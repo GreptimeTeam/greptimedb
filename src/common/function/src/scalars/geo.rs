@@ -17,7 +17,10 @@ pub(crate) mod encoding;
 mod geohash;
 mod h3;
 mod helpers;
+mod measure;
+mod relation;
 mod s2;
+mod wkt;
 
 use crate::function_registry::FunctionRegistry;
 
@@ -48,6 +51,7 @@ impl GeoFunctions {
         registry.register(Arc::new(h3::H3CellToChildrenSize));
         registry.register(Arc::new(h3::H3CellToChildPos));
         registry.register(Arc::new(h3::H3ChildPosToCell));
+        registry.register(Arc::new(h3::H3CellContains));
 
         // h3 grid traversal
         registry.register(Arc::new(h3::H3GridDisk));
@@ -55,10 +59,27 @@ impl GeoFunctions {
         registry.register(Arc::new(h3::H3GridDistance));
         registry.register(Arc::new(h3::H3GridPathCells));
 
+        // h3 measurement
+        registry.register(Arc::new(h3::H3CellDistanceSphereKm));
+        registry.register(Arc::new(h3::H3CellDistanceEuclideanDegree));
+
         // s2
         registry.register(Arc::new(s2::S2LatLngToCell));
         registry.register(Arc::new(s2::S2CellLevel));
         registry.register(Arc::new(s2::S2CellToToken));
         registry.register(Arc::new(s2::S2CellParent));
+
+        // spatial data type
+        registry.register(Arc::new(wkt::LatLngToPointWkt));
+
+        // spatial relation
+        registry.register(Arc::new(relation::STContains));
+        registry.register(Arc::new(relation::STWithin));
+        registry.register(Arc::new(relation::STIntersects));
+
+        // spatial measure
+        registry.register(Arc::new(measure::STDistance));
+        registry.register(Arc::new(measure::STDistanceSphere));
+        registry.register(Arc::new(measure::STArea));
     }
 }

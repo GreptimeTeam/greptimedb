@@ -520,7 +520,9 @@ pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValu
         ConcreteDataType::UInt64(_) => ScalarValue::UInt64(None),
         ConcreteDataType::Float32(_) => ScalarValue::Float32(None),
         ConcreteDataType::Float64(_) => ScalarValue::Float64(None),
-        ConcreteDataType::Binary(_) | ConcreteDataType::Json(_) => ScalarValue::Binary(None),
+        ConcreteDataType::Binary(_) | ConcreteDataType::Json(_) | ConcreteDataType::Vector(_) => {
+            ScalarValue::Binary(None)
+        }
         ConcreteDataType::String(_) => ScalarValue::Utf8(None),
         ConcreteDataType::Date(_) => ScalarValue::Date32(None),
         ConcreteDataType::DateTime(_) => ScalarValue::Date64(None),
@@ -1087,7 +1089,7 @@ macro_rules! impl_as_for_value_ref {
     };
 }
 
-impl ValueRef<'_> {
+impl<'a> ValueRef<'a> {
     define_data_type_func!(ValueRef);
 
     /// Returns true if this is null.
@@ -1096,12 +1098,12 @@ impl ValueRef<'_> {
     }
 
     /// Cast itself to binary slice.
-    pub fn as_binary(&self) -> Result<Option<&[u8]>> {
+    pub fn as_binary(&self) -> Result<Option<&'a [u8]>> {
         impl_as_for_value_ref!(self, Binary)
     }
 
     /// Cast itself to string slice.
-    pub fn as_string(&self) -> Result<Option<&str>> {
+    pub fn as_string(&self) -> Result<Option<&'a str>> {
         impl_as_for_value_ref!(self, String)
     }
 

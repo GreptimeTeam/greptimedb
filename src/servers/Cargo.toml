@@ -52,17 +52,21 @@ datafusion-expr.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 futures = "0.3"
+futures-util.workspace = true
 hashbrown = "0.14"
 headers = "0.3"
 hostname = "0.3"
 http = "0.2"
 http-body = "0.4"
+humantime.workspace = true
 humantime-serde.workspace = true
 hyper = { version = "0.14", features = ["full"] }
 influxdb_line_protocol = { git = "https://github.com/evenyag/influxdb_iox", branch = "feat/line-protocol" }
 itertools.workspace = true
+json5 = "0.4"
 jsonb.workspace = true
 lazy_static.workspace = true
+loki-api = "0.1"
 mime_guess = "2.0"
 notify.workspace = true
 object-pool = "0.5"

@@ -26,7 +26,7 @@ use crate::error::{self, Result};
 use crate::key::{DatanodeLeaseKey, LeaseValue};
 use crate::lease;
 use crate::metasrv::SelectorContext;
-use crate::selector::common::choose_peers;
+use crate::selector::common::choose_items;
 use crate::selector::weight_compute::{RegionNumsBasedWeightCompute, WeightCompute};
 use crate::selector::weighted_choose::RandomWeightedChoose;
 use crate::selector::{Namespace, Selector, SelectorOptions};
@@ -94,7 +94,7 @@ where
 
         // 5. choose peers by weight_array.
         let mut weighted_choose = RandomWeightedChoose::new(weight_array);
-        let selected = choose_peers(&opts, &mut weighted_choose)?;
+        let selected = choose_items(&opts, &mut weighted_choose)?;
 
         debug!(
             "LoadBasedSelector select peers: {:?}, namespace: {}, opts: {:?}.",

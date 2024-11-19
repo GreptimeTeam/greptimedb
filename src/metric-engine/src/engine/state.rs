@@ -85,19 +85,13 @@ impl MetricEngineState {
             .insert(logical_region_id, physical_region_id);
     }
 
-    /// Add and reorder logical columns.
-    ///
-    /// Caller should make sure:
-    /// 1. there is no duplicate columns
-    /// 2. the column order is the same with the order in the metadata, which is
-    ///    alphabetically ordered on column name.
-    pub fn add_logical_columns(
+    /// Replace the logical columns of the logical region with given columns.
+    pub fn set_logical_columns(
         &mut self,
         logical_region_id: RegionId,
-        new_columns: impl IntoIterator<Item = ColumnMetadata>,
+        columns: Vec<ColumnMetadata>,
     ) {
-        let columns = self.logical_columns.entry(logical_region_id).or_default();
-        columns.extend(new_columns);
+        self.logical_columns.insert(logical_region_id, columns);
     }
 
     pub fn get_physical_region_id(&self, logical_region_id: RegionId) -> Option<RegionId> {

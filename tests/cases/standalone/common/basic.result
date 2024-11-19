@@ -179,3 +179,22 @@ DROP TABLE foo;
 
 Affected Rows: 0
 
+-- SQLNESS PROTOCOL MYSQL
+SET MAX_EXECUTION_TIME = 2000;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES MAX_EXECUTION_TIME;
+
++---------------+-------+
+| Variable_name | Value |
++---------------+-------+
+|               |       |
++---------------+-------+
+
+-- SQLNESS PROTOCOL MYSQL
+SET MAX_EXECUTION_TIME = 0;
+
+affected_rows: 0
+

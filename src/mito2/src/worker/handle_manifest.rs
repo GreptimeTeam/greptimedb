@@ -19,6 +19,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use common_telemetry::{info, warn};
+use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
 use crate::cache::file_cache::{FileType, IndexKey};
@@ -71,6 +72,50 @@ impl RegionEditQueue {
 
     fn dequeue(&mut self) -> Option<RegionEditRequest> {
         self.requests.pop_front()
+    }
+}
+
+impl<S: LogStore> RegionWorkerLoop<S> {
+    /// Handles region change result.
+    pub(crate) async fn handle_manifest_region_change_result(
+        &mut self,
+        change_result: RegionChangeResult,
+    ) {
+        let region = match self.regions.get_region(change_result.region_id) {
+            Some(region) => region,
+            None => {
+                self.reject_region_stalled_requests(&change_result.region_id);
+                change_result.sender.send(
+                    RegionNotFoundSnafu {
+                        region_id: change_result.region_id,
+                    }
+                    .fail(),
+                );
+                return;
+            }
+        };
+
+        if change_result.result.is_ok() {
+            // Apply the metadata to region's version.
+            region
+                .version_control
+                .alter_schema(change_result.new_meta, &region.memtable_builder);
+
+            info!(
+                "Region {} is altered, schema version is {}",
+                region.region_id,
+                region.metadata().schema_version
+            );
+        }
+
+        // Sets the region as writable.
+        region.switch_state_to_writable(RegionLeaderState::Altering);
+        // Sends the result.
+        change_result.sender.send(change_result.result.map(|_| 0));
+
+        // Handles the stalled requests.
+        self.handle_region_stalled_requests(&change_result.region_id)
+            .await;
     }
 }
 
@@ -233,7 +278,7 @@ impl<S> RegionWorkerLoop<S> {
             sender.send(Err(e));
             return;
         }
-
+        let listener = self.listener.clone();
         let request_sender = self.sender.clone();
         // Now the region is in altering state.
         common_runtime::spawn_global(async move {
@@ -254,6 +299,9 @@ impl<S> RegionWorkerLoop<S> {
                     new_meta,
                 }),
             };
+            listener
+                .on_notify_region_change_result_begin(region.region_id)
+                .await;
 
             if let Err(res) = request_sender.send(notify).await {
                 warn!(
@@ -262,40 +310,6 @@ impl<S> RegionWorkerLoop<S> {
                 );
             }
         });
-    }
-
-    /// Handles region change result.
-    pub(crate) fn handle_manifest_region_change_result(&self, change_result: RegionChangeResult) {
-        let region = match self.regions.get_region(change_result.region_id) {
-            Some(region) => region,
-            None => {
-                change_result.sender.send(
-                    RegionNotFoundSnafu {
-                        region_id: change_result.region_id,
-                    }
-                    .fail(),
-                );
-                return;
-            }
-        };
-
-        if change_result.result.is_ok() {
-            // Apply the metadata to region's version.
-            region
-                .version_control
-                .alter_schema(change_result.new_meta, &region.memtable_builder);
-
-            info!(
-                "Region {} is altered, schema version is {}",
-                region.region_id,
-                region.metadata().schema_version
-            );
-        }
-
-        // Sets the region as writable.
-        region.switch_state_to_writable(RegionLeaderState::Altering);
-
-        change_result.sender.send(change_result.result.map(|_| 0));
     }
 }
 

@@ -185,7 +185,6 @@ impl FrontendBuilder {
             local_cache_invalidator,
             inserter.clone(),
             table_route_cache,
-            self.stats,
         ));
 
         let pipeline_operator = Arc::new(PipelineOperator::new(
@@ -211,6 +210,7 @@ impl FrontendBuilder {
             deleter,
             export_metrics_task: None,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend)),
+            stats: self.stats,
         })
     }
 }

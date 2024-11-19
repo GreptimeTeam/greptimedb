@@ -151,6 +151,17 @@ async fn test_engine_truncate_after_flush() {
 
     // Create the region.
     let region_id = RegionId::new(1, 1);
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
+
     let request = CreateRequestBuilder::new().build();
     let column_schemas = rows_schema(&request);
     engine

@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_telemetry::info;
+use common_telemetry::{info, warn};
 use common_time::Timestamp;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -31,7 +31,6 @@ use store_api::metric_engine_consts::{
     METADATA_SCHEMA_KEY_COLUMN_INDEX, METADATA_SCHEMA_KEY_COLUMN_NAME,
     METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX, METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
     METADATA_SCHEMA_VALUE_COLUMN_INDEX, METADATA_SCHEMA_VALUE_COLUMN_NAME,
-    PHYSICAL_TABLE_METADATA_KEY,
 };
 use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 use store_api::region_engine::RegionEngine;
@@ -61,7 +60,7 @@ impl MetricEngineInner {
     ) -> Result<AffectedRows> {
         Self::verify_region_create_request(&request)?;
 
-        let result = if request.options.contains_key(PHYSICAL_TABLE_METADATA_KEY) {
+        let result = if request.is_physical_table() {
             self.create_physical_region(region_id, request).await
         } else if request.options.contains_key(LOGICAL_TABLE_METADATA_KEY) {
             let physical_region_id = self.create_logical_region(region_id, request).await?;
@@ -212,11 +211,17 @@ impl MetricEngineInner {
 
             self.add_columns_to_physical_data_region(
                 data_region_id,
-                metadata_region_id,
                 logical_region_id,
-                new_columns,
+                &mut new_columns,
             )
             .await?;
+
+            // register columns to metadata region
+            for col in &new_columns {
+                self.metadata_region
+                    .add_column(metadata_region_id, logical_region_id, col)
+                    .await?;
+            }
         }
 
         // register logical region to metadata region
@@ -260,26 +265,23 @@ impl MetricEngineInner {
         Ok(data_region_id)
     }
 
-    /// Execute corresponding alter requests to mito region. New added columns' [ColumnMetadata] will be
-    /// cloned into `added_columns`.
+    /// Execute corresponding alter requests to mito region. After calling this, `new_columns` will be assign a new column id
+    /// which should be correct if the following requirements are met:
+    ///
+    /// # NOTE
+    ///
+    /// `new_columns` MUST NOT pre-exist in the physical region. Or the results will be wrong column id for the new columns.
+    ///
     pub(crate) async fn add_columns_to_physical_data_region(
         &self,
         data_region_id: RegionId,
-        metadata_region_id: RegionId,
         logical_region_id: RegionId,
-        mut new_columns: Vec<ColumnMetadata>,
+        new_columns: &mut [ColumnMetadata],
     ) -> Result<()> {
         // alter data region
         self.data_region
-            .add_columns(data_region_id, &mut new_columns)
+            .add_columns(data_region_id, new_columns)
             .await?;
-
-        // register columns to metadata region
-        for col in &new_columns {
-            self.metadata_region
-                .add_column(metadata_region_id, logical_region_id, col)
-                .await?;
-        }
 
         // safety: previous step has checked this
         self.state.write().unwrap().add_physical_columns(
@@ -290,6 +292,34 @@ impl MetricEngineInner {
         );
         info!("Create region {logical_region_id} leads to adding columns {new_columns:?} to physical region {data_region_id}");
         PHYSICAL_COLUMN_COUNT.add(new_columns.len() as _);
+
+        // correct the column id
+        let after_alter_physical_schema = self.data_region.physical_columns(data_region_id).await?;
+        let after_alter_physical_schema_map = after_alter_physical_schema
+            .iter()
+            .map(|metadata| (metadata.column_schema.name.as_str(), metadata))
+            .collect::<HashMap<_, _>>();
+
+        // double check to make sure column ids are not mismatched
+        // shouldn't be a expensive operation, given it only query for physical columns
+        for col in new_columns.iter_mut() {
+            let column_metadata = after_alter_physical_schema_map
+                .get(&col.column_schema.name.as_str())
+                .with_context(|| ColumnNotFoundSnafu {
+                    name: &col.column_schema.name,
+                    region_id: data_region_id,
+                })?;
+            if col != *column_metadata {
+                warn!(
+                    "Add already existing columns with different column metadata to physical region({:?}): new column={:?}, old column={:?}", 
+                    data_region_id,
+                    col,
+                    column_metadata
+                );
+                // update to correct metadata
+                *col = (*column_metadata).clone();
+            }
+        }
 
         Ok(())
     }
@@ -324,12 +354,11 @@ impl MetricEngineInner {
 
         // check if required table option is present
         ensure!(
-            request.options.contains_key(PHYSICAL_TABLE_METADATA_KEY)
-                || request.options.contains_key(LOGICAL_TABLE_METADATA_KEY),
+            request.is_physical_table() || request.options.contains_key(LOGICAL_TABLE_METADATA_KEY),
             MissingRegionOptionSnafu {}
         );
         ensure!(
-            !(request.options.contains_key(PHYSICAL_TABLE_METADATA_KEY)
+            !(request.is_physical_table()
                 && request.options.contains_key(LOGICAL_TABLE_METADATA_KEY)),
             ConflictRegionOptionSnafu {}
         );
@@ -512,7 +541,7 @@ impl MetricEngineInner {
 
 #[cfg(test)]
 mod test {
-    use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
+    use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
 
     use super::*;
     use crate::engine::MetricEngine;

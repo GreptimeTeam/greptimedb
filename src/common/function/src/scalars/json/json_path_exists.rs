@@ -15,7 +15,7 @@
 use std::fmt::{self, Display};
 
 use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
-use common_query::prelude::Signature;
+use common_query::prelude::{Signature, TypeSignature};
 use datafusion::logical_expr::Volatility;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
@@ -41,10 +41,24 @@ impl Function for JsonPathExistsFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::exact(
+        Signature::one_of(
             vec![
-                ConcreteDataType::json_datatype(),
-                ConcreteDataType::string_datatype(),
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::json_datatype(),
+                    ConcreteDataType::string_datatype(),
+                ]),
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::null_datatype(),
+                    ConcreteDataType::string_datatype(),
+                ]),
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::json_datatype(),
+                    ConcreteDataType::null_datatype(),
+                ]),
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::null_datatype(),
+                    ConcreteDataType::null_datatype(),
+                ]),
             ],
             Volatility::Immutable,
         )
@@ -64,25 +78,26 @@ impl Function for JsonPathExistsFunction {
         let paths = &columns[1];
 
         let size = jsons.len();
-        let datatype = jsons.data_type();
         let mut results = BooleanVectorBuilder::with_capacity(size);
 
-        match datatype {
-            // JSON data type uses binary vector
-            ConcreteDataType::Binary(_) => {
+        match (jsons.data_type(), paths.data_type()) {
+            (ConcreteDataType::Binary(_), ConcreteDataType::String(_)) => {
                 for i in 0..size {
-                    let json = jsons.get_ref(i);
-                    let path = paths.get_ref(i);
-
-                    let json = json.as_binary();
-                    let path = path.as_string();
-                    let result = match (json, path) {
+                    let result = match (jsons.get_ref(i).as_binary(), paths.get_ref(i).as_string())
+                    {
                         (Ok(Some(json)), Ok(Some(path))) => {
-                            let json_path = jsonb::jsonpath::parse_json_path(path.as_bytes());
-                            match json_path {
-                                Ok(json_path) => jsonb::path_exists(json, json_path).ok(),
-                                Err(_) => None,
-                            }
+                            // Get `JsonPath`.
+                            let json_path = match jsonb::jsonpath::parse_json_path(path.as_bytes())
+                            {
+                                Ok(json_path) => json_path,
+                                Err(_) => {
+                                    return InvalidFuncArgsSnafu {
+                                        err_msg: format!("Illegal json path: {:?}", path),
+                                    }
+                                    .fail();
+                                }
+                            };
+                            jsonb::path_exists(json, json_path).ok()
                         }
                         _ => None,
                     };
@@ -90,6 +105,12 @@ impl Function for JsonPathExistsFunction {
                     results.push(result);
                 }
             }
+
+            // Any null args existence causes the result to be NULL.
+            (ConcreteDataType::Null(_), ConcreteDataType::String(_)) => results.push_nulls(size),
+            (ConcreteDataType::Binary(_), ConcreteDataType::Null(_)) => results.push_nulls(size),
+            (ConcreteDataType::Null(_), ConcreteDataType::Null(_)) => results.push_nulls(size),
+
             _ => {
                 return UnsupportedInputDataTypeSnafu {
                     function: NAME,
@@ -114,8 +135,8 @@ mod tests {
     use std::sync::Arc;
 
     use common_query::prelude::TypeSignature;
-    use datatypes::scalars::ScalarVector;
-    use datatypes::vectors::{BinaryVector, StringVector};
+    use datatypes::prelude::ScalarVector;
+    use datatypes::vectors::{BinaryVector, NullVector, StringVector};
 
     use super::*;
 
@@ -133,9 +154,27 @@ mod tests {
 
         assert!(matches!(json_path_exists.signature(),
                          Signature {
-                             type_signature: TypeSignature::Exact(valid_types),
+                             type_signature: TypeSignature::OneOf(valid_types),
                              volatility: Volatility::Immutable
-                         } if  valid_types == vec![ConcreteDataType::json_datatype(), ConcreteDataType::string_datatype()]
+                         } if valid_types ==
+            vec![
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::json_datatype(),
+                    ConcreteDataType::string_datatype(),
+                ]),
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::null_datatype(),
+                    ConcreteDataType::string_datatype(),
+                ]),
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::json_datatype(),
+                    ConcreteDataType::null_datatype(),
+                ]),
+                TypeSignature::Exact(vec![
+                    ConcreteDataType::null_datatype(),
+                    ConcreteDataType::null_datatype(),
+                ]),
+            ],
         ));
 
         let json_strings = [
@@ -143,9 +182,15 @@ mod tests {
             r#"{"a": 4, "b": {"c": 6}, "c": 6}"#,
             r#"{"a": 7, "b": 8, "c": {"a": 7}}"#,
             r#"{"a": 7, "b": 8, "c": {"a": 7}}"#,
+            r#"[1, 2, 3]"#,
+            r#"null"#,
+            r#"{"a": 7, "b": 8, "c": {"a": 7}}"#,
+            r#"null"#,
         ];
-        let paths = vec!["$.a.b.c", "$.b", "$.c.a", ".d"];
-        let results = [false, true, true, false];
+        let paths = vec![
+            "$.a.b.c", "$.b", "$.c.a", ".d", "$[0]", "$.a", "null", "null",
+        ];
+        let expected = [false, true, true, false, true, false, false, false];
 
         let jsonbs = json_strings
             .iter()
@@ -162,11 +207,44 @@ mod tests {
             .eval(FunctionContext::default(), &args)
             .unwrap();
 
-        assert_eq!(4, vector.len());
-        for (i, gt) in results.iter().enumerate() {
+        // Test for non-nulls.
+        assert_eq!(8, vector.len());
+        for (i, real) in expected.iter().enumerate() {
             let result = vector.get_ref(i);
-            let result = result.as_boolean().unwrap().unwrap();
-            assert_eq!(*gt, result);
+            assert!(!result.is_null());
+            let val = result.as_boolean().unwrap().unwrap();
+            assert_eq!(val, *real);
         }
+
+        // Test for path error.
+        let json_bytes = jsonb::parse_value("{}".as_bytes()).unwrap().to_vec();
+        let json = BinaryVector::from_vec(vec![json_bytes]);
+        let illegal_path = StringVector::from_vec(vec!["$..a"]);
+
+        let args: Vec<VectorRef> = vec![Arc::new(json), Arc::new(illegal_path)];
+        let err = json_path_exists.eval(FunctionContext::default(), &args);
+        assert!(err.is_err());
+
+        // Test for nulls.
+        let json_bytes = jsonb::parse_value("{}".as_bytes()).unwrap().to_vec();
+        let json = BinaryVector::from_vec(vec![json_bytes]);
+        let null_json = NullVector::new(1);
+
+        let path = StringVector::from_vec(vec!["$.a"]);
+        let null_path = NullVector::new(1);
+
+        let args: Vec<VectorRef> = vec![Arc::new(null_json), Arc::new(path)];
+        let result1 = json_path_exists
+            .eval(FunctionContext::default(), &args)
+            .unwrap();
+        let args: Vec<VectorRef> = vec![Arc::new(json), Arc::new(null_path)];
+        let result2 = json_path_exists
+            .eval(FunctionContext::default(), &args)
+            .unwrap();
+
+        assert_eq!(result1.len(), 1);
+        assert!(result1.get_ref(0).is_null());
+        assert_eq!(result2.len(), 1);
+        assert!(result2.get_ref(0).is_null());
     }
 }

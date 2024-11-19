@@ -17,6 +17,6 @@ repos:
     -    id: fmt
     -    id: clippy
          args: ["--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"]
-         stages: [push]
+         stages: [pre-push]
     -    id: cargo-check
          args: ["--workspace", "--all-targets", "--all-features"]

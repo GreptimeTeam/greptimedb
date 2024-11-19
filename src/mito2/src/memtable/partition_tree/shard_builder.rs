@@ -26,10 +26,10 @@ use crate::memtable::partition_tree::data::{
     DataBatch, DataBuffer, DataBufferReader, DataBufferReaderBuilder, DataParts, DATA_INIT_CAP,
 };
 use crate::memtable::partition_tree::dict::{DictBuilderReader, KeyDictBuilder};
-use crate::memtable::partition_tree::metrics::WriteMetrics;
 use crate::memtable::partition_tree::partition::PrimaryKeyFilter;
 use crate::memtable::partition_tree::shard::Shard;
 use crate::memtable::partition_tree::{PartitionTreeConfig, PkId, PkIndex, ShardId};
+use crate::memtable::stats::WriteMetrics;
 use crate::metrics::PARTITION_TREE_READ_STAGE_ELAPSED;
 
 /// Builder to write keys and data to a shard that the key dictionary
@@ -318,7 +318,6 @@ mod tests {
 
     use super::*;
     use crate::memtable::partition_tree::data::timestamp_array_to_i64_slice;
-    use crate::memtable::partition_tree::metrics::WriteMetrics;
     use crate::memtable::KeyValues;
     use crate::test_util::memtable_util::{
         build_key_values_with_ts_seq_values, encode_key_by_kv, metadata_for_test,

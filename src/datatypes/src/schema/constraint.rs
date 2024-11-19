@@ -94,7 +94,7 @@ impl ColumnDefaultConstraint {
                     // Whether the value could be nullable has been checked before, only need
                     // to check the type compatibility here.
                     ensure!(
-                        data_type.logical_type_id() == v.logical_type_id(),
+                        value_type_match(data_type, v.data_type()),
                         error::DefaultValueTypeSnafu {
                             reason: format!(
                                 "column has type {:?} but default value has type {:?}",
@@ -212,6 +212,17 @@ fn create_current_timestamp_vector(
             reason: format!("Not support to assign current timestamp to {data_type:?} type",),
         }
         .fail()
+    }
+}
+
+fn value_type_match(column_type: &ConcreteDataType, value_type: ConcreteDataType) -> bool {
+    match (column_type, value_type) {
+        (ct, vt) if ct.logical_type_id() == vt.logical_type_id() => true,
+        // Vector and Json type is encoded as binary
+        (ConcreteDataType::Vector(_) | ConcreteDataType::Json(_), ConcreteDataType::Binary(_)) => {
+            true
+        }
+        _ => false,
     }
 }
 

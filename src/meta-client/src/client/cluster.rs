@@ -12,14 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::future::Future;
 use std::sync::Arc;
 
 use api::greptime_proto::v1;
 use api::v1::meta::cluster_client::ClusterClient;
 use api::v1::meta::{MetasrvNodeInfo, MetasrvPeersRequest, ResponseHeader, Role};
+use common_error::ext::BoxedError;
 use common_grpc::channel_manager::ChannelManager;
-use common_meta::rpc::store::{BatchGetRequest, BatchGetResponse, RangeRequest, RangeResponse};
+use common_meta::error::{Error as MetaError, ExternalSnafu, Result as MetaResult};
+use common_meta::kv_backend::{KvBackend, TxnService};
+use common_meta::rpc::store::{
+    BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
+    BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse,
+    RangeRequest, RangeResponse,
+};
 use common_telemetry::{info, warn};
 use snafu::{ensure, ResultExt};
 use tokio::sync::RwLock;
@@ -76,6 +84,51 @@ impl Client {
     ) -> Result<(Option<MetasrvNodeInfo>, Vec<MetasrvNodeInfo>)> {
         let inner = self.inner.read().await;
         inner.get_metasrv_peers().await
+    }
+}
+
+impl TxnService for Client {
+    type Error = MetaError;
+}
+
+#[async_trait::async_trait]
+impl KvBackend for Client {
+    fn name(&self) -> &str {
+        "ClusterClientKvBackend"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    async fn range(&self, req: RangeRequest) -> MetaResult<RangeResponse> {
+        self.range(req)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)
+    }
+
+    async fn put(&self, _: PutRequest) -> MetaResult<PutResponse> {
+        unimplemented!("`put` is not supported in cluster client kv backend")
+    }
+
+    async fn batch_put(&self, _: BatchPutRequest) -> MetaResult<BatchPutResponse> {
+        unimplemented!("`batch_put` is not supported in cluster client kv backend")
+    }
+
+    async fn batch_get(&self, req: BatchGetRequest) -> MetaResult<BatchGetResponse> {
+        self.batch_get(req)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)
+    }
+
+    async fn delete_range(&self, _: DeleteRangeRequest) -> MetaResult<DeleteRangeResponse> {
+        unimplemented!("`delete_range` is not supported in cluster client kv backend")
+    }
+
+    async fn batch_delete(&self, _: BatchDeleteRequest) -> MetaResult<BatchDeleteResponse> {
+        unimplemented!("`batch_delete` is not supported in cluster client kv backend")
     }
 }
 

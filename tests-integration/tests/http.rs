@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::str::FromStr;
 
 use api::prom_store::remote::WriteRequest;
 use auth::user_provider_from_option;
@@ -21,18 +22,21 @@ use axum::http::{HeaderName, HeaderValue, StatusCode};
 use common_error::status_code::StatusCode as ErrorCode;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use loki_api::logproto::{EntryAdapter, PushRequest, StreamAdapter};
+use loki_api::prost_types::Timestamp;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::metrics::v1::ResourceMetrics;
 use prost::Message;
 use serde_json::{json, Value};
-use servers::http::error_result::ErrorResponse;
-use servers::http::greptime_result_v1::GreptimedbV1Response;
 use servers::http::handler::HealthResponse;
+use servers::http::header::constants::GREPTIME_LOG_TABLE_NAME_HEADER_NAME;
 use servers::http::header::{GREPTIME_DB_HEADER_NAME, GREPTIME_TIMEZONE_HEADER_NAME};
-use servers::http::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::prometheus::{PrometheusJsonResponse, PrometheusResponse};
+use servers::http::result::error_result::ErrorResponse;
+use servers::http::result::greptime_result_v1::GreptimedbV1Response;
+use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::test_helpers::{TestClient, TestResponse};
 use servers::http::GreptimeQueryOutput;
 use servers::prom_store;
@@ -92,6 +96,7 @@ macro_rules! http_tests {
                 test_otlp_metrics,
                 test_otlp_traces,
                 test_otlp_logs,
+                test_loki_logs,
             );
         )*
     };
@@ -1594,18 +1599,18 @@ pub async fn test_otlp_traces(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // select traces data
-    let expected = r#"[["b5e5fb572cf0a3335dd194a14145fef5","3364d2da58c9fd2b","","{\"service.name\":\"telemetrygen\"}","telemetrygen","","{}","","lets-go","SPAN_KIND_CLIENT","STATUS_CODE_UNSET","","{\"net.peer.ip\":\"1.2.3.4\",\"peer.service\":\"telemetrygen-server\"}","[]","[]",1726631197820927000,1726631197821050000,0.123,1726631197820927000],["b5e5fb572cf0a3335dd194a14145fef5","74c82efa6f628e80","3364d2da58c9fd2b","{\"service.name\":\"telemetrygen\"}","telemetrygen","","{}","","okey-dokey-0","SPAN_KIND_SERVER","STATUS_CODE_UNSET","","{\"net.peer.ip\":\"1.2.3.4\",\"peer.service\":\"telemetrygen-client\"}","[]","[]",1726631197820927000,1726631197821050000,0.123,1726631197820927000]]"#;
+    let expected = r#"[[1726631197820927000,1726631197821050000,123000,"b5e5fb572cf0a3335dd194a14145fef5","3364d2da58c9fd2b","","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-server"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1726631197820927000,1726631197821050000,123000,"b5e5fb572cf0a3335dd194a14145fef5","74c82efa6f628e80","3364d2da58c9fd2b","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-client"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}]]"#;
     validate_data(
         "otlp_traces",
         &client,
-        "select * from traces_preview_v01;",
+        "select * from opentelemetry_traces;",
         expected,
     )
     .await;
 
     // drop table
     let res = client
-        .get("/v1/sql?sql=drop table traces_preview_v01;")
+        .get("/v1/sql?sql=drop table opentelemetry_traces;")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -1618,7 +1623,7 @@ pub async fn test_otlp_traces(store_type: StorageType) {
     validate_data(
         "otlp_traces_with_gzip",
         &client,
-        "select * from traces_preview_v01;",
+        "select * from opentelemetry_traces;",
         expected,
     )
     .await;
@@ -1686,6 +1691,69 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         )
         .await;
     }
+
+    guard.remove_all().await;
+}
+
+pub async fn test_loki_logs(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_loke_logs").await;
+
+    let client = TestClient::new(app);
+
+    // init loki request
+    let req: PushRequest = PushRequest {
+        streams: vec![StreamAdapter {
+            labels: "{service=\"test\",source=\"integration\"}".to_string(),
+            entries: vec![EntryAdapter {
+                timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
+                line: "this is a log message".to_string(),
+            }],
+            hash: rand::random(),
+        }],
+    };
+    let encode = req.encode_to_vec();
+    let body = prom_store::snappy_compress(&encode).unwrap();
+
+    // write to loki
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static(GREPTIME_LOG_TABLE_NAME_HEADER_NAME),
+                HeaderValue::from_static("loki_table_name"),
+            ),
+        ],
+        "/v1/loki/api/v1/push",
+        body,
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    // test schema
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"service\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"service\\\", \\\"source\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    validate_data(
+        "loki_schema",
+        &client,
+        "show create table loki_table_name;",
+        expected,
+    )
+    .await;
+
+    // test content
+    let expected = r#"[[1730976830000000000,"this is a log message","test","integration"]]"#;
+    validate_data(
+        "loki_content",
+        &client,
+        "select * from loki_table_name;",
+        expected,
+    )
+    .await;
 
     guard.remove_all().await;
 }

@@ -64,6 +64,16 @@ async fn test_edit_region_schedule_compaction() {
         .await;
 
     let region_id = RegionId::new(1, 1);
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
     engine
         .handle_request(
             region_id,

@@ -18,7 +18,6 @@ pub(crate) mod data;
 mod dedup;
 mod dict;
 mod merger;
-mod metrics;
 mod partition;
 mod shard;
 mod shard_builder;
@@ -38,8 +37,8 @@ use table::predicate::Predicate;
 use crate::error::{Result, UnsupportedOperationSnafu};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
-use crate::memtable::partition_tree::metrics::WriteMetrics;
 use crate::memtable::partition_tree::tree::PartitionTree;
+use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, BulkPart, IterBuilder, KeyValues, Memtable, MemtableBuilder,
     MemtableId, MemtableRange, MemtableRangeContext, MemtableRef, MemtableStats,
@@ -273,46 +272,7 @@ impl PartitionTreeMemtable {
     fn update_stats(&self, metrics: &WriteMetrics) {
         // Only let the tracker tracks value bytes.
         self.alloc_tracker.on_allocation(metrics.value_bytes);
-
-        loop {
-            let current_min = self.min_timestamp.load(Ordering::Relaxed);
-            if metrics.min_ts >= current_min {
-                break;
-            }
-
-            let Err(updated) = self.min_timestamp.compare_exchange(
-                current_min,
-                metrics.min_ts,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) else {
-                break;
-            };
-
-            if updated == metrics.min_ts {
-                break;
-            }
-        }
-
-        loop {
-            let current_max = self.max_timestamp.load(Ordering::Relaxed);
-            if metrics.max_ts <= current_max {
-                break;
-            }
-
-            let Err(updated) = self.max_timestamp.compare_exchange(
-                current_max,
-                metrics.max_ts,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) else {
-                break;
-            };
-
-            if updated == metrics.max_ts {
-                break;
-            }
-        }
+        metrics.update_timestamp_range(&self.max_timestamp, &self.min_timestamp);
     }
 }
 

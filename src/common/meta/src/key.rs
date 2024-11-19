@@ -90,7 +90,9 @@
 pub mod catalog_name;
 pub mod datanode_table;
 pub mod flow;
+pub mod maintenance;
 pub mod node_address;
+mod schema_metadata_manager;
 pub mod schema_name;
 pub mod table_info;
 pub mod table_name;
@@ -116,6 +118,7 @@ use flow::flow_route::FlowRouteValue;
 use flow::table_flow::TableFlowValue;
 use lazy_static::lazy_static;
 use regex::Regex;
+pub use schema_metadata_manager::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};

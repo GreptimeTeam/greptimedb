@@ -32,6 +32,16 @@ async fn test_scan_without_filtering_deleted() {
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
         .insert_option("compaction.twcs.max_active_window_runs", "10")

@@ -15,20 +15,22 @@
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::alter_expr::Kind;
+use api::v1::column_def::as_fulltext_option;
 use api::v1::{
-    column_def, AddColumnLocation as Location, AlterExpr, ChangeColumnTypes, CreateTableExpr,
-    DropColumns, RenameTable, SemanticType,
+    column_def, AddColumnLocation as Location, AlterExpr, Analyzer, CreateTableExpr, DropColumns,
+    ModifyColumnTypes, RenameTable, SemanticType,
 };
 use common_query::AddColumnLocation;
-use datatypes::schema::{ColumnSchema, RawSchema};
+use datatypes::schema::{ColumnSchema, FulltextOptions, RawSchema};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::region_request::ChangeOption;
 use table::metadata::TableId;
-use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, ChangeColumnTypeRequest};
+use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, ModifyColumnTypeRequest};
 
 use crate::error::{
-    InvalidChangeTableOptionRequestSnafu, InvalidColumnDefSnafu, MissingFieldSnafu,
-    MissingTimestampColumnSnafu, Result, UnknownLocationTypeSnafu,
+    InvalidChangeFulltextOptionRequestSnafu, InvalidChangeTableOptionRequestSnafu,
+    InvalidColumnDefSnafu, MissingFieldSnafu, MissingTimestampColumnSnafu, Result,
+    UnknownLocationTypeSnafu,
 };
 
 const LOCATION_TYPE_FIRST: i32 = LocationType::First as i32;
@@ -66,25 +68,25 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<Alter
                 columns: add_column_requests,
             }
         }
-        Kind::ChangeColumnTypes(ChangeColumnTypes {
-            change_column_types,
+        Kind::ModifyColumnTypes(ModifyColumnTypes {
+            modify_column_types,
         }) => {
-            let change_column_type_requests = change_column_types
+            let modify_column_type_requests = modify_column_types
                 .into_iter()
                 .map(|cct| {
                     let target_type =
                         ColumnDataTypeWrapper::new(cct.target_type(), cct.target_type_extension)
                             .into();
 
-                    Ok(ChangeColumnTypeRequest {
+                    Ok(ModifyColumnTypeRequest {
                         column_name: cct.column_name,
                         target_type,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
 
-            AlterKind::ChangeColumnTypes {
-                columns: change_column_type_requests,
+            AlterKind::ModifyColumnTypes {
+                columns: modify_column_type_requests,
             }
         }
         Kind::DropColumns(DropColumns { drop_columns }) => AlterKind::DropColumns {
@@ -101,6 +103,17 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<Alter
                 .map(ChangeOption::try_from)
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .context(InvalidChangeTableOptionRequestSnafu)?,
+        },
+        Kind::ChangeColumnFulltext(c) => AlterKind::ChangeColumnFulltext {
+            column_name: c.column_name,
+            options: FulltextOptions {
+                enable: c.enable,
+                analyzer: as_fulltext_option(
+                    Analyzer::try_from(c.analyzer)
+                        .context(InvalidChangeFulltextOptionRequestSnafu)?,
+                ),
+                case_sensitive: c.case_sensitive,
+            },
         },
     };
 
@@ -170,7 +183,7 @@ fn parse_location(location: Option<Location>) -> Result<Option<AddColumnLocation
 #[cfg(test)]
 mod tests {
     use api::v1::{
-        AddColumn, AddColumns, ChangeColumnType, ColumnDataType, ColumnDef, DropColumn,
+        AddColumn, AddColumns, ColumnDataType, ColumnDef, DropColumn, ModifyColumnType,
         SemanticType,
     };
     use datatypes::prelude::ConcreteDataType;
@@ -296,14 +309,14 @@ mod tests {
     }
 
     #[test]
-    fn test_change_column_type_expr() {
+    fn test_modify_column_type_expr() {
         let expr = AlterExpr {
             catalog_name: "test_catalog".to_string(),
             schema_name: "test_schema".to_string(),
             table_name: "monitor".to_string(),
 
-            kind: Some(Kind::ChangeColumnTypes(ChangeColumnTypes {
-                change_column_types: vec![ChangeColumnType {
+            kind: Some(Kind::ModifyColumnTypes(ModifyColumnTypes {
+                modify_column_types: vec![ModifyColumnType {
                     column_name: "mem_usage".to_string(),
                     target_type: ColumnDataType::String as i32,
                     target_type_extension: None,
@@ -316,16 +329,16 @@ mod tests {
         assert_eq!(alter_request.schema_name, "test_schema");
         assert_eq!("monitor".to_string(), alter_request.table_name);
 
-        let mut change_column_types = match alter_request.alter_kind {
-            AlterKind::ChangeColumnTypes { columns } => columns,
+        let mut modify_column_types = match alter_request.alter_kind {
+            AlterKind::ModifyColumnTypes { columns } => columns,
             _ => unreachable!(),
         };
 
-        let change_column_type = change_column_types.pop().unwrap();
-        assert_eq!("mem_usage", change_column_type.column_name);
+        let modify_column_type = modify_column_types.pop().unwrap();
+        assert_eq!("mem_usage", modify_column_type.column_name);
         assert_eq!(
             ConcreteDataType::string_datatype(),
-            change_column_type.target_type
+            modify_column_type.target_type
         );
     }
 

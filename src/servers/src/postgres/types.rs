@@ -24,9 +24,12 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::Schema;
-use datatypes::types::{IntervalType, TimestampType};
+use datatypes::types::{
+    json_type_value_to_string, vector_type_value_to_string, IntervalType, TimestampType,
+};
 use datatypes::value::ListValue;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::results::{DataRowEncoder, FieldInfo};
@@ -349,15 +352,37 @@ fn encode_array(
                 .collect::<PgWireResult<Vec<Option<String>>>>()?;
             builder.encode_field(&array)
         }
-        &ConcreteDataType::Json(_) => {
+        &ConcreteDataType::Json(j) => {
             let array = value_list
                 .items()
                 .iter()
                 .map(|v| match v {
                     Value::Null => Ok(None),
-                    Value::Binary(v) => Ok(Some(jsonb::to_string(v))),
+                    Value::Binary(v) => {
+                        let s = json_type_value_to_string(v, &j.format)
+                            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                        Ok(Some(s))
+                    }
                     _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
                         err_msg: format!("Invalid list item type, find {v:?}, expected json",),
+                    }))),
+                })
+                .collect::<PgWireResult<Vec<Option<String>>>>()?;
+            builder.encode_field(&array)
+        }
+        &ConcreteDataType::Vector(d) => {
+            let array = value_list
+                .items()
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Binary(v) => {
+                        let s = vector_type_value_to_string(v, d.dim)
+                            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                        Ok(Some(s))
+                    }
+                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                        err_msg: format!("Invalid list item type, find {v:?}, expected vector",),
                     }))),
                 })
                 .collect::<PgWireResult<Vec<Option<String>>>>()?;
@@ -393,7 +418,16 @@ pub(super) fn encode_value(
         Value::Float64(v) => builder.encode_field(&v.0),
         Value::String(v) => builder.encode_field(&v.as_utf8()),
         Value::Binary(v) => match datatype {
-            ConcreteDataType::Json(_) => builder.encode_field(&jsonb::to_string(v)),
+            ConcreteDataType::Json(j) => {
+                let s = json_type_value_to_string(v, &j.format)
+                    .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                builder.encode_field(&s)
+            }
+            ConcreteDataType::Vector(d) => {
+                let s = vector_type_value_to_string(v, d.dim)
+                    .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                builder.encode_field(&s)
+            }
             _ => {
                 let bytea_output = query_ctx.configuration_parameter().postgres_bytea_output();
                 match *bytea_output {
@@ -498,6 +532,7 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
             &ConcreteDataType::Json(_) => Ok(Type::JSON_ARRAY),
             &ConcreteDataType::Duration(_)
             | &ConcreteDataType::Dictionary(_)
+            | &ConcreteDataType::Vector(_)
             | &ConcreteDataType::List(_) => server_error::UnsupportedDataTypeSnafu {
                 data_type: origin,
                 reason: "not implemented",
@@ -511,6 +546,7 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
             }
             .fail()
         }
+        &ConcreteDataType::Vector(_) => Ok(Type::FLOAT4_ARRAY),
     }
 }
 
@@ -529,6 +565,21 @@ pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
         )),
         &Type::DATE => Ok(ConcreteDataType::date_datatype()),
         &Type::TIME => Ok(ConcreteDataType::datetime_datatype()),
+        &Type::CHAR_ARRAY => Ok(ConcreteDataType::list_datatype(
+            ConcreteDataType::int8_datatype(),
+        )),
+        &Type::INT2_ARRAY => Ok(ConcreteDataType::list_datatype(
+            ConcreteDataType::int16_datatype(),
+        )),
+        &Type::INT4_ARRAY => Ok(ConcreteDataType::list_datatype(
+            ConcreteDataType::int32_datatype(),
+        )),
+        &Type::INT8_ARRAY => Ok(ConcreteDataType::list_datatype(
+            ConcreteDataType::int64_datatype(),
+        )),
+        &Type::VARCHAR_ARRAY => Ok(ConcreteDataType::list_datatype(
+            ConcreteDataType::string_datatype(),
+        )),
         _ => server_error::InternalSnafu {
             err_msg: format!("unimplemented datatype {origin:?}"),
         }
@@ -972,6 +1023,42 @@ pub(super) fn parameters_to_scalar_values(
                     }
                 } else {
                     ScalarValue::Binary(data.map(|d| d.to_string().into_bytes()))
+                }
+            }
+            &Type::INT2_ARRAY => {
+                let data = portal.parameter::<Vec<i16>>(idx, &client_type)?;
+                if let Some(data) = data {
+                    let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
+                    ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Int16))
+                } else {
+                    ScalarValue::Null
+                }
+            }
+            &Type::INT4_ARRAY => {
+                let data = portal.parameter::<Vec<i32>>(idx, &client_type)?;
+                if let Some(data) = data {
+                    let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
+                    ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Int32))
+                } else {
+                    ScalarValue::Null
+                }
+            }
+            &Type::INT8_ARRAY => {
+                let data = portal.parameter::<Vec<i64>>(idx, &client_type)?;
+                if let Some(data) = data {
+                    let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
+                    ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Int64))
+                } else {
+                    ScalarValue::Null
+                }
+            }
+            &Type::VARCHAR_ARRAY => {
+                let data = portal.parameter::<Vec<String>>(idx, &client_type)?;
+                if let Some(data) = data {
+                    let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
+                    ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Utf8))
+                } else {
+                    ScalarValue::Null
                 }
             }
             _ => Err(invalid_parameter_error(

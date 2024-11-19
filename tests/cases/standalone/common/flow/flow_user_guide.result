@@ -1,0 +1,587 @@
+-- user guide example
+CREATE TABLE `ngx_access_log` (
+    `client` STRING NULL,
+    `ua_platform` STRING NULL,
+    `referer` STRING NULL,
+    `method` STRING NULL,
+    `endpoint` STRING NULL,
+    `trace_id` STRING NULL FULLTEXT,
+    `protocol` STRING NULL,
+    `status` SMALLINT UNSIGNED NULL,
+    `size` DOUBLE NULL,
+    `agent` STRING NULL,
+    `access_time` TIMESTAMP(3) NOT NULL,
+    TIME INDEX (`access_time`)
+) WITH(append_mode = 'true');
+
+Affected Rows: 0
+
+CREATE TABLE `ngx_statistics` (
+    `status` SMALLINT UNSIGNED NULL,
+    `total_logs` BIGINT NULL,
+    `min_size` DOUBLE NULL,
+    `max_size` DOUBLE NULL,
+    `avg_size` DOUBLE NULL,
+    `high_size_count` BIGINT NULL,
+    `time_window` TIMESTAMP time index,
+    `update_at` TIMESTAMP NULL,
+    PRIMARY KEY (`status`)
+);
+
+Affected Rows: 0
+
+CREATE FLOW ngx_aggregation SINK TO ngx_statistics COMMENT 'Aggregate statistics for ngx_access_log' AS
+SELECT
+    status,
+    count(client) AS total_logs,
+    min(size) as min_size,
+    max(size) as max_size,
+    avg(size) as avg_size,
+    sum(
+        case
+            when `size` > 550 then 1
+            else 0
+        end
+    ) as high_size_count,
+    date_bin(INTERVAL '1 minutes', access_time) as time_window,
+FROM
+    ngx_access_log
+GROUP BY
+    status,
+    time_window;
+
+Affected Rows: 0
+
+INSERT INTO
+    ngx_access_log
+VALUES
+    (
+        "android",
+        "Android",
+        "referer",
+        "GET",
+        "/api/v1",
+        "trace_id",
+        "HTTP",
+        200,
+        1000,
+        "agent",
+        "2021-07-01 00:00:01.000"
+    ),
+    (
+        "ios",
+        "iOS",
+        "referer",
+        "GET",
+        "/api/v1",
+        "trace_id",
+        "HTTP",
+        200,
+        500,
+        "agent",
+        "2021-07-01 00:00:30.500"
+    ),
+    (
+        "android",
+        "Android",
+        "referer",
+        "GET",
+        "/api/v1",
+        "trace_id",
+        "HTTP",
+        200,
+        600,
+        "agent",
+        "2021-07-01 00:01:01.000"
+    ),
+    (
+        "ios",
+        "iOS",
+        "referer",
+        "GET",
+        "/api/v1",
+        "trace_id",
+        "HTTP",
+        404,
+        700,
+        "agent",
+        "2021-07-01 00:01:01.500"
+    );
+
+Affected Rows: 4
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('ngx_aggregation');
+
++-------------------------------------+
+| ADMIN FLUSH_FLOW('ngx_aggregation') |
++-------------------------------------+
+|  FLOW_FLUSHED  |
++-------------------------------------+
+
+SELECT
+    status,
+    total_logs,
+    min_size,
+    max_size,
+    avg_size,
+    high_size_count,
+    time_window
+FROM
+    ngx_statistics;
+
++--------+------------+----------+----------+----------+-----------------+---------------------+
+| status | total_logs | min_size | max_size | avg_size | high_size_count | time_window         |
++--------+------------+----------+----------+----------+-----------------+---------------------+
+| 200    | 2          | 500.0    | 1000.0   | 750.0    | 1               | 2021-07-01T00:00:00 |
+| 200    | 1          | 600.0    | 600.0    | 600.0    | 1               | 2021-07-01T00:01:00 |
+| 404    | 1          | 700.0    | 700.0    | 700.0    | 1               | 2021-07-01T00:01:00 |
++--------+------------+----------+----------+----------+-----------------+---------------------+
+
+INSERT INTO
+    ngx_access_log
+VALUES
+    (
+        "android",
+        "Android",
+        "referer",
+        "GET",
+        "/api/v1",
+        "trace_id",
+        "HTTP",
+        200,
+        500,
+        "agent",
+        "2021-07-01 00:01:01.000"
+    ),
+    (
+        "ios",
+        "iOS",
+        "referer",
+        "GET",
+        "/api/v1",
+        "trace_id",
+        "HTTP",
+        404,
+        800,
+        "agent",
+        "2021-07-01 00:01:01.500"
+    );
+
+Affected Rows: 2
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('ngx_aggregation');
+
++-------------------------------------+
+| ADMIN FLUSH_FLOW('ngx_aggregation') |
++-------------------------------------+
+|  FLOW_FLUSHED  |
++-------------------------------------+
+
+SELECT
+    status,
+    total_logs,
+    min_size,
+    max_size,
+    avg_size,
+    high_size_count,
+    time_window
+FROM
+    ngx_statistics;
+
++--------+------------+----------+----------+----------+-----------------+---------------------+
+| status | total_logs | min_size | max_size | avg_size | high_size_count | time_window         |
++--------+------------+----------+----------+----------+-----------------+---------------------+
+| 200    | 2          | 500.0    | 1000.0   | 750.0    | 1               | 2021-07-01T00:00:00 |
+| 200    | 2          | 500.0    | 600.0    | 550.0    | 1               | 2021-07-01T00:01:00 |
+| 404    | 2          | 700.0    | 800.0    | 750.0    | 2               | 2021-07-01T00:01:00 |
++--------+------------+----------+----------+----------+-----------------+---------------------+
+
+DROP FLOW ngx_aggregation;
+
+Affected Rows: 0
+
+DROP TABLE ngx_statistics;
+
+Affected Rows: 0
+
+DROP TABLE ngx_access_log;
+
+Affected Rows: 0
+
+/* Usecase example */
+/* Real-time analytics example */
+/* input table */
+CREATE TABLE ngx_access_log (
+    client STRING,
+    country STRING,
+    access_time TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+/* sink table */
+CREATE TABLE ngx_country (
+    country STRING,
+    update_at TIMESTAMP,
+    __ts_placeholder TIMESTAMP TIME INDEX,
+    PRIMARY KEY(country)
+);
+
+Affected Rows: 0
+
+/* create flow task to calculate the distinct country */
+CREATE FLOW calc_ngx_country SINK TO ngx_country AS
+SELECT
+    DISTINCT country,
+FROM
+    ngx_access_log;
+
+Affected Rows: 0
+
+/* insert some data */
+INSERT INTO
+    ngx_access_log
+VALUES
+    ("client1", "US", "2022-01-01 00:00:00"),
+    ("client2", "US", "2022-01-01 00:00:01"),
+    ("client3", "UK", "2022-01-01 00:00:02"),
+    ("client4", "UK", "2022-01-01 00:00:03"),
+    ("client5", "CN", "2022-01-01 00:00:04"),
+    ("client6", "CN", "2022-01-01 00:00:05"),
+    ("client7", "JP", "2022-01-01 00:00:06"),
+    ("client8", "JP", "2022-01-01 00:00:07"),
+    ("client9", "KR", "2022-01-01 00:00:08"),
+    ("client10", "KR", "2022-01-01 00:00:09");
+
+Affected Rows: 10
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('calc_ngx_country');
+
++--------------------------------------+
+| ADMIN FLUSH_FLOW('calc_ngx_country') |
++--------------------------------------+
+|  FLOW_FLUSHED  |
++--------------------------------------+
+
+SELECT
+    country
+FROM
+    ngx_country;
+
++---------+
+| country |
++---------+
+| CN      |
+| JP      |
+| KR      |
+| UK      |
+| US      |
++---------+
+
+DROP FLOW calc_ngx_country;
+
+Affected Rows: 0
+
+DROP TABLE ngx_access_log;
+
+Affected Rows: 0
+
+DROP TABLE ngx_country;
+
+Affected Rows: 0
+
+/* Real-time analytics example: Time Window */
+/* input table */
+CREATE TABLE ngx_access_log (
+    client STRING,
+    country STRING,
+    access_time TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+/* input table create same as above */
+/* sink table */
+CREATE TABLE ngx_country (
+    country STRING,
+    time_window TIMESTAMP TIME INDEX,
+    update_at TIMESTAMP,
+    PRIMARY KEY(country)
+);
+
+Affected Rows: 0
+
+CREATE FLOW calc_ngx_country SINK TO ngx_country AS
+SELECT
+    DISTINCT country,
+    date_bin(INTERVAL '1 hour', access_time) as time_window,
+FROM
+    ngx_access_log
+GROUP BY
+    country,
+    time_window;
+
+Affected Rows: 0
+
+/* insert data using the same data as above */
+/* insert some data */
+INSERT INTO
+    ngx_access_log
+VALUES
+    ("client1", "US", "2022-01-01 00:00:00"),
+    ("client2", "US", "2022-01-01 00:00:01"),
+    ("client3", "UK", "2022-01-01 00:00:02"),
+    ("client4", "UK", "2022-01-01 00:00:03"),
+    ("client5", "CN", "2022-01-01 00:00:04"),
+    ("client6", "CN", "2022-01-01 00:00:05"),
+    ("client7", "JP", "2022-01-01 00:00:06"),
+    ("client8", "JP", "2022-01-01 00:00:07"),
+    ("client9", "KR", "2022-01-01 00:00:08"),
+    ("client10", "KR", "2022-01-01 00:00:09");
+
+Affected Rows: 10
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('calc_ngx_country');
+
++--------------------------------------+
+| ADMIN FLUSH_FLOW('calc_ngx_country') |
++--------------------------------------+
+|  FLOW_FLUSHED  |
++--------------------------------------+
+
+SELECT
+    country,
+    time_window
+FROM
+    ngx_country;
+
++---------+---------------------+
+| country | time_window         |
++---------+---------------------+
+| CN      | 2022-01-01T00:00:00 |
+| JP      | 2022-01-01T00:00:00 |
+| KR      | 2022-01-01T00:00:00 |
+| UK      | 2022-01-01T00:00:00 |
+| US      | 2022-01-01T00:00:00 |
++---------+---------------------+
+
+DROP FLOW calc_ngx_country;
+
+Affected Rows: 0
+
+DROP TABLE ngx_access_log;
+
+Affected Rows: 0
+
+DROP TABLE ngx_country;
+
+Affected Rows: 0
+
+/* create input table */
+CREATE TABLE temp_sensor_data (
+    sensor_id INT,
+    loc STRING,
+    temperature DOUBLE,
+    ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+/* Real-time monitoring example */
+/* create sink table */
+CREATE TABLE temp_alerts (
+    sensor_id INT,
+    loc STRING,
+    max_temp DOUBLE,
+    update_at TIMESTAMP TIME INDEX,
+    PRIMARY KEY(sensor_id, loc)
+);
+
+Affected Rows: 0
+
+CREATE FLOW temp_monitoring SINK TO temp_alerts AS
+SELECT
+    sensor_id,
+    loc,
+    max(temperature) as max_temp,
+FROM
+    temp_sensor_data
+GROUP BY
+    sensor_id,
+    loc
+HAVING
+    max_temp > 100;
+
+Affected Rows: 0
+
+INSERT INTO
+    temp_sensor_data
+VALUES
+    (1, "room1", 98.5, "2022-01-01 00:00:00"),
+    (2, "room2", 99.5, "2022-01-01 00:00:01");
+
+Affected Rows: 2
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('temp_monitoring');
+
++-------------------------------------+
+| ADMIN FLUSH_FLOW('temp_monitoring') |
++-------------------------------------+
+|  FLOW_FLUSHED  |
++-------------------------------------+
+
+SELECT
+    sensor_id,
+    loc,
+    max_temp
+FROM
+    temp_alerts;
+
+++
+++
+
+INSERT INTO
+    temp_sensor_data
+VALUES
+    (1, "room1", 101.5, "2022-01-01 00:00:02"),
+    (2, "room2", 102.5, "2022-01-01 00:00:03");
+
+Affected Rows: 2
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('temp_monitoring');
+
++-------------------------------------+
+| ADMIN FLUSH_FLOW('temp_monitoring') |
++-------------------------------------+
+|  FLOW_FLUSHED  |
++-------------------------------------+
+
+/* wait at least one second for flow to update results to sink table */
+SELECT
+    sensor_id,
+    loc,
+    max_temp
+FROM
+    temp_alerts;
+
++-----------+-------+----------+
+| sensor_id | loc   | max_temp |
++-----------+-------+----------+
+| 1         | room1 | 101.5    |
+| 2         | room2 | 102.5    |
++-----------+-------+----------+
+
+DROP FLOW temp_monitoring;
+
+Affected Rows: 0
+
+DROP TABLE temp_sensor_data;
+
+Affected Rows: 0
+
+DROP TABLE temp_alerts;
+
+Affected Rows: 0
+
+/* Real-time dashboard */
+/* create input table */
+CREATE TABLE ngx_access_log (
+    client STRING,
+    stat INT,
+    size INT,
+    access_time TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+/* create sink table */
+CREATE TABLE ngx_distribution (
+    stat INT,
+    bucket_size INT,
+    total_logs BIGINT,
+    time_window TIMESTAMP TIME INDEX,
+    update_at TIMESTAMP,
+    /* auto generated column to store the last update time */
+    PRIMARY KEY(stat, bucket_size)
+);
+
+Affected Rows: 0
+
+/* create flow task to calculate the distribution of packet sizes for each status code */
+CREATE FLOW calc_ngx_distribution SINK TO ngx_distribution AS
+SELECT
+    stat,
+    trunc(size, -1) :: INT as bucket_size,
+    count(client) AS total_logs,
+    date_bin(INTERVAL '1 minutes', access_time) as time_window,
+FROM
+    ngx_access_log
+GROUP BY
+    stat,
+    time_window,
+    bucket_size;
+
+Affected Rows: 0
+
+INSERT INTO
+    ngx_access_log
+VALUES
+    ("cli1", 200, 100, "2022-01-01 00:00:00"),
+    ("cli2", 200, 104, "2022-01-01 00:00:01"),
+    ("cli3", 200, 120, "2022-01-01 00:00:02"),
+    ("cli4", 200, 124, "2022-01-01 00:00:03"),
+    ("cli5", 200, 140, "2022-01-01 00:00:04"),
+    ("cli6", 404, 144, "2022-01-01 00:00:05"),
+    ("cli7", 404, 160, "2022-01-01 00:00:06"),
+    ("cli8", 404, 164, "2022-01-01 00:00:07"),
+    ("cli9", 404, 180, "2022-01-01 00:00:08"),
+    ("cli10", 404, 184, "2022-01-01 00:00:09");
+
+Affected Rows: 10
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('calc_ngx_distribution');
+
++-------------------------------------------+
+| ADMIN FLUSH_FLOW('calc_ngx_distribution') |
++-------------------------------------------+
+|  FLOW_FLUSHED  |
++-------------------------------------------+
+
+SELECT
+    stat,
+    bucket_size,
+    total_logs,
+    time_window
+FROM
+    ngx_distribution;
+
++------+-------------+------------+---------------------+
+| stat | bucket_size | total_logs | time_window         |
++------+-------------+------------+---------------------+
+| 200  | 100         | 2          | 2022-01-01T00:00:00 |
+| 200  | 120         | 2          | 2022-01-01T00:00:00 |
+| 200  | 140         | 1          | 2022-01-01T00:00:00 |
+| 404  | 140         | 1          | 2022-01-01T00:00:00 |
+| 404  | 160         | 2          | 2022-01-01T00:00:00 |
+| 404  | 180         | 2          | 2022-01-01T00:00:00 |
++------+-------------+------------+---------------------+
+
+DROP FLOW calc_ngx_distribution;
+
+Affected Rows: 0
+
+DROP TABLE ngx_distribution;
+
+Affected Rows: 0
+
+DROP TABLE ngx_access_log;
+
+Affected Rows: 0
+

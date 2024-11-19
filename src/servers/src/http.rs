@@ -45,26 +45,25 @@ use serde_json::Value;
 use snafu::{ensure, ResultExt};
 use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
-use tower::timeout::TimeoutLayer;
 use tower::ServiceBuilder;
 use tower_http::decompression::RequestDecompressionLayer;
 use tower_http::trace::TraceLayer;
 
 use self::authorize::AuthState;
-use self::table_result::TableResponse;
+use self::result::table_result::TableResponse;
 use crate::configurator::ConfiguratorRef;
 use crate::error::{AddressBindSnafu, AlreadyStartedSnafu, Error, HyperSnafu, Result, ToJsonSnafu};
-use crate::http::arrow_result::ArrowResponse;
-use crate::http::csv_result::CsvResponse;
-use crate::http::error_result::ErrorResponse;
-use crate::http::greptime_result_v1::GreptimedbV1Response;
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
-use crate::http::influxdb_result_v1::InfluxdbV1Response;
-use crate::http::json_result::JsonResponse;
 use crate::http::prometheus::{
     build_info_query, format_query, instant_query, label_values_query, labels_query, parse_query,
     range_query, series_query,
 };
+use crate::http::result::arrow_result::ArrowResponse;
+use crate::http::result::csv_result::CsvResponse;
+use crate::http::result::error_result::ErrorResponse;
+use crate::http::result::greptime_result_v1::GreptimedbV1Response;
+use crate::http::result::influxdb_result_v1::InfluxdbV1Response;
+use crate::http::result::json_result::JsonResponse;
 use crate::interceptor::LogIngestInterceptorRef;
 use crate::metrics::http_metrics_layer;
 use crate::metrics_handler::MetricsHandler;
@@ -77,8 +76,11 @@ use crate::query_handler::{
 use crate::server::Server;
 
 pub mod authorize;
+#[cfg(feature = "dashboard")]
+mod dashboard;
 pub mod dyn_log;
 pub mod event;
+mod extractor;
 pub mod handler;
 pub mod header;
 pub mod influxdb;
@@ -88,19 +90,11 @@ pub mod otlp;
 pub mod pprof;
 pub mod prom_store;
 pub mod prometheus;
-mod prometheus_resp;
+pub mod result;
 pub mod script;
+mod timeout;
 
-pub mod arrow_result;
-pub mod csv_result;
-#[cfg(feature = "dashboard")]
-mod dashboard;
-pub mod error_result;
-pub mod greptime_manage_resp;
-pub mod greptime_result_v1;
-pub mod influxdb_result_v1;
-pub mod json_result;
-pub mod table_result;
+pub(crate) use timeout::DynamicTimeoutLayer;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod test_helpers;
@@ -619,17 +613,22 @@ impl HttpServerBuilder {
         validator: Option<LogValidatorRef>,
         ingest_interceptor: Option<LogIngestInterceptorRef<Error>>,
     ) -> Self {
-        Self {
-            router: self.router.nest(
-                &format!("/{HTTP_API_VERSION}/events"),
-                HttpServer::route_log(LogState {
-                    log_handler: handler,
-                    log_validator: validator,
-                    ingest_interceptor,
-                }),
-            ),
-            ..self
-        }
+        let log_state = LogState {
+            log_handler: handler,
+            log_validator: validator,
+            ingest_interceptor,
+        };
+        let router = self.router.nest(
+            &format!("/{HTTP_API_VERSION}/events"),
+            HttpServer::route_log(log_state.clone()),
+        );
+
+        let router = router.nest(
+            &format!("/{HTTP_API_VERSION}/loki"),
+            HttpServer::route_loki(log_state),
+        );
+
+        Self { router, ..self }
     }
 
     pub fn with_plugins(self, plugins: Plugins) -> Self {
@@ -704,7 +703,7 @@ impl HttpServer {
 
     pub fn build(&self, router: Router) -> Router {
         let timeout_layer = if self.options.timeout != Duration::default() {
-            Some(ServiceBuilder::new().layer(TimeoutLayer::new(self.options.timeout)))
+            Some(ServiceBuilder::new().layer(DynamicTimeoutLayer::new(self.options.timeout)))
         } else {
             info!("HTTP server timeout is disabled");
             None
@@ -764,6 +763,12 @@ impl HttpServer {
         Router::new()
             .route("/metrics", routing::get(handler::metrics))
             .with_state(metrics_handler)
+    }
+
+    fn route_loki<S>(log_state: LogState) -> Router<S> {
+        Router::new()
+            .route("/api/v1/push", routing::post(event::loki_ingest))
+            .with_state(log_state)
     }
 
     fn route_log<S>(log_state: LogState) -> Router<S> {
@@ -997,10 +1002,12 @@ mod test {
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{StringVector, UInt32Vector};
+    use header::constants::GREPTIME_DB_HEADER_TIMEOUT;
     use query::parser::PromQuery;
     use query::query_engine::DescribeResult;
     use session::context::QueryContextRef;
     use tokio::sync::mpsc;
+    use tokio::time::Instant;
 
     use super::*;
     use crate::error::Error;
@@ -1062,8 +1069,8 @@ mod test {
         }
     }
 
-    fn timeout() -> TimeoutLayer {
-        TimeoutLayer::new(Duration::from_millis(10))
+    fn timeout() -> DynamicTimeoutLayer {
+        DynamicTimeoutLayer::new(Duration::from_millis(10))
     }
 
     async fn forever() {
@@ -1102,6 +1109,16 @@ mod test {
         let client = TestClient::new(app);
         let res = client.get("/test/timeout").send().await;
         assert_eq!(res.status(), StatusCode::REQUEST_TIMEOUT);
+
+        let now = Instant::now();
+        let res = client
+            .get("/test/timeout")
+            .header(GREPTIME_DB_HEADER_TIMEOUT, "20ms")
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::REQUEST_TIMEOUT);
+        let elapsed = now.elapsed();
+        assert!(elapsed > Duration::from_millis(15));
     }
 
     #[tokio::test]

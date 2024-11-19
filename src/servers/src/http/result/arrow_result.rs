@@ -29,8 +29,8 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
 use crate::error::{self, Error};
-use crate::http::error_result::ErrorResponse;
 use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
+use crate::http::result::error_result::ErrorResponse;
 use crate::http::{HttpResponse, ResponseFormat};
 
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]

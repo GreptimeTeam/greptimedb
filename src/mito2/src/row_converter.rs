@@ -69,7 +69,9 @@ impl SortField {
             ConcreteDataType::Int64(_) | ConcreteDataType::UInt64(_) => 9,
             ConcreteDataType::Float32(_) => 5,
             ConcreteDataType::Float64(_) => 9,
-            ConcreteDataType::Binary(_) | ConcreteDataType::Json(_) => 11,
+            ConcreteDataType::Binary(_)
+            | ConcreteDataType::Json(_)
+            | ConcreteDataType::Vector(_) => 11,
             ConcreteDataType::String(_) => 11, // a non-empty string takes at least 11 bytes.
             ConcreteDataType::Date(_) => 5,
             ConcreteDataType::DateTime(_) => 9,
@@ -165,7 +167,8 @@ impl SortField {
             Time, time,
             Duration, duration,
             Decimal128, decimal128,
-            Json, binary
+            Json, binary,
+            Vector, binary
         );
 
         Ok(())
@@ -188,7 +191,7 @@ impl SortField {
                             Ok(Value::from(Option::<$f>::deserialize(deserializer).context(error::DeserializeFieldSnafu)?))
                         }
                     )*
-                    ConcreteDataType::Binary(_) | ConcreteDataType::Json(_) => Ok(Value::from(
+                    ConcreteDataType::Binary(_) | ConcreteDataType::Json(_) | ConcreteDataType::Vector(_) => Ok(Value::from(
                         Option::<Vec<u8>>::deserialize(deserializer)
                             .context(error::DeserializeFieldSnafu)?
                             .map(Bytes::from),
@@ -273,7 +276,9 @@ impl SortField {
             ConcreteDataType::Int64(_) | ConcreteDataType::UInt64(_) => 9,
             ConcreteDataType::Float32(_) => 5,
             ConcreteDataType::Float64(_) => 9,
-            ConcreteDataType::Binary(_) | ConcreteDataType::Json(_) => {
+            ConcreteDataType::Binary(_)
+            | ConcreteDataType::Json(_)
+            | ConcreteDataType::Vector(_) => {
                 // Now the encoder encode binary as a list of bytes so we can't use
                 // skip bytes.
                 let pos_before = deserializer.position();
@@ -606,6 +611,7 @@ mod tests {
                 ConcreteDataType::interval_day_time_datatype(),
                 ConcreteDataType::interval_month_day_nano_datatype(),
                 ConcreteDataType::decimal128_default_datatype(),
+                ConcreteDataType::vector_datatype(3),
             ],
             vec![
                 Value::Boolean(true),
@@ -630,6 +636,7 @@ mod tests {
                 Value::IntervalDayTime(IntervalDayTime::new(1, 15)),
                 Value::IntervalMonthDayNano(IntervalMonthDayNano::new(1, 1, 15)),
                 Value::Decimal128(Decimal128::from(16)),
+                Value::Binary(Bytes::from(vec![0; 12])),
             ],
         );
     }

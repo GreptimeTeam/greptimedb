@@ -36,7 +36,7 @@ use crate::types::{
     IntervalDayTimeType, IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType, JsonType,
     ListType, NullType, StringType, TimeMillisecondType, TimeType, TimestampMicrosecondType,
     TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, TimestampType,
-    UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+    UInt16Type, UInt32Type, UInt64Type, UInt8Type, VectorType,
 };
 use crate::value::Value;
 use crate::vectors::MutableVector;
@@ -84,6 +84,9 @@ pub enum ConcreteDataType {
 
     // JSON type:
     Json(JsonType),
+
+    // Vector type:
+    Vector(VectorType),
 }
 
 impl fmt::Display for ConcreteDataType {
@@ -132,6 +135,7 @@ impl fmt::Display for ConcreteDataType {
             ConcreteDataType::List(v) => write!(f, "{}", v.name()),
             ConcreteDataType::Dictionary(v) => write!(f, "{}", v.name()),
             ConcreteDataType::Json(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::Vector(v) => write!(f, "{}", v.name()),
         }
     }
 }
@@ -167,6 +171,7 @@ impl ConcreteDataType {
                 | ConcreteDataType::Decimal128(_)
                 | ConcreteDataType::Binary(_)
                 | ConcreteDataType::Json(_)
+                | ConcreteDataType::Vector(_)
         )
     }
 
@@ -223,6 +228,10 @@ impl ConcreteDataType {
 
     pub fn is_json(&self) -> bool {
         matches!(self, ConcreteDataType::Json(_))
+    }
+
+    pub fn is_vector(&self) -> bool {
+        matches!(self, ConcreteDataType::Vector(_))
     }
 
     pub fn numerics() -> Vec<ConcreteDataType> {
@@ -330,6 +339,20 @@ impl ConcreteDataType {
     pub fn as_decimal128(&self) -> Option<Decimal128Type> {
         match self {
             ConcreteDataType::Decimal128(d) => Some(*d),
+            _ => None,
+        }
+    }
+
+    pub fn as_json(&self) -> Option<JsonType> {
+        match self {
+            ConcreteDataType::Json(j) => Some(*j),
+            _ => None,
+        }
+    }
+
+    pub fn as_vector(&self) -> Option<VectorType> {
+        match self {
+            ConcreteDataType::Vector(v) => Some(*v),
             _ => None,
         }
     }
@@ -564,6 +587,14 @@ impl ConcreteDataType {
     pub fn decimal128_default_datatype() -> ConcreteDataType {
         Self::decimal128_datatype(DECIMAL128_MAX_PRECISION, DECIMAL_DEFAULT_SCALE)
     }
+
+    pub fn vector_datatype(dim: u32) -> ConcreteDataType {
+        ConcreteDataType::Vector(VectorType::new(dim))
+    }
+
+    pub fn vector_default_datatype() -> ConcreteDataType {
+        Self::vector_datatype(0)
+    }
 }
 
 /// Data type abstraction.
@@ -757,6 +788,7 @@ mod tests {
         assert!(ConcreteDataType::duration_microsecond_datatype().is_stringifiable());
         assert!(ConcreteDataType::duration_nanosecond_datatype().is_stringifiable());
         assert!(ConcreteDataType::decimal128_datatype(10, 2).is_stringifiable());
+        assert!(ConcreteDataType::vector_default_datatype().is_stringifiable());
     }
 
     #[test]
@@ -908,6 +940,10 @@ mod tests {
             )
             .to_string(),
             "Dictionary<Int32, String>"
+        );
+        assert_eq!(
+            ConcreteDataType::vector_datatype(3).to_string(),
+            "Vector(3)"
         );
     }
 }

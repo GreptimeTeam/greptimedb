@@ -71,3 +71,102 @@ DROP TABLE test_alt_table;
 
 Affected Rows: 0
 
+-- to test if same name column can be added
+CREATE TABLE phy (ts timestamp time index, val double) engine = metric with ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+CREATE TABLE t1 (
+    ts timestamp time index,
+    val double,
+    host string primary key
+) engine = metric with ("on_physical_table" = "phy");
+
+Affected Rows: 0
+
+INSERT INTO
+    t1
+VALUES
+    ('host1', 0, 1),
+    ('host2', 1, 0,);
+
+Affected Rows: 2
+
+SELECT
+    *
+FROM
+    t1;
+
++-------+-------------------------+-----+
+| host  | ts                      | val |
++-------+-------------------------+-----+
+| host2 | 1970-01-01T00:00:00.001 | 0.0 |
+| host1 | 1970-01-01T00:00:00     | 1.0 |
++-------+-------------------------+-----+
+
+CREATE TABLE t2 (
+    ts timestamp time index,
+    job string primary key,
+    val double
+) engine = metric with ("on_physical_table" = "phy");
+
+Affected Rows: 0
+
+ALTER TABLE
+    t1
+ADD
+    COLUMN `at` STRING;
+
+Affected Rows: 0
+
+ALTER TABLE
+    t2
+ADD
+    COLUMN at3 STRING;
+
+Affected Rows: 0
+
+ALTER TABLE
+    t2
+ADD
+    COLUMN `at` STRING;
+
+Affected Rows: 0
+
+ALTER TABLE
+    t2
+ADD
+    COLUMN at2 STRING;
+
+Affected Rows: 0
+
+INSERT INTO
+    t2
+VALUES
+    ("loc_1", "loc_2", "loc_3", 'job1', 0, 1);
+
+Affected Rows: 1
+
+SELECT
+    *
+FROM
+    t2;
+
++-------+-------+-------+------+---------------------+-----+
+| at    | at2   | at3   | job  | ts                  | val |
++-------+-------+-------+------+---------------------+-----+
+| loc_1 | loc_2 | loc_3 | job1 | 1970-01-01T00:00:00 | 1.0 |
++-------+-------+-------+------+---------------------+-----+
+
+DROP TABLE t1;
+
+Affected Rows: 0
+
+DROP TABLE t2;
+
+Affected Rows: 0
+
+DROP TABLE phy;
+
+Affected Rows: 0
+

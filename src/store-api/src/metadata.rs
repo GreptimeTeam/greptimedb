@@ -28,12 +28,12 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::arrow::datatypes::FieldRef;
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
 
-use crate::region_request::{AddColumn, AddColumnLocation, AlterKind, ChangeColumnType};
+use crate::region_request::{AddColumn, AddColumnLocation, AlterKind, ModifyColumnType};
 use crate::storage::consts::is_internal_column;
 use crate::storage::{ColumnId, RegionId};
 
@@ -323,6 +323,36 @@ impl RegionMetadata {
         })
     }
 
+    /// Gets the column ids to be indexed by inverted index.
+    ///
+    /// If there is no column with inverted index key, it will use primary key columns.
+    pub fn inverted_indexed_column_ids<'a>(
+        &self,
+        ignore_column_ids: impl Iterator<Item = &'a ColumnId>,
+    ) -> HashSet<ColumnId> {
+        // Default to use primary key columns as inverted index columns.
+        let pk_as_inverted_index = !self
+            .column_metadatas
+            .iter()
+            .any(|c| c.column_schema.has_inverted_index_key());
+
+        let mut inverted_index: HashSet<_> = if pk_as_inverted_index {
+            self.primary_key_columns().map(|c| c.column_id).collect()
+        } else {
+            self.column_metadatas
+                .iter()
+                .filter(|column| column.column_schema.is_inverted_indexed())
+                .map(|column| column.column_id)
+                .collect()
+        };
+
+        for ignored in ignore_column_ids {
+            inverted_index.remove(ignored);
+        }
+
+        inverted_index
+    }
+
     /// Checks whether the metadata is valid.
     fn validate(&self) -> Result<()> {
         // Id to name.
@@ -522,7 +552,11 @@ impl RegionMetadataBuilder {
         match kind {
             AlterKind::AddColumns { columns } => self.add_columns(columns)?,
             AlterKind::DropColumns { names } => self.drop_columns(&names),
-            AlterKind::ChangeColumnTypes { columns } => self.change_column_types(columns),
+            AlterKind::ModifyColumnTypes { columns } => self.modify_column_types(columns),
+            AlterKind::ChangeColumnFulltext {
+                column_name,
+                options,
+            } => self.change_column_fulltext_options(column_name, options)?,
             AlterKind::ChangeRegionOptions { options: _ } => {
                 // nothing to be done with RegionMetadata
             }
@@ -608,11 +642,11 @@ impl RegionMetadataBuilder {
     }
 
     /// Changes columns type to the metadata if exist.
-    fn change_column_types(&mut self, columns: Vec<ChangeColumnType>) {
+    fn modify_column_types(&mut self, columns: Vec<ModifyColumnType>) {
         let mut change_type_map: HashMap<_, _> = columns
             .into_iter()
             .map(
-                |ChangeColumnType {
+                |ModifyColumnType {
                      column_name,
                      target_type,
                  }| (column_name, target_type),
@@ -624,6 +658,47 @@ impl RegionMetadataBuilder {
                 column_meta.column_schema.data_type = target_type;
             }
         }
+    }
+
+    fn change_column_fulltext_options(
+        &mut self,
+        column_name: String,
+        options: FulltextOptions,
+    ) -> Result<()> {
+        for column_meta in self.column_metadatas.iter_mut() {
+            if column_meta.column_schema.name == column_name {
+                ensure!(
+                    column_meta.column_schema.data_type.is_string(),
+                    InvalidColumnOptionSnafu {
+                        column_name,
+                        msg: "FULLTEXT index only supports string type".to_string(),
+                    }
+                );
+
+                let current_fulltext_options = column_meta
+                    .column_schema
+                    .fulltext_options()
+                    .context(SetFulltextOptionsSnafu {
+                        column_name: column_name.clone(),
+                    })?;
+
+                // Don't allow to enable fulltext options if it is already enabled.
+                if current_fulltext_options.is_some_and(|o| o.enable) && options.enable {
+                    return InvalidColumnOptionSnafu {
+                        column_name,
+                        msg: "FULLTEXT index options already enabled".to_string(),
+                    }
+                    .fail();
+                } else {
+                    column_meta
+                        .column_schema
+                        .set_fulltext_options(&options)
+                        .context(SetFulltextOptionsSnafu { column_name })?;
+                }
+                break;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -746,6 +821,30 @@ pub enum MetadataError {
     InvalidRegionOptionChangeRequest {
         key: String,
         value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to decode protobuf"))]
+    DecodeProto {
+        #[snafu(source)]
+        error: prost::DecodeError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid column option, column name: {}, error: {}", column_name, msg))]
+    InvalidColumnOption {
+        column_name: String,
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to set fulltext options for column {}", column_name))]
+    SetFulltextOptions {
+        column_name: String,
+        source: datatypes::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1166,8 +1265,8 @@ mod test {
 
         let mut builder = RegionMetadataBuilder::from_existing(metadata);
         builder
-            .alter(AlterKind::ChangeColumnTypes {
-                columns: vec![ChangeColumnType {
+            .alter(AlterKind::ModifyColumnTypes {
+                columns: vec![ModifyColumnType {
                     column_name: "b".to_string(),
                     target_type: ConcreteDataType::string_datatype(),
                 }],
@@ -1181,6 +1280,32 @@ mod test {
             .column_schema
             .data_type;
         assert_eq!(ConcreteDataType::string_datatype(), *b_type);
+
+        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        builder
+            .alter(AlterKind::ChangeColumnFulltext {
+                column_name: "b".to_string(),
+                options: FulltextOptions {
+                    enable: true,
+                    analyzer: datatypes::schema::FulltextAnalyzer::Chinese,
+                    case_sensitive: true,
+                },
+            })
+            .unwrap();
+        let metadata = builder.build().unwrap();
+        let a_fulltext_options = metadata
+            .column_by_name("b")
+            .unwrap()
+            .column_schema
+            .fulltext_options()
+            .unwrap()
+            .unwrap();
+        assert!(a_fulltext_options.enable);
+        assert_eq!(
+            datatypes::schema::FulltextAnalyzer::Chinese,
+            a_fulltext_options.analyzer
+        );
+        assert!(a_fulltext_options.case_sensitive);
     }
 
     #[test]

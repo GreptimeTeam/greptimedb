@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use async_walkdir::{Filtering, WalkDir};
 use base64::prelude::BASE64_URL_SAFE;
 use base64::Engine;
+use common_base::range_read::FileReader;
 use common_runtime::runtime::RuntimeTrait;
 use common_telemetry::{info, warn};
 use futures::{FutureExt, StreamExt};
@@ -30,7 +31,7 @@ use snafu::ResultExt;
 use tokio::fs;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use tokio_util::compat::TokioAsyncWriteCompatExt;
 
 use crate::error::{
     CacheGetSnafu, CreateSnafu, MetadataSnafu, OpenSnafu, ReadSnafu, RemoveSnafu, RenameSnafu,
@@ -427,11 +428,10 @@ pub struct FsBlobGuard {
 
 #[async_trait]
 impl BlobGuard for FsBlobGuard {
-    type Reader = Compat<fs::File>;
+    type Reader = FileReader;
 
     async fn reader(&self) -> Result<Self::Reader> {
-        let file = fs::File::open(&self.path).await.context(OpenSnafu)?;
-        Ok(file.compat())
+        FileReader::new(&self.path).await.context(OpenSnafu)
     }
 }
 
@@ -530,8 +530,9 @@ impl BoundedStager {
 
 #[cfg(test)]
 mod tests {
+    use common_base::range_read::RangeReader;
     use common_test_util::temp_dir::create_temp_dir;
-    use futures::{AsyncReadExt, AsyncWriteExt};
+    use futures::AsyncWriteExt;
     use tokio::io::AsyncReadExt as _;
 
     use super::*;
@@ -564,9 +565,9 @@ mod tests {
             .await
             .unwrap();
 
-        let mut buf = Vec::new();
-        reader.read_to_end(&mut buf).await.unwrap();
-        assert_eq!(buf, b"hello world");
+        let m = reader.metadata().await.unwrap();
+        let buf = reader.read(0..m.content_length).await.unwrap();
+        assert_eq!(&*buf, b"hello world");
 
         let mut file = stager.must_get_file(puffin_file_name, key).await;
         let mut buf = Vec::new();
@@ -695,9 +696,10 @@ mod tests {
             .reader()
             .await
             .unwrap();
-        let mut buf = Vec::new();
-        reader.read_to_end(&mut buf).await.unwrap();
-        assert_eq!(buf, b"hello world");
+
+        let m = reader.metadata().await.unwrap();
+        let buf = reader.read(0..m.content_length).await.unwrap();
+        assert_eq!(&*buf, b"hello world");
 
         let dir_path = stager
             .get_dir(
@@ -751,9 +753,9 @@ mod tests {
         stager.cache.run_pending_tasks().await;
         assert!(!stager.in_cache(puffin_file_name, blob_key));
 
-        let mut buf = Vec::new();
-        reader.read_to_end(&mut buf).await.unwrap();
-        assert_eq!(buf, b"Hello world");
+        let m = reader.metadata().await.unwrap();
+        let buf = reader.read(0..m.content_length).await.unwrap();
+        assert_eq!(&*buf, b"Hello world");
 
         // Second time to get the blob, get from recycle bin
         let mut reader = stager
@@ -772,9 +774,9 @@ mod tests {
         stager.cache.run_pending_tasks().await;
         assert!(!stager.in_cache(puffin_file_name, blob_key));
 
-        let mut buf = Vec::new();
-        reader.read_to_end(&mut buf).await.unwrap();
-        assert_eq!(buf, b"Hello world");
+        let m = reader.metadata().await.unwrap();
+        let buf = reader.read(0..m.content_length).await.unwrap();
+        assert_eq!(&*buf, b"Hello world");
 
         let dir_key = "dir_key";
         let files_in_dir = [

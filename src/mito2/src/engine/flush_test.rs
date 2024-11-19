@@ -45,6 +45,16 @@ async fn test_manual_flush() {
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
+
     let request = CreateRequestBuilder::new().build();
 
     let column_schemas = rows_schema(&request);
@@ -92,6 +102,16 @@ async fn test_flush_engine() {
         .await;
 
     let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
+
     let request = CreateRequestBuilder::new().build();
 
     let column_schemas = rows_schema(&request);
@@ -151,6 +171,15 @@ async fn test_write_stall() {
         .await;
 
     let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
     let request = CreateRequestBuilder::new().build();
 
     let column_schemas = rows_schema(&request);
@@ -215,6 +244,15 @@ async fn test_flush_empty() {
         .await;
 
     let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
     let request = CreateRequestBuilder::new().build();
 
     engine
@@ -249,8 +287,17 @@ async fn test_flush_reopen_region(factory: Option<LogStoreFactory>) {
 
     let mut env = TestEnv::new().with_log_store_factory(factory.clone());
     let engine = env.create_engine(MitoConfig::default()).await;
-
     let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
+
     let topic = prepare_test_for_kafka_log_store(&factory).await;
     let request = CreateRequestBuilder::new()
         .kafka_topic(topic.clone())
@@ -360,8 +407,17 @@ async fn test_auto_flush_engine() {
             time_provider.clone(),
         )
         .await;
-
     let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
+
     let request = CreateRequestBuilder::new().build();
 
     let column_schemas = rows_schema(&request);
@@ -421,6 +477,16 @@ async fn test_flush_workers() {
 
     let region_id0 = RegionId::new(1, 0);
     let region_id1 = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id0.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
+
     let request = CreateRequestBuilder::new().region_dir("r0").build();
     let column_schemas = rows_schema(&request);
     engine

@@ -83,3 +83,31 @@ drop table phy;
 show create table numbers;
 
 show create table information_schema.columns;
+
+CREATE TABLE "specify_invereted_index_cols" (
+  "ts" TIMESTAMP(3) NOT NULL,
+  "val" DOUBLE NULL,
+  "host" STRING NULL,
+  "job" STRING NULL,
+  TIME INDEX ("ts"),
+  PRIMARY KEY ("host", "job"),
+  INVERTED INDEX ("job")
+);
+
+show create table specify_invereted_index_cols;
+
+drop table specify_invereted_index_cols;
+
+CREATE TABLE "specify_empty_invereted_index_cols" (
+  "ts" TIMESTAMP(3) NOT NULL,
+  "val" DOUBLE NULL,
+  "host" STRING NULL,
+  "job" STRING NULL,
+  TIME INDEX ("ts"),
+  PRIMARY KEY ("host", "job"),
+  INVERTED INDEX ()
+);
+
+show create table specify_empty_invereted_index_cols;
+
+drop table specify_empty_invereted_index_cols;

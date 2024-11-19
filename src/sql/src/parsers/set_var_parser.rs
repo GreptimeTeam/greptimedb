@@ -58,47 +58,83 @@ mod tests {
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParseOptions;
 
-    fn assert_mysql_parse_result(sql: &str) {
+    fn assert_mysql_parse_result(sql: &str, indent_str: &str, expr: Expr) {
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::SetVariables(SetVariables {
-                variable: ObjectName(vec![Ident::new("time_zone")]),
-                value: vec![Expr::Value(Value::SingleQuotedString("UTC".to_string()))]
+                variable: ObjectName(vec![Ident::new(indent_str)]),
+                value: vec![expr]
             })
         );
     }
 
-    fn assert_pg_parse_result(sql: &str) {
+    fn assert_pg_parse_result(sql: &str, indent: &str, expr: Expr) {
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::SetVariables(SetVariables {
-                variable: ObjectName(vec![Ident::new("TIMEZONE")]),
-                value: vec![Expr::Value(Value::SingleQuotedString("UTC".to_string()))],
+                variable: ObjectName(vec![Ident::new(indent)]),
+                value: vec![expr],
             })
         );
     }
 
     #[test]
     pub fn test_set_timezone() {
+        let expected_utc_expr = Expr::Value(Value::SingleQuotedString("UTC".to_string()));
         // mysql style
         let sql = "SET time_zone = 'UTC'";
-        assert_mysql_parse_result(sql);
+        assert_mysql_parse_result(sql, "time_zone", expected_utc_expr.clone());
         // session or local style
         let sql = "SET LOCAL time_zone = 'UTC'";
-        assert_mysql_parse_result(sql);
+        assert_mysql_parse_result(sql, "time_zone", expected_utc_expr.clone());
         let sql = "SET SESSION time_zone = 'UTC'";
-        assert_mysql_parse_result(sql);
+        assert_mysql_parse_result(sql, "time_zone", expected_utc_expr.clone());
 
         // postgresql style
         let sql = "SET TIMEZONE TO 'UTC'";
-        assert_pg_parse_result(sql);
+        assert_pg_parse_result(sql, "TIMEZONE", expected_utc_expr.clone());
         let sql = "SET TIMEZONE 'UTC'";
-        assert_pg_parse_result(sql);
+        assert_pg_parse_result(sql, "TIMEZONE", expected_utc_expr);
+    }
+
+    #[test]
+    pub fn test_set_query_timeout() {
+        let expected_query_timeout_expr = Expr::Value(Value::Number("5000".to_string(), false));
+        // mysql style
+        let sql = "SET MAX_EXECUTION_TIME = 5000";
+        assert_mysql_parse_result(
+            sql,
+            "MAX_EXECUTION_TIME",
+            expected_query_timeout_expr.clone(),
+        );
+        // session or local style
+        let sql = "SET LOCAL MAX_EXECUTION_TIME = 5000";
+        assert_mysql_parse_result(
+            sql,
+            "MAX_EXECUTION_TIME",
+            expected_query_timeout_expr.clone(),
+        );
+        let sql = "SET SESSION MAX_EXECUTION_TIME = 5000";
+        assert_mysql_parse_result(
+            sql,
+            "MAX_EXECUTION_TIME",
+            expected_query_timeout_expr.clone(),
+        );
+
+        // postgresql style
+        let sql = "SET STATEMENT_TIMEOUT = 5000";
+        assert_pg_parse_result(
+            sql,
+            "STATEMENT_TIMEOUT",
+            expected_query_timeout_expr.clone(),
+        );
+        let sql = "SET STATEMENT_TIMEOUT TO 5000";
+        assert_pg_parse_result(sql, "STATEMENT_TIMEOUT", expected_query_timeout_expr);
     }
 }

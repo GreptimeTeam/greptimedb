@@ -26,7 +26,7 @@ use session::context::QueryContext;
 use snafu::ResultExt;
 
 use crate::error::{HyperSnafu, InvalidUtf8ValueSnafu};
-use crate::http::error_result::ErrorResponse;
+use crate::http::result::error_result::ErrorResponse;
 use crate::http::{ApiState, GreptimedbV1Response, HttpResponse};
 
 macro_rules! json_err {

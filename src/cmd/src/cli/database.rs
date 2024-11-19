@@ -12,11 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use base64::engine::general_purpose;
 use base64::Engine;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use humantime::format_duration;
 use serde_json::Value;
-use servers::http::greptime_result_v1::GreptimedbV1Response;
+use servers::http::header::constants::GREPTIME_DB_HEADER_TIMEOUT;
+use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use servers::http::GreptimeQueryOutput;
 use snafu::ResultExt;
 
@@ -26,10 +30,16 @@ pub(crate) struct DatabaseClient {
     addr: String,
     catalog: String,
     auth_header: Option<String>,
+    timeout: Option<Duration>,
 }
 
 impl DatabaseClient {
-    pub fn new(addr: String, catalog: String, auth_basic: Option<String>) -> Self {
+    pub fn new(
+        addr: String,
+        catalog: String,
+        auth_basic: Option<String>,
+        timeout: Option<Duration>,
+    ) -> Self {
         let auth_header = if let Some(basic) = auth_basic {
             let encoded = general_purpose::STANDARD.encode(basic);
             Some(format!("basic {}", encoded))
@@ -41,6 +51,7 @@ impl DatabaseClient {
             addr,
             catalog,
             auth_header,
+            timeout,
         }
     }
 
@@ -61,6 +72,12 @@ impl DatabaseClient {
             .header("Content-Type", "application/x-www-form-urlencoded");
         if let Some(ref auth) = self.auth_header {
             request = request.header("Authorization", auth);
+        }
+        if let Some(ref timeout) = self.timeout {
+            request = request.header(
+                GREPTIME_DB_HEADER_TIMEOUT,
+                format_duration(*timeout).to_string(),
+            );
         }
 
         let response = request.send().await.with_context(|_| HttpQuerySqlSnafu {

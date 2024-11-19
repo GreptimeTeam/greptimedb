@@ -17,19 +17,145 @@ pub(crate) mod partitioner;
 use std::collections::HashMap;
 
 use api::helper::ColumnDataTypeWrapper;
+use api::v1::column_data_type_extension::TypeExt;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::value::ValueData;
-use api::v1::{Column, ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
+use api::v1::{
+    Column, ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
+    RowDeleteRequest, RowInsertRequest, Rows, SemanticType, Value,
+};
 use common_base::BitVec;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::VectorRef;
 use snafu::prelude::*;
 use snafu::ResultExt;
 use table::metadata::TableInfo;
 
 use crate::error::{
-    ColumnDataTypeSnafu, ColumnNotFoundSnafu, InvalidInsertRequestSnafu,
-    MissingTimeIndexColumnSnafu, Result,
+    ColumnDataTypeSnafu, ColumnNotFoundSnafu, InvalidInsertRequestSnafu, InvalidJsonFormatSnafu,
+    MissingTimeIndexColumnSnafu, Result, UnexpectedSnafu,
 };
+
+/// Encodes a string value as JSONB binary data if the value is of `StringValue` type.
+fn encode_string_to_jsonb_binary(value_data: ValueData) -> Result<ValueData> {
+    if let ValueData::StringValue(json) = &value_data {
+        let binary = jsonb::parse_value(json.as_bytes())
+            .map_err(|_| InvalidJsonFormatSnafu { json }.build())
+            .map(|jsonb| jsonb.to_vec())?;
+        Ok(ValueData::BinaryValue(binary))
+    } else {
+        UnexpectedSnafu {
+            violated: "Expected to value data to be a string.",
+        }
+        .fail()
+    }
+}
+
+/// Prepares row insertion requests by converting any JSON values to binary JSONB format.
+pub fn preprocess_row_insert_requests(requests: &mut Vec<RowInsertRequest>) -> Result<()> {
+    for request in requests {
+        validate_rows(&request.rows)?;
+        prepare_rows(&mut request.rows)?;
+    }
+
+    Ok(())
+}
+
+/// Prepares row deletion requests by converting any JSON values to binary JSONB format.
+pub fn preprocess_row_delete_requests(requests: &mut Vec<RowDeleteRequest>) -> Result<()> {
+    for request in requests {
+        validate_rows(&request.rows)?;
+        prepare_rows(&mut request.rows)?;
+    }
+
+    Ok(())
+}
+
+fn prepare_rows(rows: &mut Option<Rows>) -> Result<()> {
+    if let Some(rows) = rows {
+        let indexes = rows
+            .schema
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, schema)| {
+                if schema.datatype() == ColumnDataType::Json {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        for idx in &indexes {
+            let column = &mut rows.schema[*idx];
+            column.datatype_extension = Some(ColumnDataTypeExtension {
+                type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+            });
+            column.datatype = ColumnDataType::Json.into();
+        }
+
+        for idx in &indexes {
+            for row in &mut rows.rows {
+                if let Some(value_data) = row.values[*idx].value_data.take() {
+                    row.values[*idx].value_data = Some(encode_string_to_jsonb_binary(value_data)?);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_rows(rows: &Option<Rows>) -> Result<()> {
+    let Some(rows) = rows else {
+        return Ok(());
+    };
+
+    for (col_idx, schema) in rows.schema.iter().enumerate() {
+        let column_type =
+            ColumnDataTypeWrapper::try_new(schema.datatype, schema.datatype_extension.clone())
+                .context(ColumnDataTypeSnafu)?
+                .into();
+
+        let ConcreteDataType::Vector(d) = column_type else {
+            return Ok(());
+        };
+
+        for row in &rows.rows {
+            let value = &row.values[col_idx].value_data;
+            if let Some(data) = value {
+                validate_vector_col(data, d.dim)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_vector_col(data: &ValueData, dim: u32) -> Result<()> {
+    let data = match data {
+        ValueData::BinaryValue(data) => data,
+        _ => {
+            return InvalidInsertRequestSnafu {
+                reason: "Expecting binary data for vector column.".to_string(),
+            }
+            .fail();
+        }
+    };
+
+    let expected_len = dim as usize * std::mem::size_of::<f32>();
+    if data.len() != expected_len {
+        return InvalidInsertRequestSnafu {
+            reason: format!(
+                "Expecting {} bytes of data for vector column, but got {}.",
+                expected_len,
+                data.len()
+            ),
+        }
+        .fail();
+    }
+
+    Ok(())
+}
 
 pub fn columns_to_rows(columns: Vec<Column>, row_count: u32) -> Result<Rows> {
     let row_count = row_count as usize;
@@ -165,6 +291,7 @@ fn push_column_to_rows(column: Column, rows: &mut [Row]) -> Result<()> {
             interval_month_day_nano_values
         ),
         (Decimal128, Decimal128Value, decimal128_values),
+        (Vector, BinaryValue, binary_values),
     );
 
     Ok(())
@@ -193,12 +320,7 @@ pub fn column_schema(
 ) -> Result<Vec<ColumnSchema>> {
     columns
         .iter()
-        .map(|(column_name, vector)| {
-            let (datatype, datatype_extension) =
-                ColumnDataTypeWrapper::try_from(vector.data_type().clone())
-                    .context(ColumnDataTypeSnafu)?
-                    .to_parts();
-
+        .map(|(column_name, _vector)| {
             let column_schema = table_info
                 .meta
                 .schema
@@ -206,6 +328,11 @@ pub fn column_schema(
                 .context(ColumnNotFoundSnafu {
                     msg: format!("unable to find column {column_name} in table schema"),
                 })?;
+
+            let (datatype, datatype_extension) =
+                ColumnDataTypeWrapper::try_from(column_schema.data_type.clone())
+                    .context(ColumnDataTypeSnafu)?
+                    .to_parts();
 
             Ok(ColumnSchema {
                 column_name: column_name.clone(),
@@ -251,7 +378,7 @@ fn semantic_type(table_info: &TableInfo, column: &str) -> Result<SemanticType> {
 #[cfg(test)]
 mod tests {
     use api::v1::column::Values;
-    use api::v1::SemanticType;
+    use api::v1::{SemanticType, VectorTypeExtension};
     use common_base::bit_vec::prelude::*;
 
     use super::*;
@@ -285,30 +412,57 @@ mod tests {
                 }),
                 ..Default::default()
             },
+            Column {
+                column_name: String::from("col3"),
+                datatype: ColumnDataType::Vector.into(),
+                semantic_type: SemanticType::Field.into(),
+                null_mask: vec![],
+                values: Some(Values {
+                    binary_values: vec![vec![0; 4], vec![1; 4], vec![2; 4]],
+                    ..Default::default()
+                }),
+                datatype_extension: Some(ColumnDataTypeExtension {
+                    type_ext: Some(TypeExt::VectorType(VectorTypeExtension { dim: 1 })),
+                }),
+                ..Default::default()
+            },
         ];
         let row_count = 3;
 
         let result = columns_to_rows(columns, row_count);
         let rows = result.unwrap();
 
-        assert_eq!(rows.schema.len(), 2);
+        assert_eq!(rows.schema.len(), 3);
         assert_eq!(rows.schema[0].column_name, "col1");
         assert_eq!(rows.schema[0].datatype, ColumnDataType::Int32 as i32);
         assert_eq!(rows.schema[0].semantic_type, SemanticType::Field as i32);
         assert_eq!(rows.schema[1].column_name, "col2");
         assert_eq!(rows.schema[1].datatype, ColumnDataType::String as i32);
         assert_eq!(rows.schema[1].semantic_type, SemanticType::Tag as i32);
+        assert_eq!(rows.schema[2].column_name, "col3");
+        assert_eq!(rows.schema[2].datatype, ColumnDataType::Vector as i32);
+        assert_eq!(rows.schema[2].semantic_type, SemanticType::Field as i32);
+        assert_eq!(
+            rows.schema[2].datatype_extension,
+            Some(ColumnDataTypeExtension {
+                type_ext: Some(TypeExt::VectorType(VectorTypeExtension { dim: 1 }))
+            })
+        );
 
         assert_eq!(rows.rows.len(), 3);
 
-        assert_eq!(rows.rows[0].values.len(), 2);
+        assert_eq!(rows.rows[0].values.len(), 3);
         assert_eq!(rows.rows[0].values[0].value_data, None);
         assert_eq!(
             rows.rows[0].values[1].value_data,
             Some(ValueData::StringValue(String::from("value1")))
         );
+        assert_eq!(
+            rows.rows[0].values[2].value_data,
+            Some(ValueData::BinaryValue(vec![0; 4]))
+        );
 
-        assert_eq!(rows.rows[1].values.len(), 2);
+        assert_eq!(rows.rows[1].values.len(), 3);
         assert_eq!(
             rows.rows[1].values[0].value_data,
             Some(ValueData::I32Value(42))
@@ -317,12 +471,20 @@ mod tests {
             rows.rows[1].values[1].value_data,
             Some(ValueData::StringValue(String::from("value2")))
         );
+        assert_eq!(
+            rows.rows[1].values[2].value_data,
+            Some(ValueData::BinaryValue(vec![1; 4]))
+        );
 
-        assert_eq!(rows.rows[2].values.len(), 2);
+        assert_eq!(rows.rows[2].values.len(), 3);
         assert_eq!(rows.rows[2].values[0].value_data, None);
         assert_eq!(
             rows.rows[2].values[1].value_data,
             Some(ValueData::StringValue(String::from("value3")))
+        );
+        assert_eq!(
+            rows.rows[2].values[2].value_data,
+            Some(ValueData::BinaryValue(vec![2; 4]))
         );
 
         // wrong type
@@ -369,5 +531,38 @@ mod tests {
         }];
         let row_count = 3;
         assert!(columns_to_rows(columns, row_count).is_err());
+    }
+
+    #[test]
+    fn test_validate_vector_row_success() {
+        let data = ValueData::BinaryValue(vec![0; 4]);
+        let dim = 1;
+        assert!(validate_vector_col(&data, dim).is_ok());
+
+        let data = ValueData::BinaryValue(vec![0; 8]);
+        let dim = 2;
+        assert!(validate_vector_col(&data, dim).is_ok());
+
+        let data = ValueData::BinaryValue(vec![0; 12]);
+        let dim = 3;
+        assert!(validate_vector_col(&data, dim).is_ok());
+    }
+
+    #[test]
+    fn test_validate_vector_row_fail_wrong_type() {
+        let data = ValueData::I32Value(42);
+        let dim = 1;
+        assert!(validate_vector_col(&data, dim).is_err());
+    }
+
+    #[test]
+    fn test_validate_vector_row_fail_wrong_length() {
+        let data = ValueData::BinaryValue(vec![0; 8]);
+        let dim = 1;
+        assert!(validate_vector_col(&data, dim).is_err());
+
+        let data = ValueData::BinaryValue(vec![0; 4]);
+        let dim = 2;
+        assert!(validate_vector_col(&data, dim).is_err());
     }
 }

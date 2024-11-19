@@ -245,6 +245,16 @@ async fn test_open_region_skip_wal_replay() {
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
+
     let request = CreateRequestBuilder::new().build();
     let region_dir = request.region_dir.clone();
 
@@ -423,6 +433,16 @@ async fn test_open_compaction_region() {
     let engine = env.create_engine(mito_config.clone()).await;
 
     let region_id = RegionId::new(1, 1);
+    let schema_metadata_manager = env.get_schema_metadata_manager();
+    schema_metadata_manager
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
     let request = CreateRequestBuilder::new().build();
     let region_dir = request.region_dir.clone();
     engine
@@ -444,10 +464,14 @@ async fn test_open_compaction_region() {
         region_options: RegionOptions::default(),
     };
 
-    let compaction_region =
-        open_compaction_region(&req, &mito_config, object_store_manager.clone())
-            .await
-            .unwrap();
+    let compaction_region = open_compaction_region(
+        &req,
+        &mito_config,
+        object_store_manager.clone(),
+        schema_metadata_manager,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(region_id, compaction_region.region_id);
 }

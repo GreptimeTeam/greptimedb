@@ -12,103 +12,211 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use common_query::AddColumnLocation;
-use snafu::ResultExt;
+use datatypes::schema::{FulltextOptions, COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE};
+use snafu::{ensure, ResultExt};
+use sqlparser::ast::Ident;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::Token;
 
-use crate::error::{self, Result};
+use crate::error::{self, InvalidColumnOptionSnafu, Result, SetFulltextOptionSnafu};
 use crate::parser::ParserContext;
+use crate::parsers::utils::validate_column_fulltext_create_option;
 use crate::statements::alter::{AlterTable, AlterTableOperation, ChangeTableOption};
 use crate::statements::statement::Statement;
+use crate::util::parse_option_string;
 
 impl ParserContext<'_> {
     pub(crate) fn parse_alter(&mut self) -> Result<Statement> {
-        let alter_table = self.parse_alter_table().context(error::SyntaxSnafu)?;
+        let alter_table = self.parse_alter_table()?;
         Ok(Statement::Alter(alter_table))
     }
 
-    fn parse_alter_table(&mut self) -> std::result::Result<AlterTable, ParserError> {
+    fn parse_alter_table(&mut self) -> Result<AlterTable> {
         self.parser
-            .expect_keywords(&[Keyword::ALTER, Keyword::TABLE])?;
+            .expect_keywords(&[Keyword::ALTER, Keyword::TABLE])
+            .context(error::SyntaxSnafu)?;
 
-        let raw_table_name = self.parser.parse_object_name(false)?;
+        let raw_table_name = self
+            .parser
+            .parse_object_name(false)
+            .context(error::SyntaxSnafu)?;
         let table_name = Self::canonicalize_object_name(raw_table_name);
 
-        let alter_operation = if self.parser.parse_keyword(Keyword::ADD) {
-            if let Some(constraint) = self.parser.parse_optional_table_constraint()? {
-                AlterTableOperation::AddConstraint(constraint)
-            } else {
-                let _ = self.parser.parse_keyword(Keyword::COLUMN);
-                let mut column_def = self.parser.parse_column_def()?;
-                column_def.name = Self::canonicalize_identifier(column_def.name);
-                let location = if self.parser.parse_keyword(Keyword::FIRST) {
-                    Some(AddColumnLocation::First)
-                } else if let Token::Word(word) = self.parser.peek_token().token {
-                    if word.value.eq_ignore_ascii_case("AFTER") {
-                        let _ = self.parser.next_token();
-                        let name = Self::canonicalize_identifier(self.parse_identifier()?);
-                        Some(AddColumnLocation::After {
-                            column_name: name.value,
-                        })
-                    } else {
-                        None
-                    }
+        let alter_operation = match self.parser.peek_token().token {
+            Token::Word(w) => {
+                if w.value.eq_ignore_ascii_case("MODIFY") {
+                    self.parse_alter_table_modify()?
                 } else {
-                    None
-                };
-                AlterTableOperation::AddColumn {
-                    column_def,
-                    location,
+                    match w.keyword {
+                        Keyword::ADD => self.parse_alter_table_add()?,
+                        Keyword::DROP => {
+                            let _ = self.parser.next_token();
+                            self.parser
+                                .expect_keyword(Keyword::COLUMN)
+                                .context(error::SyntaxSnafu)?;
+                            let name = Self::canonicalize_identifier(
+                                self.parse_identifier().context(error::SyntaxSnafu)?,
+                            );
+                            AlterTableOperation::DropColumn { name }
+                        }
+                        Keyword::RENAME => {
+                            let _ = self.parser.next_token();
+                            let new_table_name_obj_raw =
+                                self.parse_object_name().context(error::SyntaxSnafu)?;
+                            let new_table_name_obj =
+                                Self::canonicalize_object_name(new_table_name_obj_raw);
+                            let new_table_name = match &new_table_name_obj.0[..] {
+                                [table] => table.value.clone(),
+                                _ => {
+                                    return Err(ParserError::ParserError(format!(
+                                        "expect table name, actual: {new_table_name_obj}"
+                                    )))
+                                    .context(error::SyntaxSnafu)
+                                }
+                            };
+                            AlterTableOperation::RenameTable { new_table_name }
+                        }
+                        Keyword::SET => {
+                            let _ = self.parser.next_token();
+                            let options = self
+                                .parser
+                                .parse_comma_separated(parse_string_options)
+                                .context(error::SyntaxSnafu)?
+                                .into_iter()
+                                .map(|(key, value)| ChangeTableOption { key, value })
+                                .collect();
+                            AlterTableOperation::ChangeTableOptions { options }
+                        }
+                        _ => self.expected(
+                            "ADD or DROP or MODIFY or RENAME or SET after ALTER TABLE",
+                            self.parser.peek_token(),
+                        )?,
+                    }
                 }
             }
-        } else if self.parser.parse_keyword(Keyword::DROP) {
-            if self.parser.parse_keyword(Keyword::COLUMN) {
-                let name = Self::canonicalize_identifier(self.parse_identifier()?);
-                AlterTableOperation::DropColumn { name }
-            } else {
-                return Err(ParserError::ParserError(format!(
-                    "expect keyword COLUMN after ALTER TABLE DROP, found {}",
-                    self.parser.peek_token()
-                )));
-            }
-        } else if self.consume_token("MODIFY") {
-            let _ = self.parser.parse_keyword(Keyword::COLUMN);
-            let column_name = Self::canonicalize_identifier(self.parser.parse_identifier(false)?);
-            let target_type = self.parser.parse_data_type()?;
-
-            AlterTableOperation::ChangeColumnType {
-                column_name,
-                target_type,
-            }
-        } else if self.parser.parse_keyword(Keyword::RENAME) {
-            let new_table_name_obj_raw = self.parse_object_name()?;
-            let new_table_name_obj = Self::canonicalize_object_name(new_table_name_obj_raw);
-            let new_table_name = match &new_table_name_obj.0[..] {
-                [table] => table.value.clone(),
-                _ => {
-                    return Err(ParserError::ParserError(format!(
-                        "expect table name, actual: {new_table_name_obj}"
-                    )))
-                }
-            };
-            AlterTableOperation::RenameTable { new_table_name }
-        } else if self.parser.parse_keyword(Keyword::SET) {
-            let options = self
-                .parser
-                .parse_comma_separated(parse_string_options)?
-                .into_iter()
-                .map(|(key, value)| ChangeTableOption { key, value })
-                .collect();
-            AlterTableOperation::ChangeTableOptions { options }
-        } else {
-            return Err(ParserError::ParserError(format!(
-                "expect keyword ADD or DROP or MODIFY or RENAME after ALTER TABLE, found {}",
-                self.parser.peek_token()
-            )));
+            unexpected => self.unsupported(unexpected.to_string())?,
         };
         Ok(AlterTable::new(table_name, alter_operation))
+    }
+
+    fn parse_alter_table_add(&mut self) -> Result<AlterTableOperation> {
+        let _ = self.parser.next_token();
+        if let Some(constraint) = self
+            .parser
+            .parse_optional_table_constraint()
+            .context(error::SyntaxSnafu)?
+        {
+            Ok(AlterTableOperation::AddConstraint(constraint))
+        } else {
+            let _ = self.parser.parse_keyword(Keyword::COLUMN);
+            let mut column_def = self.parser.parse_column_def().context(error::SyntaxSnafu)?;
+            column_def.name = Self::canonicalize_identifier(column_def.name);
+            let location = if self.parser.parse_keyword(Keyword::FIRST) {
+                Some(AddColumnLocation::First)
+            } else if let Token::Word(word) = self.parser.peek_token().token {
+                if word.value.eq_ignore_ascii_case("AFTER") {
+                    let _ = self.parser.next_token();
+                    let name = Self::canonicalize_identifier(
+                        self.parse_identifier().context(error::SyntaxSnafu)?,
+                    );
+                    Some(AddColumnLocation::After {
+                        column_name: name.value,
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            Ok(AlterTableOperation::AddColumn {
+                column_def,
+                location,
+            })
+        }
+    }
+
+    fn parse_alter_table_modify(&mut self) -> Result<AlterTableOperation> {
+        let _ = self.parser.next_token();
+        self.parser
+            .expect_keyword(Keyword::COLUMN)
+            .context(error::SyntaxSnafu)?;
+        let column_name = Self::canonicalize_identifier(
+            self.parser
+                .parse_identifier(false)
+                .context(error::SyntaxSnafu)?,
+        );
+
+        match self.parser.peek_token().token {
+            Token::Word(w) => {
+                if w.value.eq_ignore_ascii_case("UNSET") {
+                    let _ = self.parser.next_token();
+
+                    self.parser
+                        .expect_keyword(Keyword::FULLTEXT)
+                        .context(error::SyntaxSnafu)?;
+
+                    Ok(AlterTableOperation::ChangeColumnFulltext {
+                        column_name,
+                        options: FulltextOptions {
+                            enable: false,
+                            ..Default::default()
+                        },
+                    })
+                } else if w.keyword == Keyword::SET {
+                    self.parse_alter_column_fulltext(column_name)
+                } else {
+                    let data_type = self.parser.parse_data_type().context(error::SyntaxSnafu)?;
+                    Ok(AlterTableOperation::ModifyColumnType {
+                        column_name,
+                        target_type: data_type,
+                    })
+                }
+            }
+            _ => self.expected(
+                "SET or UNSET or data type after MODIFY COLUMN",
+                self.parser.peek_token(),
+            )?,
+        }
+    }
+
+    fn parse_alter_column_fulltext(&mut self, column_name: Ident) -> Result<AlterTableOperation> {
+        let _ = self.parser.next_token();
+
+        self.parser
+            .expect_keyword(Keyword::FULLTEXT)
+            .context(error::SyntaxSnafu)?;
+
+        let mut options = self
+            .parser
+            .parse_options(Keyword::WITH)
+            .context(error::SyntaxSnafu)?
+            .into_iter()
+            .map(parse_option_string)
+            .collect::<Result<HashMap<String, String>>>()?;
+
+        for key in options.keys() {
+            ensure!(
+                validate_column_fulltext_create_option(key),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: format!("invalid FULLTEXT option: {key}"),
+                }
+            );
+        }
+
+        options.insert(
+            COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE.to_string(),
+            "true".to_string(),
+        );
+
+        Ok(AlterTableOperation::ChangeColumnFulltext {
+            column_name,
+            options: options.try_into().context(SetFulltextOptionSnafu)?,
+        })
     }
 }
 
@@ -133,6 +241,7 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use common_error::ext::ErrorExt;
+    use datatypes::schema::{FulltextAnalyzer, FulltextOptions};
     use sqlparser::ast::{ColumnOption, DataType};
 
     use super::*;
@@ -259,7 +368,10 @@ mod tests {
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap_err();
         let err = result.output_msg();
-        assert!(err.contains("expect keyword COLUMN after ALTER TABLE DROP"));
+        assert_eq!(
+            err,
+            "sql parser error: Expected COLUMN, found: a at Line: 1, Column 30"
+        );
 
         let sql = "ALTER TABLE my_metric_1 DROP COLUMN a";
         let mut result =
@@ -287,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_alter_change_column_type() {
+    fn test_parse_alter_modify_column_type() {
         let sql_1 = "ALTER TABLE my_metric_1 MODIFY COLUMN a STRING";
         let result_1 = ParserContext::create_with_dialect(
             sql_1,
@@ -315,10 +427,10 @@ mod tests {
                 let alter_operation = alter_table.alter_operation();
                 assert_matches!(
                     alter_operation,
-                    AlterTableOperation::ChangeColumnType { .. }
+                    AlterTableOperation::ModifyColumnType { .. }
                 );
                 match alter_operation {
-                    AlterTableOperation::ChangeColumnType {
+                    AlterTableOperation::ModifyColumnType {
                         column_name,
                         target_type,
                     } => {
@@ -349,10 +461,10 @@ mod tests {
                 let alter_operation = alter_table.alter_operation();
                 assert_matches!(
                     alter_operation,
-                    AlterTableOperation::ChangeColumnType { .. }
+                    AlterTableOperation::ModifyColumnType { .. }
                 );
                 match alter_operation {
-                    AlterTableOperation::ChangeColumnType {
+                    AlterTableOperation::ModifyColumnType {
                         column_name,
                         target_type,
                     } => {
@@ -380,10 +492,10 @@ mod tests {
                 let alter_operation = alter_table.alter_operation();
                 assert_matches!(
                     alter_operation,
-                    AlterTableOperation::ChangeColumnType { .. }
+                    AlterTableOperation::ModifyColumnType { .. }
                 );
                 match alter_operation {
-                    AlterTableOperation::ChangeColumnType {
+                    AlterTableOperation::ModifyColumnType {
                         column_name,
                         target_type,
                     } => {
@@ -404,7 +516,7 @@ mod tests {
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap_err();
         let err = result.output_msg();
-        assert!(err.contains("expect keyword ADD or DROP or MODIFY or RENAME after ALTER TABLE"));
+        assert_eq!(err, "sql parser error: Expected ADD or DROP or MODIFY or RENAME or SET after ALTER TABLE, found: table_t");
 
         let sql = "ALTER TABLE test_table RENAME table_t";
         let mut result =
@@ -443,6 +555,8 @@ mod tests {
         let AlterTableOperation::ChangeTableOptions { options } = &alter.alter_operation else {
             unreachable!()
         };
+
+        assert_eq!(sql, alter.to_string());
         let res = options
             .iter()
             .map(|o| (o.key.as_str(), o.value.as_str()))
@@ -452,16 +566,16 @@ mod tests {
 
     #[test]
     fn test_parse_alter_column() {
-        check_parse_alter_table("ALTER TABLE test_table SET 'a'='A';", &[("a", "A")]);
+        check_parse_alter_table("ALTER TABLE test_table SET 'a'='A'", &[("a", "A")]);
         check_parse_alter_table(
             "ALTER TABLE test_table SET 'a'='A','b'='B'",
             &[("a", "A"), ("b", "B")],
         );
         check_parse_alter_table(
-            "ALTER TABLE test_table SET 'a'='A','b'='B','c'='C';",
+            "ALTER TABLE test_table SET 'a'='A','b'='B','c'='C'",
             &[("a", "A"), ("b", "B"), ("c", "C")],
         );
-        check_parse_alter_table("ALTER TABLE test_table SET 'a'=NULL;", &[("a", "")]);
+        check_parse_alter_table("ALTER TABLE test_table SET 'a'=NULL", &[("a", "")]);
 
         ParserContext::create_with_dialect(
             "ALTER TABLE test_table SET a INTEGER",
@@ -469,5 +583,96 @@ mod tests {
             ParseOptions::default(),
         )
         .unwrap_err();
+    }
+
+    #[test]
+    fn test_parse_alter_column_fulltext() {
+        let sql = "ALTER TABLE test_table MODIFY COLUMN a SET FULLTEXT WITH(analyzer='English',case_sensitive='false')";
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+
+        assert_eq!(1, result.len());
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::Alter { .. });
+        match statement {
+            Statement::Alter(alter_table) => {
+                assert_eq!("test_table", alter_table.table_name().0[0].value);
+
+                let alter_operation = alter_table.alter_operation();
+                assert_matches!(
+                    alter_operation,
+                    AlterTableOperation::ChangeColumnFulltext { .. }
+                );
+                match alter_operation {
+                    AlterTableOperation::ChangeColumnFulltext {
+                        column_name,
+                        options,
+                    } => {
+                        assert_eq!("a", column_name.value);
+                        assert_eq!(
+                            FulltextOptions {
+                                enable: true,
+                                analyzer: FulltextAnalyzer::English,
+                                case_sensitive: false
+                            },
+                            *options
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "ALTER TABLE test_table MODIFY COLUMN a UNSET FULLTEXT";
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::Alter { .. });
+        match statement {
+            Statement::Alter(alter_table) => {
+                assert_eq!("test_table", alter_table.table_name().0[0].value);
+
+                let alter_operation = alter_table.alter_operation();
+                assert_matches!(
+                    alter_operation,
+                    AlterTableOperation::ChangeColumnFulltext { .. }
+                );
+                match alter_operation {
+                    AlterTableOperation::ChangeColumnFulltext {
+                        column_name,
+                        options,
+                    } => {
+                        assert_eq!("a", column_name.value);
+                        assert_eq!(
+                            FulltextOptions {
+                                enable: false,
+                                analyzer: FulltextAnalyzer::English,
+                                case_sensitive: false
+                            },
+                            *options
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+
+        let invalid_sql = "ALTER TABLE test_table MODIFY COLUMN a SET FULLTEXT WITH('abcd'='true')";
+        let result = ParserContext::create_with_dialect(
+            invalid_sql,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap_err();
+        let err = result.to_string();
+        assert_eq!(
+            err,
+            "Invalid column option, column name: a, error: invalid FULLTEXT option: abcd"
+        );
     }
 }

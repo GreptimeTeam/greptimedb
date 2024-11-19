@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use api::v1::region::RegionRequestHeader;
 use arc_swap::ArcSwap;
@@ -282,6 +283,22 @@ impl QueryContext {
     pub fn set_warning(&self, msg: String) {
         self.mutable_query_context_data.write().unwrap().warning = Some(msg);
     }
+
+    pub fn query_timeout(&self) -> Option<Duration> {
+        self.mutable_session_data.read().unwrap().query_timeout
+    }
+
+    pub fn query_timeout_as_millis(&self) -> u128 {
+        let timeout = self.mutable_session_data.read().unwrap().query_timeout;
+        if let Some(t) = timeout {
+            return t.as_millis();
+        }
+        0
+    }
+
+    pub fn set_query_timeout(&self, timeout: Duration) {
+        self.mutable_session_data.write().unwrap().query_timeout = Some(timeout);
+    }
 }
 
 impl QueryContextBuilder {
@@ -355,6 +372,7 @@ pub enum Channel {
     Grpc = 6,
     Influx = 7,
     Opentsdb = 8,
+    Loki = 9,
 }
 
 impl From<u32> for Channel {
@@ -368,6 +386,7 @@ impl From<u32> for Channel {
             6 => Self::Grpc,
             7 => Self::Influx,
             8 => Self::Opentsdb,
+            9 => Self::Loki,
 
             _ => Self::Unknown,
         }
@@ -395,6 +414,7 @@ impl Display for Channel {
             Channel::Grpc => write!(f, "grpc"),
             Channel::Influx => write!(f, "influx"),
             Channel::Opentsdb => write!(f, "opentsdb"),
+            Channel::Loki => write!(f, "loki"),
             Channel::Unknown => write!(f, "unknown"),
         }
     }

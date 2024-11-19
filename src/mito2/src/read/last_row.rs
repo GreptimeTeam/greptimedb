@@ -85,7 +85,7 @@ impl RowGroupLastRowCachedReader {
     pub(crate) fn new(
         file_id: FileId,
         row_group_idx: usize,
-        cache_manager: Option<CacheManagerRef>,
+        cache_manager: CacheManagerRef,
         row_group_reader: RowGroupReader,
     ) -> Self {
         let key = SelectorResultKey {
@@ -94,9 +94,6 @@ impl RowGroupLastRowCachedReader {
             selector: TimeSeriesRowSelector::LastRow,
         };
 
-        let Some(cache_manager) = cache_manager else {
-            return Self::new_miss(key, row_group_reader, None);
-        };
         if let Some(value) = cache_manager.get_selector_result(&key) {
             let schema_matches = value.projection
                 == row_group_reader

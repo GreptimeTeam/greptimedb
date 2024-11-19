@@ -70,6 +70,8 @@ pub enum LogicalTypeId {
     Dictionary,
 
     Json,
+
+    Vector,
 }
 
 impl LogicalTypeId {
@@ -129,6 +131,7 @@ impl LogicalTypeId {
             LogicalTypeId::DurationNanosecond => ConcreteDataType::duration_nanosecond_datatype(),
             LogicalTypeId::Decimal128 => ConcreteDataType::decimal128_default_datatype(),
             LogicalTypeId::Json => ConcreteDataType::json_datatype(),
+            LogicalTypeId::Vector => ConcreteDataType::vector_default_datatype(),
         }
     }
 }

@@ -24,11 +24,14 @@ mod show;
 mod tql;
 
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
+use async_stream::stream;
 use catalog::kvbackend::KvBackendCatalogManager;
 use catalog::CatalogManagerRef;
-use client::RecordBatches;
+use client::{OutputData, RecordBatches};
 use common_error::ext::BoxedError;
 use common_meta::cache::TableRouteCacheRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
@@ -39,16 +42,19 @@ use common_meta::key::view_info::{ViewInfoManager, ViewInfoManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_query::Output;
+use common_recordbatch::error::StreamTimeoutSnafu;
+use common_recordbatch::RecordBatchStreamWrapper;
 use common_telemetry::tracing;
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use datafusion_expr::LogicalPlan;
+use futures::stream::{Stream, StreamExt};
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use query::parser::QueryStatement;
-use query::stats::StatementStatistics;
 use query::QueryEngineRef;
 use session::context::{Channel, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
+use set::set_query_timeout;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::set_variables::SetVariables;
@@ -64,8 +70,8 @@ use table::TableRef;
 use self::set::{set_bytea_output, set_datestyle, set_timezone, validate_client_encoding};
 use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, NotSupportedSnafu,
-    PlanStatementSnafu, Result, SchemaNotFoundSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
-    UpgradeCatalogManagerRefSnafu,
+    PlanStatementSnafu, Result, SchemaNotFoundSnafu, StatementTimeoutSnafu,
+    TableMetadataManagerSnafu, TableNotFoundSnafu, UpgradeCatalogManagerRefSnafu,
 };
 use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
@@ -81,13 +87,11 @@ pub struct StatementExecutor {
     partition_manager: PartitionRuleManagerRef,
     cache_invalidator: CacheInvalidatorRef,
     inserter: InserterRef,
-    stats: StatementStatistics,
 }
 
 pub type StatementExecutorRef = Arc<StatementExecutor>;
 
 impl StatementExecutor {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         catalog_manager: CatalogManagerRef,
         query_engine: QueryEngineRef,
@@ -96,7 +100,6 @@ impl StatementExecutor {
         cache_invalidator: CacheInvalidatorRef,
         inserter: InserterRef,
         table_route_cache: TableRouteCacheRef,
-        stats: StatementStatistics,
     ) -> Self {
         Self {
             catalog_manager,
@@ -108,23 +111,22 @@ impl StatementExecutor {
             partition_manager: Arc::new(PartitionRuleManager::new(kv_backend, table_route_cache)),
             cache_invalidator,
             inserter,
-            stats,
         }
     }
 
-    #[tracing::instrument(skip_all)]
+    #[cfg(feature = "testing")]
     pub async fn execute_stmt(
         &self,
         stmt: QueryStatement,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let _slow_query_timer = self.stats.start_slow_query_timer(stmt.clone());
         match stmt {
             QueryStatement::Sql(stmt) => self.execute_sql(stmt, query_ctx).await,
             QueryStatement::Promql(_) => self.plan_exec(stmt, query_ctx).await,
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn execute_sql(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         match stmt {
             Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
@@ -343,6 +345,28 @@ impl StatementExecutor {
             "DATESTYLE" => set_datestyle(set_var.value, query_ctx)?,
 
             "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
+            "MAX_EXECUTION_TIME" => match query_ctx.channel() {
+                Channel::Mysql => set_query_timeout(set_var.value, query_ctx)?,
+                Channel::Postgres => {
+                    query_ctx.set_warning(format!("Unsupported set variable {}", var_name))
+                }
+                _ => {
+                    return NotSupportedSnafu {
+                        feat: format!("Unsupported set variable {}", var_name),
+                    }
+                    .fail()
+                }
+            },
+            "STATEMENT_TIMEOUT" => {
+                if query_ctx.channel() == Channel::Postgres {
+                    set_query_timeout(set_var.value, query_ctx)?
+                } else {
+                    return NotSupportedSnafu {
+                        feat: format!("Unsupported set variable {}", var_name),
+                    }
+                    .fail();
+                }
+            }
             _ => {
                 // for postgres, we give unknown SET statements a warning with
                 //  success, this is prevent the SET call becoming a blocker
@@ -361,6 +385,7 @@ impl StatementExecutor {
         Ok(Output::new_with_affected_rows(0))
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn plan(
         &self,
         stmt: &QueryStatement,
@@ -374,6 +399,7 @@ impl StatementExecutor {
     }
 
     /// Execute [`LogicalPlan`] directly.
+    #[tracing::instrument(skip_all)]
     pub async fn exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
         self.query_engine
             .execute(plan, query_ctx)
@@ -390,8 +416,19 @@ impl StatementExecutor {
 
     #[tracing::instrument(skip_all)]
     async fn plan_exec(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Output> {
-        let plan = self.plan(&stmt, query_ctx.clone()).await?;
-        self.exec_plan(plan, query_ctx).await
+        let timeout = derive_timeout(&stmt, &query_ctx);
+        match timeout {
+            Some(timeout) => {
+                let start = tokio::time::Instant::now();
+                let output = tokio::time::timeout(timeout, self.plan_exec_inner(stmt, query_ctx))
+                    .await
+                    .context(StatementTimeoutSnafu)?;
+                // compute remaining timeout
+                let remaining_timeout = timeout.checked_sub(start.elapsed()).unwrap_or_default();
+                Ok(attach_timeout(output?, remaining_timeout))
+            }
+            None => self.plan_exec_inner(stmt, query_ctx).await,
+        }
     }
 
     async fn get_table(&self, table_ref: &TableReference<'_>) -> Result<TableRef> {
@@ -407,6 +444,49 @@ impl StatementExecutor {
             .with_context(|| TableNotFoundSnafu {
                 table_name: table_ref.to_string(),
             })
+    }
+
+    async fn plan_exec_inner(
+        &self,
+        stmt: QueryStatement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let plan = self.plan(&stmt, query_ctx.clone()).await?;
+        self.exec_plan(plan, query_ctx).await
+    }
+}
+
+fn attach_timeout(output: Output, mut timeout: Duration) -> Output {
+    match output.data {
+        OutputData::AffectedRows(_) | OutputData::RecordBatches(_) => output,
+        OutputData::Stream(mut stream) => {
+            let schema = stream.schema();
+            let s = Box::pin(stream! {
+                let start = tokio::time::Instant::now();
+                while let Some(item) = tokio::time::timeout(timeout, stream.next()).await.context(StreamTimeoutSnafu)? {
+                    yield item;
+                    timeout = timeout.checked_sub(tokio::time::Instant::now() - start).unwrap_or(Duration::ZERO);
+                }
+            }) as Pin<Box<dyn Stream<Item = _> + Send>>;
+            let stream = RecordBatchStreamWrapper {
+                schema,
+                stream: s,
+                output_ordering: None,
+                metrics: Default::default(),
+            };
+            Output::new(OutputData::Stream(Box::pin(stream)), output.meta)
+        }
+    }
+}
+
+/// If the relevant variables are set, the timeout is enforced for all PostgreSQL statements.
+/// For MySQL, it applies only to read-only statements.
+fn derive_timeout(stmt: &QueryStatement, query_ctx: &QueryContextRef) -> Option<Duration> {
+    let query_timeout = query_ctx.query_timeout()?;
+    match (query_ctx.channel(), stmt) {
+        (Channel::Mysql, QueryStatement::Sql(Statement::Query(_)))
+        | (Channel::Postgres, QueryStatement::Sql(_)) => Some(query_timeout),
+        (_, _) => None,
     }
 }
 

@@ -66,6 +66,7 @@ use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
+use common_meta::key::SchemaMetadataManagerRef;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::tracing;
 use common_wal::options::{WalOptions, WAL_OPTIONS_KEY};
@@ -112,13 +113,21 @@ impl MitoEngine {
         mut config: MitoConfig,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
+        schema_metadata_manager: SchemaMetadataManagerRef,
         plugins: Plugins,
     ) -> Result<MitoEngine> {
         config.sanitize(data_home)?;
 
         Ok(MitoEngine {
             inner: Arc::new(
-                EngineInner::new(config, log_store, object_store_manager, plugins).await?,
+                EngineInner::new(
+                    config,
+                    log_store,
+                    object_store_manager,
+                    schema_metadata_manager,
+                    plugins,
+                )
+                .await?,
             ),
         })
     }
@@ -278,13 +287,20 @@ impl EngineInner {
         config: MitoConfig,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
+        schema_metadata_manager: SchemaMetadataManagerRef,
         plugins: Plugins,
     ) -> Result<EngineInner> {
         let config = Arc::new(config);
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
         Ok(EngineInner {
-            workers: WorkerGroup::start(config.clone(), log_store, object_store_manager, plugins)
-                .await?,
+            workers: WorkerGroup::start(
+                config.clone(),
+                log_store,
+                object_store_manager,
+                schema_metadata_manager,
+                plugins,
+            )
+            .await?,
             config,
             wal_raw_entry_reader,
         })
@@ -422,16 +438,12 @@ impl EngineInner {
             channel_size: self.config.parallel_scan_channel_size,
         };
 
-        let scan_region = ScanRegion::new(
-            version,
-            region.access_layer.clone(),
-            request,
-            Some(cache_manager),
-        )
-        .with_parallelism(scan_parallelism)
-        .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
-        .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
-        .with_start_time(query_start);
+        let scan_region =
+            ScanRegion::new(version, region.access_layer.clone(), request, cache_manager)
+                .with_parallelism(scan_parallelism)
+                .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
+                .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
+                .with_start_time(query_start);
 
         Ok(scan_region)
     }
@@ -583,6 +595,7 @@ impl RegionEngine for MitoEngine {
 
 // Tests methods.
 #[cfg(any(test, feature = "test"))]
+#[allow(clippy::too_many_arguments)]
 impl MitoEngine {
     /// Returns a new [MitoEngine] for tests.
     pub async fn new_for_test<S: LogStore>(
@@ -593,6 +606,7 @@ impl MitoEngine {
         write_buffer_manager: Option<crate::flush::WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
         time_provider: crate::time_provider::TimeProviderRef,
+        schema_metadata_manager: SchemaMetadataManagerRef,
     ) -> Result<MitoEngine> {
         config.sanitize(data_home)?;
 
@@ -606,6 +620,7 @@ impl MitoEngine {
                     object_store_manager,
                     write_buffer_manager,
                     listener,
+                    schema_metadata_manager,
                     time_provider,
                 )
                 .await?,

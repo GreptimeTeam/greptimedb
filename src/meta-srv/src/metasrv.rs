@@ -24,9 +24,9 @@ use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_config::Configurable;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
-use common_grpc::channel_manager;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::ProcedureExecutorRef;
+use common_meta::key::maintenance::MaintenanceModeManagerRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
 use common_meta::leadership_notifier::{
@@ -36,6 +36,7 @@ use common_meta::peer::Peer;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::wal_options_allocator::WalOptionsAllocatorRef;
 use common_meta::{distributed_time_constants, ClusterId};
+use common_options::datanode::DatanodeClientOptions;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
@@ -107,7 +108,7 @@ pub struct MetasrvOptions {
     /// The failure detector options.
     pub failure_detector: PhiAccrualFailureDetectorOptions,
     /// The datanode options.
-    pub datanode: DatanodeOptions,
+    pub datanode: DatanodeClientOptions,
     /// Whether to enable telemetry.
     pub enable_telemetry: bool,
     /// The data home directory.
@@ -162,7 +163,7 @@ impl Default for MetasrvOptions {
                 max_metadata_value_size: Some(ReadableSize::kb(1500)),
             },
             failure_detector: PhiAccrualFailureDetectorOptions::default(),
-            datanode: DatanodeOptions::default(),
+            datanode: DatanodeClientOptions::default(),
             enable_telemetry: true,
             data_home: METASRV_HOME.to_string(),
             wal: MetasrvWalConfig::default(),
@@ -185,35 +186,6 @@ impl Configurable for MetasrvOptions {
 pub struct MetasrvInfo {
     pub server_addr: String,
 }
-
-// Options for datanode.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct DatanodeOptions {
-    pub client: DatanodeClientOptions,
-}
-
-// Options for datanode client.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DatanodeClientOptions {
-    #[serde(with = "humantime_serde")]
-    pub timeout: Duration,
-    #[serde(with = "humantime_serde")]
-    pub connect_timeout: Duration,
-    pub tcp_nodelay: bool,
-}
-
-impl Default for DatanodeClientOptions {
-    fn default() -> Self {
-        Self {
-            timeout: Duration::from_secs(channel_manager::DEFAULT_GRPC_REQUEST_TIMEOUT_SECS),
-            connect_timeout: Duration::from_secs(
-                channel_manager::DEFAULT_GRPC_CONNECT_TIMEOUT_SECS,
-            ),
-            tcp_nodelay: true,
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct Context {
     pub server_addr: String,
@@ -369,6 +341,7 @@ pub struct Metasrv {
     procedure_executor: ProcedureExecutorRef,
     wal_options_allocator: WalOptionsAllocatorRef,
     table_metadata_manager: TableMetadataManagerRef,
+    maintenance_mode_manager: MaintenanceModeManagerRef,
     memory_region_keeper: MemoryRegionKeeperRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     region_migration_manager: RegionMigrationManagerRef,
@@ -599,6 +572,10 @@ impl Metasrv {
 
     pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
         &self.table_metadata_manager
+    }
+
+    pub fn maintenance_mode_manager(&self) -> &MaintenanceModeManagerRef {
+        &self.maintenance_mode_manager
     }
 
     pub fn memory_region_keeper(&self) -> &MemoryRegionKeeperRef {

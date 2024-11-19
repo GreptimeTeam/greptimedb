@@ -23,6 +23,7 @@ use datafusion::parquet;
 use datatypes::arrow::error::ArrowError;
 use snafu::{Location, Snafu};
 use table::metadata::TableType;
+use tokio::time::error::Elapsed;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -770,6 +771,21 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid json text: {}", json))]
+    InvalidJsonFormat {
+        #[snafu(implicit)]
+        location: Location,
+        json: String,
+    },
+
+    #[snafu(display("Canceling statement due to statement timeout"))]
+    StatementTimeout {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: Elapsed,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -808,7 +824,8 @@ impl ErrorExt for Error {
             | Error::BuildAdminFunctionArgs { .. }
             | Error::FunctionArityMismatch { .. }
             | Error::InvalidPartition { .. }
-            | Error::PhysicalExpr { .. } => StatusCode::InvalidArguments,
+            | Error::PhysicalExpr { .. }
+            | Error::InvalidJsonFormat { .. } => StatusCode::InvalidArguments,
 
             Error::TableAlreadyExists { .. } | Error::ViewAlreadyExists { .. } => {
                 StatusCode::TableAlreadyExists
@@ -916,6 +933,7 @@ impl ErrorExt for Error {
             Error::BuildRecordBatch { source, .. } => source.status_code(),
 
             Error::UpgradeCatalogManagerRef { .. } => StatusCode::Internal,
+            Error::StatementTimeout { .. } => StatusCode::Cancelled,
         }
     }
 

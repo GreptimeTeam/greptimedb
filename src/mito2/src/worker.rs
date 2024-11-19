@@ -26,11 +26,13 @@ mod handle_open;
 mod handle_truncate;
 mod handle_write;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use common_base::Plugins;
+use common_meta::key::SchemaMetadataManagerRef;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
@@ -132,6 +134,7 @@ impl WorkerGroup {
         config: Arc<MitoConfig>,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
+        schema_metadata_manager: SchemaMetadataManagerRef,
         plugins: Plugins,
     ) -> Result<WorkerGroup> {
         let (flush_sender, flush_receiver) = watch::channel(());
@@ -191,6 +194,7 @@ impl WorkerGroup {
                     flush_sender: flush_sender.clone(),
                     flush_receiver: flush_receiver.clone(),
                     plugins: plugins.clone(),
+                    schema_metadata_manager: schema_metadata_manager.clone(),
                 }
                 .start()
             })
@@ -273,6 +277,7 @@ impl WorkerGroup {
         object_store_manager: ObjectStoreManagerRef,
         write_buffer_manager: Option<WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
+        schema_metadata_manager: SchemaMetadataManagerRef,
         time_provider: TimeProviderRef,
     ) -> Result<WorkerGroup> {
         let (flush_sender, flush_receiver) = watch::channel(());
@@ -329,6 +334,7 @@ impl WorkerGroup {
                     flush_sender: flush_sender.clone(),
                     flush_receiver: flush_receiver.clone(),
                     plugins: Plugins::new(),
+                    schema_metadata_manager: schema_metadata_manager.clone(),
                 }
                 .start()
             })
@@ -405,6 +411,7 @@ struct WorkerStarter<S> {
     /// Watch channel receiver to wait for background flush job.
     flush_receiver: watch::Receiver<()>,
     plugins: Plugins,
+    schema_metadata_manager: SchemaMetadataManagerRef,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -455,6 +462,7 @@ impl<S: LogStore> WorkerStarter<S> {
             stalled_count: WRITE_STALL_TOTAL.with_label_values(&[&id_string]),
             region_count: REGION_COUNT.with_label_values(&[&id_string]),
             region_edit_queues: RegionEditQueues::default(),
+            schema_metadata_manager: self.schema_metadata_manager,
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -572,7 +580,10 @@ type RequestBuffer = Vec<WorkerRequest>;
 #[derive(Default)]
 pub(crate) struct StalledRequests {
     /// Stalled requests.
-    pub(crate) requests: Vec<SenderWriteRequest>,
+    ///
+    /// Key: RegionId
+    /// Value: (estimated size, stalled requests)
+    pub(crate) requests: HashMap<RegionId, (usize, Vec<SenderWriteRequest>)>,
     /// Estimated size of all stalled requests.
     pub(crate) estimated_size: usize,
 }
@@ -580,12 +591,28 @@ pub(crate) struct StalledRequests {
 impl StalledRequests {
     /// Appends stalled requests.
     pub(crate) fn append(&mut self, requests: &mut Vec<SenderWriteRequest>) {
-        let size: usize = requests
-            .iter()
-            .map(|req| req.request.estimated_size())
-            .sum();
-        self.requests.append(requests);
-        self.estimated_size += size;
+        for req in requests.drain(..) {
+            self.push(req);
+        }
+    }
+
+    /// Pushes a stalled request to the buffer.
+    pub(crate) fn push(&mut self, req: SenderWriteRequest) {
+        let (size, requests) = self.requests.entry(req.request.region_id).or_default();
+        let req_size = req.request.estimated_size();
+        *size += req_size;
+        self.estimated_size += req_size;
+        requests.push(req);
+    }
+
+    /// Removes stalled requests of specific region.
+    pub(crate) fn remove(&mut self, region_id: &RegionId) -> Vec<SenderWriteRequest> {
+        if let Some((size, requests)) = self.requests.remove(region_id) {
+            self.estimated_size -= size;
+            requests
+        } else {
+            vec![]
+        }
     }
 }
 
@@ -645,6 +672,8 @@ struct RegionWorkerLoop<S> {
     region_count: IntGauge,
     /// Queues for region edit requests.
     region_edit_queues: RegionEditQueues,
+    /// Database level metadata manager.
+    schema_metadata_manager: SchemaMetadataManagerRef,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -845,7 +874,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::CompactionFailed(req) => self.handle_compaction_failure(req).await,
             BackgroundNotify::Truncate(req) => self.handle_truncate_result(req).await,
-            BackgroundNotify::RegionChange(req) => self.handle_manifest_region_change_result(req),
+            BackgroundNotify::RegionChange(req) => {
+                self.handle_manifest_region_change_result(req).await
+            }
             BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req).await,
         }
     }
@@ -985,6 +1016,15 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_compaction_scheduled(_region_id);
+        }
+    }
+
+    pub(crate) async fn on_notify_region_change_result_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener
+                .on_notify_region_change_result_begin(_region_id)
+                .await;
         }
     }
 }

@@ -25,7 +25,7 @@ use common_query::AddColumnLocation;
 use common_time::range::TimestampRange;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
-use datatypes::schema::ColumnSchema;
+use datatypes::schema::{ColumnSchema, FulltextOptions};
 use greptime_proto::v1::region::compact_request;
 use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY};
@@ -194,7 +194,7 @@ pub struct AddColumnRequest {
 
 /// Change column datatype request
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChangeColumnTypeRequest {
+pub struct ModifyColumnTypeRequest {
     pub column_name: String,
     pub target_type: ConcreteDataType,
 }
@@ -207,14 +207,18 @@ pub enum AlterKind {
     DropColumns {
         names: Vec<String>,
     },
-    ChangeColumnTypes {
-        columns: Vec<ChangeColumnTypeRequest>,
+    ModifyColumnTypes {
+        columns: Vec<ModifyColumnTypeRequest>,
     },
     RenameTable {
         new_table_name: String,
     },
     ChangeTableOptions {
         options: Vec<ChangeOption>,
+    },
+    ChangeColumnFulltext {
+        column_name: String,
+        options: FulltextOptions,
     },
 }
 

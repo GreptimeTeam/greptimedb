@@ -1,0 +1,179 @@
+CREATE TABLE `test` (
+  `message` STRING,
+  `time` TIMESTAMP TIME INDEX,
+) WITH (
+  append_mode = 'true'
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" ( |
+|       |   "message" STRING NULL,            |
+|       |   "time" TIMESTAMP(3) NOT NULL,     |
+|       |   TIME INDEX ("time")               |
+|       | )                                   |
+|       |                                     |
+|       | ENGINE=mito                         |
+|       | WITH(                               |
+|       |   append_mode = 'true'              |
+|       | )                                   |
++-------+-------------------------------------+
+
+-- Write/read after altering column fulltext options
+INSERT INTO test VALUES ('hello', '2020-01-01 00:00:00'), 
+('world', '2020-01-01 00:00:01'), 
+('hello world', '2020-01-02 00:00:00'), 
+('world hello', '2020-01-02 00:00:01');
+
+Affected Rows: 4
+
+SELECT * FROM test WHERE MATCHES(message, 'hello');
+
++-------------+---------------------+
+| message     | time                |
++-------------+---------------------+
+| hello       | 2020-01-01T00:00:00 |
+| hello world | 2020-01-02T00:00:00 |
+| world hello | 2020-01-02T00:00:01 |
++-------------+---------------------+
+
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'true');
+
+Affected Rows: 0
+
+SELECT * FROM test WHERE MATCHES(message, 'hello');
+
++-------------+---------------------+
+| message     | time                |
++-------------+---------------------+
+| hello       | 2020-01-01T00:00:00 |
+| hello world | 2020-01-02T00:00:00 |
+| world hello | 2020-01-02T00:00:01 |
++-------------+---------------------+
+
+INSERT INTO test VALUES ('hello NiKo', '2020-01-03 00:00:00'), 
+('NiKo hello', '2020-01-03 00:00:01'), 
+('hello hello', '2020-01-04 00:00:00'), 
+('NiKo, NiKo', '2020-01-04 00:00:01');
+
+Affected Rows: 4
+
+SELECT * FROM test WHERE MATCHES(message, 'hello');
+
++-------------+---------------------+
+| message     | time                |
++-------------+---------------------+
+| hello NiKo  | 2020-01-03T00:00:00 |
+| NiKo hello  | 2020-01-03T00:00:01 |
+| hello hello | 2020-01-04T00:00:00 |
+| hello       | 2020-01-01T00:00:00 |
+| hello world | 2020-01-02T00:00:00 |
+| world hello | 2020-01-02T00:00:01 |
++-------------+---------------------+
+
+-- SQLNESS ARG restart=true
+SHOW CREATE TABLE test;
+
++-------+---------------------------------------------------------------------------------------+
+| Table | Create Table                                                                          |
++-------+---------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                   |
+|       |   "message" STRING NULL FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'true'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                       |
+|       |   TIME INDEX ("time")                                                                 |
+|       | )                                                                                     |
+|       |                                                                                       |
+|       | ENGINE=mito                                                                           |
+|       | WITH(                                                                                 |
+|       |   append_mode = 'true'                                                                |
+|       | )                                                                                     |
++-------+---------------------------------------------------------------------------------------+
+
+ALTER TABLE test MODIFY COLUMN message UNSET FULLTEXT;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" ( |
+|       |   "message" STRING NULL,            |
+|       |   "time" TIMESTAMP(3) NOT NULL,     |
+|       |   TIME INDEX ("time")               |
+|       | )                                   |
+|       |                                     |
+|       | ENGINE=mito                         |
+|       | WITH(                               |
+|       |   append_mode = 'true'              |
+|       | )                                   |
++-------+-------------------------------------+
+
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'English', case_sensitive = 'true');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+---------------------------------------------------------------------------------------+
+| Table | Create Table                                                                          |
++-------+---------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                   |
+|       |   "message" STRING NULL FULLTEXT WITH(analyzer = 'English', case_sensitive = 'true'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                       |
+|       |   TIME INDEX ("time")                                                                 |
+|       | )                                                                                     |
+|       |                                                                                       |
+|       | ENGINE=mito                                                                           |
+|       | WITH(                                                                                 |
+|       |   append_mode = 'true'                                                                |
+|       | )                                                                                     |
++-------+---------------------------------------------------------------------------------------+
+
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'false');
+
+Error: 1004(InvalidArguments), Invalid column option, column name: message, error: FULLTEXT index options already enabled
+
+ALTER TABLE test MODIFY COLUMN message UNSET FULLTEXT;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" ( |
+|       |   "message" STRING NULL,            |
+|       |   "time" TIMESTAMP(3) NOT NULL,     |
+|       |   TIME INDEX ("time")               |
+|       | )                                   |
+|       |                                     |
+|       | ENGINE=mito                         |
+|       | WITH(                               |
+|       |   append_mode = 'true'              |
+|       | )                                   |
++-------+-------------------------------------+
+
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinglish', case_sensitive = 'false');
+
+Error: 1002(Unexpected), Invalid fulltext option: Chinglish, expected: 'English' | 'Chinese'
+
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'no');
+
+Error: 1002(Unexpected), Invalid fulltext option: no, expected: 'true' | 'false'
+
+ALTER TABLE test MODIFY COLUMN time SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'false');
+
+Error: 1004(InvalidArguments), Invalid column option, column name: time, error: FULLTEXT index only supports string type
+
+DROP TABLE test;
+
+Affected Rows: 0
+

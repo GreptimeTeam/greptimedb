@@ -37,7 +37,6 @@ use operator::delete::Deleter;
 use operator::insert::Inserter;
 use operator::statement::StatementExecutor;
 use partition::manager::PartitionRuleManager;
-use query::stats::StatementStatistics;
 use query::{QueryEngine, QueryEngineFactory};
 use servers::error::{AlreadyStartedSnafu, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu};
 use servers::server::Server;
@@ -476,7 +475,6 @@ impl FrontendInvoker {
             layered_cache_registry.clone(),
             inserter.clone(),
             table_route_cache,
-            StatementStatistics::default(),
         ));
 
         let invoker = FrontendInvoker::new(inserter, deleter, statement_executor);

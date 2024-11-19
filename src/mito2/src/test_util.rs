@@ -35,6 +35,9 @@ use api::v1::{OpType, Row, Rows, SemanticType};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_datasource::compression::CompressionType;
+use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
+use common_meta::kv_backend::memory::MemoryKvBackend;
+use common_meta::kv_backend::KvBackendRef;
 use common_telemetry::warn;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use common_wal::options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
@@ -195,6 +198,7 @@ pub struct TestEnv {
     log_store: Option<LogStoreImpl>,
     log_store_factory: LogStoreFactory,
     object_store_manager: Option<ObjectStoreManagerRef>,
+    schema_metadata_manager: SchemaMetadataManagerRef,
 }
 
 impl Default for TestEnv {
@@ -211,6 +215,10 @@ impl TestEnv {
             log_store: None,
             log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
+            schema_metadata_manager: Arc::new(SchemaMetadataManager::new(Arc::new(
+                MemoryKvBackend::new(),
+            )
+                as KvBackendRef)),
         }
     }
 
@@ -221,6 +229,10 @@ impl TestEnv {
             log_store: None,
             log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
+            schema_metadata_manager: Arc::new(SchemaMetadataManager::new(Arc::new(
+                MemoryKvBackend::new(),
+            )
+                as KvBackendRef)),
         }
     }
 
@@ -231,6 +243,10 @@ impl TestEnv {
             log_store: None,
             log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
+            schema_metadata_manager: Arc::new(SchemaMetadataManager::new(Arc::new(
+                MemoryKvBackend::new(),
+            )
+                as KvBackendRef)),
         }
     }
 
@@ -269,6 +285,7 @@ impl TestEnv {
                 config,
                 log_store,
                 object_store_manager,
+                self.schema_metadata_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -278,6 +295,7 @@ impl TestEnv {
                 config,
                 log_store,
                 object_store_manager,
+                self.schema_metadata_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -295,6 +313,7 @@ impl TestEnv {
                 config,
                 log_store,
                 object_store_manager,
+                self.schema_metadata_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -304,6 +323,7 @@ impl TestEnv {
                 config,
                 log_store,
                 object_store_manager,
+                self.schema_metadata_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -335,6 +355,7 @@ impl TestEnv {
                 manager,
                 listener,
                 Arc::new(StdTimeProvider),
+                self.schema_metadata_manager.clone(),
             )
             .await
             .unwrap(),
@@ -346,6 +367,7 @@ impl TestEnv {
                 manager,
                 listener,
                 Arc::new(StdTimeProvider),
+                self.schema_metadata_manager.clone(),
             )
             .await
             .unwrap(),
@@ -388,6 +410,7 @@ impl TestEnv {
                 manager,
                 listener,
                 Arc::new(StdTimeProvider),
+                self.schema_metadata_manager.clone(),
             )
             .await
             .unwrap(),
@@ -399,6 +422,7 @@ impl TestEnv {
                 manager,
                 listener,
                 Arc::new(StdTimeProvider),
+                self.schema_metadata_manager.clone(),
             )
             .await
             .unwrap(),
@@ -430,6 +454,7 @@ impl TestEnv {
                 manager,
                 listener,
                 time_provider.clone(),
+                self.schema_metadata_manager.clone(),
             )
             .await
             .unwrap(),
@@ -441,6 +466,7 @@ impl TestEnv {
                 manager,
                 listener,
                 time_provider.clone(),
+                self.schema_metadata_manager.clone(),
             )
             .await
             .unwrap(),
@@ -450,13 +476,13 @@ impl TestEnv {
     /// Reopen the engine.
     pub async fn reopen_engine(&mut self, engine: MitoEngine, config: MitoConfig) -> MitoEngine {
         engine.stop().await.unwrap();
-
         match self.log_store.as_ref().unwrap().clone() {
             LogStoreImpl::RaftEngine(log_store) => MitoEngine::new(
                 &self.data_home().display().to_string(),
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
+                self.schema_metadata_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -466,6 +492,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
+                self.schema_metadata_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -481,6 +508,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
+                self.schema_metadata_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -490,6 +518,7 @@ impl TestEnv {
                 config,
                 log_store,
                 self.object_store_manager.clone().unwrap(),
+                self.schema_metadata_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -515,6 +544,7 @@ impl TestEnv {
                 Arc::new(config),
                 log_store,
                 Arc::new(object_store_manager),
+                self.schema_metadata_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -523,6 +553,7 @@ impl TestEnv {
                 Arc::new(config),
                 log_store,
                 Arc::new(object_store_manager),
+                self.schema_metadata_manager.clone(),
                 Plugins::new(),
             )
             .await
@@ -629,6 +660,10 @@ impl TestEnv {
         .unwrap();
 
         Arc::new(write_cache)
+    }
+
+    pub fn get_schema_metadata_manager(&self) -> SchemaMetadataManagerRef {
+        self.schema_metadata_manager.clone()
     }
 }
 

@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use object_store::{FuturesAsyncReader, FuturesAsyncWriter, ObjectStore};
+use object_store::{FuturesAsyncWriter, ObjectStore};
 use puffin::error::{self as puffin_error, Result as PuffinResult};
 use puffin::puffin_manager::file_accessor::PuffinFileAccessor;
 use puffin::puffin_manager::fs_puffin_manager::FsPuffinManager;
@@ -28,11 +28,11 @@ use snafu::ResultExt;
 use crate::error::{PuffinInitStagerSnafu, Result};
 use crate::metrics::{
     INDEX_PUFFIN_FLUSH_OP_TOTAL, INDEX_PUFFIN_READ_BYTES_TOTAL, INDEX_PUFFIN_READ_OP_TOTAL,
-    INDEX_PUFFIN_SEEK_OP_TOTAL, INDEX_PUFFIN_WRITE_BYTES_TOTAL, INDEX_PUFFIN_WRITE_OP_TOTAL,
+    INDEX_PUFFIN_WRITE_BYTES_TOTAL, INDEX_PUFFIN_WRITE_OP_TOTAL,
 };
 use crate::sst::index::store::{self, InstrumentedStore};
 
-type InstrumentedAsyncRead = store::InstrumentedAsyncRead<'static, FuturesAsyncReader>;
+type InstrumentedRangeReader = store::InstrumentedRangeReader<'static>;
 type InstrumentedAsyncWrite = store::InstrumentedAsyncWrite<'static, FuturesAsyncWriter>;
 
 pub(crate) type SstPuffinManager =
@@ -115,16 +115,15 @@ impl ObjectStorePuffinFileAccessor {
 
 #[async_trait]
 impl PuffinFileAccessor for ObjectStorePuffinFileAccessor {
-    type Reader = InstrumentedAsyncRead;
+    type Reader = InstrumentedRangeReader;
     type Writer = InstrumentedAsyncWrite;
 
     async fn reader(&self, puffin_file_name: &str) -> PuffinResult<Self::Reader> {
         self.object_store
-            .reader(
+            .range_reader(
                 puffin_file_name,
                 &INDEX_PUFFIN_READ_BYTES_TOTAL,
                 &INDEX_PUFFIN_READ_OP_TOTAL,
-                &INDEX_PUFFIN_SEEK_OP_TOTAL,
             )
             .await
             .map_err(BoxedError::new)
@@ -147,9 +146,9 @@ impl PuffinFileAccessor for ObjectStorePuffinFileAccessor {
 
 #[cfg(test)]
 mod tests {
+    use common_base::range_read::RangeReader;
     use common_test_util::temp_dir::create_temp_dir;
     use futures::io::Cursor;
-    use futures::AsyncReadExt;
     use object_store::services::Memory;
     use puffin::blob_metadata::CompressionCodec;
     use puffin::puffin_manager::{DirGuard, PuffinManager, PuffinReader, PuffinWriter, PutOptions};
@@ -193,9 +192,9 @@ mod tests {
         let reader = manager.reader(file_name).await.unwrap();
         let blob_guard = reader.blob(blob_key).await.unwrap();
         let mut blob_reader = blob_guard.reader().await.unwrap();
-        let mut buf = Vec::new();
-        blob_reader.read_to_end(&mut buf).await.unwrap();
-        assert_eq!(buf, raw_data);
+        let meta = blob_reader.metadata().await.unwrap();
+        let bs = blob_reader.read(0..meta.content_length).await.unwrap();
+        assert_eq!(&*bs, raw_data);
 
         let dir_guard = reader.dir(dir_key).await.unwrap();
         let file = dir_guard.path().join("hello");

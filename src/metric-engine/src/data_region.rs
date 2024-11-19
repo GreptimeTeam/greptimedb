@@ -15,8 +15,7 @@
 use api::v1::SemanticType;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_telemetry::info;
-use common_telemetry::tracing::warn;
+use common_telemetry::{debug, info, warn};
 use mito2::engine::MitoEngine;
 use snafu::ResultExt;
 use store_api::metadata::ColumnMetadata;
@@ -150,6 +149,7 @@ impl DataRegion {
             })
             .collect::<Result<_>>()?;
 
+        debug!("Adding (Column id assigned) columns {new_columns:?} to region {region_id:?}");
         // assemble alter request
         let alter_request = RegionRequest::Alter(RegionAlterRequest {
             schema_version: version,

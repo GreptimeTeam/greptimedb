@@ -22,6 +22,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Check install.sh
+        run: ./.github/scripts/check-install-script.sh
+
       - name: Run sqlness test
         uses: ./.github/actions/sqlness-test
         with:

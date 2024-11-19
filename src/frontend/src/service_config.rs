@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod datanode;
 pub mod influxdb;
 pub mod mysql;
 pub mod opentsdb;
@@ -26,5 +25,3 @@ pub use opentsdb::OpentsdbOptions;
 pub use otlp::OtlpOptions;
 pub use postgres::PostgresOptions;
 pub use prom_store::PromStoreOptions;
-
-pub use self::datanode::DatanodeOptions;

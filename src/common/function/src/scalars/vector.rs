@@ -12,17 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod distance;
+
 use std::sync::Arc;
 
-use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use distance::{CosDistanceFunction, DotProductFunction, L2SqDistanceFunction};
 
-use super::trace::span::TraceSpans;
+use crate::function_registry::FunctionRegistry;
 
-/// Transformer helps to transform ExportTraceServiceRequest based on logic, like:
-///   - uplift some fields from Attributes (Map type) to column
-pub trait TraceParser: Send + Sync {
-    fn parse(&self, request: ExportTraceServiceRequest) -> TraceSpans;
-    fn table_name(&self) -> String;
+pub(crate) struct VectorFunction;
+
+impl VectorFunction {
+    pub fn register(registry: &FunctionRegistry) {
+        registry.register(Arc::new(CosDistanceFunction));
+        registry.register(Arc::new(DotProductFunction));
+        registry.register(Arc::new(L2SqDistanceFunction));
+    }
 }
-
-pub type TraceParserRef = Arc<dyn TraceParser>;

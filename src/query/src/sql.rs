@@ -32,6 +32,7 @@ use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::build_backend;
 use common_datasource::util::find_dir_and_filename;
 use common_meta::key::flow::flow_info::FlowInfoValue;
+use common_meta::SchemaOptions;
 use common_query::prelude::GREPTIME_TIMESTAMP;
 use common_query::Output;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
@@ -47,7 +48,7 @@ use datatypes::vectors::StringVector;
 use object_store::ObjectStore;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use session::context::QueryContextRef;
+use session::context::{Channel, QueryContextRef};
 pub use show_create_table::create_table_stmt;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Ident;
@@ -650,6 +651,23 @@ pub fn show_variable(stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<
             let (style, order) = *query_ctx.configuration_parameter().pg_datetime_style();
             format!("{}, {}", style, order)
         }
+        "MAX_EXECUTION_TIME" => {
+            if query_ctx.channel() == Channel::Mysql {
+                query_ctx.query_timeout_as_millis().to_string()
+            } else {
+                return UnsupportedVariableSnafu { name: variable }.fail();
+            }
+        }
+        "STATEMENT_TIMEOUT" => {
+            // Add time units to postgres query timeout display.
+            if query_ctx.channel() == Channel::Postgres {
+                let mut timeout = query_ctx.query_timeout_as_millis().to_string();
+                timeout.push_str("ms");
+                timeout
+            } else {
+                return UnsupportedVariableSnafu { name: variable }.fail();
+            }
+        }
         _ => return UnsupportedVariableSnafu { name: variable }.fail(),
     };
     let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
@@ -703,6 +721,7 @@ pub fn show_create_database(database_name: &str, options: OptionMap) -> Result<O
 
 pub fn show_create_table(
     table: TableRef,
+    schema_options: Option<SchemaOptions>,
     partitions: Option<Partitions>,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
@@ -711,7 +730,7 @@ pub fn show_create_table(
 
     let quote_style = query_ctx.quote_style();
 
-    let mut stmt = create_table_stmt(&table_info, quote_style)?;
+    let mut stmt = create_table_stmt(&table_info, schema_options, quote_style)?;
     stmt.partitions = partitions.map(|mut p| {
         p.set_quote(quote_style);
         p

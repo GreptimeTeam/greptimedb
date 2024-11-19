@@ -45,6 +45,7 @@ flow.workspace = true
 frontend = { workspace = true, features = ["testing"] }
 futures.workspace = true
 futures-util.workspace = true
+loki-api = "0.1"
 meta-client.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
 moka.workspace = true
@@ -52,7 +53,7 @@ mysql_async = { version = "0.33", default-features = false, features = [
     "default-rustls",
 ] }
 object-store.workspace = true
-operator.workspace = true
+operator = { workspace = true, features = ["testing"] }
 prost.workspace = true
 query.workspace = true
 rstest.workspace = true
@@ -83,6 +84,7 @@ zstd.workspace = true
 [dev-dependencies]
 datafusion.workspace = true
 datafusion-expr.workspace = true
+hex.workspace = true
 itertools.workspace = true
 opentelemetry-proto.workspace = true
 partition.workspace = true

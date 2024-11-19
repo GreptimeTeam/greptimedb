@@ -18,20 +18,23 @@ use common_grpc::channel_manager;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct DatanodeOptions {
-    pub client: DatanodeClientOptions,
+pub struct DatanodeClientOptions {
+    pub client: ClientOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DatanodeClientOptions {
+pub struct ClientOptions {
+    #[serde(with = "humantime_serde")]
+    pub timeout: Duration,
     #[serde(with = "humantime_serde")]
     pub connect_timeout: Duration,
     pub tcp_nodelay: bool,
 }
 
-impl Default for DatanodeClientOptions {
+impl Default for ClientOptions {
     fn default() -> Self {
         Self {
+            timeout: Duration::from_secs(channel_manager::DEFAULT_GRPC_REQUEST_TIMEOUT_SECS),
             connect_timeout: Duration::from_secs(
                 channel_manager::DEFAULT_GRPC_CONNECT_TIMEOUT_SECS,
             ),

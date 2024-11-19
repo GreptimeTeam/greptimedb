@@ -24,10 +24,9 @@ use mime_guess::mime;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::process_with_limit;
-use crate::http::error_result::ErrorResponse;
 use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
-use crate::http::{handler, GreptimeQueryOutput, HttpResponse, ResponseFormat};
+use crate::http::result::error_result::ErrorResponse;
+use crate::http::{handler, process_with_limit, GreptimeQueryOutput, HttpResponse, ResponseFormat};
 
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct TableResponse {

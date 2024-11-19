@@ -44,6 +44,7 @@ impl<S> RegionWorkerLoop<S> {
                 &region.access_layer,
                 sender,
                 &region.manifest_ctx,
+                self.schema_metadata_manager.clone(),
             )
             .await
         {
@@ -80,7 +81,11 @@ impl<S> RegionWorkerLoop<S> {
 
         // Schedule next compaction if necessary.
         self.compaction_scheduler
-            .on_compaction_finished(region_id, &region.manifest_ctx)
+            .on_compaction_finished(
+                region_id,
+                &region.manifest_ctx,
+                self.schema_metadata_manager.clone(),
+            )
             .await;
     }
 
@@ -107,6 +112,7 @@ impl<S> RegionWorkerLoop<S> {
                     &region.access_layer,
                     OptionOutputTx::none(),
                     &region.manifest_ctx,
+                    self.schema_metadata_manager.clone(),
                 )
                 .await
             {

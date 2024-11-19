@@ -49,7 +49,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Utilizes the short circuit evaluation.
         let region = if !is_mutable_empty || region.manifest_ctx.has_update().await? {
             let manifest_version = region.manifest_ctx.manifest_version().await;
-            info!("Reopening the region: {region_id}, empty mutable: {is_mutable_empty}, manifest version: {manifest_version}");
+            let flushed_entry_id = region.version_control.current().last_entry_id;
+            info!("Reopening the region: {region_id}, empty mutable: {is_mutable_empty}, manifest version: {manifest_version}, flushed entry id: {flushed_entry_id}");
             let reopened_region = Arc::new(
                 RegionOpener::new(
                     region_id,
@@ -111,6 +112,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         } else {
             warn!("Skips to replay memtable for region: {}", region.region_id);
+            let flushed_entry_id = region.version_control.current().last_entry_id;
+            let on_region_opened = self.wal.on_region_opened();
+            on_region_opened(region_id, flushed_entry_id, &region.provider).await?;
         }
 
         if request.set_writable {

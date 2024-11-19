@@ -57,7 +57,7 @@ pub fn make_admin_service(metasrv: Arc<Metasrv>) -> Admin {
     let router = router.route(
         "/maintenance",
         maintenance::MaintenanceHandler {
-            kv_backend: metasrv.kv_backend().clone(),
+            manager: metasrv.maintenance_mode_manager().clone(),
         },
     );
     let router = Router::nest("/admin", router);

@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
@@ -83,14 +84,22 @@ pub struct ExportCommand {
     /// The basic authentication for connecting to the server
     #[clap(long)]
     auth_basic: Option<String>,
+
+    /// The timeout of invoking the database.
+    #[clap(long, value_parser = humantime::parse_duration)]
+    timeout: Option<Duration>,
 }
 
 impl ExportCommand {
     pub async fn build(&self, guard: Vec<WorkerGuard>) -> Result<Instance> {
         let (catalog, schema) = database::split_database(&self.database)?;
 
-        let database_client =
-            DatabaseClient::new(self.addr.clone(), catalog.clone(), self.auth_basic.clone());
+        let database_client = DatabaseClient::new(
+            self.addr.clone(),
+            catalog.clone(),
+            self.auth_basic.clone(),
+            self.timeout,
+        );
 
         Ok(Instance::new(
             Box::new(Export {

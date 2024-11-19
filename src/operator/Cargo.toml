@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 api.workspace = true
+async-stream.workspace = true
 async-trait = "0.1"
 catalog.workspace = true
 chrono.workspace = true
@@ -36,6 +37,7 @@ datatypes.workspace = true
 file-engine.workspace = true
 futures = "0.3"
 futures-util.workspace = true
+jsonb.workspace = true
 lazy_static.workspace = true
 meta-client.workspace = true
 meter-core.workspace = true

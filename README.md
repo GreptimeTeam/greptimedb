@@ -6,7 +6,7 @@
   </picture>
 </p>
 
-<h2 align="center">Unified Time Series Database for Metrics, Logs, and Events</h2>
+<h2 align="center">Unified & Cost-Effective Time Series Database for Metrics, Logs, and Events</h2>
 
 <div align="center">
 <h3 align="center">
@@ -48,9 +48,21 @@
 </a>
 </div>
 
+- [Introduction](#introduction)
+- [**Features: Why GreptimeDB**](#why-greptimedb)
+- [Architecture](https://docs.greptime.com/contributor-guide/overview/#architecture)
+- [Try it for free](#try-greptimedb)
+- [Getting Started](#getting-started)
+- [Project Status](#project-status)
+- [Join the community](#community)
+  - [Contributing](#contributing)
+- [Extension](#extension )
+- [License](#license)
+- [Acknowledgement](#acknowledgement)
+
 ## Introduction
 
-**GreptimeDB** is an open-source unified time-series database for **Metrics**, **Logs**, and **Events** (also **Traces** in plan). You can gain real-time insights from Edge to Cloud at any scale.
+**GreptimeDB** is an open-source unified & cost-effective time-series database for **Metrics**, **Logs**, and **Events** (also **Traces** in plan). You can gain real-time insights from Edge to Cloud at Any Scale.
 
 ## Why GreptimeDB
 

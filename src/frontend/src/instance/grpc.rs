@@ -19,7 +19,7 @@ use api::v1::{DeleteRequests, DropFlowExpr, InsertRequests, RowDeleteRequests, R
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_query::Output;
-use common_telemetry::tracing;
+use common_telemetry::tracing::{self};
 use query::parser::PromQuery;
 use servers::interceptor::{GrpcQueryInterceptor, GrpcQueryInterceptorRef};
 use servers::query_handler::grpc::GrpcQueryHandler;

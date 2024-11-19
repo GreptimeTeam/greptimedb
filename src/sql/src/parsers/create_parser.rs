@@ -20,7 +20,7 @@ use datatypes::arrow::datatypes::{DataType as ArrowDataType, IntervalUnit};
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
-use sqlparser::ast::{ColumnOption, ColumnOptionDef, DataType, Expr, KeyOrIndexDisplay};
+use sqlparser::ast::{ColumnOption, ColumnOptionDef, DataType, Expr};
 use sqlparser::dialect::keywords::Keyword;
 use sqlparser::keywords::ALL_KEYWORDS;
 use sqlparser::parser::IsOptional::Mandatory;
@@ -29,16 +29,17 @@ use sqlparser::tokenizer::{Token, TokenWithLocation, Word};
 use table::requests::validate_table_option;
 
 use super::utils;
-use crate::ast::{ColumnDef, Ident, TableConstraint};
+use crate::ast::{ColumnDef, Ident};
 use crate::error::{
     self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidIntervalSnafu,
     InvalidSqlSnafu, InvalidTableOptionSnafu, InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result,
     SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::parser::{ParserContext, FLOW};
+use crate::parsers::utils::validate_column_fulltext_create_option;
 use crate::statements::create::{
     Column, ColumnExtensions, CreateDatabase, CreateExternalTable, CreateFlow, CreateTable,
-    CreateTableLike, CreateView, Partitions, TIME_INDEX,
+    CreateTableLike, CreateView, Partitions, TableConstraint, VECTOR_OPT_DIM,
 };
 use crate::statements::statement::Statement;
 use crate::statements::{
@@ -51,22 +52,12 @@ pub const MAXVALUE: &str = "MAXVALUE";
 pub const SINK: &str = "SINK";
 pub const EXPIRE: &str = "EXPIRE";
 pub const AFTER: &str = "AFTER";
+pub const INVERTED: &str = "INVERTED";
 
 const DB_OPT_KEY_TTL: &str = "ttl";
 
 fn validate_database_option(key: &str) -> bool {
     [DB_OPT_KEY_TTL].contains(&key)
-}
-
-pub const COLUMN_FULLTEXT_OPT_KEY_ANALYZER: &str = "analyzer";
-pub const COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE: &str = "case_sensitive";
-
-fn validate_column_fulltext_option(key: &str) -> bool {
-    [
-        COLUMN_FULLTEXT_OPT_KEY_ANALYZER,
-        COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,
-    ]
-    .contains(&key)
 }
 
 /// Parses create [table] statement
@@ -500,20 +491,11 @@ impl<'a> ParserContext<'a> {
                     );
                     time_index_opt_idx = Some(index);
 
-                    let constraint = TableConstraint::Unique {
-                        name: Some(Ident {
-                            value: TIME_INDEX.to_owned(),
-                            quote_style: None,
-                        }),
-                        columns: vec![Ident {
+                    let constraint = TableConstraint::TimeIndex {
+                        column: Ident {
                             value: column.name().value.clone(),
                             quote_style: None,
-                        }],
-                        characteristics: None,
-                        index_name: None,
-                        index_type_display: KeyOrIndexDisplay::None,
-                        index_type: None,
-                        index_options: vec![],
+                        },
                     };
                     constraints.push(constraint);
                 }
@@ -686,6 +668,31 @@ impl<'a> ParserContext<'a> {
         column_type: &DataType,
         column_extensions: &mut ColumnExtensions,
     ) -> Result<bool> {
+        if let DataType::Custom(name, tokens) = column_type
+            && name.0.len() == 1
+            && &name.0[0].value.to_uppercase() == "VECTOR"
+        {
+            ensure!(
+                tokens.len() == 1,
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: "VECTOR type should have dimension",
+                }
+            );
+
+            let dimension =
+                tokens[0]
+                    .parse::<u32>()
+                    .ok()
+                    .with_context(|| InvalidColumnOptionSnafu {
+                        name: column_name.to_string(),
+                        msg: "dimension should be a positive integer",
+                    })?;
+
+            let options = HashMap::from_iter([(VECTOR_OPT_DIM.to_string(), dimension.to_string())]);
+            column_extensions.vector_options = Some(options.into());
+        }
+
         if parser.parse_keyword(Keyword::FULLTEXT) {
             ensure!(
                 column_extensions.fulltext_options.is_none(),
@@ -714,7 +721,7 @@ impl<'a> ParserContext<'a> {
 
             for key in options.keys() {
                 ensure!(
-                    validate_column_fulltext_option(key),
+                    validate_column_fulltext_create_option(key),
                     InvalidColumnOptionSnafu {
                         name: column_name.to_string(),
                         msg: format!("invalid FULLTEXT option: {key}"),
@@ -730,12 +737,6 @@ impl<'a> ParserContext<'a> {
     }
 
     fn parse_optional_table_constraint(&mut self) -> Result<Option<TableConstraint>> {
-        let name = if self.parser.parse_keyword(Keyword::CONSTRAINT) {
-            let raw_name = self.parse_identifier().context(SyntaxSnafu)?;
-            Some(Self::canonicalize_identifier(raw_name))
-        } else {
-            None
-        };
         match self.parser.next_token() {
             TokenWithLocation {
                 token: Token::Word(w),
@@ -755,14 +756,7 @@ impl<'a> ParserContext<'a> {
                     .into_iter()
                     .map(Self::canonicalize_identifier)
                     .collect();
-                Ok(Some(TableConstraint::PrimaryKey {
-                    name,
-                    index_name: None,
-                    index_type: None,
-                    columns,
-                    index_options: vec![],
-                    characteristics: None,
-                }))
+                Ok(Some(TableConstraint::PrimaryKey { columns }))
             }
             TokenWithLocation {
                 token: Token::Word(w),
@@ -779,7 +773,7 @@ impl<'a> ParserContext<'a> {
                     .parser
                     .parse_parenthesized_column_list(Mandatory, false)
                     .context(error::SyntaxSnafu)?;
-                let columns = raw_columns
+                let mut columns = raw_columns
                     .into_iter()
                     .map(Self::canonicalize_identifier)
                     .collect::<Vec<_>>();
@@ -791,28 +785,35 @@ impl<'a> ParserContext<'a> {
                     }
                 );
 
-                // TODO(dennis): TableConstraint doesn't support dialect right now,
-                // so we use unique constraint with special key to represent TIME INDEX.
-                Ok(Some(TableConstraint::Unique {
-                    name: Some(Ident {
-                        value: TIME_INDEX.to_owned(),
-                        quote_style: None,
-                    }),
-                    columns,
-                    characteristics: None,
-                    index_name: None,
-                    index_type_display: KeyOrIndexDisplay::None,
-                    index_type: None,
-                    index_options: vec![],
+                Ok(Some(TableConstraint::TimeIndex {
+                    column: columns.pop().unwrap(),
                 }))
             }
-            unexpected => {
-                if name.is_some() {
-                    self.expected("PRIMARY, TIME", unexpected)
-                } else {
-                    self.parser.prev_token();
-                    Ok(None)
-                }
+            TokenWithLocation {
+                token: Token::Word(w),
+                ..
+            } if w.value == INVERTED => {
+                self.parser
+                    .expect_keyword(Keyword::INDEX)
+                    .context(error::UnexpectedSnafu {
+                        expected: "INDEX",
+                        actual: self.peek_token_as_string(),
+                    })?;
+
+                let raw_columns = self
+                    .parser
+                    // allow empty list to unset inverted index
+                    .parse_parenthesized_column_list(Mandatory, true)
+                    .context(error::SyntaxSnafu)?;
+                let columns = raw_columns
+                    .into_iter()
+                    .map(Self::canonicalize_identifier)
+                    .collect::<Vec<_>>();
+                Ok(Some(TableConstraint::InvertedIndex { columns }))
+            }
+            _ => {
+                self.parser.prev_token();
+                Ok(None)
             }
         }
     }
@@ -842,21 +843,9 @@ impl<'a> ParserContext<'a> {
 fn validate_time_index(columns: &[Column], constraints: &[TableConstraint]) -> Result<()> {
     let time_index_constraints: Vec<_> = constraints
         .iter()
-        .filter_map(|c| {
-            if let TableConstraint::Unique {
-                name: Some(ident),
-                columns,
-                ..
-            } = c
-            {
-                if ident.value == TIME_INDEX {
-                    Some(columns)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+        .filter_map(|c| match c {
+            TableConstraint::TimeIndex { column } => Some(column),
+            _ => None,
         })
         .unique()
         .collect();
@@ -871,16 +860,10 @@ fn validate_time_index(columns: &[Column], constraints: &[TableConstraint]) -> R
             ),
         }
     );
-    ensure!(
-        time_index_constraints[0].len() == 1,
-        InvalidTimeIndexSnafu {
-            msg: "it should contain only one column in time index",
-        }
-    );
 
     // It's safe to use time_index_constraints[0][0],
     // we already check the bound above.
-    let time_index_column_ident = &time_index_constraints[0][0];
+    let time_index_column_ident = &time_index_constraints[0];
     let time_index_column = columns
         .iter()
         .find(|c| c.name().value == *time_index_column_ident.value)
@@ -1120,7 +1103,8 @@ mod tests {
             cpu float32 default 0,
             memory float64,
             TIME INDEX (ts),
-            PRIMARY KEY(ts, host)
+            PRIMARY KEY(ts, host),
+            INVERTED INDEX(host)
         ) with(location='/var/data/city.csv',format='csv');";
 
         let options = HashMap::from([
@@ -1144,11 +1128,24 @@ mod tests {
                 assert_column_def(&columns[3].column_def, "memory", "FLOAT64");
 
                 let constraints = &c.constraints;
-                assert!(matches!(&constraints[0], TableConstraint::Unique {
-                        name: Some(name),
-                        ..
-                    }  if name.value == TIME_INDEX));
-                assert_matches!(&constraints[1], TableConstraint::PrimaryKey { .. });
+                assert_eq!(
+                    &constraints[0],
+                    &TableConstraint::TimeIndex {
+                        column: Ident::new("ts"),
+                    }
+                );
+                assert_eq!(
+                    &constraints[1],
+                    &TableConstraint::PrimaryKey {
+                        columns: vec![Ident::new("ts"), Ident::new("host")]
+                    }
+                );
+                assert_eq!(
+                    &constraints[2],
+                    &TableConstraint::InvertedIndex {
+                        columns: vec![Ident::new("host")]
+                    }
+                );
             }
             _ => unreachable!(),
         }
@@ -1478,10 +1475,8 @@ ENGINE=mito";
             assert_eq!(c.constraints.len(), 2);
             let tc = c.constraints[0].clone();
             match tc {
-                TableConstraint::Unique { name, columns, .. } => {
-                    assert_eq!(name.unwrap().to_string(), "__time_index");
-                    assert_eq!(columns.len(), 1);
-                    assert_eq!(&columns[0].value, "ts");
+                TableConstraint::TimeIndex { column } => {
+                    assert_eq!(&column.value, "ts");
                 }
                 _ => panic!("should be time index constraint"),
             };
@@ -1679,10 +1674,8 @@ ENGINE=mito";
         if let Statement::CreateTable(c) = &result[0] {
             let tc = c.constraints[0].clone();
             match tc {
-                TableConstraint::Unique { name, columns, .. } => {
-                    assert_eq!(name.unwrap().to_string(), "__time_index");
-                    assert_eq!(columns.len(), 1);
-                    assert_eq!(&columns[0].value, "ts");
+                TableConstraint::TimeIndex { column } => {
+                    assert_eq!(&column.value, "ts");
                 }
                 _ => panic!("should be time index constraint"),
             }
@@ -1769,7 +1762,9 @@ ENGINE=mito";
                              cpu float32 default 0,
                              memory float64,
                              TIME INDEX (ts),
-                             PRIMARY KEY(ts, host)) engine=mito
+                             PRIMARY KEY(ts, host),
+                             INVERTED INDEX(host)
+                             ) engine=mito
                              with(ttl='10s');
          ";
         let result =
@@ -1789,11 +1784,24 @@ ENGINE=mito";
                 assert_column_def(&columns[3].column_def, "memory", "FLOAT64");
 
                 let constraints = &c.constraints;
-                assert!(matches!(&constraints[0], TableConstraint::Unique {
-                        name: Some(name),
-                        ..
-                    }  if name.value == TIME_INDEX));
-                assert_matches!(&constraints[1], TableConstraint::PrimaryKey { .. });
+                assert_eq!(
+                    &constraints[0],
+                    &TableConstraint::TimeIndex {
+                        column: Ident::new("ts"),
+                    }
+                );
+                assert_eq!(
+                    &constraints[1],
+                    &TableConstraint::PrimaryKey {
+                        columns: vec![Ident::new("ts"), Ident::new("host")]
+                    }
+                );
+                assert_eq!(
+                    &constraints[2],
+                    &TableConstraint::InvertedIndex {
+                        columns: vec![Ident::new("host")]
+                    }
+                );
                 assert_eq!(1, c.options.len());
                 assert_eq!(
                     [("ttl", "10s")].into_iter().collect::<HashMap<_, _>>(),
@@ -1849,6 +1857,33 @@ ENGINE=mito";
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result.is_err());
         assert_matches!(result, Err(crate::error::Error::InvalidTimeIndex { .. }));
+    }
+
+    #[test]
+    fn test_inverted_index_empty_list() {
+        let sql = r"create table demo(
+                             host string,
+                             ts timestamp time index,
+                             cpu float64 default 0,
+                             memory float64,
+                             TIME INDEX (ts),
+                             INVERTED INDEX()
+                             ) engine=mito;
+         ";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+
+        if let Statement::CreateTable(c) = &result[0] {
+            let tc = &c
+                .constraints
+                .iter()
+                .find(|c| matches!(c, TableConstraint::InvertedIndex { .. }))
+                .unwrap();
+            assert_eq!(*tc, &TableConstraint::InvertedIndex { columns: vec![] });
+        } else {
+            unreachable!("should be create table statement");
+        }
     }
 
     #[test]

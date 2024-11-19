@@ -18,25 +18,32 @@ use std::time::Duration;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
-use api::v1::region::alter_request::Kind;
+use api::v1::column_def::as_fulltext_option;
 use api::v1::region::{
     alter_request, compact_request, region_request, AlterRequest, AlterRequests, CloseRequest,
     CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
     FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
-use api::v1::{self, ChangeTableOption, Rows, SemanticType};
+use api::v1::{self, Analyzer, ChangeTableOption, Rows, SemanticType};
 pub use common_base::AffectedRows;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::schema::FulltextOptions;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use strum::IntoStaticStr;
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, InvalidRawRegionRequestSnafu, InvalidRegionOptionChangeRequestSnafu,
-    InvalidRegionRequestSnafu, MetadataError, RegionMetadata, Result,
+    ColumnMetadata, DecodeProtoSnafu, InvalidRawRegionRequestSnafu,
+    InvalidRegionOptionChangeRequestSnafu, InvalidRegionRequestSnafu, MetadataError,
+    RegionMetadata, Result,
 };
-use crate::mito_engine_options::TTL_KEY;
+use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
+use crate::mito_engine_options::{
+    TTL_KEY, TWCS_MAX_ACTIVE_WINDOW_FILES, TWCS_MAX_ACTIVE_WINDOW_RUNS,
+    TWCS_MAX_INACTIVE_WINDOW_FILES, TWCS_MAX_INACTIVE_WINDOW_RUNS, TWCS_MAX_OUTPUT_FILE_SIZE,
+    TWCS_TIME_WINDOW,
+};
 use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
 
@@ -300,6 +307,11 @@ impl RegionCreateRequest {
 
         Ok(())
     }
+
+    /// Returns true when the region belongs to the metric engine's physical table.
+    pub fn is_physical_table(&self) -> bool {
+        self.options.contains_key(PHYSICAL_TABLE_METADATA_KEY)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -316,6 +328,13 @@ pub struct RegionOpenRequest {
     pub options: HashMap<String, String>,
     /// To skip replaying the WAL.
     pub skip_wal_replay: bool,
+}
+
+impl RegionOpenRequest {
+    /// Returns true when the region belongs to the metric engine's physical table.
+    pub fn is_physical_table(&self) -> bool {
+        self.options.contains_key(PHYSICAL_TABLE_METADATA_KEY)
+    }
 }
 
 /// Close region request.
@@ -389,12 +408,17 @@ pub enum AlterKind {
         names: Vec<String>,
     },
     /// Change columns datatype form the region, only fields are allowed to change.
-    ChangeColumnTypes {
+    ModifyColumnTypes {
         /// Columns to change.
-        columns: Vec<ChangeColumnType>,
+        columns: Vec<ModifyColumnType>,
     },
     /// Change region options.
     ChangeRegionOptions { options: Vec<ChangeOption> },
+    /// Change fulltext index options.
+    ChangeColumnFulltext {
+        column_name: String,
+        options: FulltextOptions,
+    },
 }
 
 impl AlterKind {
@@ -413,12 +437,15 @@ impl AlterKind {
                     Self::validate_column_to_drop(name, metadata)?;
                 }
             }
-            AlterKind::ChangeColumnTypes { columns } => {
+            AlterKind::ModifyColumnTypes { columns } => {
                 for col_to_change in columns {
                     col_to_change.validate(metadata)?;
                 }
             }
             AlterKind::ChangeRegionOptions { .. } => {}
+            AlterKind::ChangeColumnFulltext { column_name, .. } => {
+                Self::validate_column_fulltext_option(column_name, metadata)?;
+            }
         }
         Ok(())
     }
@@ -433,13 +460,16 @@ impl AlterKind {
             AlterKind::DropColumns { names } => names
                 .iter()
                 .any(|name| metadata.column_by_name(name).is_some()),
-            AlterKind::ChangeColumnTypes { columns } => columns
+            AlterKind::ModifyColumnTypes { columns } => columns
                 .iter()
                 .any(|col_to_change| col_to_change.need_alter(metadata)),
             AlterKind::ChangeRegionOptions { .. } => {
                 // we need to update region options for `ChangeTableOptions`.
                 // todo: we need to check if ttl has ever changed.
                 true
+            }
+            AlterKind::ChangeColumnFulltext { column_name, .. } => {
+                metadata.column_by_name(column_name).is_some()
             }
         }
     }
@@ -458,6 +488,32 @@ impl AlterKind {
         );
         Ok(())
     }
+
+    /// Returns an error if the column to change fulltext index option is invalid.
+    fn validate_column_fulltext_option(
+        column_name: &String,
+        metadata: &RegionMetadata,
+    ) -> Result<()> {
+        let column = metadata
+            .column_by_name(column_name)
+            .context(InvalidRegionRequestSnafu {
+                region_id: metadata.region_id,
+                err: format!("column {} not found", column_name),
+            })?;
+
+        ensure!(
+            column.column_schema.data_type.is_string(),
+            InvalidRegionRequestSnafu {
+                region_id: metadata.region_id,
+                err: format!(
+                    "cannot change fulltext index options for non-string column {}",
+                    column_name
+                ),
+            }
+        );
+
+        Ok(())
+    }
 }
 
 impl TryFrom<alter_request::Kind> for AlterKind {
@@ -473,24 +529,36 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                     .collect::<Result<Vec<_>>>()?;
                 AlterKind::AddColumns { columns }
             }
-            alter_request::Kind::ChangeColumnTypes(x) => {
+            alter_request::Kind::ModifyColumnTypes(x) => {
                 let columns = x
-                    .change_column_types
+                    .modify_column_types
                     .into_iter()
                     .map(|x| x.into())
                     .collect::<Vec<_>>();
-                AlterKind::ChangeColumnTypes { columns }
+                AlterKind::ModifyColumnTypes { columns }
             }
             alter_request::Kind::DropColumns(x) => {
                 let names = x.drop_columns.into_iter().map(|x| x.name).collect();
                 AlterKind::DropColumns { names }
             }
-            Kind::ChangeTableOptions(change_options) => AlterKind::ChangeRegionOptions {
-                options: change_options
-                    .change_table_options
-                    .iter()
-                    .map(TryFrom::try_from)
-                    .collect::<Result<Vec<_>>>()?,
+            alter_request::Kind::ChangeTableOptions(change_options) => {
+                AlterKind::ChangeRegionOptions {
+                    options: change_options
+                        .change_table_options
+                        .iter()
+                        .map(TryFrom::try_from)
+                        .collect::<Result<Vec<_>>>()?,
+                }
+            }
+            alter_request::Kind::ChangeColumnFulltext(x) => AlterKind::ChangeColumnFulltext {
+                column_name: x.column_name.clone(),
+                options: FulltextOptions {
+                    enable: x.enable,
+                    analyzer: as_fulltext_option(
+                        Analyzer::try_from(x.analyzer).context(DecodeProtoSnafu)?,
+                    ),
+                    case_sensitive: x.case_sensitive,
+                },
             },
         };
 
@@ -595,14 +663,14 @@ impl TryFrom<v1::AddColumnLocation> for AddColumnLocation {
 
 /// Change a column's datatype.
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub struct ChangeColumnType {
+pub struct ModifyColumnType {
     /// Schema of the column to modify.
     pub column_name: String,
     /// Column will be changed to this type.
     pub target_type: ConcreteDataType,
 }
 
-impl ChangeColumnType {
+impl ModifyColumnType {
     /// Returns an error if the column's datatype to change is invalid.
     pub fn validate(&self, metadata: &RegionMetadata) -> Result<()> {
         let column_meta = metadata
@@ -643,16 +711,16 @@ impl ChangeColumnType {
     }
 }
 
-impl From<v1::ChangeColumnType> for ChangeColumnType {
-    fn from(change_column_type: v1::ChangeColumnType) -> Self {
+impl From<v1::ModifyColumnType> for ModifyColumnType {
+    fn from(modify_column_type: v1::ModifyColumnType) -> Self {
         let target_type = ColumnDataTypeWrapper::new(
-            change_column_type.target_type(),
-            change_column_type.target_type_extension,
+            modify_column_type.target_type(),
+            modify_column_type.target_type_extension,
         )
         .into();
 
-        ChangeColumnType {
-            column_name: change_column_type.column_name,
+        ModifyColumnType {
+            column_name: modify_column_type.column_name,
             target_type,
         }
     }
@@ -661,6 +729,8 @@ impl From<v1::ChangeColumnType> for ChangeColumnType {
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub enum ChangeOption {
     TTL(Duration),
+    // Modifying TwscOptions with values as (option name, new value).
+    Twsc(String, String),
 }
 
 impl TryFrom<&ChangeTableOption> for ChangeOption {
@@ -668,16 +738,24 @@ impl TryFrom<&ChangeTableOption> for ChangeOption {
 
     fn try_from(value: &ChangeTableOption) -> std::result::Result<Self, Self::Error> {
         let ChangeTableOption { key, value } = value;
-        if key == TTL_KEY {
-            let ttl = if value.is_empty() {
-                Duration::from_secs(0)
-            } else {
-                humantime::parse_duration(value)
-                    .map_err(|_| InvalidRegionOptionChangeRequestSnafu { key, value }.build())?
-            };
-            Ok(Self::TTL(ttl))
-        } else {
-            InvalidRegionOptionChangeRequestSnafu { key, value }.fail()
+
+        match key.as_str() {
+            TTL_KEY => {
+                let ttl = if value.is_empty() {
+                    Duration::from_secs(0)
+                } else {
+                    humantime::parse_duration(value)
+                        .map_err(|_| InvalidRegionOptionChangeRequestSnafu { key, value }.build())?
+                };
+                Ok(Self::TTL(ttl))
+            }
+            TWCS_MAX_ACTIVE_WINDOW_RUNS
+            | TWCS_MAX_ACTIVE_WINDOW_FILES
+            | TWCS_MAX_INACTIVE_WINDOW_FILES
+            | TWCS_MAX_INACTIVE_WINDOW_RUNS
+            | TWCS_MAX_OUTPUT_FILE_SIZE
+            | TWCS_TIME_WINDOW => Ok(Self::Twsc(key.to_string(), value.to_string())),
+            _ => InvalidRegionOptionChangeRequestSnafu { key, value }.fail(),
         }
     }
 }
@@ -743,7 +821,7 @@ mod tests {
     use api::v1::region::RegionColumnDef;
     use api::v1::{ColumnDataType, ColumnDef};
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::ColumnSchema;
+    use datatypes::schema::{ColumnSchema, FulltextAnalyzer};
 
     use super::*;
     use crate::metadata::RegionMetadataBuilder;
@@ -994,10 +1072,10 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_change_column_type() {
+    fn test_validate_modify_column_type() {
         let metadata = new_metadata();
-        AlterKind::ChangeColumnTypes {
-            columns: vec![ChangeColumnType {
+        AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnType {
                 column_name: "xxxx".to_string(),
                 target_type: ConcreteDataType::string_datatype(),
             }],
@@ -1005,8 +1083,8 @@ mod tests {
         .validate(&metadata)
         .unwrap_err();
 
-        AlterKind::ChangeColumnTypes {
-            columns: vec![ChangeColumnType {
+        AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnType {
                 column_name: "field_1".to_string(),
                 target_type: ConcreteDataType::date_datatype(),
             }],
@@ -1014,8 +1092,8 @@ mod tests {
         .validate(&metadata)
         .unwrap_err();
 
-        AlterKind::ChangeColumnTypes {
-            columns: vec![ChangeColumnType {
+        AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnType {
                 column_name: "ts".to_string(),
                 target_type: ConcreteDataType::date_datatype(),
             }],
@@ -1023,8 +1101,8 @@ mod tests {
         .validate(&metadata)
         .unwrap_err();
 
-        AlterKind::ChangeColumnTypes {
-            columns: vec![ChangeColumnType {
+        AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnType {
                 column_name: "tag_0".to_string(),
                 target_type: ConcreteDataType::date_datatype(),
             }],
@@ -1032,8 +1110,8 @@ mod tests {
         .validate(&metadata)
         .unwrap_err();
 
-        let kind = AlterKind::ChangeColumnTypes {
-            columns: vec![ChangeColumnType {
+        let kind = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnType {
                 column_name: "field_0".to_string(),
                 target_type: ConcreteDataType::int32_datatype(),
             }],
@@ -1136,5 +1214,24 @@ mod tests {
         };
 
         assert!(create.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_change_column_fulltext_options() {
+        let kind = AlterKind::ChangeColumnFulltext {
+            column_name: "tag_0".to_string(),
+            options: FulltextOptions {
+                enable: true,
+                analyzer: FulltextAnalyzer::Chinese,
+                case_sensitive: false,
+            },
+        };
+        let request = RegionAlterRequest {
+            schema_version: 1,
+            kind,
+        };
+        let mut metadata = new_metadata();
+        metadata.schema_version = 1;
+        request.validate(&metadata).unwrap();
     }
 }

@@ -39,7 +39,7 @@ derive_builder.workspace = true
 etcd-client.workspace = true
 futures.workspace = true
 futures-util.workspace = true
-hex = { version = "0.4" }
+hex.workspace = true
 humantime-serde.workspace = true
 itertools.workspace = true
 lazy_static.workspace = true

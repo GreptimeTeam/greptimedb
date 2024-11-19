@@ -2,23 +2,25 @@
 members = [
     "src/api",
     "src/auth",
-    "src/catalog",
     "src/cache",
+    "src/catalog",
     "src/client",
     "src/cmd",
     "src/common/base",
     "src/common/catalog",
     "src/common/config",
     "src/common/datasource",
+    "src/common/decimal",
     "src/common/error",
     "src/common/frontend",
     "src/common/function",
-    "src/common/macro",
     "src/common/greptimedb-telemetry",
     "src/common/grpc",
     "src/common/grpc-expr",
+    "src/common/macro",
     "src/common/mem-prof",
     "src/common/meta",
+    "src/common/options",
     "src/common/plugins",
     "src/common/pprof",
     "src/common/procedure",
@@ -30,7 +32,6 @@ members = [
     "src/common/telemetry",
     "src/common/test-util",
     "src/common/time",
-    "src/common/decimal",
     "src/common/version",
     "src/common/wal",
     "src/datanode",
@@ -38,6 +39,7 @@ members = [
     "src/file-engine",
     "src/flow",
     "src/frontend",
+    "src/index",
     "src/log-store",
     "src/meta-client",
     "src/meta-srv",
@@ -57,7 +59,6 @@ members = [
     "src/sql",
     "src/store-api",
     "src/table",
-    "src/index",
     "tests-fuzz",
     "tests-integration",
     "tests/runner",
@@ -117,15 +118,16 @@ datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev
 datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
 derive_builder = "0.12"
 dotenv = "0.15"
-etcd-client = { version = "0.13" }
+etcd-client = "0.13"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "255f87a3318ace3f88a67f76995a0e14910983f4" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "fb4e2146b1ea8816148304f1f258e7a73736a905" }
+hex = "0.4"
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
-jsonb = { git = "https://github.com/CookiePieWw/jsonb.git", rev = "ed2d4f8575419ed434a4ae09dee18ca900915d9c", default-features = false }
+jsonb = { git = "https://github.com/databendlabs/jsonb.git", rev = "8c8d2fc294a39f3ff08909d60f718639cfba3875", default-features = false }
 lazy_static = "1.4"
 meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "a10facb353b41460eeb98578868ebf19c2084fac" }
 mockall = "0.11.4"
@@ -151,7 +153,7 @@ raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.8"
 ratelimit = "0.9"
 regex = "1.8"
-regex-automata = { version = "0.4" }
+regex-automata = "0.4"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls-native-roots",
@@ -182,11 +184,11 @@ strum = { version = "0.25", features = ["derive"] }
 tempfile = "3"
 tokio = { version = "1.40", features = ["full"] }
 tokio-postgres = "0.7"
-tokio-stream = { version = "0.1" }
+tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
 tonic = { version = "0.11", features = ["tls", "gzip", "zstd"] }
-tower = { version = "0.4" }
+tower = "0.4"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 typetag = "0.2"
@@ -214,6 +216,7 @@ common-grpc-expr = { path = "src/common/grpc-expr" }
 common-macro = { path = "src/common/macro" }
 common-mem-prof = { path = "src/common/mem-prof" }
 common-meta = { path = "src/common/meta" }
+common-options = { path = "src/common/options" }
 common-plugins = { path = "src/common/plugins" }
 common-pprof = { path = "src/common/pprof" }
 common-procedure = { path = "src/common/procedure" }
@@ -261,6 +264,8 @@ tokio-rustls = { git = "https://github.com/GreptimeTeam/tokio-rustls" }
 # This is commented, since we are not using aws-lc-sys, if we need to use it, we need to uncomment this line or use a release after this commit, or it wouldn't compile with gcc < 8.1
 # see https://github.com/aws/aws-lc-rs/pull/526
 # aws-lc-sys = { git ="https://github.com/aws/aws-lc-rs", rev = "556558441e3494af4b156ae95ebc07ebc2fd38aa" }
+# Apply a fix for pprof for unaligned pointer access
+pprof = { git = "https://github.com/GreptimeTeam/pprof-rs", rev = "1bd1e21" }
 
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"

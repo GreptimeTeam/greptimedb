@@ -34,13 +34,13 @@ use serde_json::Value;
 use session::context::{Channel, QueryContext, QueryContextRef};
 
 use super::header::collect_plan_metrics;
-use crate::http::arrow_result::ArrowResponse;
-use crate::http::csv_result::CsvResponse;
-use crate::http::error_result::ErrorResponse;
-use crate::http::greptime_result_v1::GreptimedbV1Response;
-use crate::http::influxdb_result_v1::InfluxdbV1Response;
-use crate::http::json_result::JsonResponse;
-use crate::http::table_result::TableResponse;
+use crate::http::result::arrow_result::ArrowResponse;
+use crate::http::result::csv_result::CsvResponse;
+use crate::http::result::error_result::ErrorResponse;
+use crate::http::result::greptime_result_v1::GreptimedbV1Response;
+use crate::http::result::influxdb_result_v1::InfluxdbV1Response;
+use crate::http::result::json_result::JsonResponse;
+use crate::http::result::table_result::TableResponse;
 use crate::http::{
     ApiState, Epoch, GreptimeOptionsConfigState, GreptimeQueryOutput, HttpRecordsOutput,
     HttpResponse, ResponseFormat,

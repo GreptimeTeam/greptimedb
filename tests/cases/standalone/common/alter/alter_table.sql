@@ -20,3 +20,65 @@ ALTER TABLE test_alt_table ADD COLUMN m INTEGER;
 DESC TABLE test_alt_table;
 
 DROP TABLE test_alt_table;
+
+-- to test if same name column can be added
+CREATE TABLE phy (ts timestamp time index, val double) engine = metric with ("physical_metric_table" = "");
+
+CREATE TABLE t1 (
+    ts timestamp time index,
+    val double,
+    host string primary key
+) engine = metric with ("on_physical_table" = "phy");
+
+INSERT INTO
+    t1
+VALUES
+    ('host1', 0, 1),
+    ('host2', 1, 0,);
+
+SELECT
+    *
+FROM
+    t1;
+
+CREATE TABLE t2 (
+    ts timestamp time index,
+    job string primary key,
+    val double
+) engine = metric with ("on_physical_table" = "phy");
+
+ALTER TABLE
+    t1
+ADD
+    COLUMN `at` STRING;
+
+ALTER TABLE
+    t2
+ADD
+    COLUMN at3 STRING;
+
+ALTER TABLE
+    t2
+ADD
+    COLUMN `at` STRING;
+
+ALTER TABLE
+    t2
+ADD
+    COLUMN at2 STRING;
+
+INSERT INTO
+    t2
+VALUES
+    ("loc_1", "loc_2", "loc_3", 'job1', 0, 1);
+
+SELECT
+    *
+FROM
+    t2;
+
+DROP TABLE t1;
+
+DROP TABLE t2;
+
+DROP TABLE phy;
