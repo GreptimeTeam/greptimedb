@@ -43,6 +43,31 @@ lazy_static::lazy_static! {
         prometheus::register_int_gauge_vec!("greptime_app_version", "app version", &["version", "short_version", "app"]).unwrap();
 }
 
+/// wait for the close signal, for unix platform it's SIGINT or SIGTERM
+#[cfg(unix)]
+async fn start_wait_for_close_signal() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let mut sigterm = signal(SignalKind::terminate())?;
+
+    tokio::select! {
+        _ = sigint.recv() => {
+            info!("Received SIGINT, shutting down");
+        }
+        _ = sigterm.recv() => {
+            info!("Received SIGTERM, shutting down");
+        }
+    }
+
+    Ok(())
+}
+
+/// wait for the close signal, for non-unix platform it's ctrl-c
+#[cfg(not(unix))]
+async fn start_wait_for_close_signal() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    tokio::signal::ctrl_c().await
+}
+
 #[async_trait]
 pub trait App: Send {
     fn name(&self) -> &str;
@@ -69,7 +94,7 @@ pub trait App: Send {
         self.start().await?;
 
         if self.wait_signal() {
-            if let Err(e) = tokio::signal::ctrl_c().await {
+            if let Err(e) = start_wait_for_close_signal().await {
                 error!(e; "Failed to listen for ctrl-c signal");
                 // It's unusual to fail to listen for ctrl-c signal, maybe there's something unexpected in
                 // the underlying system. So we stop the app instead of running nonetheless to let people
