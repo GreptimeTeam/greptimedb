@@ -691,7 +691,7 @@ impl RegionMetadataBuilder {
                         options.is_some(),
                         InvalidColumnOptionSnafu {
                             column_name,
-                            msg: "FULLTEXT index options must be provided".to_string(),
+                            msg: "FULLTEXT index options must be provided",
                         }
                     );
                     set_column_fulltext_options(
@@ -922,7 +922,7 @@ fn unset_column_fulltext_options(
     } else {
         return InvalidColumnOptionSnafu {
             column_name,
-            msg: "FULLTEXT index already disabled".to_string(),
+            msg: "FULLTEXT index already disabled",
         }
         .fail();
     }

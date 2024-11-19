@@ -292,7 +292,7 @@ impl TableMeta {
                         options.is_some(),
                         error::InvalidColumnOptionSnafu {
                             column_name,
-                            msg: "FULLTEXT index options must be provided".to_string(),
+                            msg: "FULLTEXT index options must be provided",
                         }
                     );
                     set_column_fulltext_options(
@@ -1012,7 +1012,7 @@ fn set_column_fulltext_options(
             !current_options.enable,
             error::InvalidColumnOptionSnafu {
                 column_name,
-                msg: "FULLTEXT index already enabled".to_string(),
+                msg: "FULLTEXT index already enabled",
             }
         );
 
