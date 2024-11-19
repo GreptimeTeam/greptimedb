@@ -655,10 +655,17 @@ async fn handle_create_flow_task(
         procedure_id: &procedure_id,
         err_msg: "downcast to `u32`",
     })?);
-    info!(
-        "Flow {}.{}({flow_id}) is created via procedure_id {id:?}",
-        create_flow_task.catalog_name, create_flow_task.flow_name,
-    );
+    if !create_flow_task.or_replace {
+        info!(
+            "Flow {}.{}({flow_id}) is created via procedure_id {id:?}",
+            create_flow_task.catalog_name, create_flow_task.flow_name,
+        );
+    } else {
+        info!(
+            "Flow {}.{}({flow_id}) is replaced via procedure_id {id:?}",
+            create_flow_task.catalog_name, create_flow_task.flow_name,
+        );
+    }
 
     Ok(SubmitDdlTaskResponse {
         key: procedure_id.into(),

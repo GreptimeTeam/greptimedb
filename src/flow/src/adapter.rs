@@ -50,7 +50,10 @@ use crate::adapter::util::column_schemas_to_proto;
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
 use crate::df_optimizer::sql_to_flow_plan;
-use crate::error::{EvalSnafu, ExternalSnafu, InternalSnafu, TableNotFoundSnafu, UnexpectedSnafu};
+use crate::error::{
+    EvalSnafu, ExternalSnafu, FlowAlreadyExistSnafu, InternalSnafu, TableNotFoundSnafu,
+    UnexpectedSnafu,
+};
 use crate::expr::{Batch, GlobalId};
 use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_RUN_INTERVAL_MS};
 use crate::repr::{self, DiffRow, Row, BATCH_SIZE};
@@ -673,6 +676,21 @@ impl FlowWorkerManager {
     }
 }
 
+/// The arguments to create a flow in [`FlowWorkerManager`].
+#[derive(Debug, Clone)]
+pub struct CreateFlowArgs {
+    pub flow_id: FlowId,
+    pub sink_table_name: TableName,
+    pub source_table_ids: Vec<TableId>,
+    pub create_if_not_exists: bool,
+    pub or_replace: bool,
+    pub expire_after: Option<i64>,
+    pub comment: Option<String>,
+    pub sql: String,
+    pub flow_options: HashMap<String, String>,
+    pub query_ctx: Option<QueryContext>,
+}
+
 /// Create&Remove flow
 impl FlowWorkerManager {
     /// remove a flow by it's id
@@ -694,18 +712,48 @@ impl FlowWorkerManager {
     /// 1. parse query into typed plan(and optional parse expire_after expr)
     /// 2. render source/sink with output table id and used input table id
     #[allow(clippy::too_many_arguments)]
-    pub async fn create_flow(
-        &self,
-        flow_id: FlowId,
-        sink_table_name: TableName,
-        source_table_ids: &[TableId],
-        create_if_not_exists: bool,
-        expire_after: Option<i64>,
-        comment: Option<String>,
-        sql: String,
-        flow_options: HashMap<String, String>,
-        query_ctx: Option<QueryContext>,
-    ) -> Result<Option<FlowId>, Error> {
+    pub async fn create_flow(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
+        let CreateFlowArgs {
+            flow_id,
+            sink_table_name,
+            source_table_ids,
+            create_if_not_exists,
+            or_replace,
+            expire_after,
+            comment,
+            sql,
+            flow_options,
+            query_ctx,
+        } = args;
+
+        let already_exist = {
+            let mut flag = false;
+
+            // check if the task already exists
+            for handle in self.worker_handles.iter() {
+                if handle.lock().await.contains_flow(flow_id).await? {
+                    flag = true;
+                    break;
+                }
+            }
+            flag
+        };
+        match (create_if_not_exists, or_replace, already_exist) {
+            // do replace
+            (_, true, true) => {
+                info!("Replacing flow with id={}", flow_id);
+                self.remove_flow(flow_id).await?;
+            }
+            (false, false, true) => FlowAlreadyExistSnafu { id: flow_id }.fail()?,
+            // do nothing if exists
+            (true, false, true) => {
+                info!("Flow with id={} already exists, do nothing", flow_id);
+                return Ok(None);
+            }
+            // create if not exists
+            (_, _, false) => (),
+        }
+
         if create_if_not_exists {
             // check if the task already exists
             for handle in self.worker_handles.iter() {
@@ -717,7 +765,7 @@ impl FlowWorkerManager {
 
         let mut node_ctx = self.node_context.write().await;
         // assign global id to source and sink table
-        for source in source_table_ids {
+        for source in &source_table_ids {
             node_ctx
                 .assign_global_id_to_table(&self.table_info_source, None, Some(*source))
                 .await?;
@@ -726,7 +774,7 @@ impl FlowWorkerManager {
             .assign_global_id_to_table(&self.table_info_source, Some(sink_table_name.clone()), None)
             .await?;
 
-        node_ctx.register_task_src_sink(flow_id, source_table_ids, sink_table_name.clone());
+        node_ctx.register_task_src_sink(flow_id, &source_table_ids, sink_table_name.clone());
 
         node_ctx.query_context = query_ctx.map(Arc::new);
         // construct a active dataflow state with it

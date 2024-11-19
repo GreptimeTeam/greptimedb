@@ -26,7 +26,7 @@ use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{
     BytesAdapter, DeserializedValueWithBytes, FlowId, MetadataKey, MetadataValue, NAME_PATTERN,
 };
-use crate::kv_backend::txn::Txn;
+use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use crate::rpc::store::RangeRequest;
@@ -231,6 +231,37 @@ impl FlowNameManager {
         let raw_key = key.to_bytes();
         let flow_flow_name_value = FlowNameValue::new(flow_id);
         let txn = Txn::put_if_not_exists(raw_key.clone(), flow_flow_name_value.try_as_raw_value()?);
+
+        Ok((
+            txn,
+            TxnOpGetResponseSet::decode_with(TxnOpGetResponseSet::filter(raw_key)),
+        ))
+    }
+
+    /// Builds a update flow name transaction. Which doesn't change either the name or id, just checking if they are the same.
+    /// It's expected that the `__flow/name/{catalog}/{flow_name}` IS already occupied,
+    /// and both flow name and flow id is the same.
+    /// Otherwise, the transaction will retrieve existing value(and fail).
+    pub fn build_update_txn(
+        &self,
+        catalog_name: &str,
+        flow_name: &str,
+        flow_id: FlowId,
+    ) -> Result<(
+        Txn,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> FlowNameDecodeResult,
+    )> {
+        let key = FlowNameKey::new(catalog_name, flow_name);
+        let raw_key = key.to_bytes();
+        let flow_flow_name_value = FlowNameValue::new(flow_id);
+        let raw_value = flow_flow_name_value.try_as_raw_value()?;
+        let txn = Txn::new()
+            .when(vec![Compare::new(
+                raw_key.clone(),
+                CompareOp::Equal,
+                Some(raw_value),
+            )])
+            .or_else(vec![TxnOp::Get(raw_key.clone())]);
 
         Ok((
             txn,

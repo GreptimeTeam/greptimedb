@@ -865,7 +865,9 @@ pub fn show_create_flow(
             value: flow_val.sink_table_name().table_name.clone(),
             quote_style: None,
         }]),
-        or_replace: true,
+        // notice we don't want `OR REPLACE` and `IF NOT EXISTS` in same sql since it's unclear what to do
+        // so we set `or_replace` to false.
+        or_replace: false,
         if_not_exists: true,
         expire_after: flow_val.expire_after(),
         comment,

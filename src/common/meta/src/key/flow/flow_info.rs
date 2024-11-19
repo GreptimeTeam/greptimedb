@@ -26,7 +26,7 @@ use crate::error::{self, Result};
 use crate::key::flow::FlowScoped;
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKey, MetadataValue};
-use crate::kv_backend::txn::Txn;
+use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::FlownodeId;
 
@@ -196,6 +196,19 @@ impl FlowInfoManager {
             .transpose()
     }
 
+    /// Returns the [FlowInfoValue] with original bytes of specified `flow_id`.
+    pub async fn get_raw(
+        &self,
+        flow_id: FlowId,
+    ) -> Result<Option<DeserializedValueWithBytes<FlowInfoValue>>> {
+        let key = FlowInfoKey::new(flow_id).to_bytes();
+        self.kv_backend
+            .get(&key)
+            .await?
+            .map(|x| DeserializedValueWithBytes::from_inner_slice(&x.value))
+            .transpose()
+    }
+
     /// Builds a create flow transaction.
     /// It is expected that the `__flow/info/{flow_id}` wasn't occupied.
     /// Otherwise, the transaction will retrieve existing value.
@@ -209,6 +222,36 @@ impl FlowInfoManager {
     )> {
         let key = FlowInfoKey::new(flow_id).to_bytes();
         let txn = Txn::put_if_not_exists(key.clone(), flow_value.try_as_raw_value()?);
+
+        Ok((
+            txn,
+            TxnOpGetResponseSet::decode_with(TxnOpGetResponseSet::filter(key)),
+        ))
+    }
+
+    /// Builds a update flow transaction.
+    /// It is expected that the `__flow/info/{flow_id}` IS ALREADY occupied and equal to `prev_flow_value`,
+    /// but the new value can be the same, so to allow replace operation to happen even when the value is the same.
+    /// Otherwise, the transaction will retrieve existing value and fail.
+    pub(crate) fn build_update_txn(
+        &self,
+        flow_id: FlowId,
+        current_flow_value: &DeserializedValueWithBytes<FlowInfoValue>,
+        new_flow_value: &FlowInfoValue,
+    ) -> Result<(
+        Txn,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> FlowInfoDecodeResult,
+    )> {
+        let key = FlowInfoKey::new(flow_id).to_bytes();
+        let raw_value = new_flow_value.try_as_raw_value()?;
+        let prev_value = current_flow_value.get_raw_bytes();
+        let txn = Txn::new()
+            .when(vec![
+                Compare::new(key.clone(), CompareOp::NotEqual, None),
+                Compare::new(key.clone(), CompareOp::Equal, Some(prev_value)),
+            ])
+            .and_then(vec![TxnOp::Put(key.clone(), raw_value)])
+            .or_else(vec![TxnOp::Get(key.clone())]);
 
         Ok((
             txn,
