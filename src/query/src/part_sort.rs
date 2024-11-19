@@ -668,9 +668,12 @@ mod test {
     #[tokio::test]
     async fn fuzzy_test() {
         let test_cnt = 100;
+        // bound for total count of PartitionRange
         let part_cnt_bound = 100;
+        // bound for timestamp range size and offset for each PartitionRange
         let range_size_bound = 100;
         let range_offset_bound = 100;
+        // bound for batch count and size within each PartitionRange
         let batch_cnt_bound = 20;
         let batch_size_bound = 100;
 
@@ -686,6 +689,11 @@ mod test {
             let opt = SortOptions {
                 descending,
                 nulls_first,
+            };
+            let limit = if rng.bool() {
+                Some(rng.usize(0..batch_cnt_bound * batch_size_bound))
+            } else {
+                None
             };
             let unit = match rng.u8(0..3) {
                 0 => TimeUnit::Second,
@@ -797,19 +805,39 @@ mod test {
                     DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit.clone(), a)])
                         .unwrap()
                 })
+                .map(|rb| {
+                    // trim expected output with limit
+                    if let Some(limit) = limit
+                        && rb.num_rows() > limit
+                    {
+                        rb.slice(0, limit)
+                    } else {
+                        rb
+                    }
+                })
                 .collect_vec();
+
             test_cases.push((
                 case_id,
                 unit,
                 input_ranged_data,
                 schema,
                 opt,
+                limit,
                 expected_output,
             ));
         }
 
-        for (case_id, _unit, input_ranged_data, schema, opt, expected_output) in test_cases {
-            run_test(case_id, input_ranged_data, schema, opt, expected_output).await;
+        for (case_id, _unit, input_ranged_data, schema, opt, limit, expected_output) in test_cases {
+            run_test(
+                case_id,
+                input_ranged_data,
+                schema,
+                opt,
+                limit,
+                expected_output,
+            )
+            .await;
         }
     }
 
@@ -823,6 +851,7 @@ mod test {
                     ((5, 10), vec![vec![5, 6], vec![7, 8]]),
                 ],
                 false,
+                None,
                 vec![vec![1, 2, 3, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9]],
             ),
             (
@@ -832,6 +861,7 @@ mod test {
                     ((0, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8]]),
                 ],
                 true,
+                None,
                 vec![vec![9, 8, 7, 6, 5], vec![8, 7, 6, 5, 4, 3, 2, 1]],
             ),
             (
@@ -841,6 +871,7 @@ mod test {
                     ((0, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8]]),
                 ],
                 true,
+                None,
                 vec![vec![8, 7, 6, 5, 4, 3, 2, 1]],
             ),
             (
@@ -852,6 +883,7 @@ mod test {
                     ((0, 10), vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8]]),
                 ],
                 true,
+                None,
                 vec![vec![19, 18, 17], vec![8, 7, 6, 5, 4, 3, 2, 1]],
             ),
             (
@@ -863,6 +895,7 @@ mod test {
                     ((0, 10), vec![]),
                 ],
                 true,
+                None,
                 vec![],
             ),
             (
@@ -877,6 +910,7 @@ mod test {
                     ((0, 10), vec![]),
                 ],
                 true,
+                None,
                 vec![
                     vec![19, 17, 15],
                     vec![12, 11, 10],
@@ -884,9 +918,24 @@ mod test {
                     vec![4, 3, 2, 1],
                 ],
             ),
+            (
+                TimeUnit::Millisecond,
+                vec![
+                    (
+                        (15, 20),
+                        vec![vec![15, 17, 19, 10, 11, 12, 5, 6, 7, 8, 9, 1, 2, 3, 4]],
+                    ),
+                    ((10, 15), vec![]),
+                    ((5, 10), vec![]),
+                    ((0, 10), vec![]),
+                ],
+                true,
+                Some(2),
+                vec![vec![19, 17], vec![12, 11], vec![9, 8], vec![4, 3]],
+            ),
         ];
 
-        for (identifier, (unit, input_ranged_data, descending, expected_output)) in
+        for (identifier, (unit, input_ranged_data, descending, limit, expected_output)) in
             testcases.into_iter().enumerate()
         {
             let schema = Schema::new(vec![Field::new(
@@ -899,6 +948,7 @@ mod test {
                 descending,
                 ..Default::default()
             };
+
             let input_ranged_data = input_ranged_data
                 .into_iter()
                 .map(|(range, data)| {
@@ -933,6 +983,7 @@ mod test {
                 input_ranged_data,
                 schema.clone(),
                 opt,
+                limit,
                 expected_output,
             )
             .await;
@@ -945,8 +996,19 @@ mod test {
         input_ranged_data: Vec<(PartitionRange, Vec<DfRecordBatch>)>,
         schema: SchemaRef,
         opt: SortOptions,
+        limit: Option<usize>,
         expected_output: Vec<DfRecordBatch>,
     ) {
+        for rb in &expected_output {
+            if let Some(limit) = limit {
+                assert!(
+                    rb.num_rows() <= limit,
+                    "Expect row count in expected output's batch({}) <= limit({})",
+                    rb.num_rows(),
+                    limit
+                );
+            }
+        }
         let (ranges, batches): (Vec<_>, Vec<_>) = input_ranged_data.clone().into_iter().unzip();
 
         let batches = batches
@@ -963,7 +1025,7 @@ mod test {
                 expr: Arc::new(Column::new("ts", 0)),
                 options: opt,
             },
-            None,
+            limit,
             vec![ranges.clone()],
             Arc::new(mock_input),
         );
