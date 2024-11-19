@@ -106,6 +106,20 @@ CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT nu
 
 SELECT flow_name, table_catalog, flow_definition FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
+-- makesure after recover should be the same
+-- SQLNESS ARG restart=true
+
+SELECT flow_name, table_catalog, flow_definition FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
+
+SELECT * FROM out_num_cnt_show;
+
+INSERT INTO numbers_input_show VALUES(-4,0), (-3,1), (-2,2), (-1,3);
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('filter_numbers_show');
+
+SELECT * FROM out_num_cnt_show;
+
 DROP FLOW filter_numbers_show;
 
 drop table out_num_cnt_show;

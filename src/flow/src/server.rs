@@ -359,6 +359,9 @@ impl FlownodeBuilder {
                 flow_id: flow_id as _,
                 sink_table_name,
                 source_table_ids: info.source_table_ids().to_vec(),
+                // because recover should only happen on restart the `create_if_not_exists` and `or_replace` can be arbitrary value(since flow doesn't exist)
+                // but for the sake of consistency and to make sure recover of flow actually happen, we set both to true
+                // (which is also fine since checks for not allow both to be true is on metasrv and we already pass that)
                 create_if_not_exists: true,
                 or_replace: true,
                 expire_after: info.expire_after(),

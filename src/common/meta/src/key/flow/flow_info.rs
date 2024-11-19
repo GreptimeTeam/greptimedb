@@ -250,7 +250,7 @@ impl FlowInfoManager {
                 Compare::new(key.clone(), CompareOp::NotEqual, None),
                 Compare::new(key.clone(), CompareOp::Equal, Some(prev_value)),
             ])
-            .and_then(vec![TxnOp::Put(key.clone(), raw_value.clone())])
+            .and_then(vec![TxnOp::Put(key.clone(), raw_value)])
             .or_else(vec![TxnOp::Get(key.clone())]);
 
         Ok((

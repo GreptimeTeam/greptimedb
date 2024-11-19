@@ -676,6 +676,7 @@ impl FlowWorkerManager {
     }
 }
 
+/// The arguments to create a flow in [`FlowWorkerManager`].
 #[derive(Debug, Clone)]
 pub struct CreateFlowArgs {
     pub flow_id: FlowId,
@@ -732,6 +733,7 @@ impl FlowWorkerManager {
             for handle in self.worker_handles.iter() {
                 if handle.lock().await.contains_flow(flow_id).await? {
                     flag = true;
+                    break;
                 }
             }
             flag
