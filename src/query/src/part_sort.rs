@@ -37,7 +37,7 @@ use datafusion::physical_plan::{
 };
 use datafusion_common::{internal_err, DataFusionError};
 use datafusion_physical_expr::PhysicalSortExpr;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use itertools::Itertools;
 use snafu::location;
 use store_api::region_engine::PartitionRange;
@@ -198,64 +198,6 @@ impl PartSortBuffer {
             PartSortBuffer::Top(_, cnt) => *cnt == 0,
         }
     }
-
-    pub fn len(&self) -> usize {
-        match self {
-            PartSortBuffer::All(v) => v.len(),
-            PartSortBuffer::Top(_, cnt) => *cnt,
-        }
-    }
-
-    pub fn push_record_batch(&mut self, batch: DfRecordBatch) -> datafusion_common::Result<()> {
-        match self {
-            PartSortBuffer::All(v) => v.push(batch),
-            PartSortBuffer::Top(top, cnt) => {
-                *cnt += batch.num_rows();
-                top.insert_batch(batch)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    // pub fn compute(&mut self) -> datafusion_common::Result<Vec<DfRecordBatch>> {
-    //     match self {
-    //         PartSortBuffer::All(vec) => todo!(),
-    //         PartSortBuffer::Top(top_k, _) => todo!(),
-    //     }
-    //     todo!()
-    // }
-
-    // fn compute_all(&mut self) -> datafusion_common::Result<Vec<DfRecordBatch>> {
-    //     let Self::All(buffer) = self else {
-    //         unreachable!()
-    //     };
-
-    //     todo!()
-    // }
-
-    // fn compute_top(&mut self) -> datafusion_common::Result<Vec<DfRecordBatch>> {
-    //     let Self::Top(top_k, _) = self else {
-    //         unreachable!()
-    //     };
-
-    //     let result_stream = std::mem::replace(
-    //         top_k,
-    //         TopK::try_new(
-    //             partition_id,
-    //             schema,
-    //             expr,
-    //             k,
-    //             batch_size,
-    //             runtime,
-    //             metrics,
-    //             partition,
-    //         )?,
-    //     )
-    //     .emit()?;
-
-    //     todo!()
-    // }
 }
 
 struct PartSortStream {
@@ -274,6 +216,8 @@ struct PartSortStream {
     cur_part_idx: usize,
     evaluating_batch: Option<DfRecordBatch>,
     metrics: BaselineMetrics,
+    context: Arc<TaskContext>,
+    root_metrics: ExecutionPlanMetricsSet,
 }
 
 impl PartSortStream {
@@ -318,6 +262,8 @@ impl PartSortStream {
             cur_part_idx: 0,
             evaluating_batch: None,
             metrics: BaselineMetrics::new(&sort.metrics, partition),
+            context,
+            root_metrics: sort.metrics.clone(),
         })
     }
 }
@@ -441,16 +387,17 @@ impl PartSortStream {
         Ok(())
     }
 
-    fn sort_buffer(&mut self) -> datafusion_common::Result<DfRecordBatch> {
-        match &mut self.buffer {
-            PartSortBuffer::All(vec) => self.sort_all_buffer(),
-            PartSortBuffer::Top(top_k, _) => todo!(),
-        }
-    }
-
     /// Sort and clear the buffer and return the sorted record batch
     ///
     /// this function will return a empty record batch if the buffer is empty
+    fn sort_buffer(&mut self) -> datafusion_common::Result<DfRecordBatch> {
+        match &mut self.buffer {
+            PartSortBuffer::All(_) => self.sort_all_buffer(),
+            PartSortBuffer::Top(_, _) => self.sort_top_buffer(),
+        }
+    }
+
+    /// Internal method for sorting `All` buffer (without limit).
     fn sort_all_buffer(&mut self) -> datafusion_common::Result<DfRecordBatch> {
         let PartSortBuffer::All(buffer) =
             std::mem::replace(&mut self.buffer, PartSortBuffer::All(Vec::new()))
@@ -458,10 +405,10 @@ impl PartSortStream {
             unreachable!("buffer type is checked before and should be All variant")
         };
 
-        if self.buffer.is_empty() {
+        if buffer.is_empty() {
             return Ok(DfRecordBatch::new_empty(self.schema.clone()));
         }
-        let mut sort_columns = Vec::with_capacity(self.buffer.len());
+        let mut sort_columns = Vec::with_capacity(buffer.len());
         let mut opt = None;
         for batch in buffer.iter() {
             let sort_column = self.expression.evaluate_to_sort_column(batch)?;
@@ -534,13 +481,53 @@ impl PartSortStream {
             )
         })?;
 
-        // only clear after sorted for better debugging
-        // self.buffer.clear();
         self.produced += sorted.num_rows();
         drop(full_input);
         // here remove both buffer and full_input memory
         self.reservation.shrink(2 * total_mem);
         Ok(sorted)
+    }
+
+    /// Internal method for sorting `Top` buffer (with limit).
+    fn sort_top_buffer(&mut self) -> datafusion_common::Result<DfRecordBatch> {
+        let new_top_buffer = TopK::try_new(
+            self.partition,
+            self.schema().clone(),
+            vec![self.expression.clone()],
+            self.limit.unwrap(),
+            self.context.session_config().batch_size(),
+            self.context.runtime_env(),
+            &self.root_metrics,
+            self.partition,
+        )?;
+        let PartSortBuffer::Top(top_k, _) =
+            std::mem::replace(&mut self.buffer, PartSortBuffer::Top(new_top_buffer, 0))
+        else {
+            unreachable!("buffer type is checked before and should be Top variant")
+        };
+
+        let mut result_stream = top_k.emit()?;
+        let mut placeholder_ctx = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        let mut results = vec![];
+        let mut row_count = 0;
+        // according to the current implementation of `TopK`, the result stream will always be ready
+        while let Poll::Ready(Some(batch)) = result_stream.poll_next_unpin(&mut placeholder_ctx) {
+            let batch = batch?;
+            row_count += batch.num_rows();
+            results.push(batch);
+        }
+
+        let concat_batch = concat_batches(&self.schema, &results, row_count).map_err(|e| {
+            DataFusionError::ArrowError(
+                e,
+                Some(format!(
+                    "Fail to concat top k result record batch when sorting at {}",
+                    location!()
+                )),
+            )
+        })?;
+
+        Ok(concat_batch)
     }
 
     /// Try to split the input batch if it contains data that exceeds the current partition range.
@@ -568,7 +555,7 @@ impl PartSortStream {
 
         let next_range_idx = self.try_find_next_range(&sort_column)?;
         let Some(idx) = next_range_idx else {
-            self.push_buffer(batch);
+            self.push_buffer(batch)?;
             // keep polling input for next batch
             return Ok(None);
         };
@@ -576,7 +563,7 @@ impl PartSortStream {
         let this_range = batch.slice(0, idx);
         let remaining_range = batch.slice(idx, batch.num_rows() - idx);
         if this_range.num_rows() != 0 {
-            self.push_buffer(this_range);
+            self.push_buffer(this_range)?;
         }
         // mark end of current PartitionRange
         let sorted_batch = self.sort_buffer();
@@ -591,7 +578,7 @@ impl PartSortStream {
             // remaining batch is within the current partition range
             // push to the buffer and continue polling
             if remaining_range.num_rows() != 0 {
-                self.push_buffer(remaining_range);
+                self.push_buffer(remaining_range)?;
             }
         }
 
