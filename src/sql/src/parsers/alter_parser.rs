@@ -557,7 +557,7 @@ mod tests {
         }
     }
 
-    fn check_parse_alter_table(sql: &str, expected: &[(&str, &str)]) {
+    fn check_parse_alter_table_set_options(sql: &str, expected: &[(&str, &str)]) {
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -578,21 +578,51 @@ mod tests {
         assert_eq!(expected, &res);
     }
 
+    fn check_parse_alter_table_unset_options(sql: &str, expected: &[&str]) {
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+        let Statement::Alter(alter) = &result[0] else {
+            unreachable!()
+        };
+        assert_eq!("test_table", alter.table_name.0[0].value);
+        let AlterTableOperation::UnsetTableOptions { keys } = &alter.alter_operation else {
+            unreachable!()
+        };
+
+        assert_eq!(sql, alter.to_string());
+        let res = keys.iter().map(|o| o.to_string()).collect::<Vec<_>>();
+        assert_eq!(expected, &res);
+    }
+
     #[test]
-    fn test_parse_alter_column() {
-        check_parse_alter_table("ALTER TABLE test_table SET 'a'='A'", &[("a", "A")]);
-        check_parse_alter_table(
+    fn test_parse_alter_table_set_options() {
+        check_parse_alter_table_set_options("ALTER TABLE test_table SET 'a'='A'", &[("a", "A")]);
+        check_parse_alter_table_set_options(
             "ALTER TABLE test_table SET 'a'='A','b'='B'",
             &[("a", "A"), ("b", "B")],
         );
-        check_parse_alter_table(
+        check_parse_alter_table_set_options(
             "ALTER TABLE test_table SET 'a'='A','b'='B','c'='C'",
             &[("a", "A"), ("b", "B"), ("c", "C")],
         );
-        check_parse_alter_table("ALTER TABLE test_table SET 'a'=NULL", &[("a", "")]);
+        check_parse_alter_table_set_options("ALTER TABLE test_table SET 'a'=NULL", &[("a", "")]);
 
         ParserContext::create_with_dialect(
             "ALTER TABLE test_table SET a INTEGER",
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap_err();
+    }
+
+    #[test]
+    fn test_parse_alter_table_unset_options() {
+        check_parse_alter_table_unset_options("ALTER TABLE test_table UNSET 'a'", &["a"]);
+        check_parse_alter_table_unset_options("ALTER TABLE test_table UNSET 'a','b'", &["a", "b"]);
+        ParserContext::create_with_dialect(
+            "ALTER TABLE test_table UNSET a INTEGER",
             &GreptimeDbDialect {},
             ParseOptions::default(),
         )

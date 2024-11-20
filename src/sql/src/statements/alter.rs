@@ -135,7 +135,7 @@ impl Display for AlterTableOperation {
                 write!(f, "SET {kvs}")
             }
             AlterTableOperation::UnsetTableOptions { keys } => {
-                let keys = keys.join(",");
+                let keys = keys.iter().map(|k| format!("'{k}'")).join(",");
                 write!(f, "UNSET {keys}")
             }
             AlterTableOperation::SetColumnFulltext {

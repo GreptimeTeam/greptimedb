@@ -42,7 +42,7 @@ ALTER TABLE ato SET 'compaction.twcs.max_inactive_window_runs'='6';
 
 SHOW CREATE TABLE ato;
 
-ALTER TABLE ato SET 'compaction.twcs.time_window'='';
+ALTER TABLE ato UNSET 'compaction.twcs.time_window';
 
 SHOW CREATE TABLE ato;
 
