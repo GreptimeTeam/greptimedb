@@ -16,6 +16,7 @@
 #![feature(int_roundings)]
 #![feature(trait_upcasting)]
 #![feature(try_blocks)]
+#![feature(stmt_expr_attributes)]
 
 mod analyze;
 pub mod dataframe;

@@ -187,7 +187,10 @@ impl ExecutionPlan for PartSortExec {
 
 enum PartSortBuffer {
     All(Vec<DfRecordBatch>),
-    // TopK buffer with row count
+    /// TopK buffer with row count.
+    ///
+    /// Given this heap only keeps k element, the capacity of this buffer
+    /// is not accurate, and is only used for empty check.
     Top(TopK, usize),
 }
 
@@ -511,10 +514,21 @@ impl PartSortStream {
         let mut results = vec![];
         let mut row_count = 0;
         // according to the current implementation of `TopK`, the result stream will always be ready
-        while let Poll::Ready(Some(batch)) = result_stream.poll_next_unpin(&mut placeholder_ctx) {
-            let batch = batch?;
-            row_count += batch.num_rows();
-            results.push(batch);
+        loop {
+            match result_stream.poll_next_unpin(&mut placeholder_ctx) {
+                Poll::Ready(Some(batch)) => {
+                    let batch = batch?;
+                    row_count += batch.num_rows();
+                    results.push(batch);
+                }
+                Poll::Pending => {
+                    #[cfg(debug_assertions)]
+                    unreachable!("TopK result stream should always be ready")
+                }
+                Poll::Ready(None) => {
+                    break;
+                }
+            }
         }
 
         let concat_batch = concat_batches(&self.schema, &results, row_count).map_err(|e| {
