@@ -97,7 +97,7 @@ impl AlterDatabaseProcedure {
             }
             Kind::UnsetDatabaseOptions(options) => {
                 let option_map = options
-                    .unset_database_options
+                    .keys
                     .iter()
                     .map(|option| (option.clone(), "".to_string()))
                     .collect::<HashMap<String, String>>();

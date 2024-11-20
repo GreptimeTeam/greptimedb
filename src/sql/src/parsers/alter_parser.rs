@@ -322,6 +322,7 @@ mod tests {
                         assert_eq!("a", options[0].key);
                         assert_eq!("A", options[0].value);
                     }
+                    _ => unreachable!(),
                 }
             }
             _ => unreachable!(),
@@ -649,7 +650,7 @@ mod tests {
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
         assert_eq!(1, result.len());
-        let Statement::Alter(alter) = &result[0] else {
+        let Statement::AlterTable(alter) = &result[0] else {
             unreachable!()
         };
         assert_eq!("test_table", alter.table_name.0[0].value);

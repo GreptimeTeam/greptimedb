@@ -19,10 +19,11 @@ use api::v1::alter_database_expr::Kind as AlterDatabaseKind;
 use api::v1::alter_table_expr::Kind as AlterTableKind;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{
-    AddColumn, AddColumns, AlterExpr, Analyzer, ColumnDataType, ColumnDataTypeExtension,
-    CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn, DropColumns, ExpireAfter,
-    ModifyColumnType, ModifyColumnTypes, RenameTable, SemanticType, SetColumnFulltext,
-    SetTableOptions, TableName, UnsetColumnFulltext, UnsetTableOptions,
+    AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer, ColumnDataType,
+    ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn,
+    DropColumns, ExpireAfter, ModifyColumnType, ModifyColumnTypes, RenameTable, SemanticType,
+    SetColumnFulltext, SetDatabaseOptions, SetTableOptions, TableName, UnsetColumnFulltext,
+    UnsetDatabaseOptions, UnsetTableOptions,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
@@ -526,16 +527,18 @@ pub(crate) fn to_alter_table_expr(
                 name: name.value.to_string(),
             }],
         }),
-        AlterTableOperation::RenameTable { new_table_name } => Kind::RenameTable(RenameTable {
-            new_table_name: new_table_name.to_string(),
-        }),
+        AlterTableOperation::RenameTable { new_table_name } => {
+            AlterTableKind::RenameTable(RenameTable {
+                new_table_name: new_table_name.to_string(),
+            })
+        }
         AlterTableOperation::SetTableOptions { options } => {
-            Kind::SetTableOptions(SetTableOptions {
+            AlterTableKind::SetTableOptions(SetTableOptions {
                 table_options: options.into_iter().map(Into::into).collect(),
             })
         }
         AlterTableOperation::UnsetTableOptions { keys } => {
-            Kind::UnsetTableOptions(UnsetTableOptions { keys })
+            AlterTableKind::UnsetTableOptions(UnsetTableOptions { keys })
         }
         AlterTableOperation::SetColumnFulltext {
             column_name,
@@ -579,10 +582,8 @@ pub fn to_alter_database_expr(
                 set_database_options: options,
             })
         }
-        AlterDatabaseOperation::UnsetDatabaseOption { options } => {
-            AlterDatabaseKind::UnsetDatabaseOptions(UnsetDatabaseOptions {
-                unset_database_options: options,
-            })
+        AlterDatabaseOperation::UnsetDatabaseOption { keys } => {
+            AlterDatabaseKind::UnsetDatabaseOptions(UnsetDatabaseOptions { keys })
         }
     };
 
@@ -688,6 +689,7 @@ pub fn to_create_flow_task_expr(
 
 #[cfg(test)]
 mod tests {
+    use api::v1::{SetDatabaseOptions, UnsetDatabaseOptions};
     use datatypes::value::Value;
     use session::context::{QueryContext, QueryContextBuilder};
     use sql::dialect::GreptimeDbDialect;
@@ -815,10 +817,10 @@ mod tests {
         };
 
         assert_eq!(2, set_database_options.len());
-        assert_eq!("key1", set_database_options.get(0).unwrap().key);
-        assert_eq!("value1", set_database_options.get(0).unwrap().value);
-        assert_eq!("key2", set_database_options.get(1).unwrap().key);
-        assert_eq!("value2", set_database_options.get(1).unwrap().value);
+        assert_eq!("key1", set_database_options[0].key);
+        assert_eq!("value1", set_database_options[0].value);
+        assert_eq!("key2", set_database_options[1].key);
+        assert_eq!("value2", set_database_options[1].value);
 
         let sql = "ALTER DATABASE greptime UNSET key1, key2;";
         let stmt =
@@ -834,16 +836,13 @@ mod tests {
         let expr = to_alter_database_expr(alter_database, &QueryContext::arc()).unwrap();
         let kind = expr.kind.unwrap();
 
-        let AlterDatabaseKind::UnsetDatabaseOptions(UnsetDatabaseOptions {
-            unset_database_options,
-        }) = kind
-        else {
+        let AlterDatabaseKind::UnsetDatabaseOptions(UnsetDatabaseOptions { keys }) = kind else {
             unreachable!()
         };
 
-        assert_eq!(2, unset_database_options.len());
-        assert!(unset_database_options.contains(&"key1".to_string()));
-        assert!(unset_database_options.contains(&"key2".to_string()));
+        assert_eq!(2, keys.len());
+        assert!(keys.contains(&"key1".to_string()));
+        assert!(keys.contains(&"key2".to_string()));
 
         let sql = "ALTER TABLE monitor add column ts TIMESTAMP default '2024-01-30T00:01:01';";
         let stmt =

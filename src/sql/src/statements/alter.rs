@@ -13,10 +13,8 @@
 // limitations under the License.
 
 use std::fmt::{Debug, Display};
-use std::time::Duration;
 
 use api::v1;
-use api::v1::Option as PbOption;
 use common_query::AddColumnLocation;
 use datatypes::schema::FulltextOptions;
 use itertools::Itertools;
@@ -202,7 +200,7 @@ impl Display for AlterDatabase {
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub enum AlterDatabaseOperation {
     SetDatabaseOption { options: Vec<KeyValueOption> },
-    UnsetDatabaseOption { options: Vec<String> },
+    UnsetDatabaseOption { keys: Vec<String> },
 }
 
 impl Display for AlterDatabaseOperation {
@@ -224,8 +222,8 @@ impl Display for AlterDatabaseOperation {
 
                 Ok(())
             }
-            AlterDatabaseOperation::UnsetDatabaseOption { options } => {
-                let keys = options.iter().map(|key| format!("'{key}'")).join(",");
+            AlterDatabaseOperation::UnsetDatabaseOption { keys } => {
+                let keys = keys.iter().map(|key| format!("'{key}'")).join(",");
                 write!(f, "UNSET {keys}")?;
 
                 Ok(())

@@ -19,8 +19,8 @@ use std::sync::Arc;
 use api::v1::alter_table_expr::Kind;
 use api::v1::region::{region_request, RegionRequest};
 use api::v1::{
-    AddColumn, AddColumns, AlterExpr, ColumnDataType, ColumnDef as PbColumnDef, DropColumn,
-    DropColumns, SemanticType, SetTableOptions, TableOption,
+    AddColumn, AddColumns, AlterTableExpr, ColumnDataType, ColumnDef as PbColumnDef, DropColumn,
+    DropColumns, SemanticType, SetTableOptions,
 };
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
@@ -389,13 +389,8 @@ async fn test_on_update_table_options() {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
-<<<<<<< HEAD
             kind: Some(Kind::SetTableOptions(SetTableOptions {
-                table_options: vec![TableOption {
-=======
-            kind: Some(Kind::ChangeTableOptions(ChangeTableOptions {
-                change_table_options: vec![AlterOption {
->>>>>>> 6248898995 (feat: alter databaset ttl)
+                table_options: vec![api::v1::Option {
                     key: TTL_KEY.to_string(),
                     value: "1d".to_string(),
                 }],
