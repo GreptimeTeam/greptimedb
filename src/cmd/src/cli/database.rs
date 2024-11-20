@@ -30,7 +30,7 @@ pub(crate) struct DatabaseClient {
     addr: String,
     catalog: String,
     auth_header: Option<String>,
-    timeout: Option<Duration>,
+    timeout: Duration,
 }
 
 impl DatabaseClient {
@@ -38,7 +38,7 @@ impl DatabaseClient {
         addr: String,
         catalog: String,
         auth_basic: Option<String>,
-        timeout: Option<Duration>,
+        timeout: Duration,
     ) -> Self {
         let auth_header = if let Some(basic) = auth_basic {
             let encoded = general_purpose::STANDARD.encode(basic);
@@ -73,12 +73,11 @@ impl DatabaseClient {
         if let Some(ref auth) = self.auth_header {
             request = request.header("Authorization", auth);
         }
-        if let Some(ref timeout) = self.timeout {
-            request = request.header(
-                GREPTIME_DB_HEADER_TIMEOUT,
-                format_duration(*timeout).to_string(),
-            );
-        }
+
+        request = request.header(
+            GREPTIME_DB_HEADER_TIMEOUT,
+            format_duration(self.timeout).to_string(),
+        );
 
         let response = request.send().await.with_context(|_| HttpQuerySqlSnafu {
             reason: format!("bad url: {}", url),
