@@ -64,7 +64,7 @@ impl Function for ParseVectorFunction {
             let value = column.get(i).as_string();
             if let Some(value) = value {
                 let res = parse_string_to_vector_type_value(&value, None)
-                    .context(InvalidVectorStringSnafu)?;
+                    .context(InvalidVectorStringSnafu { vec_str: &value })?;
                 result.push(Some(&res));
             } else {
                 result.push_null();

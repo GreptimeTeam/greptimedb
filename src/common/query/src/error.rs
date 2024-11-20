@@ -246,8 +246,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid vector string"))]
+    #[snafu(display("Invalid vector string: {}", vec_str))]
     InvalidVectorString {
+        vec_str: String,
         source: DataTypeError,
         #[snafu(implicit)]
         location: Location,
