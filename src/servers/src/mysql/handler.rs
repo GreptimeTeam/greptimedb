@@ -189,8 +189,6 @@ impl MysqlInstanceShim {
             dummy_params(param_num)?
         };
 
-        debug_assert_eq!(params.len(), param_num - 1);
-
         let columns = schema
             .as_ref()
             .map(|schema| {
@@ -205,14 +203,26 @@ impl MysqlInstanceShim {
             .transpose()?
             .unwrap_or_default();
 
-        self.save_plan(
-            SqlPlan {
-                query: query.to_string(),
-                plan,
-                schema,
-            },
-            stmt_key,
-        );
+        // DataFusion may optimize the plan so that some parameters are not used.
+        if params.len() != param_num {
+            self.save_plan(
+                SqlPlan {
+                    query: query.to_string(),
+                    plan: None,
+                    schema: None,
+                },
+                stmt_key,
+            );
+        } else {
+            self.save_plan(
+                SqlPlan {
+                    query: query.to_string(),
+                    plan,
+                    schema,
+                },
+                stmt_key,
+            );
+        }
 
         Ok((params, columns))
     }
