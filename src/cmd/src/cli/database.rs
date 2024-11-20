@@ -73,12 +73,11 @@ impl DatabaseClient {
         if let Some(ref auth) = self.auth_header {
             request = request.header("Authorization", auth);
         }
-        if !self.timeout.is_zero() {
-            request = request.header(
-                GREPTIME_DB_HEADER_TIMEOUT,
-                format_duration(self.timeout).to_string(),
-            );
-        }
+
+        request = request.header(
+            GREPTIME_DB_HEADER_TIMEOUT,
+            format_duration(self.timeout).to_string(),
+        );
 
         let response = request.send().await.with_context(|_| HttpQuerySqlSnafu {
             reason: format!("bad url: {}", url),

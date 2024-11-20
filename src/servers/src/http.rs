@@ -1119,6 +1119,29 @@ mod test {
         assert_eq!(res.status(), StatusCode::REQUEST_TIMEOUT);
         let elapsed = now.elapsed();
         assert!(elapsed > Duration::from_millis(15));
+
+        tokio::time::timeout(
+            Duration::from_millis(15),
+            client
+                .get("/test/timeout")
+                .header(GREPTIME_DB_HEADER_TIMEOUT, "0s")
+                .send(),
+        )
+        .await
+        .unwrap_err();
+
+        tokio::time::timeout(
+            Duration::from_millis(15),
+            client
+                .get("/test/timeout")
+                .header(
+                    GREPTIME_DB_HEADER_TIMEOUT,
+                    humantime::format_duration(Duration::default()).to_string(),
+                )
+                .send(),
+        )
+        .await
+        .unwrap_err();
     }
 
     #[tokio::test]

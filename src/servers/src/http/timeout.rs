@@ -21,7 +21,7 @@ use axum::body::Body;
 use axum::http::Request;
 use axum::response::Response;
 use pin_project::pin_project;
-use tokio::time::Sleep;
+use tokio::time::{Instant, Sleep};
 use tower::timeout::error::Elapsed;
 use tower::{BoxError, Layer, Service};
 
@@ -128,7 +128,7 @@ where
     }
 
     fn call(&mut self, request: Request<Body>) -> Self::Future {
-        let user_timeout = request
+        let timeout = request
             .headers()
             .get(GREPTIME_DB_HEADER_TIMEOUT)
             .and_then(|value| {
@@ -136,9 +136,17 @@ where
                     .to_str()
                     .ok()
                     .and_then(|value| humantime::parse_duration(value).ok())
-            });
+            })
+            .unwrap_or(self.default_timeout);
         let response = self.inner.call(request);
-        let sleep = tokio::time::sleep(user_timeout.unwrap_or(self.default_timeout));
-        ResponseFuture::new(response, sleep)
+
+        if timeout.is_zero() {
+            // 30 years. See `Instant::far_future`.
+            let far_future = Instant::now() + Duration::from_secs(86400 * 365 * 30);
+            ResponseFuture::new(response, tokio::time::sleep_until(far_future))
+        } else {
+            let sleep = tokio::time::sleep(timeout);
+            ResponseFuture::new(response, sleep)
+        }
     }
 }
