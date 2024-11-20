@@ -25,7 +25,7 @@ EXECUTE stmt USING 'a';
 Failed to parse query result, err: MySqlError { ERROR 1815 (HY000): (EngineExecuteQuery): Cast error: Cannot cast string 'a' to value of Int32 type }
 
 -- SQLNESS PROTOCOL MYSQL
-DEALLOCATE PREPARE stmt;
+DEALLOCATE stmt;
 
 affected_rows: 0
 
@@ -45,7 +45,7 @@ EXECUTE stmt USING 'a';
 affected_rows: 0
 
 -- SQLNESS PROTOCOL MYSQL
-DEALLOCATE PREPARE stmt;
+DEALLOCATE stmt;
 
 affected_rows: 0
 
@@ -64,4 +64,9 @@ EXECUTE stmt USING 1, 'hello';
 +----------+---------------+
 | 1        | hello         |
 +----------+---------------+
+
+-- SQLNESS PROTOCOL MYSQL
+DEALLOCATE stmt;
+
+affected_rows: 0
 
