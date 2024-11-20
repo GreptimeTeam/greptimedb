@@ -88,7 +88,7 @@ pub struct ExportCommand {
     /// The timeout of invoking the database.
     ///
     /// It is used to override the server-side timeout setting.
-    /// Sets `0s` to follow server-side default timeout.
+    /// Sets `0s` to disable server-side default timeout.
     #[clap(long, value_parser = humantime::parse_duration)]
     timeout: Duration,
 }
