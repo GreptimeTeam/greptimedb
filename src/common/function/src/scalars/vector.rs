@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod convert;
 mod distance;
 
 use std::sync::Arc;
-
-use distance::{CosDistanceFunction, DotProductFunction, L2SqDistanceFunction};
 
 use crate::function_registry::FunctionRegistry;
 
@@ -24,8 +23,13 @@ pub(crate) struct VectorFunction;
 
 impl VectorFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(CosDistanceFunction));
-        registry.register(Arc::new(DotProductFunction));
-        registry.register(Arc::new(L2SqDistanceFunction));
+        // conversion
+        registry.register(Arc::new(convert::ParseVectorFunction));
+        registry.register(Arc::new(convert::VectorToStringFunction));
+
+        // distance
+        registry.register(Arc::new(distance::CosDistanceFunction));
+        registry.register(Arc::new(distance::DotProductFunction));
+        registry.register(Arc::new(distance::L2SqDistanceFunction));
     }
 }

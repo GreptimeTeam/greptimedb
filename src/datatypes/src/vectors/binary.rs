@@ -80,7 +80,7 @@ impl BinaryVector {
             let v = if let Some(binary) = binary {
                 let bytes_size = dim as usize * std::mem::size_of::<f32>();
                 if let Ok(s) = String::from_utf8(binary.to_vec()) {
-                    let v = parse_string_to_vector_type_value(&s, dim)?;
+                    let v = parse_string_to_vector_type_value(&s, Some(dim))?;
                     Some(v)
                 } else if binary.len() == dim as usize * std::mem::size_of::<f32>() {
                     Some(binary.to_vec())

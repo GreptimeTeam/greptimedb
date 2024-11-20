@@ -102,7 +102,7 @@ pub fn vector_type_value_to_string(val: &[u8], dim: u32) -> Result<String> {
 
 /// Parses a string to a vector type value
 /// Valid input format: "[1.0,2.0,3.0]", "[1.0, 2.0, 3.0]"
-pub fn parse_string_to_vector_type_value(s: &str, dim: u32) -> Result<Vec<u8>> {
+pub fn parse_string_to_vector_type_value(s: &str, dim: Option<u32>) -> Result<Vec<u8>> {
     // Trim the brackets
     let trimmed = s.trim();
     if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
@@ -115,7 +115,7 @@ pub fn parse_string_to_vector_type_value(s: &str, dim: u32) -> Result<Vec<u8>> {
     let content = trimmed[1..trimmed.len() - 1].trim();
 
     if content.is_empty() {
-        if dim != 0 {
+        if dim.map_or(false, |d| d != 0) {
             return InvalidVectorSnafu {
                 msg: format!("Failed to parse {s} to Vector value: wrong dimension"),
             }
@@ -139,7 +139,7 @@ pub fn parse_string_to_vector_type_value(s: &str, dim: u32) -> Result<Vec<u8>> {
         .collect::<Result<Vec<f32>>>()?;
 
     // Check dimension
-    if elements.len() != dim as usize {
+    if dim.map_or(false, |d| d as usize != elements.len()) {
         return InvalidVectorSnafu {
             msg: format!("Failed to parse {s} to Vector value: wrong dimension"),
         }
@@ -180,7 +180,7 @@ mod tests {
         ];
 
         for (s, expected) in cases.iter() {
-            let val = parse_string_to_vector_type_value(s, dim).unwrap();
+            let val = parse_string_to_vector_type_value(s, Some(dim)).unwrap();
             let s = vector_type_value_to_string(&val, dim).unwrap();
             assert_eq!(s, *expected);
         }
@@ -188,7 +188,7 @@ mod tests {
         let dim = 0;
         let cases = [("[]", "[]"), ("[ ]", "[]"), ("[  ]", "[]")];
         for (s, expected) in cases.iter() {
-            let val = parse_string_to_vector_type_value(s, dim).unwrap();
+            let val = parse_string_to_vector_type_value(s, Some(dim)).unwrap();
             let s = vector_type_value_to_string(&val, dim).unwrap();
             assert_eq!(s, *expected);
         }
@@ -211,15 +211,15 @@ mod tests {
     fn test_parse_string_to_vector_type_value_not_properly_enclosed_in_brackets() {
         let dim = 3;
         let s = "1.0,2.0,3.0";
-        let res = parse_string_to_vector_type_value(s, dim);
+        let res = parse_string_to_vector_type_value(s, Some(dim));
         assert!(res.is_err());
 
         let s = "[1.0,2.0,3.0";
-        let res = parse_string_to_vector_type_value(s, dim);
+        let res = parse_string_to_vector_type_value(s, Some(dim));
         assert!(res.is_err());
 
         let s = "1.0,2.0,3.0]";
-        let res = parse_string_to_vector_type_value(s, dim);
+        let res = parse_string_to_vector_type_value(s, Some(dim));
         assert!(res.is_err());
     }
 
@@ -227,7 +227,7 @@ mod tests {
     fn test_parse_string_to_vector_type_value_wrong_dimension() {
         let dim = 3;
         let s = "[1.0,2.0]";
-        let res = parse_string_to_vector_type_value(s, dim);
+        let res = parse_string_to_vector_type_value(s, Some(dim));
         assert!(res.is_err());
     }
 
@@ -235,7 +235,7 @@ mod tests {
     fn test_parse_string_to_vector_type_value_elements_are_not_all_float32() {
         let dim = 3;
         let s = "[1.0,2.0,ah]";
-        let res = parse_string_to_vector_type_value(s, dim);
+        let res = parse_string_to_vector_type_value(s, Some(dim));
         assert!(res.is_err());
     }
 }
