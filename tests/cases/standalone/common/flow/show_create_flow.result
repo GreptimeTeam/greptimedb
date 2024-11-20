@@ -322,3 +322,82 @@ drop table numbers_input_show;
 
 Affected Rows: 0
 
+CREATE TABLE numbers_input_show (
+    number INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(number),
+    TIME INDEX(ts)
+);
+
+Affected Rows: 0
+
+create table out_num_cnt_show (
+    number INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP TIME INDEX,    
+    PRIMARY KEY(number),
+);
+
+Affected Rows: 0
+
+CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number FROM numbers_input_show where number > 10;
+
+Affected Rows: 0
+
+INSERT INTO numbers_input_show VALUES (10, 0),(15, 1),(16, 2);
+
+Affected Rows: 3
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('filter_numbers_show');
+
++-----------------------------------------+
+| ADMIN FLUSH_FLOW('filter_numbers_show') |
++-----------------------------------------+
+|  FLOW_FLUSHED  |
++-----------------------------------------+
+
+SELECT number, ts FROM out_num_cnt_show;
+
++--------+-------------------------+
+| number | ts                      |
++--------+-------------------------+
+| 15     | 2024-11-20T10:40:13.631 |
+| 16     | 2024-11-20T10:40:13.631 |
++--------+-------------------------+
+
+-- should mismatch once insert
+CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number AS n1, number AS n2, number AS n3 FROM numbers_input_show where number > 15;
+
+Affected Rows: 0
+
+INSERT INTO numbers_input_show VALUES (10, 6),(15, 7),(18, 3);
+
+Affected Rows: 3
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('filter_numbers_show');
+
+Error: 1000(Unknown), Internal error: 1000
+
+-- sink table stays the same since the flow error out due to column mismatch
+SELECT number, ts FROM out_num_cnt_show;
+
++--------+-------------------------+
+| number | ts                      |
++--------+-------------------------+
+| 15     | 2024-11-20T10:40:13.631 |
+| 16     | 2024-11-20T10:40:13.631 |
++--------+-------------------------+
+
+DROP FLOW filter_numbers_show;
+
+Affected Rows: 0
+
+drop table out_num_cnt_show;
+
+Affected Rows: 0
+
+drop table numbers_input_show;
+
+Affected Rows: 0
+
