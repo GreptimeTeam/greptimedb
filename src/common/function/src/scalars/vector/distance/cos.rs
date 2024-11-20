@@ -17,7 +17,7 @@ use nalgebra::DVectorView;
 /// Calculates the cos distance between two vectors.
 ///
 /// **Note:** Must ensure that the length of the two vectors are the same.
-pub fn cos_scalar(lhs: &[f32], rhs: &[f32]) -> f32 {
+pub fn cos(lhs: &[f32], rhs: &[f32]) -> f32 {
     let lhs_vec = DVectorView::from_slice(lhs, lhs.len());
     let rhs_vec = DVectorView::from_slice(rhs, rhs.len());
 
@@ -50,38 +50,38 @@ mod tests {
     fn test_cos_scalar() {
         let lhs = vec![1.0, 2.0, 3.0];
         let rhs = vec![1.0, 2.0, 3.0];
-        assert_relative_eq!(cos_scalar(&lhs, &rhs), 0.0, epsilon = 1e-2);
+        assert_relative_eq!(cos(&lhs, &rhs), 0.0, epsilon = 1e-2);
 
         let lhs = vec![1.0, 2.0, 3.0];
         let rhs = vec![4.0, 5.0, 6.0];
-        assert_relative_eq!(cos_scalar(&lhs, &rhs), 0.025, epsilon = 1e-2);
+        assert_relative_eq!(cos(&lhs, &rhs), 0.025, epsilon = 1e-2);
 
         let lhs = vec![1.0, 2.0, 3.0];
         let rhs = vec![7.0, 8.0, 9.0];
-        assert_relative_eq!(cos_scalar(&lhs, &rhs), 0.04, epsilon = 1e-2);
+        assert_relative_eq!(cos(&lhs, &rhs), 0.04, epsilon = 1e-2);
 
         let lhs = vec![0.0, 0.0, 0.0];
         let rhs = vec![1.0, 2.0, 3.0];
-        assert_relative_eq!(cos_scalar(&lhs, &rhs), 1.0, epsilon = 1e-2);
+        assert_relative_eq!(cos(&lhs, &rhs), 1.0, epsilon = 1e-2);
 
         let lhs = vec![0.0, 0.0, 0.0];
         let rhs = vec![4.0, 5.0, 6.0];
-        assert_relative_eq!(cos_scalar(&lhs, &rhs), 1.0, epsilon = 1e-2);
+        assert_relative_eq!(cos(&lhs, &rhs), 1.0, epsilon = 1e-2);
 
         let lhs = vec![0.0, 0.0, 0.0];
         let rhs = vec![7.0, 8.0, 9.0];
-        assert_relative_eq!(cos_scalar(&lhs, &rhs), 1.0, epsilon = 1e-2);
+        assert_relative_eq!(cos(&lhs, &rhs), 1.0, epsilon = 1e-2);
 
         let lhs = vec![7.0, 8.0, 9.0];
         let rhs = vec![1.0, 2.0, 3.0];
-        assert_relative_eq!(cos_scalar(&lhs, &rhs), 0.04, epsilon = 1e-2);
+        assert_relative_eq!(cos(&lhs, &rhs), 0.04, epsilon = 1e-2);
 
         let lhs = vec![7.0, 8.0, 9.0];
         let rhs = vec![4.0, 5.0, 6.0];
-        assert_relative_eq!(cos_scalar(&lhs, &rhs), 0.0, epsilon = 1e-2);
+        assert_relative_eq!(cos(&lhs, &rhs), 0.0, epsilon = 1e-2);
 
         let lhs = vec![7.0, 8.0, 9.0];
         let rhs = vec![7.0, 8.0, 9.0];
-        assert_relative_eq!(cos_scalar(&lhs, &rhs), 0.0, epsilon = 1e-2);
+        assert_relative_eq!(cos(&lhs, &rhs), 0.0, epsilon = 1e-2);
     }
 }

@@ -125,9 +125,9 @@ macro_rules! define_distance_function {
     }
 }
 
-define_distance_function!(CosDistanceFunction, "vec_cos_distance", cos::cos_scalar);
-define_distance_function!(L2SqDistanceFunction, "vec_l2sq_distance", l2sq::l2sq_scalar);
-define_distance_function!(DotProductFunction, "vec_dot_product", dot::dot_scalar);
+define_distance_function!(CosDistanceFunction, "vec_cos_distance", cos::cos);
+define_distance_function!(L2SqDistanceFunction, "vec_l2sq_distance", l2sq::l2sq);
+define_distance_function!(DotProductFunction, "vec_dot_product", dot::dot);
 
 /// Parse a vector value if the value is a constant string.
 fn parse_if_constant_string(arg: &Arc<dyn Vector>) -> Result<Option<Vec<f32>>> {

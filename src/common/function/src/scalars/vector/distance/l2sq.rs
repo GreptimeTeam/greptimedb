@@ -17,7 +17,7 @@ use nalgebra::DVectorView;
 /// Calculates the squared L2 distance between two vectors.
 ///
 /// **Note:** Must ensure that the length of the two vectors are the same.
-pub fn l2sq_scalar(lhs: &[f32], rhs: &[f32]) -> f32 {
+pub fn l2sq(lhs: &[f32], rhs: &[f32]) -> f32 {
     let lhs = DVectorView::from_slice(lhs, lhs.len());
     let rhs = DVectorView::from_slice(rhs, rhs.len());
 
@@ -34,38 +34,38 @@ mod tests {
     fn test_l2sq_scalar() {
         let lhs = vec![1.0, 2.0, 3.0];
         let rhs = vec![1.0, 2.0, 3.0];
-        assert_relative_eq!(l2sq_scalar(&lhs, &rhs), 0.0, epsilon = 1e-2);
+        assert_relative_eq!(l2sq(&lhs, &rhs), 0.0, epsilon = 1e-2);
 
         let lhs = vec![1.0, 2.0, 3.0];
         let rhs = vec![4.0, 5.0, 6.0];
-        assert_relative_eq!(l2sq_scalar(&lhs, &rhs), 27.0, epsilon = 1e-2);
+        assert_relative_eq!(l2sq(&lhs, &rhs), 27.0, epsilon = 1e-2);
 
         let lhs = vec![1.0, 2.0, 3.0];
         let rhs = vec![7.0, 8.0, 9.0];
-        assert_relative_eq!(l2sq_scalar(&lhs, &rhs), 108.0, epsilon = 1e-2);
+        assert_relative_eq!(l2sq(&lhs, &rhs), 108.0, epsilon = 1e-2);
 
         let lhs = vec![0.0, 0.0, 0.0];
         let rhs = vec![1.0, 2.0, 3.0];
-        assert_relative_eq!(l2sq_scalar(&lhs, &rhs), 14.0, epsilon = 1e-2);
+        assert_relative_eq!(l2sq(&lhs, &rhs), 14.0, epsilon = 1e-2);
 
         let lhs = vec![0.0, 0.0, 0.0];
         let rhs = vec![4.0, 5.0, 6.0];
-        assert_relative_eq!(l2sq_scalar(&lhs, &rhs), 77.0, epsilon = 1e-2);
+        assert_relative_eq!(l2sq(&lhs, &rhs), 77.0, epsilon = 1e-2);
 
         let lhs = vec![0.0, 0.0, 0.0];
         let rhs = vec![7.0, 8.0, 9.0];
-        assert_relative_eq!(l2sq_scalar(&lhs, &rhs), 194.0, epsilon = 1e-2);
+        assert_relative_eq!(l2sq(&lhs, &rhs), 194.0, epsilon = 1e-2);
 
         let lhs = vec![7.0, 8.0, 9.0];
         let rhs = vec![1.0, 2.0, 3.0];
-        assert_relative_eq!(l2sq_scalar(&lhs, &rhs), 108.0, epsilon = 1e-2);
+        assert_relative_eq!(l2sq(&lhs, &rhs), 108.0, epsilon = 1e-2);
 
         let lhs = vec![7.0, 8.0, 9.0];
         let rhs = vec![4.0, 5.0, 6.0];
-        assert_relative_eq!(l2sq_scalar(&lhs, &rhs), 27.0, epsilon = 1e-2);
+        assert_relative_eq!(l2sq(&lhs, &rhs), 27.0, epsilon = 1e-2);
 
         let lhs = vec![7.0, 8.0, 9.0];
         let rhs = vec![7.0, 8.0, 9.0];
-        assert_relative_eq!(l2sq_scalar(&lhs, &rhs), 0.0, epsilon = 1e-2);
+        assert_relative_eq!(l2sq(&lhs, &rhs), 0.0, epsilon = 1e-2);
     }
 }
