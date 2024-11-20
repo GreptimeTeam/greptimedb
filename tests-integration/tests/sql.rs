@@ -215,7 +215,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         let dt: DateTime<Utc> = row.get("dt");
         let bytes: Vec<u8> = row.get("b");
         let json: serde_json::Value = row.get("j");
-        let vector: String = row.get("v");
+        let vector: Vec<u8> = row.get("v");
         assert_eq!(ret, i as i64);
         let expected_d = NaiveDate::from_yo_opt(2015, 100).unwrap();
         assert_eq!(expected_d, d);
@@ -242,7 +242,13 @@ pub async fn test_mysql_crud(store_type: StorageType) {
             }
         });
         assert_eq!(json, expected_j);
-        assert_eq!(vector, "[1,2,3]");
+        assert_eq!(
+            vector,
+            [1.0f32, 2.0, 3.0]
+                .iter()
+                .flat_map(|x| x.to_le_bytes())
+                .collect::<Vec<u8>>()
+        );
     }
 
     let rows = sqlx::query("select i from demo where i=?")

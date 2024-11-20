@@ -27,9 +27,7 @@ use datafusion_expr::LogicalPlan;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::Schema;
-use datatypes::types::{
-    json_type_value_to_string, vector_type_value_to_string, IntervalType, TimestampType,
-};
+use datatypes::types::{json_type_value_to_string, IntervalType, TimestampType};
 use datatypes::value::ListValue;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::results::{DataRowEncoder, FieldInfo};
@@ -178,7 +176,7 @@ fn encode_array(
                 .collect::<PgWireResult<Vec<Option<f64>>>>()?;
             builder.encode_field(&array)
         }
-        &ConcreteDataType::Binary(_) => {
+        &ConcreteDataType::Binary(_) | &ConcreteDataType::Vector(_) => {
             let bytea_output = query_ctx.configuration_parameter().postgres_bytea_output();
 
             match *bytea_output {
@@ -370,24 +368,6 @@ fn encode_array(
                 .collect::<PgWireResult<Vec<Option<String>>>>()?;
             builder.encode_field(&array)
         }
-        &ConcreteDataType::Vector(d) => {
-            let array = value_list
-                .items()
-                .iter()
-                .map(|v| match v {
-                    Value::Null => Ok(None),
-                    Value::Binary(v) => {
-                        let s = vector_type_value_to_string(v, d.dim)
-                            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-                        Ok(Some(s))
-                    }
-                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
-                        err_msg: format!("Invalid list item type, find {v:?}, expected vector",),
-                    }))),
-                })
-                .collect::<PgWireResult<Vec<Option<String>>>>()?;
-            builder.encode_field(&array)
-        }
         _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
             err_msg: format!(
                 "cannot write array type {:?} in postgres protocol: unimplemented",
@@ -420,11 +400,6 @@ pub(super) fn encode_value(
         Value::Binary(v) => match datatype {
             ConcreteDataType::Json(j) => {
                 let s = json_type_value_to_string(v, &j.format)
-                    .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-                builder.encode_field(&s)
-            }
-            ConcreteDataType::Vector(d) => {
-                let s = vector_type_value_to_string(v, d.dim)
                     .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
                 builder.encode_field(&s)
             }
@@ -503,7 +478,7 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         &ConcreteDataType::Int64(_) | &ConcreteDataType::UInt64(_) => Ok(Type::INT8),
         &ConcreteDataType::Float32(_) => Ok(Type::FLOAT4),
         &ConcreteDataType::Float64(_) => Ok(Type::FLOAT8),
-        &ConcreteDataType::Binary(_) => Ok(Type::BYTEA),
+        &ConcreteDataType::Binary(_) | &ConcreteDataType::Vector(_) => Ok(Type::BYTEA),
         &ConcreteDataType::String(_) => Ok(Type::VARCHAR),
         &ConcreteDataType::Date(_) => Ok(Type::DATE),
         &ConcreteDataType::DateTime(_) | &ConcreteDataType::Timestamp(_) => Ok(Type::TIMESTAMP),
@@ -546,7 +521,6 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
             }
             .fail()
         }
-        &ConcreteDataType::Vector(_) => Ok(Type::FLOAT4_ARRAY),
     }
 }
 

@@ -245,6 +245,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid vector string: {}", vec_str))]
+    InvalidVectorString {
+        vec_str: String,
+        source: DataTypeError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -273,7 +281,8 @@ impl ErrorExt for Error {
             | Error::IntoVector { source, .. }
             | Error::FromScalarValue { source, .. }
             | Error::ConvertArrowSchema { source, .. }
-            | Error::FromArrowArray { source, .. } => source.status_code(),
+            | Error::FromArrowArray { source, .. }
+            | Error::InvalidVectorString { source, .. } => source.status_code(),
 
             Error::MissingTableMutationHandler { .. }
             | Error::MissingProcedureServiceHandler { .. }

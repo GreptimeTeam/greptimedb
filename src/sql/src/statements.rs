@@ -133,7 +133,7 @@ fn parse_string_to_value(
             Ok(Value::Binary(v.into()))
         }
         ConcreteDataType::Vector(d) => {
-            let v = parse_string_to_vector_type_value(&s, d.dim).context(DatatypeSnafu)?;
+            let v = parse_string_to_vector_type_value(&s, Some(d.dim)).context(DatatypeSnafu)?;
             Ok(Value::Binary(v.into()))
         }
         _ => {
