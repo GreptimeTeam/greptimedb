@@ -75,7 +75,7 @@ pub struct ImportCommand {
     /// It is used to override the server-side timeout setting.
     /// Sets `0s` to disable server-side default timeout.
     #[clap(long, value_parser = humantime::parse_duration)]
-    timeout: Duration,
+    timeout: Option<Duration>,
 }
 
 impl ImportCommand {
@@ -85,7 +85,8 @@ impl ImportCommand {
             self.addr.clone(),
             catalog.clone(),
             self.auth_basic.clone(),
-            self.timeout,
+            // Treats `None` as `0s` to disable server-side default timeout.
+            self.timeout.unwrap_or_default(),
         );
 
         Ok(Instance::new(
