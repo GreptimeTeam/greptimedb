@@ -23,7 +23,7 @@ mod test {
     use api::v1::query_request::Query;
     use api::v1::region::QueryRequest as RegionQueryRequest;
     use api::v1::{
-        alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType,
+        alter_table_expr, AddColumn, AddColumns, AlterTableExpr, Column, ColumnDataType,
         ColumnDataTypeExtension, ColumnDef, CreateDatabaseExpr, CreateTableExpr, DdlRequest,
         DeleteRequest, DeleteRequests, DropTableExpr, InsertRequest, InsertRequests, QueryRequest,
         SemanticType, VectorTypeExtension,
@@ -116,11 +116,11 @@ mod test {
         assert!(matches!(output.data, OutputData::AffectedRows(0)));
 
         let request = Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::Alter(AlterExpr {
+            expr: Some(DdlExpr::AlterTable(AlterTableExpr {
                 catalog_name: "greptime".to_string(),
                 schema_name: "database_created_through_grpc".to_string(),
                 table_name: "table_created_through_grpc".to_string(),
-                kind: Some(alter_expr::Kind::AddColumns(AddColumns {
+                kind: Some(alter_table_expr::Kind::AddColumns(AddColumns {
                     add_columns: vec![AddColumn {
                         column_def: Some(ColumnDef {
                             name: "b".to_string(),

@@ -527,13 +527,14 @@ fn ddl_request_type(request: &DdlRequest) -> &'static str {
     match request.expr {
         Some(Expr::CreateDatabase(_)) => "ddl.create_database",
         Some(Expr::CreateTable(_)) => "ddl.create_table",
-        Some(Expr::Alter(_)) => "ddl.alter",
+        Some(Expr::AlterTable(_)) => "ddl.alter_table",
         Some(Expr::DropTable(_)) => "ddl.drop_table",
         Some(Expr::TruncateTable(_)) => "ddl.truncate_table",
         Some(Expr::CreateFlow(_)) => "ddl.create_flow",
         Some(Expr::DropFlow(_)) => "ddl.drop_flow",
         Some(Expr::CreateView(_)) => "ddl.create_view",
         Some(Expr::DropView(_)) => "ddl.drop_view",
+        Some(Expr::AlterDatabase(_)) => "ddl.alter_database",
         None => "ddl.empty",
     }
 }

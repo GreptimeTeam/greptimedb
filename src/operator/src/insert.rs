@@ -15,11 +15,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::v1::alter_expr::Kind;
+use api::v1::alter_table_expr::Kind;
 use api::v1::region::{InsertRequests as RegionInsertRequests, RegionRequestHeader};
 use api::v1::{
-    AlterExpr, ColumnDataType, ColumnSchema, CreateTableExpr, InsertRequests, RowInsertRequest,
-    RowInsertRequests, SemanticType,
+    AlterTableExpr, ColumnDataType, ColumnSchema, CreateTableExpr, InsertRequests,
+    RowInsertRequest, RowInsertRequests, SemanticType,
 };
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
@@ -692,7 +692,7 @@ impl Inserter {
         req: &RowInsertRequest,
         table: &TableRef,
         ctx: &QueryContextRef,
-    ) -> Result<Option<AlterExpr>> {
+    ) -> Result<Option<AlterTableExpr>> {
         let catalog_name = ctx.current_catalog();
         let schema_name = ctx.current_schema();
         let table_name = table.table_info().name.clone();
@@ -705,7 +705,7 @@ impl Inserter {
             return Ok(None);
         };
 
-        Ok(Some(AlterExpr {
+        Ok(Some(AlterTableExpr {
             catalog_name: catalog_name.to_string(),
             schema_name: schema_name.to_string(),
             table_name: table_name.to_string(),

@@ -492,6 +492,7 @@ pub fn check_permission(
         Statement::CreateDatabase(_)
         | Statement::ShowDatabases(_)
         | Statement::DropDatabase(_)
+        | Statement::AlterDatabase(_)
         | Statement::DropFlow(_)
         | Statement::Use(_) => {}
         Statement::ShowCreateDatabase(stmt) => {
@@ -516,7 +517,7 @@ pub fn check_permission(
         Statement::CreateView(stmt) => {
             validate_param(&stmt.name, query_ctx)?;
         }
-        Statement::Alter(stmt) => {
+        Statement::AlterTable(stmt) => {
             validate_param(stmt.table_name(), query_ctx)?;
         }
         // set/show variable now only alter/show variable in session

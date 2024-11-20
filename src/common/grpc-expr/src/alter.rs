@@ -14,11 +14,11 @@
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
-use api::v1::alter_expr::Kind;
+use api::v1::alter_table_expr::Kind;
 use api::v1::column_def::as_fulltext_option;
 use api::v1::{
-    column_def, AddColumnLocation as Location, AlterExpr, Analyzer, CreateTableExpr, DropColumns,
-    ModifyColumnTypes, RenameTable, SemanticType,
+    column_def, AddColumnLocation as Location, AlterTableExpr, Analyzer, CreateTableExpr,
+    DropColumns, ModifyColumnTypes, RenameTable, SemanticType,
 };
 use common_query::AddColumnLocation;
 use datatypes::schema::{ColumnSchema, FulltextOptions, RawSchema};
@@ -36,9 +36,9 @@ use crate::error::{
 const LOCATION_TYPE_FIRST: i32 = LocationType::First as i32;
 const LOCATION_TYPE_AFTER: i32 = LocationType::After as i32;
 
-/// Convert an [`AlterExpr`] to an [`AlterTableRequest`]
-pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<AlterTableRequest> {
-    let catalog_name = expr.catalog_name;
+/// Convert an [`AlterTableExpr`] to an [`AlterTableRequest`]
+pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<AlterTableRequest> {
+    let alter_table_expr = expr.catalog_name;
     let schema_name = expr.schema_name;
     let kind = expr.kind.context(MissingFieldSnafu { field: "kind" })?;
     let alter_kind = match kind {
@@ -129,7 +129,7 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<Alter
     };
 
     let request = AlterTableRequest {
-        catalog_name,
+        catalog_name: alter_table_expr,
         schema_name,
         table_name: expr.table_name,
         table_id,
@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn test_alter_expr_to_request() {
-        let expr = AlterExpr {
+        let expr = AlterTableExpr {
             catalog_name: String::default(),
             schema_name: String::default(),
             table_name: "monitor".to_string(),
@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn test_alter_expr_with_location_to_request() {
-        let expr = AlterExpr {
+        let expr = AlterTableExpr {
             catalog_name: String::default(),
             schema_name: String::default(),
             table_name: "monitor".to_string(),
@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn test_modify_column_type_expr() {
-        let expr = AlterExpr {
+        let expr = AlterTableExpr {
             catalog_name: "test_catalog".to_string(),
             schema_name: "test_schema".to_string(),
             table_name: "monitor".to_string(),
@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn test_drop_column_expr() {
-        let expr = AlterExpr {
+        let expr = AlterTableExpr {
             catalog_name: "test_catalog".to_string(),
             schema_name: "test_schema".to_string(),
             table_name: "monitor".to_string(),

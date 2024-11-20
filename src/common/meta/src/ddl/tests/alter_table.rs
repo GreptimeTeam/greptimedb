@@ -16,7 +16,7 @@ use std::assert_matches::assert_matches;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::v1::alter_expr::Kind;
+use api::v1::alter_table_expr::Kind;
 use api::v1::region::{region_request, RegionRequest};
 use api::v1::{
     AddColumn, AddColumns, AlterExpr, ColumnDataType, ColumnDef as PbColumnDef, DropColumn,
@@ -133,7 +133,7 @@ async fn test_on_submit_alter_request() {
         .unwrap();
 
     let alter_table_task = AlterTableTask {
-        alter_table: AlterExpr {
+        alter_table: AlterTableExpr {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
@@ -219,7 +219,7 @@ async fn test_on_submit_alter_request_with_outdated_request() {
         .unwrap();
 
     let alter_table_task = AlterTableTask {
-        alter_table: AlterExpr {
+        alter_table: AlterTableExpr {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
@@ -316,7 +316,7 @@ async fn test_on_update_metadata_add_columns() {
         .unwrap();
 
     let task = AlterTableTask {
-        alter_table: AlterExpr {
+        alter_table: AlterTableExpr {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
@@ -385,12 +385,17 @@ async fn test_on_update_table_options() {
         .unwrap();
 
     let task = AlterTableTask {
-        alter_table: AlterExpr {
+        alter_table: AlterTableExpr {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
+<<<<<<< HEAD
             kind: Some(Kind::SetTableOptions(SetTableOptions {
                 table_options: vec![TableOption {
+=======
+            kind: Some(Kind::ChangeTableOptions(ChangeTableOptions {
+                change_table_options: vec![AlterOption {
+>>>>>>> 6248898995 (feat: alter databaset ttl)
                     key: TTL_KEY.to_string(),
                     value: "1d".to_string(),
                 }],

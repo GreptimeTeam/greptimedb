@@ -220,6 +220,17 @@ impl SchemaManager {
         Ok(())
     }
 
+    /// Updates a [SchemaNameKey].
+    pub async fn update(&self, schema: SchemaNameKey<'_>, value: SchemaNameValue) -> Result<()> {
+        let raw_key = schema.to_bytes();
+        let raw_value = value.try_as_raw_value()?;
+        self.kv_backend
+            .put_conditionally(raw_key, raw_value, false)
+            .await?;
+
+        Ok(())
+    }
+
     /// Returns a schema stream, it lists all schemas belong to the target `catalog`.
     pub fn schema_names(&self, catalog: &str) -> BoxStream<'static, Result<String>> {
         let start_key = SchemaNameKey::range_start_key(catalog);

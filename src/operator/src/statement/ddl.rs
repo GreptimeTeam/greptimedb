@@ -17,7 +17,9 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
-use api::v1::{column_def, AlterExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr};
+use api::v1::{
+    column_def, AlterDatabaseExpr, AlterTableExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
+};
 use catalog::CatalogManagerRef;
 use chrono::Utc;
 use common_catalog::consts::{is_readonly_schema, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -51,7 +53,7 @@ use regex::Regex;
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::statements::alter::AlterTable;
+use sql::statements::alter::{AlterDatabase, AlterTable};
 use sql::statements::create::{
     CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView, Partitions,
 };
@@ -723,7 +725,7 @@ impl StatementExecutor {
     #[tracing::instrument(skip_all)]
     pub async fn alter_logical_tables(
         &self,
-        alter_table_exprs: Vec<AlterExpr>,
+        alter_table_exprs: Vec<AlterTableExpr>,
         query_context: QueryContextRef,
     ) -> Result<Output> {
         let _timer = crate::metrics::DIST_ALTER_TABLES.start_timer();
@@ -885,7 +887,7 @@ impl StatementExecutor {
         &self,
         table_id: TableId,
         table_info: Arc<TableInfo>,
-        expr: AlterExpr,
+        expr: AlterTableExpr,
     ) -> Result<()> {
         let request: AlterTableRequest = common_grpc_expr::alter_expr_to_request(table_id, expr)
             .context(AlterExprToRequestSnafu)?;
@@ -921,14 +923,14 @@ impl StatementExecutor {
         alter_table: AlterTable,
         query_context: QueryContextRef,
     ) -> Result<Output> {
-        let expr = expr_factory::to_alter_expr(alter_table, &query_context)?;
+        let expr = expr_factory::to_alter_table_expr(alter_table, &query_context)?;
         self.alter_table_inner(expr, query_context).await
     }
 
     #[tracing::instrument(skip_all)]
     pub async fn alter_table_inner(
         &self,
-        expr: AlterExpr,
+        expr: AlterTableExpr,
         query_context: QueryContextRef,
     ) -> Result<Output> {
         ensure!(
@@ -1041,6 +1043,47 @@ impl StatementExecutor {
         Ok(Output::new_with_affected_rows(0))
     }
 
+    #[tracing::instrument(skip_all)]
+    pub async fn alter_database(
+        &self,
+        alter_expr: AlterDatabase,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
+        let alter_expr = expr_factory::to_alter_database_expr(alter_expr, &query_context)?;
+        self.alter_database_inner(alter_expr, query_context).await
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn alter_database_inner(
+        &self,
+        alter_expr: AlterDatabaseExpr,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
+        ensure!(
+            !is_readonly_schema(&alter_expr.schema_name),
+            SchemaReadOnlySnafu {
+                name: query_context.current_schema().clone()
+            }
+        );
+
+        if self
+            .catalog_manager
+            .schema_exists(&alter_expr.catalog_name, &alter_expr.schema_name, None)
+            .await
+            .context(CatalogSnafu)?
+        {
+            self.alter_database_procedure(alter_expr, query_context)
+                .await?;
+
+            Ok(Output::new_with_affected_rows(0))
+        } else {
+            SchemaNotFoundSnafu {
+                schema_info: alter_expr.schema_name,
+            }
+            .fail()
+        }
+    }
+
     async fn create_table_procedure(
         &self,
         create_table: CreateTableExpr,
@@ -1079,7 +1122,7 @@ impl StatementExecutor {
 
     async fn alter_logical_tables_procedure(
         &self,
-        tables_data: Vec<AlterExpr>,
+        tables_data: Vec<AlterTableExpr>,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest {
@@ -1127,6 +1170,22 @@ impl StatementExecutor {
         let request = SubmitDdlTaskRequest {
             query_context,
             task: DdlTask::new_drop_database(catalog, schema, drop_if_exists),
+        };
+
+        self.procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), request)
+            .await
+            .context(error::ExecuteDdlSnafu)
+    }
+
+    async fn alter_database_procedure(
+        &self,
+        alter_expr: AlterDatabaseExpr,
+        query_context: QueryContextRef,
+    ) -> Result<SubmitDdlTaskResponse> {
+        let request = SubmitDdlTaskRequest {
+            query_context,
+            task: DdlTask::new_alter_database(alter_expr),
         };
 
         self.procedure_executor

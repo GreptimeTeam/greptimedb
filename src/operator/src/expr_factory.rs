@@ -15,13 +15,21 @@
 use std::collections::{HashMap, HashSet};
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::alter_expr::Kind;
+use api::v1::alter_database_expr::Kind as AlterDatabaseKind;
+use api::v1::alter_table_expr::Kind as AlterTableKind;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{
+<<<<<<< HEAD
     AddColumn, AddColumns, AlterExpr, Analyzer, ColumnDataType, ColumnDataTypeExtension,
     CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn, DropColumns, ExpireAfter,
     ModifyColumnType, ModifyColumnTypes, RenameTable, SemanticType, SetColumnFulltext,
     SetTableOptions, TableName, UnsetColumnFulltext, UnsetTableOptions,
+=======
+    AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer, ChangeTableOptions,
+    ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
+    DropColumn, DropColumns, ExpireAfter, ModifyColumnType, ModifyColumnTypes, RenameTable,
+    SemanticType, SetColumnFulltext, SetDatabaseOptions, TableName, UnsetColumnFulltext,
+>>>>>>> 6248898995 (feat: alter databaset ttl)
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
@@ -37,7 +45,9 @@ use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::ColumnOption;
-use sql::statements::alter::{AlterTable, AlterTableOperation};
+use sql::statements::alter::{
+    AlterDatabase, AlterDatabaseOperation, AlterTable, AlterTableOperation,
+};
 use sql::statements::create::{
     Column as SqlColumn, CreateExternalTable, CreateFlow, CreateTable, CreateView, TableConstraint,
 };
@@ -472,10 +482,10 @@ pub fn column_schemas_to_defs(
         .collect()
 }
 
-pub(crate) fn to_alter_expr(
+pub(crate) fn to_alter_table_expr(
     alter_table: AlterTable,
     query_ctx: &QueryContextRef,
-) -> Result<AlterExpr> {
+) -> Result<AlterTableExpr> {
     let (catalog_name, schema_name, table_name) =
         table_idents_to_full_name(alter_table.table_name(), query_ctx)
             .map_err(BoxedError::new)
@@ -491,7 +501,7 @@ pub(crate) fn to_alter_expr(
         AlterTableOperation::AddColumn {
             column_def,
             location,
-        } => Kind::AddColumns(AddColumns {
+        } => AlterTableKind::AddColumns(AddColumns {
             add_columns: vec![AddColumn {
                 column_def: Some(
                     sql_column_def_to_grpc_column_def(&column_def, Some(&query_ctx.timezone()))
@@ -510,7 +520,7 @@ pub(crate) fn to_alter_expr(
             let (target_type, target_type_extension) = ColumnDataTypeWrapper::try_from(target_type)
                 .map(|w| w.to_parts())
                 .context(ColumnDataTypeSnafu)?;
-            Kind::ModifyColumnTypes(ModifyColumnTypes {
+            AlterTableKind::ModifyColumnTypes(ModifyColumnTypes {
                 modify_column_types: vec![ModifyColumnType {
                     column_name: column_name.value,
                     target_type: target_type as i32,
@@ -518,7 +528,7 @@ pub(crate) fn to_alter_expr(
                 }],
             })
         }
-        AlterTableOperation::DropColumn { name } => Kind::DropColumns(DropColumns {
+        AlterTableOperation::DropColumn { name } => AlterTableKind::DropColumns(DropColumns {
             drop_columns: vec![DropColumn {
                 name: name.value.to_string(),
             }],
@@ -537,7 +547,7 @@ pub(crate) fn to_alter_expr(
         AlterTableOperation::SetColumnFulltext {
             column_name,
             options,
-        } => Kind::SetColumnFulltext(SetColumnFulltext {
+        } => AlterTableKind::SetColumnFulltext(SetColumnFulltext {
             column_name: column_name.value,
             enable: options.enable,
             analyzer: match options.analyzer {
@@ -547,16 +557,40 @@ pub(crate) fn to_alter_expr(
             case_sensitive: options.case_sensitive,
         }),
         AlterTableOperation::UnsetColumnFulltext { column_name } => {
-            Kind::UnsetColumnFulltext(UnsetColumnFulltext {
+            AlterTableKind::UnsetColumnFulltext(UnsetColumnFulltext {
                 column_name: column_name.value,
             })
         }
     };
 
-    Ok(AlterExpr {
+    Ok(AlterTableExpr {
         catalog_name,
         schema_name,
         table_name,
+        kind: Some(kind),
+    })
+}
+
+/// Try to cast the `[AlterDatabase]` statement into gRPC `[AlterDatabaseExpr]`.
+pub fn to_alter_database_expr(
+    alter_database: AlterDatabase,
+    query_ctx: &QueryContextRef,
+) -> Result<AlterDatabaseExpr> {
+    let catalog = query_ctx.current_catalog();
+    let schema = alter_database.database_name;
+
+    let kind = match alter_database.alter_operation {
+        AlterDatabaseOperation::SetDatabaseOption { options } => {
+            let options = options.into_iter().map(Into::into).collect();
+            AlterDatabaseKind::SetDatabaseOptions(SetDatabaseOptions {
+                set_database_options: options,
+            })
+        }
+    };
+
+    Ok(AlterDatabaseExpr {
+        catalog_name: catalog.to_string(),
+        schema_name: schema.to_string(),
         kind: Some(kind),
     })
 }
@@ -768,15 +802,15 @@ mod tests {
                 .pop()
                 .unwrap();
 
-        let Statement::Alter(alter_table) = stmt else {
+        let Statement::AlterTable(alter_table) = stmt else {
             unreachable!()
         };
 
         // query context with system timezone UTC.
-        let expr = to_alter_expr(alter_table.clone(), &QueryContext::arc()).unwrap();
+        let expr = to_alter_table_expr(alter_table.clone(), &QueryContext::arc()).unwrap();
         let kind = expr.kind.unwrap();
 
-        let Kind::AddColumns(AddColumns { add_columns, .. }) = kind else {
+        let AlterTableKind::AddColumns(AddColumns { add_columns, .. }) = kind else {
             unreachable!()
         };
 
@@ -794,10 +828,10 @@ mod tests {
             .timezone(Timezone::from_tz_string("+08:00").unwrap())
             .build()
             .into();
-        let expr = to_alter_expr(alter_table, &ctx).unwrap();
+        let expr = to_alter_table_expr(alter_table, &ctx).unwrap();
         let kind = expr.kind.unwrap();
 
-        let Kind::AddColumns(AddColumns { add_columns, .. }) = kind else {
+        let AlterTableKind::AddColumns(AddColumns { add_columns, .. }) = kind else {
             unreachable!()
         };
 
@@ -819,15 +853,15 @@ mod tests {
                 .pop()
                 .unwrap();
 
-        let Statement::Alter(alter_table) = stmt else {
+        let Statement::AlterTable(alter_table) = stmt else {
             unreachable!()
         };
 
         // query context with system timezone UTC.
-        let expr = to_alter_expr(alter_table.clone(), &QueryContext::arc()).unwrap();
+        let expr = to_alter_table_expr(alter_table.clone(), &QueryContext::arc()).unwrap();
         let kind = expr.kind.unwrap();
 
-        let Kind::ModifyColumnTypes(ModifyColumnTypes {
+        let AlterTableKind::ModifyColumnTypes(ModifyColumnTypes {
             modify_column_types,
         }) = kind
         else {

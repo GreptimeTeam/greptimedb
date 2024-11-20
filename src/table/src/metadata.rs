@@ -28,7 +28,11 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{COMPACTION_TYPE, COMPACTION_TYPE_TWCS};
+<<<<<<< HEAD
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
+=======
+use store_api::region_request::AlterTableOption;
+>>>>>>> 6248898995 (feat: alter databaset ttl)
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId, RegionId};
 
 use crate::error::{self, Result};

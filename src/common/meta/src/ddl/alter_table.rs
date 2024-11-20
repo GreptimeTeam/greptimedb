@@ -19,7 +19,7 @@ mod update_metadata;
 
 use std::vec;
 
-use api::v1::alter_expr::Kind;
+use api::v1::alter_table_expr::Kind;
 use api::v1::RenameTable;
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;

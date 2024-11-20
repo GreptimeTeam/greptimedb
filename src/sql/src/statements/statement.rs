@@ -18,6 +18,7 @@ use datafusion_sql::parser::Statement as DfStatement;
 use sqlparser::ast::Statement as SpStatement;
 use sqlparser_derive::{Visit, VisitMut};
 
+use super::alter::AlterDatabase;
 use crate::error::{ConvertToDfStatementSnafu, Error};
 use crate::statements::admin::Admin;
 use crate::statements::alter::AlterTable;
@@ -70,7 +71,9 @@ pub enum Statement {
     // CREATE DATABASE
     CreateDatabase(CreateDatabase),
     /// ALTER TABLE
-    Alter(AlterTable),
+    AlterTable(AlterTable),
+    /// ALTER DATABASE
+    AlterDatabase(AlterDatabase),
     // Databases.
     ShowDatabases(ShowDatabases),
     // SHOW TABLES
@@ -133,7 +136,8 @@ impl Display for Statement {
             Statement::DropDatabase(s) => s.fmt(f),
             Statement::DropView(s) => s.fmt(f),
             Statement::CreateDatabase(s) => s.fmt(f),
-            Statement::Alter(s) => s.fmt(f),
+            Statement::AlterTable(s) => s.fmt(f),
+            Statement::AlterDatabase(s) => s.fmt(f),
             Statement::ShowDatabases(s) => s.fmt(f),
             Statement::ShowTables(s) => s.fmt(f),
             Statement::ShowTableStatus(s) => s.fmt(f),

@@ -17,18 +17,19 @@ use std::result;
 
 use api::v1::meta::ddl_task_request::Task;
 use api::v1::meta::{
-    AlterTableTask as PbAlterTableTask, AlterTableTasks as PbAlterTableTasks,
-    CreateDatabaseTask as PbCreateDatabaseTask, CreateFlowTask as PbCreateFlowTask,
-    CreateTableTask as PbCreateTableTask, CreateTableTasks as PbCreateTableTasks,
-    CreateViewTask as PbCreateViewTask, DdlTaskRequest as PbDdlTaskRequest,
-    DdlTaskResponse as PbDdlTaskResponse, DropDatabaseTask as PbDropDatabaseTask,
-    DropFlowTask as PbDropFlowTask, DropTableTask as PbDropTableTask,
-    DropTableTasks as PbDropTableTasks, DropViewTask as PbDropViewTask, Partition, ProcedureId,
+    AlterDatabaseTask as PbAlterDatabaseTask, AlterTableTask as PbAlterTableTask,
+    AlterTableTasks as PbAlterTableTasks, CreateDatabaseTask as PbCreateDatabaseTask,
+    CreateFlowTask as PbCreateFlowTask, CreateTableTask as PbCreateTableTask,
+    CreateTableTasks as PbCreateTableTasks, CreateViewTask as PbCreateViewTask,
+    DdlTaskRequest as PbDdlTaskRequest, DdlTaskResponse as PbDdlTaskResponse,
+    DropDatabaseTask as PbDropDatabaseTask, DropFlowTask as PbDropFlowTask,
+    DropTableTask as PbDropTableTask, DropTableTasks as PbDropTableTasks,
+    DropViewTask as PbDropViewTask, Partition, ProcedureId,
     TruncateTableTask as PbTruncateTableTask,
 };
 use api::v1::{
-    AlterExpr, CreateDatabaseExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
-    DropDatabaseExpr, DropFlowExpr, DropTableExpr, DropViewExpr, ExpireAfter,
+    AlterDatabaseExpr, AlterTableExpr, CreateDatabaseExpr, CreateFlowExpr, CreateTableExpr,
+    CreateViewExpr, DropDatabaseExpr, DropFlowExpr, DropTableExpr, DropViewExpr, ExpireAfter,
     QueryContext as PbQueryContext, TruncateTableExpr,
 };
 use base64::engine::general_purpose;
@@ -57,6 +58,7 @@ pub enum DdlTask {
     AlterLogicalTables(Vec<AlterTableTask>),
     CreateDatabase(CreateDatabaseTask),
     DropDatabase(DropDatabaseTask),
+    AlterDatabase(AlterDatabaseTask),
     CreateFlow(CreateFlowTask),
     DropFlow(DropFlowTask),
     CreateView(CreateViewTask),
@@ -99,7 +101,7 @@ impl DdlTask {
     }
 
     /// Creates a [`DdlTask`] to alter several logical tables.
-    pub fn new_alter_logical_tables(table_data: Vec<AlterExpr>) -> Self {
+    pub fn new_alter_logical_tables(table_data: Vec<AlterTableExpr>) -> Self {
         DdlTask::AlterLogicalTables(
             table_data
                 .into_iter()
@@ -149,8 +151,13 @@ impl DdlTask {
         })
     }
 
+    /// Creates a [`DdlTask`] to alter a database.
+    pub fn new_alter_database(alter_expr: AlterDatabaseExpr) -> Self {
+        DdlTask::AlterDatabase(AlterDatabaseTask { alter_expr })
+    }
+
     /// Creates a [`DdlTask`] to alter a table.
-    pub fn new_alter_table(alter_table: AlterExpr) -> Self {
+    pub fn new_alter_table(alter_table: AlterTableExpr) -> Self {
         DdlTask::AlterTable(AlterTableTask { alter_table })
     }
 
@@ -223,6 +230,9 @@ impl TryFrom<Task> for DdlTask {
             Task::DropDatabaseTask(drop_database) => {
                 Ok(DdlTask::DropDatabase(drop_database.try_into()?))
             }
+            Task::AlterDatabaseTask(alter_database) => {
+                Ok(DdlTask::AlterDatabase(alter_database.try_into()?))
+            }
             Task::CreateFlowTask(create_flow) => Ok(DdlTask::CreateFlow(create_flow.try_into()?)),
             Task::DropFlowTask(drop_flow) => Ok(DdlTask::DropFlow(drop_flow.try_into()?)),
             Task::CreateViewTask(create_view) => Ok(DdlTask::CreateView(create_view.try_into()?)),
@@ -272,6 +282,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
             }
             DdlTask::CreateDatabase(task) => Task::CreateDatabaseTask(task.try_into()?),
             DdlTask::DropDatabase(task) => Task::DropDatabaseTask(task.try_into()?),
+            DdlTask::AlterDatabase(task) => Task::AlterDatabaseTask(task.try_into()?),
             DdlTask::CreateFlow(task) => Task::CreateFlowTask(task.into()),
             DdlTask::DropFlow(task) => Task::DropFlowTask(task.into()),
             DdlTask::CreateView(task) => Task::CreateViewTask(task.try_into()?),
@@ -680,7 +691,7 @@ impl<'de> Deserialize<'de> for CreateTableTask {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct AlterTableTask {
-    pub alter_table: AlterExpr,
+    pub alter_table: AlterTableExpr,
 }
 
 impl AlterTableTask {
@@ -932,6 +943,85 @@ impl TryFrom<DropDatabaseTask> for PbDropDatabaseTask {
     }
 }
 
+#[derive(Debug, PartialEq, Clone)]
+pub struct AlterDatabaseTask {
+    pub alter_expr: AlterDatabaseExpr,
+}
+
+impl TryFrom<AlterDatabaseTask> for PbAlterDatabaseTask {
+    type Error = error::Error;
+
+    fn try_from(task: AlterDatabaseTask) -> Result<Self> {
+        Ok(PbAlterDatabaseTask {
+            task: Some(task.alter_expr),
+        })
+    }
+}
+
+impl TryFrom<PbAlterDatabaseTask> for AlterDatabaseTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbAlterDatabaseTask) -> Result<Self> {
+        let alter_expr = pb.task.context(error::InvalidProtoMsgSnafu {
+            err_msg: "expected alter database",
+        })?;
+
+        Ok(AlterDatabaseTask { alter_expr })
+    }
+}
+
+impl AlterDatabaseTask {
+    pub fn validate(&self) -> Result<()> {
+        self.alter_expr
+            .kind
+            .as_ref()
+            .context(error::UnexpectedSnafu {
+                err_msg: "'kind' is absent",
+            })?;
+        Ok(())
+    }
+
+    pub fn catalog(&self) -> &str {
+        &self.alter_expr.catalog_name
+    }
+
+    pub fn schema(&self) -> &str {
+        &self.alter_expr.schema_name
+    }
+}
+
+impl Serialize for AlterDatabaseTask {
+    fn serialize<S>(&self, serializer: S) -> result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let pb = PbAlterDatabaseTask {
+            task: Some(self.alter_expr.clone()),
+        };
+        let buf = pb.encode_to_vec();
+        let encoded = general_purpose::STANDARD_NO_PAD.encode(buf);
+        serializer.serialize_str(&encoded)
+    }
+}
+
+impl<'de> Deserialize<'de> for AlterDatabaseTask {
+    fn deserialize<D>(deserializer: D) -> result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        let buf = general_purpose::STANDARD_NO_PAD
+            .decode(encoded)
+            .map_err(|err| serde::de::Error::custom(err.to_string()))?;
+        let expr: PbAlterDatabaseTask = PbAlterDatabaseTask::decode(&*buf)
+            .map_err(|err| serde::de::Error::custom(err.to_string()))?;
+
+        let expr = AlterDatabaseTask::try_from(expr)
+            .map_err(|err| serde::de::Error::custom(err.to_string()))?;
+
+        Ok(expr)
+    }
+}
 /// Create flow
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateFlowTask {
@@ -1118,7 +1208,7 @@ impl From<QueryContext> for PbQueryContext {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::{AlterExpr, ColumnDef, CreateTableExpr, SemanticType};
+    use api::v1::{AlterTableExpr, ColumnDef, CreateTableExpr, SemanticType};
     use datatypes::schema::{ColumnSchema, RawSchema, SchemaBuilder};
     use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
     use store_api::storage::ConcreteDataType;
@@ -1146,7 +1236,7 @@ mod tests {
     #[test]
     fn test_basic_ser_de_alter_table_task() {
         let task = AlterTableTask {
-            alter_table: AlterExpr::default(),
+            alter_table: AlterTableExpr::default(),
         };
 
         let output = serde_json::to_vec(&task).unwrap();
