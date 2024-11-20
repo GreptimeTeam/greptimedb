@@ -18,10 +18,10 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{
-    AddColumn, AddColumns, AlterExpr, Analyzer, ChangeColumnFulltext, ChangeTableOptions,
-    ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
-    DropColumn, DropColumns, ExpireAfter, ModifyColumnType, ModifyColumnTypes, RenameTable,
-    SemanticType, TableName,
+    AddColumn, AddColumns, AlterExpr, Analyzer, ChangeTableOptions, ColumnDataType,
+    ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn,
+    DropColumns, ExpireAfter, ModifyColumnType, ModifyColumnTypes, RenameTable, SemanticType,
+    SetColumnFulltext, TableName, UnsetColumnFulltext,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
@@ -531,10 +531,10 @@ pub(crate) fn to_alter_expr(
                 change_table_options: options.into_iter().map(Into::into).collect(),
             })
         }
-        AlterTableOperation::ChangeColumnFulltext {
+        AlterTableOperation::SetColumnFulltext {
             column_name,
             options,
-        } => Kind::ChangeColumnFulltext(ChangeColumnFulltext {
+        } => Kind::SetColumnFulltext(SetColumnFulltext {
             column_name: column_name.value,
             enable: options.enable,
             analyzer: match options.analyzer {
@@ -543,6 +543,11 @@ pub(crate) fn to_alter_expr(
             },
             case_sensitive: options.case_sensitive,
         }),
+        AlterTableOperation::UnsetColumnFulltext { column_name } => {
+            Kind::UnsetColumnFulltext(UnsetColumnFulltext {
+                column_name: column_name.value,
+            })
+        }
     };
 
     Ok(AlterExpr {

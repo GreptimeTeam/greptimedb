@@ -71,7 +71,7 @@ fn add_tag1() -> RegionAlterRequest {
 fn alter_column_fulltext_options() -> RegionAlterRequest {
     RegionAlterRequest {
         schema_version: 0,
-        kind: AlterKind::ChangeColumnFulltext {
+        kind: AlterKind::SetColumnFulltext {
             column_name: "tag_0".to_string(),
             options: FulltextOptions {
                 enable: true,

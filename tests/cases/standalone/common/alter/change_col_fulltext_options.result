@@ -115,7 +115,7 @@ SHOW CREATE TABLE test;
 |       | )                                   |
 +-------+-------------------------------------+
 
-ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'English', case_sensitive = 'true');
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'true');
 
 Affected Rows: 0
 
@@ -125,7 +125,7 @@ SHOW CREATE TABLE test;
 | Table | Create Table                                                                          |
 +-------+---------------------------------------------------------------------------------------+
 | test  | CREATE TABLE IF NOT EXISTS "test" (                                                   |
-|       |   "message" STRING NULL FULLTEXT WITH(analyzer = 'English', case_sensitive = 'true'), |
+|       |   "message" STRING NULL FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'true'), |
 |       |   "time" TIMESTAMP(3) NOT NULL,                                                       |
 |       |   TIME INDEX ("time")                                                                 |
 |       | )                                                                                     |
@@ -138,7 +138,7 @@ SHOW CREATE TABLE test;
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'false');
 
-Error: 1004(InvalidArguments), Invalid column option, column name: message, error: FULLTEXT index options already enabled
+Error: 1004(InvalidArguments), Invalid column option, column name: message, error: FULLTEXT index already enabled
 
 ALTER TABLE test MODIFY COLUMN message UNSET FULLTEXT;
 
@@ -172,6 +172,10 @@ Error: 1002(Unexpected), Invalid fulltext option: no, expected: 'true' | 'false'
 ALTER TABLE test MODIFY COLUMN time SET FULLTEXT WITH(analyzer = 'Chinese', case_sensitive = 'false');
 
 Error: 1004(InvalidArguments), Invalid column option, column name: time, error: FULLTEXT index only supports string type
+
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT WITH(analyzer = 'English', case_sensitive = 'true');
+
+Error: 1004(InvalidArguments), Invalid column option, column name: message, error: Cannot change analyzer or case_sensitive if FULLTEXT index is set before. Previous analyzer: Chinese, previous case_sensitive: true
 
 DROP TABLE test;
 

@@ -207,10 +207,13 @@ impl TableMeta {
             // No need to rebuild table meta when renaming tables.
             AlterKind::RenameTable { .. } => Ok(self.new_meta_builder()),
             AlterKind::ChangeTableOptions { options } => self.change_table_options(options),
-            AlterKind::ChangeColumnFulltext {
+            AlterKind::SetColumnFulltext {
                 column_name,
                 options,
-            } => self.change_column_fulltext_options(table_name, column_name, options),
+            } => self.change_column_fulltext_options(table_name, column_name, true, Some(options)),
+            AlterKind::UnsetColumnFulltext { column_name } => {
+                self.change_column_fulltext_options(table_name, column_name, false, None)
+            }
         }
     }
 
@@ -255,7 +258,8 @@ impl TableMeta {
         &self,
         table_name: &str,
         column_name: &str,
-        options: &FulltextOptions,
+        enable: bool,
+        options: Option<&FulltextOptions>,
     ) -> Result<TableMetaBuilder> {
         let table_schema = &self.schema;
         let mut meta_builder = self.new_meta_builder();
@@ -279,21 +283,31 @@ impl TableMeta {
             .fulltext_options()
             .context(error::SetFulltextOptionsSnafu { column_name })?;
 
-        ensure!(
-            !(current_fulltext_options.is_some_and(|o| o.enable) && options.enable),
-            error::InvalidColumnOptionSnafu {
-                column_name,
-                msg: "FULLTEXT index options already enabled",
-            }
-        );
-
         let mut columns = Vec::with_capacity(table_schema.column_schemas().len());
         for column_schema in table_schema.column_schemas() {
             if column_schema.name == column_name {
                 let mut new_column_schema = column_schema.clone();
-                new_column_schema
-                    .set_fulltext_options(options)
-                    .context(error::SetFulltextOptionsSnafu { column_name })?;
+                if enable {
+                    ensure!(
+                        options.is_some(),
+                        error::InvalidColumnOptionSnafu {
+                            column_name,
+                            msg: "FULLTEXT index options must be provided",
+                        }
+                    );
+                    set_column_fulltext_options(
+                        &mut new_column_schema,
+                        column_name,
+                        options.unwrap(),
+                        current_fulltext_options.clone(),
+                    )?
+                } else {
+                    unset_column_fulltext_options(
+                        &mut new_column_schema,
+                        column_name,
+                        current_fulltext_options.clone(),
+                    )?
+                }
                 columns.push(new_column_schema);
             } else {
                 columns.push(column_schema.clone());
@@ -987,6 +1001,63 @@ impl TryFrom<RawTableInfo> for TableInfo {
     }
 }
 
+fn set_column_fulltext_options(
+    column_schema: &mut ColumnSchema,
+    column_name: &str,
+    options: &FulltextOptions,
+    current_options: Option<FulltextOptions>,
+) -> Result<()> {
+    if let Some(current_options) = current_options {
+        ensure!(
+            !current_options.enable,
+            error::InvalidColumnOptionSnafu {
+                column_name,
+                msg: "FULLTEXT index already enabled",
+            }
+        );
+
+        ensure!(
+            current_options.analyzer == options.analyzer
+                && current_options.case_sensitive == options.case_sensitive,
+            error::InvalidColumnOptionSnafu {
+                column_name,
+                msg: format!("Cannot change analyzer or case_sensitive if FULLTEXT index is set before. Previous analyzer: {}, previous case_sensitive: {}",
+                current_options.analyzer, current_options.case_sensitive),
+            }
+        );
+    }
+
+    column_schema
+        .set_fulltext_options(options)
+        .context(error::SetFulltextOptionsSnafu { column_name })?;
+
+    Ok(())
+}
+
+fn unset_column_fulltext_options(
+    column_schema: &mut ColumnSchema,
+    column_name: &str,
+    current_options: Option<FulltextOptions>,
+) -> Result<()> {
+    ensure!(
+        current_options
+            .clone()
+            .is_some_and(|options| options.enable),
+        error::InvalidColumnOptionSnafu {
+            column_name,
+            msg: "FULLTEXT index already disabled".to_string(),
+        }
+    );
+
+    let mut options = current_options.unwrap();
+    options.enable = false;
+    column_schema
+        .set_fulltext_options(&options)
+        .context(error::SetFulltextOptionsSnafu { column_name })?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use common_error::ext::ErrorExt;
@@ -1434,7 +1505,7 @@ mod tests {
     }
 
     #[test]
-    fn test_alter_column_fulltext_options() {
+    fn test_modify_column_fulltext_options() {
         let schema = Arc::new(new_test_schema());
         let meta = TableMetaBuilder::default()
             .schema(schema)
@@ -1444,7 +1515,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::ChangeColumnFulltext {
+        let alter_kind = AlterKind::SetColumnFulltext {
             column_name: "col1".to_string(),
             options: FulltextOptions::default(),
         };
@@ -1461,7 +1532,7 @@ mod tests {
         let new_meta = add_columns_to_meta_with_location(&meta);
         assert_eq!(meta.region_numbers, new_meta.region_numbers);
 
-        let alter_kind = AlterKind::ChangeColumnFulltext {
+        let alter_kind = AlterKind::SetColumnFulltext {
             column_name: "my_tag_first".to_string(),
             options: FulltextOptions {
                 enable: true,
@@ -1485,5 +1556,20 @@ mod tests {
             fulltext_options.analyzer
         );
         assert!(fulltext_options.case_sensitive);
+
+        let alter_kind = AlterKind::UnsetColumnFulltext {
+            column_name: "my_tag_first".to_string(),
+        };
+        let new_meta = new_meta
+            .builder_with_alter_kind("my_table", &alter_kind, false)
+            .unwrap()
+            .build()
+            .unwrap();
+        let column_schema = new_meta
+            .schema
+            .column_schema_by_name("my_tag_first")
+            .unwrap();
+        let fulltext_options = column_schema.fulltext_options().unwrap().unwrap();
+        assert!(!fulltext_options.enable);
     }
 }

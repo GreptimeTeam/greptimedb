@@ -413,11 +413,16 @@ pub enum AlterKind {
         columns: Vec<ModifyColumnType>,
     },
     /// Change region options.
-    ChangeRegionOptions { options: Vec<ChangeOption> },
+    ChangeRegionOptions {
+        options: Vec<ChangeOption>,
+    },
     /// Change fulltext index options.
-    ChangeColumnFulltext {
+    SetColumnFulltext {
         column_name: String,
         options: FulltextOptions,
+    },
+    UnsetColumnFulltext {
+        column_name: String,
     },
 }
 
@@ -443,7 +448,8 @@ impl AlterKind {
                 }
             }
             AlterKind::ChangeRegionOptions { .. } => {}
-            AlterKind::ChangeColumnFulltext { column_name, .. } => {
+            AlterKind::SetColumnFulltext { column_name, .. }
+            | AlterKind::UnsetColumnFulltext { column_name } => {
                 Self::validate_column_fulltext_option(column_name, metadata)?;
             }
         }
@@ -468,7 +474,10 @@ impl AlterKind {
                 // todo: we need to check if ttl has ever changed.
                 true
             }
-            AlterKind::ChangeColumnFulltext { column_name, .. } => {
+            AlterKind::SetColumnFulltext { column_name, .. } => {
+                metadata.column_by_name(column_name).is_some()
+            }
+            AlterKind::UnsetColumnFulltext { column_name } => {
                 metadata.column_by_name(column_name).is_some()
             }
         }
@@ -550,7 +559,7 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                         .collect::<Result<Vec<_>>>()?,
                 }
             }
-            alter_request::Kind::ChangeColumnFulltext(x) => AlterKind::ChangeColumnFulltext {
+            alter_request::Kind::SetColumnFulltext(x) => AlterKind::SetColumnFulltext {
                 column_name: x.column_name.clone(),
                 options: FulltextOptions {
                     enable: x.enable,
@@ -559,6 +568,9 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                     ),
                     case_sensitive: x.case_sensitive,
                 },
+            },
+            alter_request::Kind::UnsetColumnFulltext(x) => AlterKind::UnsetColumnFulltext {
+                column_name: x.column_name,
             },
         };
 
@@ -1217,14 +1229,25 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_change_column_fulltext_options() {
-        let kind = AlterKind::ChangeColumnFulltext {
+    fn test_validate_modify_column_fulltext_options() {
+        let kind = AlterKind::SetColumnFulltext {
             column_name: "tag_0".to_string(),
             options: FulltextOptions {
                 enable: true,
                 analyzer: FulltextAnalyzer::Chinese,
                 case_sensitive: false,
             },
+        };
+        let request = RegionAlterRequest {
+            schema_version: 1,
+            kind,
+        };
+        let mut metadata = new_metadata();
+        metadata.schema_version = 1;
+        request.validate(&metadata).unwrap();
+
+        let kind = AlterKind::UnsetColumnFulltext {
+            column_name: "tag_0".to_string(),
         };
         let request = RegionAlterRequest {
             schema_version: 1,

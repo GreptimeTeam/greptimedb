@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use common_query::AddColumnLocation;
-use datatypes::schema::{FulltextOptions, COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE};
+use datatypes::schema::COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE;
 use snafu::{ensure, ResultExt};
 use sqlparser::ast::Ident;
 use sqlparser::keywords::Keyword;
@@ -159,13 +159,7 @@ impl ParserContext<'_> {
                         .expect_keyword(Keyword::FULLTEXT)
                         .context(error::SyntaxSnafu)?;
 
-                    Ok(AlterTableOperation::ChangeColumnFulltext {
-                        column_name,
-                        options: FulltextOptions {
-                            enable: false,
-                            ..Default::default()
-                        },
-                    })
+                    Ok(AlterTableOperation::UnsetColumnFulltext { column_name })
                 } else if w.keyword == Keyword::SET {
                     self.parse_alter_column_fulltext(column_name)
                 } else {
@@ -213,7 +207,7 @@ impl ParserContext<'_> {
             "true".to_string(),
         );
 
-        Ok(AlterTableOperation::ChangeColumnFulltext {
+        Ok(AlterTableOperation::SetColumnFulltext {
             column_name,
             options: options.try_into().context(SetFulltextOptionSnafu)?,
         })
@@ -602,10 +596,10 @@ mod tests {
                 let alter_operation = alter_table.alter_operation();
                 assert_matches!(
                     alter_operation,
-                    AlterTableOperation::ChangeColumnFulltext { .. }
+                    AlterTableOperation::SetColumnFulltext { .. }
                 );
                 match alter_operation {
-                    AlterTableOperation::ChangeColumnFulltext {
+                    AlterTableOperation::SetColumnFulltext {
                         column_name,
                         options,
                     } => {
@@ -637,27 +631,15 @@ mod tests {
                 assert_eq!("test_table", alter_table.table_name().0[0].value);
 
                 let alter_operation = alter_table.alter_operation();
-                assert_matches!(
+                assert_eq!(
                     alter_operation,
-                    AlterTableOperation::ChangeColumnFulltext { .. }
-                );
-                match alter_operation {
-                    AlterTableOperation::ChangeColumnFulltext {
-                        column_name,
-                        options,
-                    } => {
-                        assert_eq!("a", column_name.value);
-                        assert_eq!(
-                            FulltextOptions {
-                                enable: false,
-                                analyzer: FulltextAnalyzer::English,
-                                case_sensitive: false
-                            },
-                            *options
-                        );
+                    &AlterTableOperation::UnsetColumnFulltext {
+                        column_name: Ident {
+                            value: "a".to_string(),
+                            quote_style: None
+                        }
                     }
-                    _ => unreachable!(),
-                }
+                );
             }
             _ => unreachable!(),
         }

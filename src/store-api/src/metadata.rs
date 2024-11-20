@@ -553,10 +553,13 @@ impl RegionMetadataBuilder {
             AlterKind::AddColumns { columns } => self.add_columns(columns)?,
             AlterKind::DropColumns { names } => self.drop_columns(&names),
             AlterKind::ModifyColumnTypes { columns } => self.modify_column_types(columns),
-            AlterKind::ChangeColumnFulltext {
+            AlterKind::SetColumnFulltext {
                 column_name,
                 options,
-            } => self.change_column_fulltext_options(column_name, options)?,
+            } => self.change_column_fulltext_options(column_name, true, Some(options))?,
+            AlterKind::UnsetColumnFulltext { column_name } => {
+                self.change_column_fulltext_options(column_name, false, None)?
+            }
             AlterKind::ChangeRegionOptions { options: _ } => {
                 // nothing to be done with RegionMetadata
             }
@@ -663,7 +666,8 @@ impl RegionMetadataBuilder {
     fn change_column_fulltext_options(
         &mut self,
         column_name: String,
-        options: FulltextOptions,
+        enable: bool,
+        options: Option<FulltextOptions>,
     ) -> Result<()> {
         for column_meta in self.column_metadatas.iter_mut() {
             if column_meta.column_schema.name == column_name {
@@ -682,18 +686,26 @@ impl RegionMetadataBuilder {
                         column_name: column_name.clone(),
                     })?;
 
-                // Don't allow to enable fulltext options if it is already enabled.
-                if current_fulltext_options.is_some_and(|o| o.enable) && options.enable {
-                    return InvalidColumnOptionSnafu {
+                if enable {
+                    ensure!(
+                        options.is_some(),
+                        InvalidColumnOptionSnafu {
+                            column_name,
+                            msg: "FULLTEXT index options must be provided",
+                        }
+                    );
+                    set_column_fulltext_options(
+                        column_meta,
                         column_name,
-                        msg: "FULLTEXT index options already enabled".to_string(),
-                    }
-                    .fail();
+                        options.unwrap(),
+                        current_fulltext_options,
+                    )?;
                 } else {
-                    column_meta
-                        .column_schema
-                        .set_fulltext_options(&options)
-                        .context(SetFulltextOptionsSnafu { column_name })?;
+                    unset_column_fulltext_options(
+                        column_meta,
+                        column_name,
+                        current_fulltext_options,
+                    )?;
                 }
                 break;
             }
@@ -858,6 +870,64 @@ impl ErrorExt for MetadataError {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+fn set_column_fulltext_options(
+    column_meta: &mut ColumnMetadata,
+    column_name: String,
+    options: FulltextOptions,
+    current_options: Option<FulltextOptions>,
+) -> Result<()> {
+    if let Some(current_options) = current_options {
+        ensure!(
+            !current_options.enable,
+            InvalidColumnOptionSnafu {
+                column_name,
+                msg: "FULLTEXT index already enabled".to_string(),
+            }
+        );
+
+        ensure!(
+            current_options.analyzer == options.analyzer
+                && current_options.case_sensitive == options.case_sensitive,
+            InvalidColumnOptionSnafu {
+                column_name,
+                msg: format!("Cannot change analyzer or case_sensitive if FULLTEXT index is set before. Previous analyzer: {}, previous case_sensitive: {}",
+                current_options.analyzer, current_options.case_sensitive),
+            }
+        );
+    }
+
+    column_meta
+        .column_schema
+        .set_fulltext_options(&options)
+        .context(SetFulltextOptionsSnafu { column_name })?;
+
+    Ok(())
+}
+
+fn unset_column_fulltext_options(
+    column_meta: &mut ColumnMetadata,
+    column_name: String,
+    current_options: Option<FulltextOptions>,
+) -> Result<()> {
+    if let Some(mut current_options) = current_options
+        && current_options.enable
+    {
+        current_options.enable = false;
+        column_meta
+            .column_schema
+            .set_fulltext_options(&current_options)
+            .context(SetFulltextOptionsSnafu { column_name })?;
+    } else {
+        return InvalidColumnOptionSnafu {
+            column_name,
+            msg: "FULLTEXT index already disabled",
+        }
+        .fail();
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1283,7 +1353,7 @@ mod test {
 
         let mut builder = RegionMetadataBuilder::from_existing(metadata);
         builder
-            .alter(AlterKind::ChangeColumnFulltext {
+            .alter(AlterKind::SetColumnFulltext {
                 column_name: "b".to_string(),
                 options: FulltextOptions {
                     enable: true,
@@ -1301,6 +1371,27 @@ mod test {
             .unwrap()
             .unwrap();
         assert!(a_fulltext_options.enable);
+        assert_eq!(
+            datatypes::schema::FulltextAnalyzer::Chinese,
+            a_fulltext_options.analyzer
+        );
+        assert!(a_fulltext_options.case_sensitive);
+
+        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        builder
+            .alter(AlterKind::UnsetColumnFulltext {
+                column_name: "b".to_string(),
+            })
+            .unwrap();
+        let metadata = builder.build().unwrap();
+        let a_fulltext_options = metadata
+            .column_by_name("b")
+            .unwrap()
+            .column_schema
+            .fulltext_options()
+            .unwrap()
+            .unwrap();
+        assert!(!a_fulltext_options.enable);
         assert_eq!(
             datatypes::schema::FulltextAnalyzer::Chinese,
             a_fulltext_options.analyzer

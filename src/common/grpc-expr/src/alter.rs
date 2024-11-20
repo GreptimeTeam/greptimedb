@@ -104,7 +104,7 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<Alter
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .context(InvalidChangeTableOptionRequestSnafu)?,
         },
-        Kind::ChangeColumnFulltext(c) => AlterKind::ChangeColumnFulltext {
+        Kind::SetColumnFulltext(c) => AlterKind::SetColumnFulltext {
             column_name: c.column_name,
             options: FulltextOptions {
                 enable: c.enable,
@@ -114,6 +114,9 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<Alter
                 ),
                 case_sensitive: c.case_sensitive,
             },
+        },
+        Kind::UnsetColumnFulltext(c) => AlterKind::UnsetColumnFulltext {
+            column_name: c.column_name,
         },
     };
 

@@ -216,9 +216,12 @@ pub enum AlterKind {
     ChangeTableOptions {
         options: Vec<ChangeOption>,
     },
-    ChangeColumnFulltext {
+    SetColumnFulltext {
         column_name: String,
         options: FulltextOptions,
+    },
+    UnsetColumnFulltext {
+        column_name: String,
     },
 }
 
