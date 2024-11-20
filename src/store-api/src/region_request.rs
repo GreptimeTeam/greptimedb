@@ -1,4 +1,3 @@
-// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,11 +23,7 @@ use api::v1::region::{
     CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
     FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
-<<<<<<< HEAD
-use api::v1::{self, Analyzer, Rows, SemanticType, TableOption};
-=======
-use api::v1::{self, AlterOption as PbAlterOption, Analyzer, Rows, SemanticType};
->>>>>>> 6248898995 (feat: alter databaset ttl)
+use api::v1::{self, Analyzer, Option as PbOption, Rows, SemanticType};
 pub use common_base::AffectedRows;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::FulltextOptions;
@@ -416,19 +411,11 @@ pub enum AlterKind {
         /// Columns to change.
         columns: Vec<ModifyColumnType>,
     },
-<<<<<<< HEAD
     /// Set region options.
     SetRegionOptions { options: Vec<SetRegionOption> },
     /// Unset region options.
     UnsetRegionOptions { keys: Vec<UnsetRegionOption> },
     /// Set fulltext index options.
-=======
-    /// Change region options.
-    ChangeRegionOptions {
-        options: Vec<AlterTableOption>,
-    },
-    /// Change fulltext index options.
->>>>>>> 6248898995 (feat: alter databaset ttl)
     SetColumnFulltext {
         column_name: String,
         options: FulltextOptions,
@@ -757,30 +744,17 @@ impl From<v1::ModifyColumnType> for ModifyColumnType {
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
-<<<<<<< HEAD
 pub enum SetRegionOption {
-=======
-pub enum AlterTableOption {
->>>>>>> 6248898995 (feat: alter databaset ttl)
     TTL(Duration),
     // Modifying TwscOptions with values as (option name, new value).
     Twsc(String, String),
 }
 
-<<<<<<< HEAD
-impl TryFrom<&TableOption> for SetRegionOption {
+impl TryFrom<&PbOption> for SetRegionOption {
     type Error = MetadataError;
 
-    fn try_from(value: &TableOption) -> std::result::Result<Self, Self::Error> {
-        let TableOption { key, value } = value;
-=======
-impl TryFrom<&PbAlterOption> for AlterTableOption {
-    type Error = MetadataError;
-
-    fn try_from(value: &PbAlterOption) -> std::result::Result<Self, Self::Error> {
-        let PbAlterOption { key, value } = value;
->>>>>>> 6248898995 (feat: alter databaset ttl)
-
+    fn try_from(value: &PbOption) -> std::result::Result<Self, Self::Error> {
+        let PbOption { key, value } = value;
         match key.as_str() {
             TTL_KEY => {
                 let ttl = if value.is_empty() {

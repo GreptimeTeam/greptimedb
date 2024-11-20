@@ -56,6 +56,7 @@ impl AlterDatabaseProcedure {
             }
         );
 
+        self.data.task.validate()?;
         self.data.state = AlterDatabaseState::UpdateMetadata;
 
         Ok(Status::executing(true))
@@ -63,8 +64,7 @@ impl AlterDatabaseProcedure {
 
     pub async fn on_update_metadata(&mut self) -> Result<Status> {
         let schema_name = SchemaNameKey::new(self.data.catalog(), self.data.schema());
-
-        self.data.task.validate()?;
+        // Safety: Validated in on_prepare
         let alter_kind = self.data.task.alter_expr.kind.as_ref().unwrap();
         match alter_kind {
             Kind::SetDatabaseOptions(options) => {
@@ -72,6 +72,20 @@ impl AlterDatabaseProcedure {
                     .set_database_options
                     .iter()
                     .map(|option| (option.key.clone(), option.value.clone()))
+                    .collect::<HashMap<String, String>>();
+                self.validate_options(&option_map)?;
+                let schema_value = (&option_map).try_into()?;
+                self.context
+                    .table_metadata_manager
+                    .schema_manager()
+                    .update(schema_name, schema_value)
+                    .await?;
+            }
+            Kind::UnsetDatabaseOptions(options) => {
+                let option_map = options
+                    .unset_database_options
+                    .iter()
+                    .map(|option| (option.clone(), "".to_string()))
                     .collect::<HashMap<String, String>>();
                 self.validate_options(&option_map)?;
                 let schema_value = (&option_map).try_into()?;

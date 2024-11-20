@@ -691,6 +691,7 @@ impl<'de> Deserialize<'de> for CreateTableTask {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct AlterTableTask {
+    // TODO(CookiePieWw): Replace proto struct with user-defined struct
     pub alter_table: AlterTableExpr,
 }
 
@@ -945,6 +946,7 @@ impl TryFrom<DropDatabaseTask> for PbDropDatabaseTask {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct AlterDatabaseTask {
+    // TODO(CookiePieWw): Replace proto struct with user-defined struct
     pub alter_expr: AlterDatabaseExpr,
 }
 

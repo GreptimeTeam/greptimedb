@@ -11451,6 +11451,7 @@ dependencies = [
  "datafusion-sql",
  "datatypes",
  "hex",
+ "humantime",
  "iso8601",
  "itertools 0.10.5",
  "jsonb",
@@ -11460,6 +11461,7 @@ dependencies = [
  "snafu 0.8.5",
  "sqlparser 0.45.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=54a267ac89c09b11c0c88934690530807185d3e7)",
  "sqlparser_derive 0.1.1",
+ "store-api",
  "table",
 ]
 

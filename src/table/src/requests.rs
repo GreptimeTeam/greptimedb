@@ -30,11 +30,7 @@ use greptime_proto::v1::region::compact_request;
 use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::mito_engine_options::is_mito_engine_option_key;
-<<<<<<< HEAD
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
-=======
-use store_api::region_request::AlterTableOption;
->>>>>>> 6248898995 (feat: alter databaset ttl)
 
 use crate::error::{ParseTableOptionSnafu, Result};
 use crate::metadata::{TableId, TableVersion};

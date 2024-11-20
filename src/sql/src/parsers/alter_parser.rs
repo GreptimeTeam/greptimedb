@@ -25,7 +25,9 @@ use sqlparser::tokenizer::Token;
 use crate::error::{self, InvalidColumnOptionSnafu, Result, SetFulltextOptionSnafu};
 use crate::parser::ParserContext;
 use crate::parsers::utils::validate_column_fulltext_create_option;
-use crate::statements::alter::{AlterTable, AlterTableOperation, TableOption};
+use crate::statements::alter::{
+    AlterDatabase, AlterDatabaseOperation, AlterTable, AlterTableOperation, KeyValueOption,
+};
 use crate::statements::statement::Statement;
 use crate::util::parse_option_string;
 
@@ -59,7 +61,7 @@ impl ParserContext<'_> {
             .parse_comma_separated(parse_string_options)
             .context(error::SyntaxSnafu)?
             .into_iter()
-            .map(|(key, value)| AlterOption { key, value })
+            .map(|(key, value)| KeyValueOption { key, value })
             .collect();
         Ok(AlterDatabase::new(
             database_name,
@@ -121,7 +123,7 @@ impl ParserContext<'_> {
                                 .parse_comma_separated(parse_string_options)
                                 .context(error::SyntaxSnafu)?
                                 .into_iter()
-                                .map(|(key, value)| TableOption { key, value })
+                                .map(|(key, value)| KeyValueOption { key, value })
                                 .collect();
                             AlterTableOperation::SetTableOptions { options }
                         }
@@ -293,6 +295,7 @@ mod tests {
     use super::*;
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParseOptions;
+    use crate::statements::alter::AlterDatabaseOperation;
 
     #[test]
     fn test_parse_alter_database() {

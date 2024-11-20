@@ -19,17 +19,10 @@ use api::v1::alter_database_expr::Kind as AlterDatabaseKind;
 use api::v1::alter_table_expr::Kind as AlterTableKind;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{
-<<<<<<< HEAD
     AddColumn, AddColumns, AlterExpr, Analyzer, ColumnDataType, ColumnDataTypeExtension,
     CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn, DropColumns, ExpireAfter,
     ModifyColumnType, ModifyColumnTypes, RenameTable, SemanticType, SetColumnFulltext,
     SetTableOptions, TableName, UnsetColumnFulltext, UnsetTableOptions,
-=======
-    AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer, ChangeTableOptions,
-    ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
-    DropColumn, DropColumns, ExpireAfter, ModifyColumnType, ModifyColumnTypes, RenameTable,
-    SemanticType, SetColumnFulltext, SetDatabaseOptions, TableName, UnsetColumnFulltext,
->>>>>>> 6248898995 (feat: alter databaset ttl)
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
@@ -586,6 +579,11 @@ pub fn to_alter_database_expr(
                 set_database_options: options,
             })
         }
+        AlterDatabaseOperation::UnsetDatabaseOption { options } => {
+            AlterDatabaseKind::UnsetDatabaseOptions(UnsetDatabaseOptions {
+                unset_database_options: options,
+            })
+        }
     };
 
     Ok(AlterDatabaseExpr {
@@ -795,6 +793,58 @@ mod tests {
 
     #[test]
     fn test_to_alter_expr() {
+        let sql = "ALTER DATABASE greptime SET key1='value1', key2='value2';";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::AlterDatabase(alter_database) = stmt else {
+            unreachable!()
+        };
+
+        let expr = to_alter_database_expr(alter_database, &QueryContext::arc()).unwrap();
+        let kind = expr.kind.unwrap();
+
+        let AlterDatabaseKind::SetDatabaseOptions(SetDatabaseOptions {
+            set_database_options,
+        }) = kind
+        else {
+            unreachable!()
+        };
+
+        assert_eq!(2, set_database_options.len());
+        assert_eq!("key1", set_database_options.get(0).unwrap().key);
+        assert_eq!("value1", set_database_options.get(0).unwrap().value);
+        assert_eq!("key2", set_database_options.get(1).unwrap().key);
+        assert_eq!("value2", set_database_options.get(1).unwrap().value);
+
+        let sql = "ALTER DATABASE greptime UNSET key1, key2;";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::AlterDatabase(alter_database) = stmt else {
+            unreachable!()
+        };
+
+        let expr = to_alter_database_expr(alter_database, &QueryContext::arc()).unwrap();
+        let kind = expr.kind.unwrap();
+
+        let AlterDatabaseKind::UnsetDatabaseOptions(UnsetDatabaseOptions {
+            unset_database_options,
+        }) = kind
+        else {
+            unreachable!()
+        };
+
+        assert_eq!(2, unset_database_options.len());
+        assert!(unset_database_options.contains(&"key1".to_string()));
+        assert!(unset_database_options.contains(&"key2".to_string()));
+
         let sql = "ALTER TABLE monitor add column ts TIMESTAMP default '2024-01-30T00:01:01';";
         let stmt =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())

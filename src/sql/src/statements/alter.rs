@@ -13,8 +13,10 @@
 // limitations under the License.
 
 use std::fmt::{Debug, Display};
+use std::time::Duration;
 
 use api::v1;
+use api::v1::Option as PbOption;
 use common_query::AddColumnLocation;
 use datatypes::schema::FulltextOptions;
 use itertools::Itertools;
@@ -72,7 +74,7 @@ pub enum AlterTableOperation {
     },
     /// `SET <table attrs key> = <table attr value>`
     SetTableOptions {
-        options: Vec<TableOption>,
+        options: Vec<KeyValueOption>,
     },
     UnsetTableOptions {
         keys: Vec<String>,
@@ -123,7 +125,7 @@ impl Display for AlterTableOperation {
             AlterTableOperation::SetTableOptions { options } => {
                 let kvs = options
                     .iter()
-                    .map(|TableOption { key, value }| {
+                    .map(|KeyValueOption { key, value }| {
                         if !value.is_empty() {
                             format!("'{key}'='{value}'")
                         } else {
@@ -152,14 +154,14 @@ impl Display for AlterTableOperation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
-pub struct TableOption {
+pub struct KeyValueOption {
     pub key: String,
     pub value: String,
 }
 
-impl From<TableOption> for v1::TableOption {
-    fn from(c: TableOption) -> Self {
-        v1::TableOption {
+impl From<KeyValueOption> for v1::Option {
+    fn from(c: KeyValueOption) -> Self {
+        v1::Option {
             key: c.key,
             value: c.value,
         }
@@ -199,7 +201,8 @@ impl Display for AlterDatabase {
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub enum AlterDatabaseOperation {
-    SetDatabaseOption { options: Vec<AlterOption> },
+    SetDatabaseOption { options: Vec<KeyValueOption> },
+    UnsetDatabaseOption { options: Vec<String> },
 }
 
 impl Display for AlterDatabaseOperation {
@@ -208,7 +211,7 @@ impl Display for AlterDatabaseOperation {
             AlterDatabaseOperation::SetDatabaseOption { options } => {
                 let kvs = options
                     .iter()
-                    .map(|AlterOption { key, value }| {
+                    .map(|KeyValueOption { key, value }| {
                         if !value.is_empty() {
                             format!("'{key}'='{value}'")
                         } else {
@@ -218,6 +221,12 @@ impl Display for AlterDatabaseOperation {
                     .join(",");
 
                 write!(f, "SET {kvs}")?;
+
+                Ok(())
+            }
+            AlterDatabaseOperation::UnsetDatabaseOption { options } => {
+                let keys = options.iter().map(|key| format!("'{key}'")).join(",");
+                write!(f, "UNSET {keys}")?;
 
                 Ok(())
             }
@@ -235,6 +244,47 @@ mod tests {
 
     #[test]
     fn test_display_alter() {
+        let sql = r"ALTER DATABASE db SET 'a' = 'b', 'c' = 'd'";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::AlterDatabase { .. });
+
+        match &stmts[0] {
+            Statement::AlterDatabase(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+ALTER DATABASE db SET 'a'='b','c'='d'"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = r"ALTER DATABASE db UNSET 'a', 'c'";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+
+        match &stmts[0] {
+            Statement::AlterDatabase(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+ALTER DATABASE db UNSET 'a','c'"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
         let sql = r"alter table monitor add column app string default 'shop' primary key;";
         let stmts =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
