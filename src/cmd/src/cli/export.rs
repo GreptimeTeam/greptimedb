@@ -86,8 +86,11 @@ pub struct ExportCommand {
     auth_basic: Option<String>,
 
     /// The timeout of invoking the database.
+    ///
+    /// It is used to override the server-side timeout setting.
+    /// Sets `0s` to follow server-side default timeout.
     #[clap(long, value_parser = humantime::parse_duration, default_value = "180s")]
-    timeout: Option<Duration>,
+    timeout: Duration,
 }
 
 impl ExportCommand {

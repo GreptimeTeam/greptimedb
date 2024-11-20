@@ -71,8 +71,11 @@ pub struct ImportCommand {
     auth_basic: Option<String>,
 
     /// The timeout of invoking the database.
-    #[clap(long, value_parser = humantime::parse_duration)]
-    timeout: Option<Duration>,
+    ///
+    /// It is used to override the server-side timeout setting.
+    /// Sets `0s` to follow server-side default timeout.
+    #[clap(long, value_parser = humantime::parse_duration, default_value = "180s")]
+    timeout: Duration,
 }
 
 impl ImportCommand {
