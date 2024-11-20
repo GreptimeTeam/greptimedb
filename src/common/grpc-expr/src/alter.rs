@@ -23,13 +23,13 @@ use api::v1::{
 use common_query::AddColumnLocation;
 use datatypes::schema::{ColumnSchema, FulltextOptions, RawSchema};
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::region_request::ChangeOption;
+use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use table::metadata::TableId;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, ModifyColumnTypeRequest};
 
 use crate::error::{
-    InvalidChangeFulltextOptionRequestSnafu, InvalidChangeTableOptionRequestSnafu,
-    InvalidColumnDefSnafu, MissingFieldSnafu, MissingTimestampColumnSnafu, Result,
+    InvalidColumnDefSnafu, InvalidSetFulltextOptionRequestSnafu, InvalidSetTableOptionRequestSnafu,
+    InvalidUnsetTableOptionRequestSnafu, MissingFieldSnafu, MissingTimestampColumnSnafu, Result,
     UnknownLocationTypeSnafu,
 };
 
@@ -95,22 +95,30 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterExpr) -> Result<Alter
         Kind::RenameTable(RenameTable { new_table_name }) => {
             AlterKind::RenameTable { new_table_name }
         }
-        Kind::ChangeTableOptions(api::v1::ChangeTableOptions {
-            change_table_options,
-        }) => AlterKind::ChangeTableOptions {
-            options: change_table_options
-                .iter()
-                .map(ChangeOption::try_from)
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .context(InvalidChangeTableOptionRequestSnafu)?,
-        },
+        Kind::SetTableOptions(api::v1::SetTableOptions { table_options }) => {
+            AlterKind::SetTableOptions {
+                options: table_options
+                    .iter()
+                    .map(SetRegionOption::try_from)
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .context(InvalidSetTableOptionRequestSnafu)?,
+            }
+        }
+        Kind::UnsetTableOptions(api::v1::UnsetTableOptions { keys }) => {
+            AlterKind::UnsetTableOptions {
+                keys: keys
+                    .iter()
+                    .map(|key| UnsetRegionOption::try_from(key.as_str()))
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .context(InvalidUnsetTableOptionRequestSnafu)?,
+            }
+        }
         Kind::SetColumnFulltext(c) => AlterKind::SetColumnFulltext {
             column_name: c.column_name,
             options: FulltextOptions {
                 enable: c.enable,
                 analyzer: as_fulltext_option(
-                    Analyzer::try_from(c.analyzer)
-                        .context(InvalidChangeFulltextOptionRequestSnafu)?,
+                    Analyzer::try_from(c.analyzer).context(InvalidSetFulltextOptionRequestSnafu)?,
                 ),
                 case_sensitive: c.case_sensitive,
             },

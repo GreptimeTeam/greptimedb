@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::fmt;
+use std::fmt::{self, Display};
 use std::time::Duration;
 
 use api::helper::ColumnDataTypeWrapper;
@@ -24,7 +24,7 @@ use api::v1::region::{
     CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
     FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
-use api::v1::{self, Analyzer, ChangeTableOption, Rows, SemanticType};
+use api::v1::{self, Analyzer, Rows, SemanticType, TableOption};
 pub use common_base::AffectedRows;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::FulltextOptions;
@@ -34,8 +34,8 @@ use strum::IntoStaticStr;
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, DecodeProtoSnafu, InvalidRawRegionRequestSnafu,
-    InvalidRegionOptionChangeRequestSnafu, InvalidRegionRequestSnafu, MetadataError,
+    ColumnMetadata, DecodeProtoSnafu, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu,
+    InvalidSetRegionOptionRequestSnafu, InvalidUnsetRegionOptionRequestSnafu, MetadataError,
     RegionMetadata, Result,
 };
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
@@ -412,18 +412,17 @@ pub enum AlterKind {
         /// Columns to change.
         columns: Vec<ModifyColumnType>,
     },
-    /// Change region options.
-    ChangeRegionOptions {
-        options: Vec<ChangeOption>,
-    },
-    /// Change fulltext index options.
+    /// Set region options.
+    SetRegionOptions { options: Vec<SetRegionOption> },
+    /// Unset region options.
+    UnsetRegionOptions { keys: Vec<UnsetRegionOption> },
+    /// Set fulltext index options.
     SetColumnFulltext {
         column_name: String,
         options: FulltextOptions,
     },
-    UnsetColumnFulltext {
-        column_name: String,
-    },
+    /// Unset fulltext index options.
+    UnsetColumnFulltext { column_name: String },
 }
 
 impl AlterKind {
@@ -447,7 +446,8 @@ impl AlterKind {
                     col_to_change.validate(metadata)?;
                 }
             }
-            AlterKind::ChangeRegionOptions { .. } => {}
+            AlterKind::SetRegionOptions { .. } => {}
+            AlterKind::UnsetRegionOptions { .. } => {}
             AlterKind::SetColumnFulltext { column_name, .. }
             | AlterKind::UnsetColumnFulltext { column_name } => {
                 Self::validate_column_fulltext_option(column_name, metadata)?;
@@ -469,11 +469,12 @@ impl AlterKind {
             AlterKind::ModifyColumnTypes { columns } => columns
                 .iter()
                 .any(|col_to_change| col_to_change.need_alter(metadata)),
-            AlterKind::ChangeRegionOptions { .. } => {
+            AlterKind::SetRegionOptions { .. } => {
                 // we need to update region options for `ChangeTableOptions`.
                 // todo: we need to check if ttl has ever changed.
                 true
             }
+            AlterKind::UnsetRegionOptions { .. } => true,
             AlterKind::SetColumnFulltext { column_name, .. } => {
                 metadata.column_by_name(column_name).is_some()
             }
@@ -550,15 +551,20 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                 let names = x.drop_columns.into_iter().map(|x| x.name).collect();
                 AlterKind::DropColumns { names }
             }
-            alter_request::Kind::ChangeTableOptions(change_options) => {
-                AlterKind::ChangeRegionOptions {
-                    options: change_options
-                        .change_table_options
-                        .iter()
-                        .map(TryFrom::try_from)
-                        .collect::<Result<Vec<_>>>()?,
-                }
-            }
+            alter_request::Kind::SetTableOptions(options) => AlterKind::SetRegionOptions {
+                options: options
+                    .table_options
+                    .iter()
+                    .map(TryFrom::try_from)
+                    .collect::<Result<Vec<_>>>()?,
+            },
+            alter_request::Kind::UnsetTableOptions(options) => AlterKind::UnsetRegionOptions {
+                keys: options
+                    .keys
+                    .iter()
+                    .map(|key| UnsetRegionOption::try_from(key.as_str()))
+                    .collect::<Result<Vec<_>>>()?,
+            },
             alter_request::Kind::SetColumnFulltext(x) => AlterKind::SetColumnFulltext {
                 column_name: x.column_name.clone(),
                 options: FulltextOptions {
@@ -739,17 +745,17 @@ impl From<v1::ModifyColumnType> for ModifyColumnType {
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
-pub enum ChangeOption {
+pub enum SetRegionOption {
     TTL(Duration),
     // Modifying TwscOptions with values as (option name, new value).
     Twsc(String, String),
 }
 
-impl TryFrom<&ChangeTableOption> for ChangeOption {
+impl TryFrom<&TableOption> for SetRegionOption {
     type Error = MetadataError;
 
-    fn try_from(value: &ChangeTableOption) -> std::result::Result<Self, Self::Error> {
-        let ChangeTableOption { key, value } = value;
+    fn try_from(value: &TableOption) -> std::result::Result<Self, Self::Error> {
+        let TableOption { key, value } = value;
 
         match key.as_str() {
             TTL_KEY => {
@@ -757,7 +763,7 @@ impl TryFrom<&ChangeTableOption> for ChangeOption {
                     Duration::from_secs(0)
                 } else {
                     humantime::parse_duration(value)
-                        .map_err(|_| InvalidRegionOptionChangeRequestSnafu { key, value }.build())?
+                        .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?
                 };
                 Ok(Self::TTL(ttl))
             }
@@ -767,8 +773,82 @@ impl TryFrom<&ChangeTableOption> for ChangeOption {
             | TWCS_MAX_INACTIVE_WINDOW_RUNS
             | TWCS_MAX_OUTPUT_FILE_SIZE
             | TWCS_TIME_WINDOW => Ok(Self::Twsc(key.to_string(), value.to_string())),
-            _ => InvalidRegionOptionChangeRequestSnafu { key, value }.fail(),
+            _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
+    }
+}
+
+impl From<&UnsetRegionOption> for SetRegionOption {
+    fn from(unset_option: &UnsetRegionOption) -> Self {
+        match unset_option {
+            UnsetRegionOption::TwcsMaxActiveWindowFiles => {
+                SetRegionOption::Twsc(unset_option.to_string(), String::new())
+            }
+            UnsetRegionOption::TwcsMaxInactiveWindowFiles => {
+                SetRegionOption::Twsc(unset_option.to_string(), String::new())
+            }
+            UnsetRegionOption::TwcsMaxActiveWindowRuns => {
+                SetRegionOption::Twsc(unset_option.to_string(), String::new())
+            }
+            UnsetRegionOption::TwcsMaxInactiveWindowRuns => {
+                SetRegionOption::Twsc(unset_option.to_string(), String::new())
+            }
+            UnsetRegionOption::TwcsMaxOutputFileSize => {
+                SetRegionOption::Twsc(unset_option.to_string(), String::new())
+            }
+            UnsetRegionOption::TwcsTimeWindow => {
+                SetRegionOption::Twsc(unset_option.to_string(), String::new())
+            }
+            UnsetRegionOption::Ttl => SetRegionOption::TTL(Duration::default()),
+        }
+    }
+}
+
+impl TryFrom<&str> for UnsetRegionOption {
+    type Error = MetadataError;
+
+    fn try_from(key: &str) -> Result<Self> {
+        match key.to_ascii_lowercase().as_str() {
+            TTL_KEY => Ok(Self::Ttl),
+            TWCS_MAX_ACTIVE_WINDOW_FILES => Ok(Self::TwcsMaxActiveWindowFiles),
+            TWCS_MAX_INACTIVE_WINDOW_FILES => Ok(Self::TwcsMaxInactiveWindowFiles),
+            TWCS_MAX_ACTIVE_WINDOW_RUNS => Ok(Self::TwcsMaxActiveWindowRuns),
+            TWCS_MAX_INACTIVE_WINDOW_RUNS => Ok(Self::TwcsMaxInactiveWindowRuns),
+            TWCS_MAX_OUTPUT_FILE_SIZE => Ok(Self::TwcsMaxOutputFileSize),
+            TWCS_TIME_WINDOW => Ok(Self::TwcsTimeWindow),
+            _ => InvalidUnsetRegionOptionRequestSnafu { key }.fail(),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
+pub enum UnsetRegionOption {
+    TwcsMaxActiveWindowFiles,
+    TwcsMaxInactiveWindowFiles,
+    TwcsMaxActiveWindowRuns,
+    TwcsMaxInactiveWindowRuns,
+    TwcsMaxOutputFileSize,
+    TwcsTimeWindow,
+    Ttl,
+}
+
+impl UnsetRegionOption {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Ttl => TTL_KEY,
+            Self::TwcsMaxActiveWindowFiles => TWCS_MAX_ACTIVE_WINDOW_FILES,
+            Self::TwcsMaxInactiveWindowFiles => TWCS_MAX_INACTIVE_WINDOW_FILES,
+            Self::TwcsMaxActiveWindowRuns => TWCS_MAX_ACTIVE_WINDOW_RUNS,
+            Self::TwcsMaxInactiveWindowRuns => TWCS_MAX_INACTIVE_WINDOW_RUNS,
+            Self::TwcsMaxOutputFileSize => TWCS_MAX_OUTPUT_FILE_SIZE,
+            Self::TwcsTimeWindow => TWCS_TIME_WINDOW,
+        }
+    }
+}
+
+impl Display for UnsetRegionOption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }
 

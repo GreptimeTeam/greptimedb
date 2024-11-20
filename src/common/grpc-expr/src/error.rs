@@ -120,14 +120,20 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid change table option request"))]
-    InvalidChangeTableOptionRequest {
+    #[snafu(display("Invalid set table option request"))]
+    InvalidSetTableOptionRequest {
         #[snafu(source)]
         error: MetadataError,
     },
 
-    #[snafu(display("Invalid change fulltext option request"))]
-    InvalidChangeFulltextOptionRequest {
+    #[snafu(display("Invalid unset table option request"))]
+    InvalidUnsetTableOptionRequest {
+        #[snafu(source)]
+        error: MetadataError,
+    },
+
+    #[snafu(display("Invalid set fulltext option request"))]
+    InvalidSetFulltextOptionRequest {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
@@ -156,8 +162,9 @@ impl ErrorExt for Error {
             Error::UnknownColumnDataType { .. } | Error::InvalidFulltextColumnType { .. } => {
                 StatusCode::InvalidArguments
             }
-            Error::InvalidChangeTableOptionRequest { .. }
-            | Error::InvalidChangeFulltextOptionRequest { .. } => StatusCode::InvalidArguments,
+            Error::InvalidSetTableOptionRequest { .. }
+            | Error::InvalidUnsetTableOptionRequest { .. }
+            | Error::InvalidSetFulltextOptionRequest { .. } => StatusCode::InvalidArguments,
         }
     }
 

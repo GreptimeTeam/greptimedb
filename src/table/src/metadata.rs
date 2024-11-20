@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{COMPACTION_TYPE, COMPACTION_TYPE_TWCS};
-use store_api::region_request::ChangeOption;
+use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId, RegionId};
 
 use crate::error::{self, Result};
@@ -206,7 +206,8 @@ impl TableMeta {
             }
             // No need to rebuild table meta when renaming tables.
             AlterKind::RenameTable { .. } => Ok(self.new_meta_builder()),
-            AlterKind::ChangeTableOptions { options } => self.change_table_options(options),
+            AlterKind::SetTableOptions { options } => self.set_table_options(options),
+            AlterKind::UnsetTableOptions { keys } => self.unset_table_options(keys),
             AlterKind::SetColumnFulltext {
                 column_name,
                 options,
@@ -218,19 +219,19 @@ impl TableMeta {
     }
 
     /// Creates a [TableMetaBuilder] with modified table options.
-    fn change_table_options(&self, requests: &[ChangeOption]) -> Result<TableMetaBuilder> {
+    fn set_table_options(&self, requests: &[SetRegionOption]) -> Result<TableMetaBuilder> {
         let mut new_options = self.options.clone();
 
         for request in requests {
             match request {
-                ChangeOption::TTL(new_ttl) => {
+                SetRegionOption::TTL(new_ttl) => {
                     if new_ttl.is_zero() {
                         new_options.ttl = None;
                     } else {
                         new_options.ttl = Some(*new_ttl);
                     }
                 }
-                ChangeOption::Twsc(key, value) => {
+                SetRegionOption::Twsc(key, value) => {
                     if !value.is_empty() {
                         new_options
                             .extra_options
@@ -251,6 +252,11 @@ impl TableMeta {
         builder.options(new_options);
 
         Ok(builder)
+    }
+
+    fn unset_table_options(&self, requests: &[UnsetRegionOption]) -> Result<TableMetaBuilder> {
+        let requests = requests.iter().map(Into::into).collect::<Vec<_>>();
+        self.set_table_options(&requests)
     }
 
     /// Creates a [TableMetaBuilder] with modified column fulltext options.
