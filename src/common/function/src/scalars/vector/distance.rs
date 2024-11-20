@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod cos;
+mod dot;
+mod l2sq;
+
 use std::borrow::Cow;
 use std::fmt::Display;
 use std::sync::Arc;
@@ -21,14 +25,14 @@ use common_query::prelude::Signature;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::value::ValueRef;
-use datatypes::vectors::{Float64VectorBuilder, MutableVector, Vector, VectorRef};
+use datatypes::vectors::{Float32VectorBuilder, MutableVector, Vector, VectorRef};
 use snafu::ensure;
 
 use crate::function::{Function, FunctionContext};
 use crate::helper;
 
 macro_rules! define_distance_function {
-    ($StructName:ident, $display_name:expr, $similarity_method:ident) => {
+    ($StructName:ident, $display_name:expr, $similarity_method:path) => {
 
         /// A function calculates the distance between two vectors.
 
@@ -41,7 +45,7 @@ macro_rules! define_distance_function {
             }
 
             fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-                Ok(ConcreteDataType::float64_datatype())
+                Ok(ConcreteDataType::float32_datatype())
             }
 
             fn signature(&self) -> Signature {
@@ -71,7 +75,7 @@ macro_rules! define_distance_function {
                 let arg1 = &columns[1];
 
                 let size = arg0.len();
-                let mut result = Float64VectorBuilder::with_capacity(size);
+                let mut result = Float32VectorBuilder::with_capacity(size);
                 if size == 0 {
                     return Ok(result.to_vector());
                 }
@@ -101,9 +105,8 @@ macro_rules! define_distance_function {
                             }
                         );
 
-                        let f = <f32 as simsimd::SpatialSimilarity>::$similarity_method;
-                        // Safe: checked if the length of the vectors match
-                        let d = f(vec0.as_ref(), vec1.as_ref()).unwrap();
+                        // Checked if the length of the vectors match
+                        let d = $similarity_method(vec0.as_ref(), vec1.as_ref());
                         result.push(Some(d));
                     } else {
                         result.push_null();
@@ -122,9 +125,9 @@ macro_rules! define_distance_function {
     }
 }
 
-define_distance_function!(CosDistanceFunction, "cos_distance", cos);
-define_distance_function!(L2SqDistanceFunction, "l2sq_distance", l2sq);
-define_distance_function!(DotProductFunction, "dot_product", dot);
+define_distance_function!(CosDistanceFunction, "vec_cos_distance", cos::cos_scalar);
+define_distance_function!(L2SqDistanceFunction, "vec_l2sq_distance", l2sq::l2sq_scalar);
+define_distance_function!(DotProductFunction, "vec_dot_product", dot::dot_scalar);
 
 /// Parse a vector value if the value is a constant string.
 fn parse_if_constant_string(arg: &Arc<dyn Vector>) -> Result<Option<Vec<f32>>> {
@@ -148,7 +151,7 @@ fn as_vector(arg: ValueRef<'_>) -> Result<Option<Cow<'_, [f32]>>> {
         ConcreteDataType::Binary(_) => arg
             .as_binary()
             .unwrap() // Safe: checked if it is a binary
-            .map(|bytes| Ok(Cow::Borrowed(binary_as_vector(bytes)?)))
+            .map(binary_as_vector)
             .transpose(),
         ConcreteDataType::String(_) => arg
             .as_string()
@@ -164,18 +167,28 @@ fn as_vector(arg: ValueRef<'_>) -> Result<Option<Cow<'_, [f32]>>> {
 }
 
 /// Convert a u8 slice to a vector value.
-fn binary_as_vector(bytes: &[u8]) -> Result<&[f32]> {
-    if bytes.len() % 4 != 0 {
+fn binary_as_vector(bytes: &[u8]) -> Result<Cow<'_, [f32]>> {
+    if bytes.len() % std::mem::size_of::<f32>() != 0 {
         return InvalidFuncArgsSnafu {
             err_msg: format!("Invalid binary length of vector: {}", bytes.len()),
         }
         .fail();
     }
 
-    unsafe {
-        let num_floats = bytes.len() / 4;
-        let floats: &[f32] = std::slice::from_raw_parts(bytes.as_ptr() as *const f32, num_floats);
-        Ok(floats)
+    if cfg!(target_endian = "little") {
+        Ok(unsafe {
+            let vec = std::slice::from_raw_parts(
+                bytes.as_ptr() as *const f32,
+                bytes.len() / std::mem::size_of::<f32>(),
+            );
+            Cow::Borrowed(vec)
+        })
+    } else {
+        let v = bytes
+            .chunks_exact(std::mem::size_of::<f32>())
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect::<Vec<f32>>();
+        Ok(Cow::Owned(v))
     }
 }
 
@@ -460,7 +473,7 @@ mod tests {
     fn test_binary_as_vector() {
         let bytes = [0, 0, 128, 63];
         let result = binary_as_vector(&bytes).unwrap();
-        assert_eq!(result, &[1.0]);
+        assert_eq!(result.as_ref(), &[1.0]);
 
         let invalid_bytes = [0, 0, 128];
         let result = binary_as_vector(&invalid_bytes);

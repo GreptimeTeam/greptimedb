@@ -33,6 +33,7 @@ geo-types = { version = "0.7", optional = true }
 geohash = { version = "0.13", optional = true }
 h3o = { version = "0.6", optional = true }
 jsonb.workspace = true
+nalgebra = "0.33"
 num = "0.4"
 num-traits = "0.2"
 once_cell.workspace = true
@@ -41,7 +42,6 @@ s2 = { version = "0.0.12", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 session.workspace = true
-simsimd = "4"
 snafu.workspace = true
 sql.workspace = true
 statrs = "0.16"
@@ -50,6 +50,7 @@ table.workspace = true
 wkt = { version = "0.11", optional = true }
 
 [dev-dependencies]
+approx = "0.5"
 ron = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 tokio.workspace = true

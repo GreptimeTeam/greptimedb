@@ -85,15 +85,12 @@ pub fn vector_type_value_to_string(val: &[u8], dim: u32) -> Result<String> {
         return Ok("[]".to_string());
     }
 
-    let elements = unsafe {
-        std::slice::from_raw_parts(
-            val.as_ptr() as *const f32,
-            val.len() / std::mem::size_of::<f32>(),
-        )
-    };
+    let elements = val
+        .chunks_exact(std::mem::size_of::<f32>())
+        .map(|e| f32::from_le_bytes(e.try_into().unwrap()));
 
     let mut s = String::from("[");
-    for (i, e) in elements.iter().enumerate() {
+    for (i, e) in elements.enumerate() {
         if i > 0 {
             s.push(',');
         }
@@ -150,12 +147,19 @@ pub fn parse_string_to_vector_type_value(s: &str, dim: u32) -> Result<Vec<u8>> {
     }
 
     // Convert Vec<f32> to Vec<u8>
-    let bytes = unsafe {
-        std::slice::from_raw_parts(
-            elements.as_ptr() as *const u8,
-            elements.len() * std::mem::size_of::<f32>(),
-        )
-        .to_vec()
+    let bytes = if cfg!(target_endian = "little") {
+        unsafe {
+            std::slice::from_raw_parts(
+                elements.as_ptr() as *const u8,
+                elements.len() * std::mem::size_of::<f32>(),
+            )
+            .to_vec()
+        }
+    } else {
+        elements
+            .iter()
+            .flat_map(|e| e.to_le_bytes())
+            .collect::<Vec<u8>>()
     };
 
     Ok(bytes)
