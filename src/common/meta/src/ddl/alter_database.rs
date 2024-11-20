@@ -46,10 +46,7 @@ impl AlterDatabaseProcedure {
             .context
             .table_metadata_manager
             .schema_manager()
-            .exists(SchemaNameKey::new(
-                &self.data.catalog(),
-                &self.data.schema(),
-            ))
+            .exists(SchemaNameKey::new(self.data.catalog(), self.data.schema()))
             .await?;
 
         ensure!(
@@ -65,7 +62,7 @@ impl AlterDatabaseProcedure {
     }
 
     pub async fn on_update_metadata(&mut self) -> Result<Status> {
-        let schema_name = SchemaNameKey::new(&self.data.catalog(), &self.data.schema());
+        let schema_name = SchemaNameKey::new(self.data.catalog(), self.data.schema());
 
         self.data.task.validate()?;
         let alter_kind = self.data.task.alter_expr.kind.as_ref().unwrap();
@@ -147,10 +144,10 @@ impl AlterDatabaseData {
     }
 
     pub fn catalog(&self) -> &str {
-        &self.task.catalog()
+        self.task.catalog()
     }
 
     pub fn schema(&self) -> &str {
-        &self.task.schema()
+        self.task.schema()
     }
 }
