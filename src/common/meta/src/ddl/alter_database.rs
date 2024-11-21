@@ -15,14 +15,17 @@
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
+use common_telemetry::tracing::info;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use strum::AsRefStr;
 
 use super::utils::handle_retry_error;
+use crate::cache_invalidator::Context;
 use crate::ddl::DdlContext;
 use crate::error::{Result, SchemaNotFoundSnafu};
-use crate::key::schema_name::{SchemaNameKey, SchemaNameValue};
+use crate::instruction::CacheIdent;
+use crate::key::schema_name::{SchemaName, SchemaNameKey, SchemaNameValue};
 use crate::key::DeserializedValueWithBytes;
 use crate::lock_key::{CatalogLock, SchemaLock};
 use crate::rpc::ddl::UnsetDatabaseOption::{self};
@@ -121,6 +124,23 @@ impl AlterDatabaseProcedure {
             .update(schema_name, current_schema_value, &new_schema_value)
             .await?;
 
+        info!("Updated database metadata for schema {schema_name}");
+        self.data.state = AlterDatabaseState::InvalidateSchemaCache;
+        Ok(Status::executing(true))
+    }
+
+    pub async fn on_invalidate_schema_cache(&mut self) -> Result<Status> {
+        let cache_invalidator = &self.context.cache_invalidator;
+        cache_invalidator
+            .invalidate(
+                &Context::default(),
+                &[CacheIdent::SchemaName(SchemaName {
+                    catalog_name: self.data.catalog().to_string(),
+                    schema_name: self.data.schema().to_string(),
+                })],
+            )
+            .await?;
+
         Ok(Status::done())
     }
 }
@@ -135,6 +155,7 @@ impl Procedure for AlterDatabaseProcedure {
         match self.data.state {
             AlterDatabaseState::Prepare => self.on_prepare().await,
             AlterDatabaseState::UpdateMetadata => self.on_update_metadata().await,
+            AlterDatabaseState::InvalidateSchemaCache => self.on_invalidate_schema_cache().await,
         }
         .map_err(handle_retry_error)
     }
@@ -160,6 +181,7 @@ impl Procedure for AlterDatabaseProcedure {
 enum AlterDatabaseState {
     Prepare,
     UpdateMetadata,
+    InvalidateSchemaCache,
 }
 
 /// The data of alter database procedure.
@@ -170,7 +192,6 @@ pub struct AlterDatabaseData {
     kind: AlterDatabaseKind,
     catalog_name: String,
     schema_name: String,
-
     schema_value: Option<DeserializedValueWithBytes<SchemaNameValue>>,
 }
 

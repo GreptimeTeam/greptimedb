@@ -20,6 +20,9 @@ SHOW CREATE DATABASE alter_database;
 | Database       | Create Database                              |
 +----------------+----------------------------------------------+
 | alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
+|                | WITH(                                        |
+|                |   ttl = '10s'                                |
+|                | )                                            |
 +----------------+----------------------------------------------+
 
 ALTER DATABASE alter_database SET 'ttl'='20s';
@@ -32,6 +35,9 @@ SHOW CREATE DATABASE alter_database;
 | Database       | Create Database                              |
 +----------------+----------------------------------------------+
 | alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
+|                | WITH(                                        |
+|                |   ttl = '20s'                                |
+|                | )                                            |
 +----------------+----------------------------------------------+
 
 -- SQLNESS ARG restart=true
@@ -41,6 +47,9 @@ SHOW CREATE DATABASE alter_database;
 | Database       | Create Database                              |
 +----------------+----------------------------------------------+
 | alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
+|                | WITH(                                        |
+|                |   ttl = '20s'                                |
+|                | )                                            |
 +----------------+----------------------------------------------+
 
 ALTER DATABASE alter_database UNSET 'ttl';

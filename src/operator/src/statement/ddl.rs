@@ -28,7 +28,7 @@ use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
 use common_meta::ddl::ExecutorContext;
 use common_meta::instruction::CacheIdent;
-use common_meta::key::schema_name::SchemaNameKey;
+use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
 use common_meta::key::NAME_PATTERN;
 use common_meta::rpc::ddl::{
     CreateFlowTask, DdlTask, DropFlowTask, DropViewTask, SubmitDdlTaskRequest,
@@ -1067,22 +1067,33 @@ impl StatementExecutor {
             }
         );
 
-        if self
+        let exist = self
             .catalog_manager
             .schema_exists(&alter_expr.catalog_name, &alter_expr.schema_name, None)
             .await
-            .context(CatalogSnafu)?
-        {
-            self.alter_database_procedure(alter_expr, query_context)
-                .await?;
-
-            Ok(Output::new_with_affected_rows(0))
-        } else {
+            .context(CatalogSnafu)?;
+        ensure!(
+            exist,
             SchemaNotFoundSnafu {
                 schema_info: alter_expr.schema_name,
             }
-            .fail()
-        }
+        );
+
+        let cache_ident = [CacheIdent::SchemaName(SchemaName {
+            catalog_name: alter_expr.catalog_name.clone(),
+            schema_name: alter_expr.schema_name.clone(),
+        })];
+
+        self.alter_database_procedure(alter_expr, query_context)
+            .await?;
+
+        // Invalidates local cache ASAP.
+        self.cache_invalidator
+            .invalidate(&Context::default(), &cache_ident)
+            .await
+            .context(error::InvalidateTableCacheSnafu)?;
+
+        Ok(Output::new_with_affected_rows(0))
     }
 
     async fn create_table_procedure(
