@@ -21,10 +21,14 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use futures::stream::BoxStream;
 use humantime_serde::re::humantime;
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
+use super::txn_helper::TxnOpGetResponseSet;
+use super::DeserializedValueWithBytes;
+use crate::ensure_values;
 use crate::error::{self, Error, InvalidMetadataSnafu, ParseOptionSnafu, Result};
 use crate::key::{MetadataKey, SCHEMA_NAME_KEY_PATTERN, SCHEMA_NAME_KEY_PREFIX};
+use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use crate::rpc::store::RangeRequest;
@@ -171,6 +175,8 @@ pub struct SchemaManager {
     kv_backend: KvBackendRef,
 }
 
+pub type SchemaNameDecodeResult = Result<Option<DeserializedValueWithBytes<SchemaNameValue>>>;
+
 impl SchemaManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
@@ -204,11 +210,15 @@ impl SchemaManager {
         self.kv_backend.exists(&raw_key).await
     }
 
-    pub async fn get(&self, schema: SchemaNameKey<'_>) -> Result<Option<SchemaNameValue>> {
+    pub async fn get(
+        &self,
+        schema: SchemaNameKey<'_>,
+    ) -> Result<Option<DeserializedValueWithBytes<SchemaNameValue>>> {
         let raw_key = schema.to_bytes();
-        let value = self.kv_backend.get(&raw_key).await?;
-        value
-            .and_then(|v| SchemaNameValue::try_from_raw_value(v.value.as_ref()).transpose())
+        self.kv_backend
+            .get(&raw_key)
+            .await?
+            .map(|x| DeserializedValueWithBytes::from_inner_slice(&x.value))
             .transpose()
     }
 
@@ -216,6 +226,54 @@ impl SchemaManager {
     pub async fn delete(&self, schema: SchemaNameKey<'_>) -> Result<()> {
         let raw_key = schema.to_bytes();
         self.kv_backend.delete(&raw_key, false).await?;
+
+        Ok(())
+    }
+
+    pub(crate) fn build_update_txn(
+        &self,
+        schema: SchemaNameKey<'_>,
+        current_schema_value: &DeserializedValueWithBytes<SchemaNameValue>,
+        new_schema_value: &SchemaNameValue,
+    ) -> Result<(
+        Txn,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> SchemaNameDecodeResult,
+    )> {
+        let raw_key = schema.to_bytes();
+        let raw_value = current_schema_value.get_raw_bytes();
+        let new_raw_value: Vec<u8> = new_schema_value.try_as_raw_value()?;
+
+        let txn = Txn::compare_and_put(raw_key.clone(), raw_value, new_raw_value);
+
+        Ok((
+            txn,
+            TxnOpGetResponseSet::decode_with(TxnOpGetResponseSet::filter(raw_key)),
+        ))
+    }
+
+    /// Updates a [SchemaNameKey].
+    pub async fn update(
+        &self,
+        schema: SchemaNameKey<'_>,
+        current_schema_value: &DeserializedValueWithBytes<SchemaNameValue>,
+        new_schema_value: &SchemaNameValue,
+    ) -> Result<()> {
+        let (txn, on_failure) =
+            self.build_update_txn(schema, current_schema_value, new_schema_value)?;
+        let mut r = self.kv_backend.txn(txn).await?;
+
+        if !r.succeeded {
+            let mut set = TxnOpGetResponseSet::from(&mut r.responses);
+            let remote_schema_value = on_failure(&mut set)?
+                .context(error::UnexpectedSnafu {
+                    err_msg:
+                        "Reads the empty schema name value in comparing operation of updating schema name value",
+                })?
+                .into_inner();
+
+            let op_name = "the updating schema name value";
+            ensure_values!(&remote_schema_value, new_schema_value, op_name);
+        }
 
         Ok(())
     }
@@ -305,5 +363,43 @@ mod tests {
         let wrong_schema_key = SchemaNameKey::new("my-catalog", "my-wrong");
 
         assert!(!manager.exists(wrong_schema_key).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_update_schema_value() {
+        let manager = SchemaManager::new(Arc::new(MemoryKvBackend::default()));
+        let schema_key = SchemaNameKey::new("my-catalog", "my-schema");
+        manager.create(schema_key, None, false).await.unwrap();
+
+        let current_schema_value = manager.get(schema_key).await.unwrap().unwrap();
+        let new_schema_value = SchemaNameValue {
+            ttl: Some(Duration::from_secs(10)),
+        };
+        manager
+            .update(schema_key, &current_schema_value, &new_schema_value)
+            .await
+            .unwrap();
+
+        // Update with the same value, should be ok
+        manager
+            .update(schema_key, &current_schema_value, &new_schema_value)
+            .await
+            .unwrap();
+
+        let new_schema_value = SchemaNameValue {
+            ttl: Some(Duration::from_secs(40)),
+        };
+        let incorrect_schema_value = SchemaNameValue {
+            ttl: Some(Duration::from_secs(20)),
+        }
+        .try_as_raw_value()
+        .unwrap();
+        let incorrect_schema_value =
+            DeserializedValueWithBytes::from_inner_slice(&incorrect_schema_value).unwrap();
+
+        manager
+            .update(schema_key, &incorrect_schema_value, &new_schema_value)
+            .await
+            .unwrap_err();
     }
 }

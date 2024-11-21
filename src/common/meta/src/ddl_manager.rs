@@ -24,6 +24,7 @@ use derive_builder::Builder;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::TableId;
 
+use crate::ddl::alter_database::AlterDatabaseProcedure;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
 use crate::ddl::alter_table::AlterTableProcedure;
 use crate::ddl::create_database::CreateDatabaseProcedure;
@@ -47,12 +48,13 @@ use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use crate::rpc::ddl::DdlTask::{
-    AlterLogicalTables, AlterTable, CreateDatabase, CreateFlow, CreateLogicalTables, CreateTable,
-    CreateView, DropDatabase, DropFlow, DropLogicalTables, DropTable, DropView, TruncateTable,
+    AlterDatabase, AlterLogicalTables, AlterTable, CreateDatabase, CreateFlow, CreateLogicalTables,
+    CreateTable, CreateView, DropDatabase, DropFlow, DropLogicalTables, DropTable, DropView,
+    TruncateTable,
 };
 use crate::rpc::ddl::{
-    AlterTableTask, CreateDatabaseTask, CreateFlowTask, CreateTableTask, CreateViewTask,
-    DropDatabaseTask, DropFlowTask, DropTableTask, DropViewTask, QueryContext,
+    AlterDatabaseTask, AlterTableTask, CreateDatabaseTask, CreateFlowTask, CreateTableTask,
+    CreateViewTask, DropDatabaseTask, DropFlowTask, DropTableTask, DropViewTask, QueryContext,
     SubmitDdlTaskRequest, SubmitDdlTaskResponse, TruncateTableTask,
 };
 use crate::rpc::procedure;
@@ -129,6 +131,7 @@ impl DdlManager {
             CreateFlowProcedure,
             AlterTableProcedure,
             AlterLogicalTablesProcedure,
+            AlterDatabaseProcedure,
             DropTableProcedure,
             DropFlowProcedure,
             TruncateTableProcedure,
@@ -289,6 +292,18 @@ impl DdlManager {
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = DropDatabaseProcedure::new(catalog, schema, drop_if_exists, context);
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        self.submit_procedure(procedure_with_id).await
+    }
+
+    pub async fn submit_alter_database(
+        &self,
+        cluster_id: ClusterId,
+        alter_database_task: AlterDatabaseTask,
+    ) -> Result<(ProcedureId, Option<Output>)> {
+        let context = self.create_context();
+        let procedure = AlterDatabaseProcedure::new(cluster_id, alter_database_task, context)?;
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.submit_procedure(procedure_with_id).await
@@ -593,6 +608,28 @@ async fn handle_drop_database_task(
     })
 }
 
+async fn handle_alter_database_task(
+    ddl_manager: &DdlManager,
+    cluster_id: ClusterId,
+    alter_database_task: AlterDatabaseTask,
+) -> Result<SubmitDdlTaskResponse> {
+    let (id, _) = ddl_manager
+        .submit_alter_database(cluster_id, alter_database_task.clone())
+        .await?;
+
+    let procedure_id = id.to_string();
+    info!(
+        "Database {}.{} is altered via procedure_id {id:?}",
+        alter_database_task.catalog(),
+        alter_database_task.schema()
+    );
+
+    Ok(SubmitDdlTaskResponse {
+        key: procedure_id.into(),
+        ..Default::default()
+    })
+}
+
 async fn handle_drop_flow_task(
     ddl_manager: &DdlManager,
     cluster_id: ClusterId,
@@ -778,6 +815,9 @@ impl ProcedureExecutor for DdlManager {
                 }
                 DropDatabase(drop_database_task) => {
                     handle_drop_database_task(self, cluster_id, drop_database_task).await
+                }
+                AlterDatabase(alter_database_task) => {
+                    handle_alter_database_task(self, cluster_id, alter_database_task).await
                 }
                 CreateFlow(create_flow_task) => {
                     handle_create_flow_task(

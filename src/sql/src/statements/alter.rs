@@ -72,7 +72,7 @@ pub enum AlterTableOperation {
     },
     /// `SET <table attrs key> = <table attr value>`
     SetTableOptions {
-        options: Vec<TableOption>,
+        options: Vec<KeyValueOption>,
     },
     UnsetTableOptions {
         keys: Vec<String>,
@@ -123,7 +123,7 @@ impl Display for AlterTableOperation {
             AlterTableOperation::SetTableOptions { options } => {
                 let kvs = options
                     .iter()
-                    .map(|TableOption { key, value }| {
+                    .map(|KeyValueOption { key, value }| {
                         if !value.is_empty() {
                             format!("'{key}'='{value}'")
                         } else {
@@ -152,16 +152,82 @@ impl Display for AlterTableOperation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
-pub struct TableOption {
+pub struct KeyValueOption {
     pub key: String,
     pub value: String,
 }
 
-impl From<TableOption> for v1::TableOption {
-    fn from(c: TableOption) -> Self {
-        v1::TableOption {
+impl From<KeyValueOption> for v1::Option {
+    fn from(c: KeyValueOption) -> Self {
+        v1::Option {
             key: c.key,
             value: c.value,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub struct AlterDatabase {
+    pub database_name: ObjectName,
+    pub alter_operation: AlterDatabaseOperation,
+}
+
+impl AlterDatabase {
+    pub(crate) fn new(database_name: ObjectName, alter_operation: AlterDatabaseOperation) -> Self {
+        Self {
+            database_name,
+            alter_operation,
+        }
+    }
+
+    pub fn database_name(&self) -> &ObjectName {
+        &self.database_name
+    }
+
+    pub fn alter_operation(&self) -> &AlterDatabaseOperation {
+        &self.alter_operation
+    }
+}
+
+impl Display for AlterDatabase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let database_name = self.database_name();
+        let alter_operation = self.alter_operation();
+        write!(f, r#"ALTER DATABASE {database_name} {alter_operation}"#)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub enum AlterDatabaseOperation {
+    SetDatabaseOption { options: Vec<KeyValueOption> },
+    UnsetDatabaseOption { keys: Vec<String> },
+}
+
+impl Display for AlterDatabaseOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AlterDatabaseOperation::SetDatabaseOption { options } => {
+                let kvs = options
+                    .iter()
+                    .map(|KeyValueOption { key, value }| {
+                        if !value.is_empty() {
+                            format!("'{key}'='{value}'")
+                        } else {
+                            format!("'{key}'=NULL")
+                        }
+                    })
+                    .join(",");
+
+                write!(f, "SET {kvs}")?;
+
+                Ok(())
+            }
+            AlterDatabaseOperation::UnsetDatabaseOption { keys } => {
+                let keys = keys.iter().map(|key| format!("'{key}'")).join(",");
+                write!(f, "UNSET {keys}")?;
+
+                Ok(())
+            }
         }
     }
 }
@@ -176,15 +242,56 @@ mod tests {
 
     #[test]
     fn test_display_alter() {
+        let sql = r"ALTER DATABASE db SET 'a' = 'b', 'c' = 'd'";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::AlterDatabase { .. });
+
+        match &stmts[0] {
+            Statement::AlterDatabase(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+ALTER DATABASE db SET 'a'='b','c'='d'"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = r"ALTER DATABASE db UNSET 'a', 'c'";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+
+        match &stmts[0] {
+            Statement::AlterDatabase(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+ALTER DATABASE db UNSET 'a','c'"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
         let sql = r"alter table monitor add column app string default 'shop' primary key;";
         let stmts =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
         assert_eq!(1, stmts.len());
-        assert_matches!(&stmts[0], Statement::Alter { .. });
+        assert_matches!(&stmts[0], Statement::AlterTable { .. });
 
         match &stmts[0] {
-            Statement::Alter(set) => {
+            Statement::AlterTable(set) => {
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
@@ -202,10 +309,10 @@ ALTER TABLE monitor ADD COLUMN app STRING DEFAULT 'shop' PRIMARY KEY"#,
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
         assert_eq!(1, stmts.len());
-        assert_matches!(&stmts[0], Statement::Alter { .. });
+        assert_matches!(&stmts[0], Statement::AlterTable { .. });
 
         match &stmts[0] {
-            Statement::Alter(set) => {
+            Statement::AlterTable(set) => {
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
@@ -223,10 +330,10 @@ ALTER TABLE monitor MODIFY COLUMN load_15 STRING"#,
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
         assert_eq!(1, stmts.len());
-        assert_matches!(&stmts[0], Statement::Alter { .. });
+        assert_matches!(&stmts[0], Statement::AlterTable { .. });
 
         match &stmts[0] {
-            Statement::Alter(set) => {
+            Statement::AlterTable(set) => {
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
@@ -244,10 +351,10 @@ ALTER TABLE monitor DROP COLUMN load_15"#,
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
         assert_eq!(1, stmts.len());
-        assert_matches!(&stmts[0], Statement::Alter { .. });
+        assert_matches!(&stmts[0], Statement::AlterTable { .. });
 
         match &stmts[0] {
-            Statement::Alter(set) => {
+            Statement::AlterTable(set) => {
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
@@ -265,10 +372,10 @@ ALTER TABLE monitor RENAME monitor_new"#,
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
         assert_eq!(1, stmts.len());
-        assert_matches!(&stmts[0], Statement::Alter { .. });
+        assert_matches!(&stmts[0], Statement::AlterTable { .. });
 
         match &stmts[0] {
-            Statement::Alter(set) => {
+            Statement::AlterTable(set) => {
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
@@ -286,10 +393,10 @@ ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT WITH(analyzer=English, case_sen
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
         assert_eq!(1, stmts.len());
-        assert_matches!(&stmts[0], Statement::Alter { .. });
+        assert_matches!(&stmts[0], Statement::AlterTable { .. });
 
         match &stmts[0] {
-            Statement::Alter(set) => {
+            Statement::AlterTable(set) => {
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"

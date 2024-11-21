@@ -1,0 +1,107 @@
+CREATE DATABASE alter_database;
+
+Affected Rows: 1
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
++----------------+----------------------------------------------+
+
+ALTER DATABASE alter_database SET 'ttl'='10s';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
+|                | WITH(                                        |
+|                |   ttl = '10s'                                |
+|                | )                                            |
++----------------+----------------------------------------------+
+
+ALTER DATABASE alter_database SET 'ttl'='20s';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
+|                | WITH(                                        |
+|                |   ttl = '20s'                                |
+|                | )                                            |
++----------------+----------------------------------------------+
+
+-- SQLNESS ARG restart=true
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
+|                | WITH(                                        |
+|                |   ttl = '20s'                                |
+|                | )                                            |
++----------------+----------------------------------------------+
+
+ALTER DATABASE alter_database SET 'ttl'='';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
++----------------+----------------------------------------------+
+
+ALTER DATABASE alter_database SET 'ttl'='😁';
+
+Error: 1004(InvalidArguments), Invalid set database option, key: ttl, value: 😁
+
+ALTER DATABASE alter_database SET '🕶️'='1s';
+
+Error: 1004(InvalidArguments), Invalid set database option, key: 🕶️, value: 1s
+
+ALTER DATABASE alter_database SET 'ttl'='40s';
+
+Affected Rows: 0
+
+ALTER DATABASE alter_database UNSET 'ttl';
+
+Affected Rows: 0
+
+ALTER DATABASE alter_database UNSET '🕶️';
+
+Error: 1004(InvalidArguments), Invalid unset database option, key: 🕶️
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
++----------------+----------------------------------------------+
+
+-- SQLNESS ARG restart=true
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
++----------------+----------------------------------------------+
+
+DROP DATABASE alter_database;
+
+Affected Rows: 0
+

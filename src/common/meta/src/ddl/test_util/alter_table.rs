@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::alter_expr::Kind;
-use api::v1::{AddColumn, AddColumns, AlterExpr, ColumnDef, RenameTable};
+use api::v1::alter_table_expr::Kind;
+use api::v1::{AddColumn, AddColumns, AlterTableExpr, ColumnDef, RenameTable};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use derive_builder::Builder;
 
@@ -32,7 +32,7 @@ pub struct TestAlterTableExpr {
     new_table_name: Option<String>,
 }
 
-impl From<TestAlterTableExpr> for AlterExpr {
+impl From<TestAlterTableExpr> for AlterTableExpr {
     fn from(value: TestAlterTableExpr) -> Self {
         if let Some(new_table_name) = value.new_table_name {
             Self {

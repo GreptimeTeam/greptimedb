@@ -128,6 +128,14 @@ SHOW CREATE TABLE ato;
 |       | )                                  |
 +-------+------------------------------------+
 
+ALTER TABLE ato SET 'ttl'='😁';
+
+Error: 1004(InvalidArguments), Invalid set table option request: Invalid set region option request, key: ttl, value: 😁
+
+ALTER TABLE ato SET '🕶️'='1s';
+
+Error: 1004(InvalidArguments), Invalid set table option request: Invalid set region option request, key: 🕶️, value: 1s
+
 SELECT i FROM ato;
 
 +---+
@@ -190,6 +198,10 @@ ALTER TABLE ato UNSET 'compaction.twcs.time_window';
 
 Affected Rows: 0
 
+ALTER TABLE ato UNSET '🕶️';
+
+Error: 1004(InvalidArguments), Invalid unset table option request: Invalid set region option request, key: 🕶️
+
 SHOW CREATE TABLE ato;
 
 +-------+----------------------------------------------------+
@@ -214,6 +226,33 @@ SHOW CREATE TABLE ato;
 |       | )                                                  |
 +-------+----------------------------------------------------+
 
+ALTER TABLE ato SET 'compaction.twcs.max_inactive_window_runs'='';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE ato;
+
++-------+----------------------------------------------------+
+| Table | Create Table                                       |
++-------+----------------------------------------------------+
+| ato   | CREATE TABLE IF NOT EXISTS "ato" (                 |
+|       |   "i" INT NULL,                                    |
+|       |   "j" TIMESTAMP(3) NOT NULL,                       |
+|       |   TIME INDEX ("j"),                                |
+|       |   PRIMARY KEY ("i")                                |
+|       | )                                                  |
+|       |                                                    |
+|       | ENGINE=mito                                        |
+|       | WITH(                                              |
+|       |   compaction.twcs.max_active_window_files = '2',   |
+|       |   compaction.twcs.max_active_window_runs = '6',    |
+|       |   compaction.twcs.max_inactive_window_files = '2', |
+|       |   compaction.twcs.max_output_file_size = '500MB',  |
+|       |   compaction.type = 'twcs',                        |
+|       |   ttl = '1s'                                       |
+|       | )                                                  |
++-------+----------------------------------------------------+
+
 -- SQLNESS ARG restart=true
 SHOW CREATE TABLE ato;
 
@@ -232,7 +271,6 @@ SHOW CREATE TABLE ato;
 |       |   compaction.twcs.max_active_window_files = '2',   |
 |       |   compaction.twcs.max_active_window_runs = '6',    |
 |       |   compaction.twcs.max_inactive_window_files = '2', |
-|       |   compaction.twcs.max_inactive_window_runs = '6',  |
 |       |   compaction.twcs.max_output_file_size = '500MB',  |
 |       |   compaction.type = 'twcs',                        |
 |       |   ttl = '1s'                                       |

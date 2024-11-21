@@ -115,7 +115,14 @@ impl GrpcQueryHandler for Instance {
                             .await?;
                         Output::new_with_affected_rows(0)
                     }
-                    DdlExpr::Alter(expr) => {
+                    DdlExpr::AlterDatabase(expr) => {
+                        let _ = self
+                            .statement_executor
+                            .alter_database_inner(expr, ctx.clone())
+                            .await?;
+                        Output::new_with_affected_rows(0)
+                    }
+                    DdlExpr::AlterTable(expr) => {
                         self.statement_executor
                             .alter_table_inner(expr, ctx.clone())
                             .await?
@@ -195,11 +202,11 @@ fn fill_catalog_and_schema_from_context(ddl_expr: &mut DdlExpr, ctx: &QueryConte
     }
 
     match ddl_expr {
-        Expr::CreateDatabase(_) => { /* do nothing*/ }
+        Expr::CreateDatabase(_) | Expr::AlterDatabase(_) => { /* do nothing*/ }
         Expr::CreateTable(expr) => {
             check_and_fill!(expr);
         }
-        Expr::Alter(expr) => {
+        Expr::AlterTable(expr) => {
             check_and_fill!(expr);
         }
         Expr::DropTable(expr) => {

@@ -593,6 +593,21 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid set database option, key: {}, value: {}", key, value))]
+    InvalidSetDatabaseOption {
+        key: String,
+        value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid unset database option, key: {}", key))]
+    InvalidUnsetDatabaseOption {
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid prefix: {}, key: {}", prefix, key))]
     MismatchPrefix {
         prefix: String,
@@ -730,7 +745,9 @@ impl ErrorExt for Error {
             | AlterLogicalTablesInvalidArguments { .. }
             | CreateLogicalTablesInvalidArguments { .. }
             | MismatchPrefix { .. }
-            | TlsConfig { .. } => StatusCode::InvalidArguments,
+            | TlsConfig { .. }
+            | InvalidSetDatabaseOption { .. }
+            | InvalidUnsetDatabaseOption { .. } => StatusCode::InvalidArguments,
 
             FlowNotFound { .. } => StatusCode::FlowNotFound,
             FlowRouteNotFound { .. } => StatusCode::Unexpected,

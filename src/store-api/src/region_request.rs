@@ -24,7 +24,7 @@ use api::v1::region::{
     CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
     FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
-use api::v1::{self, Analyzer, Rows, SemanticType, TableOption};
+use api::v1::{self, Analyzer, Option as PbOption, Rows, SemanticType};
 pub use common_base::AffectedRows;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::FulltextOptions;
@@ -751,12 +751,11 @@ pub enum SetRegionOption {
     Twsc(String, String),
 }
 
-impl TryFrom<&TableOption> for SetRegionOption {
+impl TryFrom<&PbOption> for SetRegionOption {
     type Error = MetadataError;
 
-    fn try_from(value: &TableOption) -> std::result::Result<Self, Self::Error> {
-        let TableOption { key, value } = value;
-
+    fn try_from(value: &PbOption) -> std::result::Result<Self, Self::Error> {
+        let PbOption { key, value } = value;
         match key.as_str() {
             TTL_KEY => {
                 let ttl = if value.is_empty() {

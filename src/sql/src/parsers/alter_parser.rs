@@ -25,19 +25,78 @@ use sqlparser::tokenizer::Token;
 use crate::error::{self, InvalidColumnOptionSnafu, Result, SetFulltextOptionSnafu};
 use crate::parser::ParserContext;
 use crate::parsers::utils::validate_column_fulltext_create_option;
-use crate::statements::alter::{AlterTable, AlterTableOperation, TableOption};
+use crate::statements::alter::{
+    AlterDatabase, AlterDatabaseOperation, AlterTable, AlterTableOperation, KeyValueOption,
+};
 use crate::statements::statement::Statement;
 use crate::util::parse_option_string;
 
 impl ParserContext<'_> {
     pub(crate) fn parse_alter(&mut self) -> Result<Statement> {
-        let alter_table = self.parse_alter_table()?;
-        Ok(Statement::Alter(alter_table))
+        let _ = self.parser.expect_keyword(Keyword::ALTER);
+        match self.parser.peek_token().token {
+            Token::Word(w) => match w.keyword {
+                Keyword::DATABASE => self.parse_alter_database().map(Statement::AlterDatabase),
+                Keyword::TABLE => self.parse_alter_table().map(Statement::AlterTable),
+                _ => self.expected("DATABASE or TABLE after ALTER", self.parser.peek_token()),
+            },
+            unexpected => self.unsupported(unexpected.to_string()),
+        }
+    }
+
+    fn parse_alter_database(&mut self) -> Result<AlterDatabase> {
+        self.parser
+            .expect_keyword(Keyword::DATABASE)
+            .context(error::SyntaxSnafu)?;
+
+        let database_name = self
+            .parser
+            .parse_object_name(false)
+            .context(error::SyntaxSnafu)?;
+        let database_name = Self::canonicalize_object_name(database_name);
+
+        match self.parser.peek_token().token {
+            Token::Word(w) => {
+                if w.value.eq_ignore_ascii_case("UNSET") {
+                    let _ = self.parser.next_token();
+                    let keys = self
+                        .parser
+                        .parse_comma_separated(parse_string_option_names)
+                        .context(error::SyntaxSnafu)?
+                        .into_iter()
+                        .map(|name| name.to_string())
+                        .collect();
+                    Ok(AlterDatabase::new(
+                        database_name,
+                        AlterDatabaseOperation::UnsetDatabaseOption { keys },
+                    ))
+                } else if w.keyword == Keyword::SET {
+                    let _ = self.parser.next_token();
+                    let options = self
+                        .parser
+                        .parse_comma_separated(parse_string_options)
+                        .context(error::SyntaxSnafu)?
+                        .into_iter()
+                        .map(|(key, value)| KeyValueOption { key, value })
+                        .collect();
+                    Ok(AlterDatabase::new(
+                        database_name,
+                        AlterDatabaseOperation::SetDatabaseOption { options },
+                    ))
+                } else {
+                    self.expected(
+                        "SET or UNSET after ALTER DATABASE",
+                        self.parser.peek_token(),
+                    )
+                }
+            }
+            unexpected => self.unsupported(unexpected.to_string()),
+        }
     }
 
     fn parse_alter_table(&mut self) -> Result<AlterTable> {
         self.parser
-            .expect_keywords(&[Keyword::ALTER, Keyword::TABLE])
+            .expect_keyword(Keyword::TABLE)
             .context(error::SyntaxSnafu)?;
 
         let raw_table_name = self
@@ -89,7 +148,7 @@ impl ParserContext<'_> {
                                 .parse_comma_separated(parse_string_options)
                                 .context(error::SyntaxSnafu)?
                                 .into_iter()
-                                .map(|(key, value)| TableOption { key, value })
+                                .map(|(key, value)| KeyValueOption { key, value })
                                 .collect();
                             AlterTableOperation::SetTableOptions { options }
                         }
@@ -261,6 +320,67 @@ mod tests {
     use super::*;
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParseOptions;
+    use crate::statements::alter::AlterDatabaseOperation;
+
+    #[test]
+    fn test_parse_alter_database() {
+        let sql = "ALTER DATABASE test_db SET 'a'='A', 'b' = 'B'";
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::AlterDatabase { .. });
+        match statement {
+            Statement::AlterDatabase(alter_database) => {
+                assert_eq!("test_db", alter_database.database_name().0[0].value);
+
+                let alter_operation = alter_database.alter_operation();
+                assert_matches!(
+                    alter_operation,
+                    AlterDatabaseOperation::SetDatabaseOption { .. }
+                );
+                match alter_operation {
+                    AlterDatabaseOperation::SetDatabaseOption { options } => {
+                        assert_eq!(2, options.len());
+                        assert_eq!("a", options[0].key);
+                        assert_eq!("A", options[0].value);
+                        assert_eq!("b", options[1].key);
+                        assert_eq!("B", options[1].value);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+        let sql = "ALTER DATABASE test_db UNSET 'a', 'b'";
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::AlterDatabase { .. });
+        match statement {
+            Statement::AlterDatabase(alter_database) => {
+                assert_eq!("test_db", alter_database.database_name().0[0].value);
+                let alter_operation = alter_database.alter_operation();
+                assert_matches!(
+                    alter_operation,
+                    AlterDatabaseOperation::UnsetDatabaseOption { .. }
+                );
+                match alter_operation {
+                    AlterDatabaseOperation::UnsetDatabaseOption { keys } => {
+                        assert_eq!(2, keys.len());
+                        assert_eq!("a", keys[0]);
+                        assert_eq!("b", keys[1]);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
 
     #[test]
     fn test_parse_alter_add_column() {
@@ -271,9 +391,9 @@ mod tests {
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);
-        assert_matches!(statement, Statement::Alter { .. });
+        assert_matches!(statement, Statement::AlterTable { .. });
         match statement {
-            Statement::Alter(alter_table) => {
+            Statement::AlterTable(alter_table) => {
                 assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
 
                 let alter_operation = alter_table.alter_operation();
@@ -307,9 +427,9 @@ mod tests {
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);
-        assert_matches!(statement, Statement::Alter { .. });
+        assert_matches!(statement, Statement::AlterTable { .. });
         match statement {
-            Statement::Alter(alter_table) => {
+            Statement::AlterTable(alter_table) => {
                 assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
 
                 let alter_operation = alter_table.alter_operation();
@@ -343,9 +463,9 @@ mod tests {
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);
-        assert_matches!(statement, Statement::Alter { .. });
+        assert_matches!(statement, Statement::AlterTable { .. });
         match statement {
-            Statement::Alter(alter_table) => {
+            Statement::AlterTable(alter_table) => {
                 assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
 
                 let alter_operation = alter_table.alter_operation();
@@ -394,9 +514,9 @@ mod tests {
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);
-        assert_matches!(statement, Statement::Alter { .. });
+        assert_matches!(statement, Statement::AlterTable { .. });
         match statement {
-            Statement::Alter(alter_table) => {
+            Statement::AlterTable(alter_table) => {
                 assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
 
                 let alter_operation = alter_table.alter_operation();
@@ -433,9 +553,9 @@ mod tests {
         assert_eq!(1, result_2.len());
 
         let statement = result_2.remove(0);
-        assert_matches!(statement, Statement::Alter { .. });
+        assert_matches!(statement, Statement::AlterTable { .. });
         match statement {
-            Statement::Alter(alter_table) => {
+            Statement::AlterTable(alter_table) => {
                 assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
 
                 let alter_operation = alter_table.alter_operation();
@@ -469,7 +589,7 @@ mod tests {
         .unwrap();
 
         match result_1.remove(0) {
-            Statement::Alter(alter_table) => {
+            Statement::AlterTable(alter_table) => {
                 assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
 
                 let alter_operation = alter_table.alter_operation();
@@ -500,7 +620,7 @@ mod tests {
         .unwrap();
 
         match result_2.remove(0) {
-            Statement::Alter(alter_table) => {
+            Statement::AlterTable(alter_table) => {
                 assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
 
                 let alter_operation = alter_table.alter_operation();
@@ -539,9 +659,9 @@ mod tests {
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);
-        assert_matches!(statement, Statement::Alter { .. });
+        assert_matches!(statement, Statement::AlterTable { .. });
         match statement {
-            Statement::Alter(alter_table) => {
+            Statement::AlterTable(alter_table) => {
                 assert_eq!("test_table", alter_table.table_name().0[0].value);
 
                 let alter_operation = alter_table.alter_operation();
@@ -562,7 +682,7 @@ mod tests {
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
         assert_eq!(1, result.len());
-        let Statement::Alter(alter) = &result[0] else {
+        let Statement::AlterTable(alter) = &result[0] else {
             unreachable!()
         };
         assert_eq!("test_table", alter.table_name.0[0].value);
@@ -583,7 +703,7 @@ mod tests {
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
         assert_eq!(1, result.len());
-        let Statement::Alter(alter) = &result[0] else {
+        let Statement::AlterTable(alter) = &result[0] else {
             unreachable!()
         };
         assert_eq!("test_table", alter.table_name.0[0].value);
@@ -638,9 +758,9 @@ mod tests {
 
         assert_eq!(1, result.len());
         let statement = result.remove(0);
-        assert_matches!(statement, Statement::Alter { .. });
+        assert_matches!(statement, Statement::AlterTable { .. });
         match statement {
-            Statement::Alter(alter_table) => {
+            Statement::AlterTable(alter_table) => {
                 assert_eq!("test_table", alter_table.table_name().0[0].value);
 
                 let alter_operation = alter_table.alter_operation();
@@ -675,9 +795,9 @@ mod tests {
                 .unwrap();
         assert_eq!(1, result.len());
         let statement = result.remove(0);
-        assert_matches!(statement, Statement::Alter { .. });
+        assert_matches!(statement, Statement::AlterTable { .. });
         match statement {
-            Statement::Alter(alter_table) => {
+            Statement::AlterTable(alter_table) => {
                 assert_eq!("test_table", alter_table.table_name().0[0].value);
 
                 let alter_operation = alter_table.alter_operation();

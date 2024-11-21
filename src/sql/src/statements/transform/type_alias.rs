@@ -52,7 +52,7 @@ impl TransformRule for TypeAliasTransformRule {
                     .iter_mut()
                     .for_each(|column| replace_type_alias(column.mut_data_type()));
             }
-            Statement::Alter(alter_table) => {
+            Statement::AlterTable(alter_table) => {
                 if let AlterTableOperation::ModifyColumnType { target_type, .. } =
                     alter_table.alter_operation_mut()
                 {

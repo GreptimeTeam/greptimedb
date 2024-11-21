@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::alter_expr::Kind;
+use api::v1::alter_table_expr::Kind;
 use api::v1::region::region_request::Body;
 use api::v1::region::{
     alter_request, AddColumn, AddColumns, AlterRequest, DropColumn, DropColumns, RegionColumnDef,
@@ -121,11 +121,11 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::add_column_location::LocationType;
-    use api::v1::alter_expr::Kind;
+    use api::v1::alter_table_expr::Kind;
     use api::v1::region::region_request::Body;
     use api::v1::region::RegionColumnDef;
     use api::v1::{
-        region, AddColumn, AddColumnLocation, AddColumns, AlterExpr, ColumnDataType,
+        region, AddColumn, AddColumnLocation, AddColumns, AlterTableExpr, ColumnDataType,
         ColumnDef as PbColumnDef, ModifyColumnType, ModifyColumnTypes, SemanticType,
     };
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -215,7 +215,7 @@ mod tests {
             prepare_ddl_context().await;
 
         let task = AlterTableTask {
-            alter_table: AlterExpr {
+            alter_table: AlterTableExpr {
                 catalog_name: DEFAULT_CATALOG_NAME.to_string(),
                 schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                 table_name,
@@ -282,7 +282,7 @@ mod tests {
             prepare_ddl_context().await;
 
         let task = AlterTableTask {
-            alter_table: AlterExpr {
+            alter_table: AlterTableExpr {
                 catalog_name: DEFAULT_CATALOG_NAME.to_string(),
                 schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                 table_name,
