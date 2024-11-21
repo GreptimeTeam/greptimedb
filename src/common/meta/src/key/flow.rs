@@ -197,7 +197,7 @@ impl FlowMetadataManager {
                 on_create_flow_flow_name_failure(&mut set)?.with_context(|| {
                     error::UnexpectedSnafu {
                         err_msg: format!(
-                    "Reads the empty flow name during the creating flow, flow_id: {flow_id}"
+                    "Reads the empty flow name in comparing operation of the creating flow, flow_id: {flow_id}"
                 ),
                     }
                 })?;
@@ -220,7 +220,7 @@ impl FlowMetadataManager {
             let remote_flow =
                 on_create_flow_failure(&mut set)?.with_context(|| error::UnexpectedSnafu {
                     err_msg: format!(
-                        "Reads the empty flow during the creating flow, flow_id: {flow_id}"
+                        "Reads the empty flow in comparing operation of creating flow, flow_id: {flow_id}"
                     ),
                 })?;
             let op_name = "creating flow";
@@ -288,7 +288,7 @@ impl FlowMetadataManager {
                 on_create_flow_flow_name_failure(&mut set)?.with_context(|| {
                     error::UnexpectedSnafu {
                         err_msg: format!(
-                        "Reads the empty flow name during the updating flow, flow_id: {flow_id}"
+                        "Reads the empty flow name in comparing operation of the updating flow, flow_id: {flow_id}"
                     ),
                     }
                 })?;
@@ -316,7 +316,7 @@ impl FlowMetadataManager {
             let remote_flow =
                 on_create_flow_failure(&mut set)?.with_context(|| error::UnexpectedSnafu {
                     err_msg: format!(
-                        "Reads the empty flow during the updating flow, flow_id: {flow_id}"
+                        "Reads the empty flow in comparing operation of the updating flow, flow_id: {flow_id}"
                     ),
                 })?;
             let op_name = "updating flow";

@@ -565,13 +565,13 @@ impl TableMetadataManager {
             let mut set = TxnOpGetResponseSet::from(&mut r.responses);
             let remote_table_info = on_create_table_info_failure(&mut set)?
                 .context(error::UnexpectedSnafu {
-                    err_msg: "Reads the empty table info during the create table metadata",
+                    err_msg: "Reads the empty table info in comparing operation of creating table metadata",
                 })?
                 .into_inner();
 
             let remote_view_info = on_create_view_info_failure(&mut set)?
                 .context(error::UnexpectedSnafu {
-                    err_msg: "Reads the empty view info during the create view info",
+                    err_msg: "Reads the empty view info in comparing operation of creating view metadata",
                 })?
                 .into_inner();
 
@@ -644,13 +644,13 @@ impl TableMetadataManager {
             let mut set = TxnOpGetResponseSet::from(&mut r.responses);
             let remote_table_info = on_create_table_info_failure(&mut set)?
                 .context(error::UnexpectedSnafu {
-                    err_msg: "Reads the empty table info during the create table metadata",
+                    err_msg: "Reads the empty table info in comparing operation of creating table metadata",
                 })?
                 .into_inner();
 
             let remote_table_route = on_create_table_route_failure(&mut set)?
                 .context(error::UnexpectedSnafu {
-                    err_msg: "Reads the empty table route during the create table metadata",
+                    err_msg: "Reads the empty table route in comparing operation of creating table metadata",
                 })?
                 .into_inner();
 
@@ -731,13 +731,13 @@ impl TableMetadataManager {
             for on_failure in on_failures {
                 let remote_table_info = (on_failure.on_create_table_info_failure)(&mut set)?
                     .context(error::UnexpectedSnafu {
-                        err_msg: "Reads the empty table info during the create table metadata",
+                        err_msg: "Reads the empty table info in comparing operation of creating table metadata",
                     })?
                     .into_inner();
 
                 let remote_table_route = (on_failure.on_create_table_route_failure)(&mut set)?
                     .context(error::UnexpectedSnafu {
-                        err_msg: "Reads the empty table route during the create table metadata",
+                        err_msg: "Reads the empty table route in comparing operation of creating table metadata",
                     })?
                     .into_inner();
 
@@ -915,7 +915,7 @@ impl TableMetadataManager {
             let mut set = TxnOpGetResponseSet::from(&mut r.responses);
             let remote_table_info = on_update_table_info_failure(&mut set)?
                 .context(error::UnexpectedSnafu {
-                    err_msg: "Reads the empty table info during the rename table metadata",
+                    err_msg: "Reads the empty table info in comparing operation of the rename table metadata",
                 })?
                 .into_inner();
 
@@ -961,7 +961,7 @@ impl TableMetadataManager {
             let mut set = TxnOpGetResponseSet::from(&mut r.responses);
             let remote_table_info = on_update_table_info_failure(&mut set)?
                 .context(error::UnexpectedSnafu {
-                    err_msg: "Reads the empty table info during the updating table info",
+                    err_msg: "Reads the empty table info in comparing operation of the updating table info",
                 })?
                 .into_inner();
 
@@ -1012,7 +1012,7 @@ impl TableMetadataManager {
             let mut set = TxnOpGetResponseSet::from(&mut r.responses);
             let remote_view_info = on_update_view_info_failure(&mut set)?
                 .context(error::UnexpectedSnafu {
-                    err_msg: "Reads the empty view info during the updating view info",
+                    err_msg: "Reads the empty view info in comparing operation of the updating view info",
                 })?
                 .into_inner();
 
@@ -1069,7 +1069,7 @@ impl TableMetadataManager {
             for on_failure in on_failures {
                 let remote_table_info = (on_failure.on_update_table_info_failure)(&mut set)?
                     .context(error::UnexpectedSnafu {
-                        err_msg: "Reads the empty table info during the updating table info",
+                        err_msg: "Reads the empty table info in comparing operation of the updating table info",
                     })?
                     .into_inner();
 
@@ -1121,7 +1121,7 @@ impl TableMetadataManager {
             let mut set = TxnOpGetResponseSet::from(&mut r.responses);
             let remote_table_route = on_update_table_route_failure(&mut set)?
                 .context(error::UnexpectedSnafu {
-                    err_msg: "Reads the empty table route during the updating table route",
+                    err_msg: "Reads the empty table route in comparing operation of the updating table route",
                 })?
                 .into_inner();
 
@@ -1173,7 +1173,7 @@ impl TableMetadataManager {
             let mut set = TxnOpGetResponseSet::from(&mut r.responses);
             let remote_table_route = on_update_table_route_failure(&mut set)?
                 .context(error::UnexpectedSnafu {
-                    err_msg: "Reads the empty table route during the updating leader region status",
+                    err_msg: "Reads the empty table route in comparing operation of the updating leader region status",
                 })?
                 .into_inner();
 
