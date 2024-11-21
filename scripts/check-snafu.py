@@ -59,7 +59,7 @@ def main():
     ]
 
     for name in unused_snafu:
-        print(name)
+        print("Unused snafu variant name:", name)
 
     if unused_snafu:
         raise SystemExit(1)

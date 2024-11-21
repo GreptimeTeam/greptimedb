@@ -26,6 +26,7 @@ use common_meta::ddl::{
 };
 use common_meta::ddl_manager::DdlManager;
 use common_meta::distributed_time_constants;
+use common_meta::key::flow::flow_state::FlowStateManager;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::maintenance::MaintenanceModeManager;
 use common_meta::key::TableMetadataManager;
@@ -47,6 +48,7 @@ use crate::error::{self, Result};
 use crate::flow_meta_alloc::FlowPeerAllocator;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
+use crate::handler::flow_state_handler::FlowStateHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers};
 use crate::lease::MetaPeerLookupService;
@@ -228,6 +230,7 @@ impl MetasrvBuilder {
                 peer_allocator,
             ))
         });
+
         let flow_metadata_allocator = {
             // for now flownode just use round-robin selector
             let flow_selector = RoundRobinSelector::new(SelectTarget::Flownode);
@@ -248,6 +251,9 @@ impl MetasrvBuilder {
                 peer_allocator,
             ))
         };
+        let flow_state_handler =
+            FlowStateHandler::new(FlowStateManager::new(in_memory.clone().as_kv_backend_ref()));
+
         let memory_region_keeper = Arc::new(MemoryRegionKeeper::default());
         let node_manager = node_manager.unwrap_or_else(|| {
             let datanode_client_channel_config = ChannelConfig::new()
@@ -350,6 +356,7 @@ impl MetasrvBuilder {
                     .with_region_failure_handler(region_failover_handler)
                     .with_region_lease_handler(Some(region_lease_handler))
                     .with_flush_stats_factor(Some(options.flush_stats_factor))
+                    .with_flow_state_handler(Some(flow_state_handler))
                     .add_default_handlers()
             }
         };

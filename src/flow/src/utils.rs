@@ -18,15 +18,72 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 use std::sync::Arc;
 
+use common_meta::key::flow::flow_state::FlowStat;
 use common_telemetry::trace;
+use datatypes::value::Value;
+use get_size2::GetSize;
 use smallvec::{smallvec, SmallVec};
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::time::Instant;
 
+use crate::error::InternalSnafu;
 use crate::expr::{EvalError, ScalarExpr};
 use crate::repr::{value_to_internal_ts, DiffRow, Duration, KeyValDiffRow, Row, Timestamp};
 
 /// A batch of updates, arranged by key
 pub type Batch = BTreeMap<Row, SmallVec<[DiffRow; 2]>>;
+
+/// Get a estimate of heap size of a value
+pub fn get_value_heap_size(v: &Value) -> usize {
+    match v {
+        Value::Binary(bin) => bin.len(),
+        Value::String(s) => s.len(),
+        Value::List(list) => list.items().iter().map(get_value_heap_size).sum(),
+        _ => 0,
+    }
+}
+
+#[derive(Clone)]
+pub struct SizeReportSender {
+    inner: mpsc::Sender<oneshot::Sender<FlowStat>>,
+}
+
+impl SizeReportSender {
+    pub fn new() -> (Self, StateReportHandler) {
+        let (tx, rx) = mpsc::channel(1);
+        let zelf = Self { inner: tx };
+        (zelf, rx)
+    }
+
+    /// Query the size report, will timeout after one second if no response
+    pub async fn query(&self) -> crate::Result<FlowStat> {
+        let (tx, rx) = oneshot::channel();
+        self.inner.send(tx).await.map_err(|_| {
+            InternalSnafu {
+                reason: "failed to send size report request due to receiver dropped",
+            }
+            .build()
+        })?;
+        let timeout = tokio::time::timeout(std::time::Duration::from_secs(1), rx);
+        timeout
+            .await
+            .map_err(|_elapsed| {
+                InternalSnafu {
+                    reason: "failed to receive size report after one second timeout",
+                }
+                .build()
+            })?
+            .map_err(|_| {
+                InternalSnafu {
+                    reason: "failed to receive size report due to sender dropped",
+                }
+                .build()
+            })
+    }
+}
+
+/// Handle the size report request, and send the report back
+pub type StateReportHandler = mpsc::Receiver<oneshot::Sender<FlowStat>>;
 
 /// A spine of batches, arranged by timestamp
 /// TODO(discord9): consider internally index by key, value, and timestamp for faster lookup
@@ -47,6 +104,24 @@ pub struct KeyExpiryManager {
 
     /// Expression to get timestamp from key row
     event_timestamp_from_row: Option<ScalarExpr>,
+}
+
+impl GetSize for KeyExpiryManager {
+    fn get_heap_size(&self) -> usize {
+        let row_size = if let Some(row_size) = &self
+            .event_ts_to_key
+            .first_key_value()
+            .map(|(_, v)| v.first().get_heap_size())
+        {
+            *row_size
+        } else {
+            0
+        };
+        self.event_ts_to_key
+            .values()
+            .map(|v| v.len() * row_size + std::mem::size_of::<i64>())
+            .sum::<usize>()
+    }
 }
 
 impl KeyExpiryManager {
@@ -154,7 +229,7 @@ impl KeyExpiryManager {
 ///
 /// Note the two way arrow between reduce operator and arrange, it's because reduce operator need to query existing state
 /// and also need to update existing state.
-#[derive(Debug, Clone, Default, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Arrangement {
     /// A name or identifier for the arrangement which can be used for debugging or logging purposes.
     /// This field is not critical to the functionality but aids in monitoring and management of arrangements.
@@ -196,6 +271,61 @@ pub struct Arrangement {
 
     /// The time that the last compaction happened, also known as the current time.
     last_compaction_time: Option<Timestamp>,
+
+    /// Estimated size of the arrangement in heap size.
+    estimated_size: usize,
+    last_size_update: Instant,
+    size_update_interval: tokio::time::Duration,
+}
+
+impl Arrangement {
+    fn compute_size(&self) -> usize {
+        self.spine
+            .values()
+            .map(|v| {
+                let per_entry_size = v
+                    .first_key_value()
+                    .map(|(k, v)| {
+                        k.get_heap_size()
+                            + v.len() * v.first().map(|r| r.get_heap_size()).unwrap_or(0)
+                    })
+                    .unwrap_or(0);
+                std::mem::size_of::<i64>() + v.len() * per_entry_size
+            })
+            .sum::<usize>()
+            + self.expire_state.get_heap_size()
+            + self.name.get_heap_size()
+    }
+
+    fn update_and_fetch_size(&mut self) -> usize {
+        if self.last_size_update.elapsed() > self.size_update_interval {
+            self.estimated_size = self.compute_size();
+            self.last_size_update = Instant::now();
+        }
+        self.estimated_size
+    }
+}
+
+impl GetSize for Arrangement {
+    fn get_heap_size(&self) -> usize {
+        self.estimated_size
+    }
+}
+
+impl Default for Arrangement {
+    fn default() -> Self {
+        Self {
+            spine: Default::default(),
+            full_arrangement: false,
+            is_written: false,
+            expire_state: None,
+            last_compaction_time: None,
+            name: Vec::new(),
+            estimated_size: 0,
+            last_size_update: Instant::now(),
+            size_update_interval: tokio::time::Duration::from_secs(3),
+        }
+    }
 }
 
 impl Arrangement {
@@ -207,6 +337,9 @@ impl Arrangement {
             expire_state: None,
             last_compaction_time: None,
             name,
+            estimated_size: 0,
+            last_size_update: Instant::now(),
+            size_update_interval: tokio::time::Duration::from_secs(3),
         }
     }
 
@@ -269,6 +402,7 @@ impl Arrangement {
             // without changing the order of updates within same tick
             key_updates.sort_by_key(|(_val, ts, _diff)| *ts);
         }
+        self.update_and_fetch_size();
         Ok(max_expired_by)
     }
 
@@ -390,6 +524,7 @@ impl Arrangement {
 
         // insert the compacted batch into spine with key being `now`
         self.spine.insert(now, compacting_batch);
+        self.update_and_fetch_size();
         Ok(max_expired_by)
     }
 
