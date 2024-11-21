@@ -353,10 +353,10 @@ fn find_latest_window_in_seconds<'a>(
     let mut latest_timestamp = None;
     for f in files {
         let (_, end) = f.time_range();
-        if let Some(latest) = latest_timestamp
-            && end > latest
-        {
-            latest_timestamp = Some(end);
+        if let Some(latest) = latest_timestamp {
+            if end > latest {
+                latest_timestamp = Some(end);
+            }
         } else {
             latest_timestamp = Some(end);
         }
@@ -405,6 +405,14 @@ mod tests {
                 10000,
             )
             .unwrap()
+        );
+
+        assert_eq!(
+            Some((i64::MAX / 3600000 + 1) * 3600),
+            find_latest_window_in_seconds(
+                [new_file_handle(FileId::random(), i64::MIN, i64::MAX, 0),].iter(),
+                3600
+            )
         );
     }
 
