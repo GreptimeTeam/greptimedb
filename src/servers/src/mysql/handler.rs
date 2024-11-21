@@ -204,7 +204,7 @@ impl MysqlInstanceShim {
             .unwrap_or_default();
 
         // DataFusion may optimize the plan so that some parameters are not used.
-        if params.len() != param_num {
+        if params.len() != param_num - 1 {
             self.save_plan(
                 SqlPlan {
                     query: query.to_string(),
