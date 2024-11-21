@@ -1067,13 +1067,13 @@ impl StatementExecutor {
             }
         );
 
-        let exist = self
+        let exists = self
             .catalog_manager
             .schema_exists(&alter_expr.catalog_name, &alter_expr.schema_name, None)
             .await
             .context(CatalogSnafu)?;
         ensure!(
-            exist,
+            exists,
             SchemaNotFoundSnafu {
                 schema_info: alter_expr.schema_name,
             }
