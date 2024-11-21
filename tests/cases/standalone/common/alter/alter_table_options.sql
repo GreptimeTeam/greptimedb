@@ -26,6 +26,10 @@ ALTER TABLE ato SET 'ttl'='1s';
 
 SHOW CREATE TABLE ato;
 
+ALTER TABLE ato SET 'ttl'='😁';
+
+ALTER TABLE ato SET '🕶️'='1s';
+
 SELECT i FROM ato;
 
 ALTER TABLE ato SET 'compaction.twcs.time_window'='2h';
@@ -43,6 +47,8 @@ ALTER TABLE ato SET 'compaction.twcs.max_inactive_window_runs'='6';
 SHOW CREATE TABLE ato;
 
 ALTER TABLE ato UNSET 'compaction.twcs.time_window';
+
+ALTER TABLE ato UNSET '🕶️';
 
 SHOW CREATE TABLE ato;
 

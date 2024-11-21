@@ -128,6 +128,14 @@ SHOW CREATE TABLE ato;
 |       | )                                  |
 +-------+------------------------------------+
 
+ALTER TABLE ato SET 'ttl'='😁';
+
+Error: 1004(InvalidArguments), Invalid set table option request: Invalid set region option request, key: ttl, value: 😁
+
+ALTER TABLE ato SET '🕶️'='1s';
+
+Error: 1004(InvalidArguments), Invalid set table option request: Invalid set region option request, key: 🕶️, value: 1s
+
 SELECT i FROM ato;
 
 +---+
@@ -189,6 +197,10 @@ SHOW CREATE TABLE ato;
 ALTER TABLE ato UNSET 'compaction.twcs.time_window';
 
 Affected Rows: 0
+
+ALTER TABLE ato UNSET '🕶️';
+
+Error: 1004(InvalidArguments), Invalid unset table option request: Invalid set region option request, key: 🕶️
 
 SHOW CREATE TABLE ato;
 
