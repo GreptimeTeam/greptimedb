@@ -38,7 +38,7 @@ const LOCATION_TYPE_AFTER: i32 = LocationType::After as i32;
 
 /// Convert an [`AlterTableExpr`] to an [`AlterTableRequest`]
 pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<AlterTableRequest> {
-    let alter_table_expr = expr.catalog_name;
+    let catalog_name = expr.catalog_name;
     let schema_name = expr.schema_name;
     let kind = expr.kind.context(MissingFieldSnafu { field: "kind" })?;
     let alter_kind = match kind {
