@@ -129,7 +129,7 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<
     };
 
     let request = AlterTableRequest {
-        catalog_name: alter_table_expr,
+        catalog_name,
         schema_name,
         table_name: expr.table_name,
         table_id,
