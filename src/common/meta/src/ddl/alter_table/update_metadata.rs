@@ -53,7 +53,8 @@ impl AlterTableProcedure {
             }
             AlterKind::DropColumns { .. }
             | AlterKind::ModifyColumnTypes { .. }
-            | AlterKind::ChangeTableOptions { .. }
+            | AlterKind::SetTableOptions { .. }
+            | AlterKind::UnsetTableOptions { .. }
             | AlterKind::SetColumnFulltext { .. }
             | AlterKind::UnsetColumnFulltext { .. } => {}
         }

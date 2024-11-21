@@ -71,18 +71,29 @@ pub enum AlterTableOperation {
         target_type: DataType,
     },
     /// `SET <table attrs key> = <table attr value>`
-    ChangeTableOptions { options: Vec<ChangeTableOption> },
+    SetTableOptions {
+        options: Vec<TableOption>,
+    },
+    UnsetTableOptions {
+        keys: Vec<String>,
+    },
     /// `DROP COLUMN <name>`
-    DropColumn { name: Ident },
+    DropColumn {
+        name: Ident,
+    },
     /// `RENAME <new_table_name>`
-    RenameTable { new_table_name: String },
+    RenameTable {
+        new_table_name: String,
+    },
     /// `MODIFY COLUMN <column_name> SET FULLTEXT [WITH <options>]`
     SetColumnFulltext {
         column_name: Ident,
         options: FulltextOptions,
     },
     /// `MODIFY COLUMN <column_name> UNSET FULLTEXT`
-    UnsetColumnFulltext { column_name: Ident },
+    UnsetColumnFulltext {
+        column_name: Ident,
+    },
 }
 
 impl Display for AlterTableOperation {
@@ -109,10 +120,10 @@ impl Display for AlterTableOperation {
             } => {
                 write!(f, r#"MODIFY COLUMN {column_name} {target_type}"#)
             }
-            AlterTableOperation::ChangeTableOptions { options } => {
+            AlterTableOperation::SetTableOptions { options } => {
                 let kvs = options
                     .iter()
-                    .map(|ChangeTableOption { key, value }| {
+                    .map(|TableOption { key, value }| {
                         if !value.is_empty() {
                             format!("'{key}'='{value}'")
                         } else {
@@ -121,9 +132,11 @@ impl Display for AlterTableOperation {
                     })
                     .join(",");
 
-                write!(f, "SET {kvs}")?;
-
-                Ok(())
+                write!(f, "SET {kvs}")
+            }
+            AlterTableOperation::UnsetTableOptions { keys } => {
+                let keys = keys.iter().map(|k| format!("'{k}'")).join(",");
+                write!(f, "UNSET {keys}")
             }
             AlterTableOperation::SetColumnFulltext {
                 column_name,
@@ -139,14 +152,14 @@ impl Display for AlterTableOperation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
-pub struct ChangeTableOption {
+pub struct TableOption {
     pub key: String,
     pub value: String,
 }
 
-impl From<ChangeTableOption> for v1::ChangeTableOption {
-    fn from(c: ChangeTableOption) -> Self {
-        v1::ChangeTableOption {
+impl From<TableOption> for v1::TableOption {
+    fn from(c: TableOption) -> Self {
+        v1::TableOption {
             key: c.key,
             value: c.value,
         }

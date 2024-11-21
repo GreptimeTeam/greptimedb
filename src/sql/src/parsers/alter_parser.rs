@@ -25,7 +25,7 @@ use sqlparser::tokenizer::Token;
 use crate::error::{self, InvalidColumnOptionSnafu, Result, SetFulltextOptionSnafu};
 use crate::parser::ParserContext;
 use crate::parsers::utils::validate_column_fulltext_create_option;
-use crate::statements::alter::{AlterTable, AlterTableOperation, ChangeTableOption};
+use crate::statements::alter::{AlterTable, AlterTableOperation, TableOption};
 use crate::statements::statement::Statement;
 use crate::util::parse_option_string;
 
@@ -50,6 +50,8 @@ impl ParserContext<'_> {
             Token::Word(w) => {
                 if w.value.eq_ignore_ascii_case("MODIFY") {
                     self.parse_alter_table_modify()?
+                } else if w.value.eq_ignore_ascii_case("UNSET") {
+                    self.parse_alter_table_unset()?
                 } else {
                     match w.keyword {
                         Keyword::ADD => self.parse_alter_table_add()?,
@@ -87,9 +89,9 @@ impl ParserContext<'_> {
                                 .parse_comma_separated(parse_string_options)
                                 .context(error::SyntaxSnafu)?
                                 .into_iter()
-                                .map(|(key, value)| ChangeTableOption { key, value })
+                                .map(|(key, value)| TableOption { key, value })
                                 .collect();
-                            AlterTableOperation::ChangeTableOptions { options }
+                            AlterTableOperation::SetTableOptions { options }
                         }
                         _ => self.expected(
                             "ADD or DROP or MODIFY or RENAME or SET after ALTER TABLE",
@@ -101,6 +103,18 @@ impl ParserContext<'_> {
             unexpected => self.unsupported(unexpected.to_string())?,
         };
         Ok(AlterTable::new(table_name, alter_operation))
+    }
+
+    fn parse_alter_table_unset(&mut self) -> Result<AlterTableOperation> {
+        let _ = self.parser.next_token();
+        let keys = self
+            .parser
+            .parse_comma_separated(parse_string_option_names)
+            .context(error::SyntaxSnafu)?
+            .into_iter()
+            .collect();
+
+        Ok(AlterTableOperation::UnsetTableOptions { keys })
     }
 
     fn parse_alter_table_add(&mut self) -> Result<AlterTableOperation> {
@@ -214,6 +228,7 @@ impl ParserContext<'_> {
     }
 }
 
+/// Parses a string literal and an optional string literal value.
 fn parse_string_options(parser: &mut Parser) -> std::result::Result<(String, String), ParserError> {
     let name = parser.parse_literal_string()?;
     parser.expect_token(&Token::Eq)?;
@@ -228,6 +243,11 @@ fn parse_string_options(parser: &mut Parser) -> std::result::Result<(String, Str
         )));
     };
     Ok((name, value))
+}
+
+/// Parses a comma separated list of string literals.
+fn parse_string_option_names(parser: &mut Parser) -> std::result::Result<String, ParserError> {
+    parser.parse_literal_string()
 }
 
 #[cfg(test)]
@@ -537,7 +557,7 @@ mod tests {
         }
     }
 
-    fn check_parse_alter_table(sql: &str, expected: &[(&str, &str)]) {
+    fn check_parse_alter_table_set_options(sql: &str, expected: &[(&str, &str)]) {
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -546,7 +566,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!("test_table", alter.table_name.0[0].value);
-        let AlterTableOperation::ChangeTableOptions { options } = &alter.alter_operation else {
+        let AlterTableOperation::SetTableOptions { options } = &alter.alter_operation else {
             unreachable!()
         };
 
@@ -558,21 +578,51 @@ mod tests {
         assert_eq!(expected, &res);
     }
 
+    fn check_parse_alter_table_unset_options(sql: &str, expected: &[&str]) {
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+        let Statement::Alter(alter) = &result[0] else {
+            unreachable!()
+        };
+        assert_eq!("test_table", alter.table_name.0[0].value);
+        let AlterTableOperation::UnsetTableOptions { keys } = &alter.alter_operation else {
+            unreachable!()
+        };
+
+        assert_eq!(sql, alter.to_string());
+        let res = keys.iter().map(|o| o.to_string()).collect::<Vec<_>>();
+        assert_eq!(expected, &res);
+    }
+
     #[test]
-    fn test_parse_alter_column() {
-        check_parse_alter_table("ALTER TABLE test_table SET 'a'='A'", &[("a", "A")]);
-        check_parse_alter_table(
+    fn test_parse_alter_table_set_options() {
+        check_parse_alter_table_set_options("ALTER TABLE test_table SET 'a'='A'", &[("a", "A")]);
+        check_parse_alter_table_set_options(
             "ALTER TABLE test_table SET 'a'='A','b'='B'",
             &[("a", "A"), ("b", "B")],
         );
-        check_parse_alter_table(
+        check_parse_alter_table_set_options(
             "ALTER TABLE test_table SET 'a'='A','b'='B','c'='C'",
             &[("a", "A"), ("b", "B"), ("c", "C")],
         );
-        check_parse_alter_table("ALTER TABLE test_table SET 'a'=NULL", &[("a", "")]);
+        check_parse_alter_table_set_options("ALTER TABLE test_table SET 'a'=NULL", &[("a", "")]);
 
         ParserContext::create_with_dialect(
             "ALTER TABLE test_table SET a INTEGER",
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap_err();
+    }
+
+    #[test]
+    fn test_parse_alter_table_unset_options() {
+        check_parse_alter_table_unset_options("ALTER TABLE test_table UNSET 'a'", &["a"]);
+        check_parse_alter_table_unset_options("ALTER TABLE test_table UNSET 'a','b'", &["a", "b"]);
+        ParserContext::create_with_dialect(
+            "ALTER TABLE test_table UNSET a INTEGER",
             &GreptimeDbDialect {},
             ParseOptions::default(),
         )

@@ -186,7 +186,7 @@ SHOW CREATE TABLE ato;
 |       | )                                                  |
 +-------+----------------------------------------------------+
 
-ALTER TABLE ato SET 'compaction.twcs.time_window'='';
+ALTER TABLE ato UNSET 'compaction.twcs.time_window';
 
 Affected Rows: 0
 

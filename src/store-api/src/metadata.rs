@@ -560,7 +560,10 @@ impl RegionMetadataBuilder {
             AlterKind::UnsetColumnFulltext { column_name } => {
                 self.change_column_fulltext_options(column_name, false, None)?
             }
-            AlterKind::ChangeRegionOptions { options: _ } => {
+            AlterKind::SetRegionOptions { options: _ } => {
+                // nothing to be done with RegionMetadata
+            }
+            AlterKind::UnsetRegionOptions { keys: _ } => {
                 // nothing to be done with RegionMetadata
             }
         }
@@ -829,10 +832,17 @@ pub enum MetadataError {
         location: Location,
     },
 
-    #[snafu(display("Invalid region option change request, key: {}, value: {}", key, value))]
-    InvalidRegionOptionChangeRequest {
+    #[snafu(display("Invalid set region option request, key: {}, value: {}", key, value))]
+    InvalidSetRegionOptionRequest {
         key: String,
         value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid set region option request, key: {}", key))]
+    InvalidUnsetRegionOptionRequest {
+        key: String,
         #[snafu(implicit)]
         location: Location,
     },
