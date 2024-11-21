@@ -266,7 +266,8 @@ impl SchemaManager {
             let mut set = TxnOpGetResponseSet::from(&mut r.responses);
             let remote_schema_value = (on_failure)(&mut set)?
                 .context(error::UnexpectedSnafu {
-                    err_msg: "Reads the empty schema name value during the updating schema name value",
+                    err_msg:
+                        "Reads the empty schema name value during the updating schema name value",
                 })?
                 .into_inner();
 
