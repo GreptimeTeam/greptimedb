@@ -410,7 +410,11 @@ mod tests {
         assert_eq!(
             Some((i64::MAX / 3600000 + 1) * 3600),
             find_latest_window_in_seconds(
-                [new_file_handle(FileId::random(), i64::MIN, i64::MAX, 0),].iter(),
+                [
+                    new_file_handle(FileId::random(), i64::MIN, i64::MAX, 0),
+                    new_file_handle(FileId::random(), 0, 1000, 0)
+                ]
+                .iter(),
                 3600
             )
         );
