@@ -363,4 +363,42 @@ mod tests {
 
         assert!(!manager.exists(wrong_schema_key).await.unwrap());
     }
+
+    #[tokio::test]
+    async fn test_update_schema_value() {
+        let manager = SchemaManager::new(Arc::new(MemoryKvBackend::default()));
+        let schema_key = SchemaNameKey::new("my-catalog", "my-schema");
+        manager.create(schema_key, None, false).await.unwrap();
+
+        let current_schema_value = manager.get(schema_key).await.unwrap().unwrap();
+        let new_schema_value = SchemaNameValue {
+            ttl: Some(Duration::from_secs(10)),
+        };
+        manager
+            .update(schema_key, &current_schema_value, &new_schema_value)
+            .await
+            .unwrap();
+
+        // Update with the same value, should be ok
+        manager
+            .update(schema_key, &current_schema_value, &new_schema_value)
+            .await
+            .unwrap();
+
+        let new_schema_value = SchemaNameValue {
+            ttl: Some(Duration::from_secs(40)),
+        };
+        let incorrect_schema_value = SchemaNameValue {
+            ttl: Some(Duration::from_secs(20)),
+        }
+        .try_as_raw_value()
+        .unwrap();
+        let incorrect_schema_value =
+            DeserializedValueWithBytes::from_inner_slice(&incorrect_schema_value).unwrap();
+
+        manager
+            .update(schema_key, &incorrect_schema_value, &new_schema_value)
+            .await
+            .unwrap_err();
+    }
 }

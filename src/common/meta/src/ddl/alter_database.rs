@@ -34,6 +34,35 @@ pub struct AlterDatabaseProcedure {
     pub data: AlterDatabaseData,
 }
 
+fn build_new_schema_value(
+    mut value: SchemaNameValue,
+    alter_kind: &AlterDatabaseKind,
+) -> Result<SchemaNameValue> {
+    match alter_kind {
+        AlterDatabaseKind::SetDatabaseOptions(options) => {
+            for option in options.0.iter() {
+                match option {
+                    SetDatabaseOption::Ttl(ttl) => {
+                        if ttl.is_zero() {
+                            value.ttl = None;
+                        } else {
+                            value.ttl = Some(*ttl);
+                        }
+                    }
+                }
+            }
+        }
+        AlterDatabaseKind::UnsetDatabaseOptions(keys) => {
+            for key in keys.0.iter() {
+                match key {
+                    UnsetDatabaseOption::Ttl => value.ttl = None,
+                }
+            }
+        }
+    }
+    Ok(value)
+}
+
 impl AlterDatabaseProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::AlterDatabase";
 
@@ -75,42 +104,13 @@ impl AlterDatabaseProcedure {
         Ok(Status::executing(true))
     }
 
-    fn build_new_schema_value(
-        mut value: SchemaNameValue,
-        alter_kind: &AlterDatabaseKind,
-    ) -> Result<SchemaNameValue> {
-        match alter_kind {
-            AlterDatabaseKind::SetDatabaseOptions(options) => {
-                for option in options.0.iter() {
-                    match option {
-                        SetDatabaseOption::Ttl(ttl) => {
-                            if ttl.is_zero() {
-                                value.ttl = None;
-                            } else {
-                                value.ttl = Some(*ttl);
-                            }
-                        }
-                    }
-                }
-            }
-            AlterDatabaseKind::UnsetDatabaseOptions(keys) => {
-                for key in keys.0.iter() {
-                    match key {
-                        UnsetDatabaseOption::Ttl => value.ttl = None,
-                    }
-                }
-            }
-        }
-        Ok(value)
-    }
-
     pub async fn on_update_metadata(&mut self) -> Result<Status> {
         let schema_name = SchemaNameKey::new(self.data.catalog(), self.data.schema());
 
         // Safety: schema_value is not None.
         let current_schema_value = self.data.schema_value.as_ref().unwrap();
 
-        let new_schema_value = Self::build_new_schema_value(
+        let new_schema_value = build_new_schema_value(
             current_schema_value.get_inner_ref().clone(),
             &self.data.kind,
         )?;
@@ -192,5 +192,36 @@ impl AlterDatabaseData {
 
     pub fn schema(&self) -> &str {
         &self.schema_name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use crate::ddl::alter_database::build_new_schema_value;
+    use crate::key::schema_name::SchemaNameValue;
+    use crate::rpc::ddl::{
+        AlterDatabaseKind, SetDatabaseOption, SetDatabaseOptions, UnsetDatabaseOption,
+        UnsetDatabaseOptions,
+    };
+
+    #[test]
+    fn test_build_new_schema_value() {
+        let set_ttl = AlterDatabaseKind::SetDatabaseOptions(SetDatabaseOptions(vec![
+            SetDatabaseOption::Ttl(Duration::from_secs(10)),
+        ]));
+        let current_schema_value = SchemaNameValue::default();
+        let new_schema_value =
+            build_new_schema_value(current_schema_value.clone(), &set_ttl).unwrap();
+        assert_eq!(new_schema_value.ttl, Some(Duration::from_secs(10)));
+
+        let unset_ttl_alter_kind =
+            AlterDatabaseKind::UnsetDatabaseOptions(UnsetDatabaseOptions(vec![
+                UnsetDatabaseOption::Ttl,
+            ]));
+        let new_schema_value =
+            build_new_schema_value(current_schema_value, &unset_ttl_alter_kind).unwrap();
+        assert_eq!(new_schema_value.ttl, None);
     }
 }
