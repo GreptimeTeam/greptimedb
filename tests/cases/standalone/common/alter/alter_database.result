@@ -1,0 +1,70 @@
+CREATE DATABASE alter_database;
+
+Affected Rows: 1
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
++----------------+----------------------------------------------+
+
+ALTER DATABASE alter_database SET 'ttl'='10s';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
++----------------+----------------------------------------------+
+
+ALTER DATABASE alter_database SET 'ttl'='20s';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
++----------------+----------------------------------------------+
+
+-- SQLNESS ARG restart=true
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
++----------------+----------------------------------------------+
+
+ALTER DATABASE alter_database UNSET 'ttl';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
++----------------+----------------------------------------------+
+
+-- SQLNESS ARG restart=true
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
++----------------+----------------------------------------------+
+
+DROP DATABASE alter_database;
+
+Affected Rows: 0
+
