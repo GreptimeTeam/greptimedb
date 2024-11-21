@@ -67,6 +67,9 @@ impl<S> RegionWorkerLoop<S> {
                 return;
             }
             AlterKind::UnsetRegionOptions { keys } => {
+                // Converts the keys to SetRegionOption.
+                //
+                // It passes an empty string to achieve the purpose of unset
                 match self.handle_alter_region_options(
                     region,
                     version,
