@@ -127,7 +127,8 @@ impl StatementExecutor {
                 schema: &table_name.schema_name,
             })
             .await
-            .context(TableMetadataManagerSnafu)?;
+            .context(TableMetadataManagerSnafu)?
+            .map(|v| v.into_inner());
 
         let partitions = self
             .partition_manager

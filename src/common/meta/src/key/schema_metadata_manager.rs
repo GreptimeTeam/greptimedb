@@ -75,7 +75,10 @@ impl SchemaMetadataManager {
             &table_info.table_info.catalog_name,
             &table_info.table_info.schema_name,
         );
-        self.schema_manager.get(key).await
+        self.schema_manager
+            .get(key)
+            .await
+            .map(|v| v.map(|v| v.into_inner()))
     }
 
     #[cfg(any(test, feature = "testing"))]

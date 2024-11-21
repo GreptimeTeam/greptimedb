@@ -14,7 +14,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::result;
+use std::time::Duration;
 
+use api::v1::alter_database_expr::Kind as PbAlterDatabaseKind;
 use api::v1::meta::ddl_task_request::Task;
 use api::v1::meta::{
     AlterDatabaseTask as PbAlterDatabaseTask, AlterTableTask as PbAlterTableTask,
@@ -30,10 +32,11 @@ use api::v1::meta::{
 use api::v1::{
     AlterDatabaseExpr, AlterTableExpr, CreateDatabaseExpr, CreateFlowExpr, CreateTableExpr,
     CreateViewExpr, DropDatabaseExpr, DropFlowExpr, DropTableExpr, DropViewExpr, ExpireAfter,
-    QueryContext as PbQueryContext, TruncateTableExpr,
+    Option as PbOption, QueryContext as PbQueryContext, TruncateTableExpr,
 };
 use base64::engine::general_purpose;
 use base64::Engine as _;
+use humantime_serde::re::humantime;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DefaultOnNull};
@@ -43,7 +46,7 @@ use table::metadata::{RawTableInfo, TableId};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
-use crate::error::{self, Result};
+use crate::error::{self, InvalidSetDatabaseOptionSnafu, InvalidUnsetDatabaseOptionSnafu, Result};
 use crate::key::FlowId;
 
 /// DDL tasks
@@ -946,7 +949,6 @@ impl TryFrom<DropDatabaseTask> for PbDropDatabaseTask {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct AlterDatabaseTask {
-    // TODO(CookiePieWw): Replace proto struct with user-defined struct
     pub alter_expr: AlterDatabaseExpr,
 }
 
@@ -972,58 +974,98 @@ impl TryFrom<PbAlterDatabaseTask> for AlterDatabaseTask {
     }
 }
 
-impl AlterDatabaseTask {
-    pub fn validate(&self) -> Result<()> {
-        self.alter_expr
-            .kind
-            .as_ref()
-            .context(error::UnexpectedSnafu {
-                err_msg: "'kind' is absent",
-            })?;
-        Ok(())
-    }
+impl TryFrom<PbAlterDatabaseKind> for AlterDatabaseKind {
+    type Error = error::Error;
 
+    fn try_from(pb: PbAlterDatabaseKind) -> Result<Self> {
+        match pb {
+            PbAlterDatabaseKind::SetDatabaseOptions(options) => {
+                Ok(AlterDatabaseKind::SetDatabaseOptions(SetDatabaseOptions(
+                    options
+                        .set_database_options
+                        .into_iter()
+                        .map(SetDatabaseOption::try_from)
+                        .collect::<Result<Vec<_>>>()?,
+                )))
+            }
+            PbAlterDatabaseKind::UnsetDatabaseOptions(options) => Ok(
+                AlterDatabaseKind::UnsetDatabaseOptions(UnsetDatabaseOptions(
+                    options
+                        .keys
+                        .iter()
+                        .map(|key| UnsetDatabaseOption::try_from(key.as_str()))
+                        .collect::<Result<Vec<_>>>()?,
+                )),
+            ),
+        }
+    }
+}
+
+const TTL_KEY: &str = "ttl";
+
+impl TryFrom<PbOption> for SetDatabaseOption {
+    type Error = error::Error;
+
+    fn try_from(PbOption { key, value }: PbOption) -> Result<Self> {
+        match key.to_ascii_lowercase().as_str() {
+            TTL_KEY => {
+                let ttl = if value.is_empty() {
+                    Duration::from_secs(0)
+                } else {
+                    humantime::parse_duration(&value)
+                        .map_err(|_| InvalidSetDatabaseOptionSnafu { key, value }.build())?
+                };
+
+                Ok(SetDatabaseOption::Ttl(ttl))
+            }
+            _ => InvalidSetDatabaseOptionSnafu { key, value }.fail(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub enum SetDatabaseOption {
+    Ttl(Duration),
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub enum UnsetDatabaseOption {
+    Ttl,
+}
+
+impl TryFrom<&str> for UnsetDatabaseOption {
+    type Error = error::Error;
+
+    fn try_from(key: &str) -> Result<Self> {
+        match key.to_ascii_lowercase().as_str() {
+            TTL_KEY => Ok(UnsetDatabaseOption::Ttl),
+            _ => InvalidUnsetDatabaseOptionSnafu { key }.fail(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct SetDatabaseOptions(pub Vec<SetDatabaseOption>);
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct UnsetDatabaseOptions(pub Vec<UnsetDatabaseOption>);
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub enum AlterDatabaseKind {
+    SetDatabaseOptions(SetDatabaseOptions),
+    UnsetDatabaseOptions(UnsetDatabaseOptions),
+}
+
+impl AlterDatabaseTask {
     pub fn catalog(&self) -> &str {
         &self.alter_expr.catalog_name
     }
 
     pub fn schema(&self) -> &str {
-        &self.alter_expr.schema_name
+        &self.alter_expr.catalog_name
     }
 }
 
-impl Serialize for AlterDatabaseTask {
-    fn serialize<S>(&self, serializer: S) -> result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let pb = PbAlterDatabaseTask {
-            task: Some(self.alter_expr.clone()),
-        };
-        let buf = pb.encode_to_vec();
-        let encoded = general_purpose::STANDARD_NO_PAD.encode(buf);
-        serializer.serialize_str(&encoded)
-    }
-}
-
-impl<'de> Deserialize<'de> for AlterDatabaseTask {
-    fn deserialize<D>(deserializer: D) -> result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let encoded = String::deserialize(deserializer)?;
-        let buf = general_purpose::STANDARD_NO_PAD
-            .decode(encoded)
-            .map_err(|err| serde::de::Error::custom(err.to_string()))?;
-        let expr: PbAlterDatabaseTask = PbAlterDatabaseTask::decode(&*buf)
-            .map_err(|err| serde::de::Error::custom(err.to_string()))?;
-
-        let expr = AlterDatabaseTask::try_from(expr)
-            .map_err(|err| serde::de::Error::custom(err.to_string()))?;
-
-        Ok(expr)
-    }
-}
 /// Create flow
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateFlowTask {

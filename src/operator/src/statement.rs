@@ -287,6 +287,7 @@ impl StatementExecutor {
                     .context(SchemaNotFoundSnafu {
                         schema_info: &database,
                     })?
+                    .into_inner()
                     .into();
 
                 self.show_create_database(&database, opts.into()).await

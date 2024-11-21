@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
-use api::v1::alter_database_expr::Kind;
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
@@ -25,9 +22,11 @@ use strum::AsRefStr;
 use super::utils::handle_retry_error;
 use crate::ddl::DdlContext;
 use crate::error::{Result, SchemaNotFoundSnafu};
-use crate::key::schema_name::SchemaNameKey;
+use crate::key::schema_name::{SchemaNameKey, SchemaNameValue};
+use crate::key::DeserializedValueWithBytes;
 use crate::lock_key::{CatalogLock, SchemaLock};
-use crate::rpc::ddl::AlterDatabaseTask;
+use crate::rpc::ddl::UnsetDatabaseOption::{self};
+use crate::rpc::ddl::{AlterDatabaseKind, AlterDatabaseTask, SetDatabaseOption};
 use crate::ClusterId;
 
 pub struct AlterDatabaseProcedure {
@@ -38,15 +37,15 @@ pub struct AlterDatabaseProcedure {
 impl AlterDatabaseProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::AlterDatabase";
 
-    pub fn new(cluster_id: ClusterId, task: AlterDatabaseTask, context: DdlContext) -> Self {
-        Self {
+    pub fn new(
+        cluster_id: ClusterId,
+        task: AlterDatabaseTask,
+        context: DdlContext,
+    ) -> Result<Self> {
+        Ok(Self {
             context,
-            data: AlterDatabaseData {
-                state: AlterDatabaseState::Prepare,
-                cluster_id,
-                task,
-            },
-        }
+            data: AlterDatabaseData::new(task, cluster_id)?,
+        })
     }
 
     pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
@@ -56,65 +55,73 @@ impl AlterDatabaseProcedure {
     }
 
     pub async fn on_prepare(&mut self) -> Result<Status> {
-        let exists = self
+        let value = self
             .context
             .table_metadata_manager
             .schema_manager()
-            .exists(SchemaNameKey::new(self.data.catalog(), self.data.schema()))
+            .get(SchemaNameKey::new(self.data.catalog(), self.data.schema()))
             .await?;
 
         ensure!(
-            exists,
+            value.is_some(),
             SchemaNotFoundSnafu {
                 table_schema: self.data.schema(),
             }
         );
 
-        self.data.task.validate()?;
+        self.data.schema_value = value;
         self.data.state = AlterDatabaseState::UpdateMetadata;
 
         Ok(Status::executing(true))
     }
 
-    pub async fn on_update_metadata(&mut self) -> Result<Status> {
-        let schema_name = SchemaNameKey::new(self.data.catalog(), self.data.schema());
-        // Safety: Validated in on_prepare
-        let alter_kind = self.data.task.alter_expr.kind.as_ref().unwrap();
+    fn build_new_schema_value(
+        mut value: SchemaNameValue,
+        alter_kind: &AlterDatabaseKind,
+    ) -> Result<SchemaNameValue> {
         match alter_kind {
-            Kind::SetDatabaseOptions(options) => {
-                let option_map = options
-                    .set_database_options
-                    .iter()
-                    .map(|option| (option.key.clone(), option.value.clone()))
-                    .collect::<HashMap<String, String>>();
-                self.validate_options(&option_map)?;
-                let schema_value = (&option_map).try_into()?;
-                self.context
-                    .table_metadata_manager
-                    .schema_manager()
-                    .update(schema_name, schema_value)
-                    .await?;
+            AlterDatabaseKind::SetDatabaseOptions(options) => {
+                for option in options.0.iter() {
+                    match option {
+                        SetDatabaseOption::Ttl(ttl) => {
+                            if ttl.is_zero() {
+                                value.ttl = None;
+                            } else {
+                                value.ttl = Some(*ttl);
+                            }
+                        }
+                    }
+                }
             }
-            Kind::UnsetDatabaseOptions(options) => {
-                let option_map = options
-                    .keys
-                    .iter()
-                    .map(|option| (option.clone(), "".to_string()))
-                    .collect::<HashMap<String, String>>();
-                self.validate_options(&option_map)?;
-                let schema_value = (&option_map).try_into()?;
-                self.context
-                    .table_metadata_manager
-                    .schema_manager()
-                    .update(schema_name, schema_value)
-                    .await?;
+            AlterDatabaseKind::UnsetDatabaseOptions(keys) => {
+                for key in keys.0.iter() {
+                    match key {
+                        UnsetDatabaseOption::Ttl => value.ttl = None,
+                    }
+                }
             }
-        };
-        Ok(Status::done())
+        }
+        Ok(value)
     }
 
-    fn validate_options(&self, _options: &HashMap<String, String>) -> Result<()> {
-        todo!()
+    pub async fn on_update_metadata(&mut self) -> Result<Status> {
+        let schema_name = SchemaNameKey::new(self.data.catalog(), self.data.schema());
+
+        // Safety: schema_value is not None.
+        let current_schema_value = self.data.schema_value.as_ref().unwrap();
+
+        let new_schema_value = Self::build_new_schema_value(
+            current_schema_value.get_inner_ref().clone(),
+            &self.data.kind,
+        )?;
+
+        self.context
+            .table_metadata_manager
+            .schema_manager()
+            .update(schema_name, current_schema_value, &new_schema_value)
+            .await?;
+
+        Ok(Status::done())
     }
 }
 
@@ -155,27 +162,35 @@ enum AlterDatabaseState {
     UpdateMetadata,
 }
 
+/// The data of alter database procedure.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AlterDatabaseData {
     cluster_id: ClusterId,
     state: AlterDatabaseState,
-    task: AlterDatabaseTask,
+    kind: AlterDatabaseKind,
+    catalog_name: String,
+    schema_name: String,
+
+    schema_value: Option<DeserializedValueWithBytes<SchemaNameValue>>,
 }
 
 impl AlterDatabaseData {
-    pub fn new(task: AlterDatabaseTask, cluster_id: ClusterId) -> Self {
-        Self {
+    pub fn new(task: AlterDatabaseTask, cluster_id: ClusterId) -> Result<Self> {
+        Ok(Self {
             cluster_id,
             state: AlterDatabaseState::Prepare,
-            task,
-        }
+            kind: AlterDatabaseKind::try_from(task.alter_expr.kind.unwrap())?,
+            catalog_name: task.alter_expr.catalog_name,
+            schema_name: task.alter_expr.schema_name,
+            schema_value: None,
+        })
     }
 
     pub fn catalog(&self) -> &str {
-        self.task.catalog()
+        &self.catalog_name
     }
 
     pub fn schema(&self) -> &str {
-        self.task.schema()
+        &self.schema_name
     }
 }

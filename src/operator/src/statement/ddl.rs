@@ -127,7 +127,8 @@ impl StatementExecutor {
                 schema: &schema,
             })
             .await
-            .context(TableMetadataManagerSnafu)?;
+            .context(TableMetadataManagerSnafu)?
+            .map(|v| v.into_inner());
 
         let quote_style = ctx.quote_style();
         let mut create_stmt =

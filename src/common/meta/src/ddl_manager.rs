@@ -131,6 +131,7 @@ impl DdlManager {
             CreateFlowProcedure,
             AlterTableProcedure,
             AlterLogicalTablesProcedure,
+            AlterDatabaseProcedure,
             DropTableProcedure,
             DropFlowProcedure,
             TruncateTableProcedure,
@@ -302,7 +303,7 @@ impl DdlManager {
         alter_database_task: AlterDatabaseTask,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
-        let procedure = AlterDatabaseProcedure::new(cluster_id, alter_database_task, context);
+        let procedure = AlterDatabaseProcedure::new(cluster_id, alter_database_task, context)?;
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.submit_procedure(procedure_with_id).await
