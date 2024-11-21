@@ -52,6 +52,10 @@ ALTER TABLE ato UNSET '🕶️';
 
 SHOW CREATE TABLE ato;
 
+ALTER TABLE ato SET 'compaction.twcs.max_inactive_window_runs'='';
+
+SHOW CREATE TABLE ato;
+
 -- SQLNESS ARG restart=true
 SHOW CREATE TABLE ato;
 
