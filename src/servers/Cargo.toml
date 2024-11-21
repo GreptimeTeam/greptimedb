@@ -5,17 +5,20 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+default = []
 dashboard = []
 mem-prof = ["dep:common-mem-prof"]
 pprof = ["dep:common-pprof"]
 testing = []
+apidocs = ["dep:aide"]
+
 
 [lints]
 workspace = true
 
 [dependencies]
 ahash = "0.8"
-aide = { version = "0.9", features = ["axum"] }
+aide = { version = "0.9", features = ["axum"], optional = true }
 api.workspace = true
 arrow.workspace = true
 arrow-flight.workspace = true

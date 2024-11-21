@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+#[cfg(feature = "apidocs")]
 use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
 use axum::response::{IntoResponse, Response};
@@ -277,6 +278,7 @@ pub async fn promql(
         .into_response()
 }
 
+#[cfg(feature = "apidocs")]
 pub(crate) fn sql_docs(op: TransformOperation) -> TransformOperation {
     op.response::<200, Json<HttpResponse>>()
 }

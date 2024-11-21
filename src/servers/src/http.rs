@@ -18,15 +18,22 @@ use std::net::SocketAddr;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
-use aide::axum::{routing as apirouting, ApiRouter, IntoApiResponse};
-use aide::openapi::{Info, OpenApi, Server as OpenAPIServer};
-use aide::OperationOutput;
+#[cfg(feature = "apidocs")]
+use aide::{
+    axum::{routing as apirouting, ApiRouter, IntoApiResponse},
+    openapi::{Info, OpenApi, Server as OpenAPIServer},
+    OperationOutput,
+};
 use async_trait::async_trait;
 use auth::UserProviderRef;
+#[cfg(feature = "apidocs")]
+use axem::Extension;
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::DefaultBodyLimit;
-use axum::response::{Html, IntoResponse, Json, Response};
-use axum::{middleware, routing, BoxError, Extension, Router};
+#[cfg(feature = "apidocs")]
+use axum::response::Html;
+use axum::response::{IntoResponse, Json, Response};
+use axum::{middleware, routing, BoxError, Router};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_error::status_code::StatusCode;
@@ -420,6 +427,7 @@ impl IntoResponse for HttpResponse {
     }
 }
 
+#[cfg(feature = "apidocs")]
 impl OperationOutput for HttpResponse {
     type Inner = Response;
 }
@@ -466,10 +474,12 @@ impl From<JsonResponse> for HttpResponse {
     }
 }
 
+#[cfg(feature = "apidocs")]
 async fn serve_api(Extension(api): Extension<OpenApi>) -> impl IntoApiResponse {
     Json(api)
 }
 
+#[cfg(feature = "apidocs")]
 async fn serve_docs() -> Html<String> {
     Html(include_str!("http/redoc.html").to_owned())
 }
@@ -490,12 +500,14 @@ pub struct HttpServerBuilder {
     options: HttpOptions,
     plugins: Plugins,
     user_provider: Option<UserProviderRef>,
+    #[cfg(feature = "apidocs")]
     api: OpenApi,
     router: Router,
 }
 
 impl HttpServerBuilder {
     pub fn new(options: HttpOptions) -> Self {
+        #[cfg(feature = "apidocs")]
         let api = OpenApi {
             info: Info {
                 title: "GreptimeDB HTTP API".to_string(),
@@ -513,11 +525,13 @@ impl HttpServerBuilder {
             options,
             plugins: Plugins::default(),
             user_provider: None,
+            #[cfg(feature = "apidocs")]
             api,
             router: Router::new(),
         }
     }
 
+    #[cfg(feature = "apidocs")]
     pub fn with_sql_handler(
         mut self,
         sql_handler: ServerSqlQueryHandlerRef,
@@ -526,9 +540,30 @@ impl HttpServerBuilder {
         let sql_router = HttpServer::route_sql(ApiState {
             sql_handler,
             script_handler,
-        })
-        .finish_api(&mut self.api)
-        .layer(Extension(self.api.clone()));
+        });
+
+        let sql_router = sql_router
+            .finish_api(&mut self.api)
+            .layer(Extension(self.api.clone()));
+
+        Self {
+            router: self
+                .router
+                .nest(&format!("/{HTTP_API_VERSION}"), sql_router),
+            ..self
+        }
+    }
+
+    #[cfg(not(feature = "apidocs"))]
+    pub fn with_sql_handler(
+        self,
+        sql_handler: ServerSqlQueryHandlerRef,
+        script_handler: Option<ScriptHandlerRef>,
+    ) -> Self {
+        let sql_router = HttpServer::route_sql(ApiState {
+            sql_handler,
+            script_handler,
+        });
 
         Self {
             router: self
@@ -635,11 +670,10 @@ impl HttpServerBuilder {
         Self { plugins, ..self }
     }
 
-    pub fn with_greptime_config_options(mut self, opts: String) -> Self {
+    pub fn with_greptime_config_options(self, opts: String) -> Self {
         let config_router = HttpServer::route_config(GreptimeOptionsConfigState {
             greptime_config_options: opts,
-        })
-        .finish_api(&mut self.api);
+        });
 
         Self {
             router: self.router.nest("", config_router),
@@ -791,6 +825,7 @@ impl HttpServer {
             .with_state(log_state)
     }
 
+    #[cfg(feature = "apidocs")]
     fn route_sql<S>(api_state: ApiState) -> ApiRouter<S> {
         ApiRouter::new()
             .api_route(
@@ -807,6 +842,19 @@ impl HttpServer {
             .api_route("/run-script", apirouting::post(script::run_script))
             .route("/private/api.json", apirouting::get(serve_api))
             .route("/private/docs", apirouting::get(serve_docs))
+            .with_state(api_state)
+    }
+
+    #[cfg(not(feature = "apidocs"))]
+    fn route_sql<S>(api_state: ApiState) -> Router<S> {
+        Router::new()
+            .route("/sql", routing::get(handler::sql).post(handler::sql))
+            .route(
+                "/promql",
+                routing::get(handler::promql).post(handler::promql),
+            )
+            .route("/scripts", routing::post(script::scripts))
+            .route("/run-script", routing::post(script::run_script))
             .with_state(api_state)
     }
 
@@ -902,9 +950,9 @@ impl HttpServer {
             .with_state(otlp_handler)
     }
 
-    fn route_config<S>(state: GreptimeOptionsConfigState) -> ApiRouter<S> {
-        ApiRouter::new()
-            .route("/config", apirouting::get(handler::config))
+    fn route_config<S>(state: GreptimeOptionsConfigState) -> Router<S> {
+        Router::new()
+            .route("/config", routing::get(handler::config))
             .with_state(state)
     }
 }
