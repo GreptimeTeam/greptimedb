@@ -6,5 +6,6 @@
 -- SQLNESS REPLACE [\s\-]+
 SELECT build();
 
--- SQLNESS REPLACE [\d\.]+ VERSION
+-- SQLNESS REPLACE (\d+\.\d+\.\d+) VERSION
+-- SQLNESS REPLACE [\s\-]+
 SELECT version();
