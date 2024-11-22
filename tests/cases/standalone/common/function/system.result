@@ -8,12 +8,9 @@ SELECT build();
 
 ++|build()|++|branch:BRANCH|commit:COMMIT|commit_short:COMMIT_SHORT|clean:CLEAN|version:VERSION++
 
--- SQLNESS REPLACE [\d\.]+ VERSION
+-- SQLNESS REPLACE (\d+\.\d+\.\d+) VERSION
+-- SQLNESS REPLACE [\s\-]+
 SELECT version();
 
-+-----------+
-| version() |
-+-----------+
-| VERSION     |
-+-----------+
+++|version()|++|VERSION|++
 
