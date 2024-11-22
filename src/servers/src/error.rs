@@ -575,6 +575,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Prepare statement not found: {}", name))]
+    PrepareStatementNotFound {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -643,7 +650,8 @@ impl ErrorExt for Error {
             | TimestampOverflow { .. }
             | OpenTelemetryLog { .. }
             | UnsupportedJsonDataTypeForTag { .. }
-            | InvalidTableName { .. } => StatusCode::InvalidArguments,
+            | InvalidTableName { .. }
+            | PrepareStatementNotFound { .. } => StatusCode::InvalidArguments,
 
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),
