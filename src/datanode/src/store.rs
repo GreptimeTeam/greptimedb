@@ -32,7 +32,7 @@ use object_store::util::{join_dir, normalize_dir, with_instrument_layers};
 use object_store::{Access, Error, HttpClient, ObjectStore, ObjectStoreBuilder};
 use snafu::prelude::*;
 
-use crate::config::{ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
+use crate::config::{HttpClientConfig, ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
 use crate::error::{self, Result};
 
 pub(crate) async fn new_raw_object_store(
@@ -177,7 +177,7 @@ pub(crate) fn clean_temp_dir(dir: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn build_http_client() -> Result<HttpClient> {
+pub(crate) fn build_http_client(config: &HttpClientConfig) -> Result<HttpClient> {
     let http_builder = {
         let mut builder = reqwest::ClientBuilder::new();
 
@@ -186,25 +186,28 @@ pub(crate) fn build_http_client() -> Result<HttpClient> {
         let pool_max_idle_per_host = env::var("_GREPTIMEDB_HTTP_POOL_MAX_IDLE_PER_HOST")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(usize::MAX);
+            .inspect(|_| warn!("'_GREPTIMEDB_HTTP_POOL_MAX_IDLE_PER_HOST' might be deprecated in the future. Please set it in the config file instead."))
+            .unwrap_or(config.pool_max_idle_per_host as usize);
         builder = builder.pool_max_idle_per_host(pool_max_idle_per_host);
 
         // Connect timeout default to 30s.
         let connect_timeout = env::var("_GREPTIMEDB_HTTP_CONNECT_TIMEOUT")
             .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(30);
-        builder = builder.connect_timeout(Duration::from_secs(connect_timeout));
+            .and_then(|v| v.parse::<u64>().ok().map(Duration::from_secs))
+            .inspect(|_| warn!("'_GREPTIMEDB_HTTP_CONNECT_TIMEOUT' might be deprecated in the future. Please set it in the config file instead."))
+            .unwrap_or(config.connect_timeout);
+        builder = builder.connect_timeout(connect_timeout);
 
         // Pool connection idle timeout default to 90s.
         let idle_timeout = env::var("_GREPTIMEDB_HTTP_POOL_IDLE_TIMEOUT")
             .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(90);
+            .and_then(|v| v.parse::<u64>().ok().map(Duration::from_secs))
+            .inspect(|_| warn!("'_GREPTIMEDB_HTTP_POOL_IDLE_TIMEOUT' might be deprecated in the future. Please set it in the config file instead."))
+            .unwrap_or(config.pool_idle_timeout);
 
-        builder = builder.pool_idle_timeout(Duration::from_secs(idle_timeout));
+        builder = builder.pool_idle_timeout(idle_timeout);
 
-        builder
+        builder.timeout(config.timeout)
     };
 
     HttpClient::build(http_builder).context(error::InitBackendSnafu)
