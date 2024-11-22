@@ -1,0 +1,72 @@
+-- invalid prepare, from
+-- https://github.com/duckdb/duckdb/blob/00a605270719941ca0412ad5d0a14b1bdfbf9eb5/test/sql/prepared/invalid_prepare.test
+-- SQLNESS PROTOCOL MYSQL
+SELECT ?;
+
+Failed to execute query, err: MySqlError { ERROR 1815 (HY000): (PlanQuery): Failed to plan SQL: Error during planning: Placeholder type could not be resolved. Make sure that the placeholder is bound to a concrete type, e.g. by providing parameter values. }
+
+-- SQLNESS PROTOCOL MYSQL
+PREPARE stmt FROM 'SELECT ?::int;';
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+EXECUTE stmt USING 1;
+
++----------+
+| Int64(1) |
++----------+
+| 1        |
++----------+
+
+-- SQLNESS PROTOCOL MYSQL
+EXECUTE stmt USING 'a';
+
+Failed to parse query result, err: MySqlError { ERROR 1815 (HY000): (EngineExecuteQuery): Cast error: Cannot cast string 'a' to value of Int32 type }
+
+-- SQLNESS PROTOCOL MYSQL
+DEALLOCATE stmt;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+PREPARE stmt FROM 'SELECT ?::int WHERE 1=0;';
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+EXECUTE stmt USING 1;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+EXECUTE stmt USING 'a';
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+DEALLOCATE stmt;
+
+affected_rows: 0
+
+-- parameter variants, from:
+-- https://github.com/duckdb/duckdb/blob/2360dd00f193b5d0850f9379d0c3794eb2084f36/test/sql/prepared/parameter_variants.test
+-- SQLNESS PROTOCOL MYSQL
+PREPARE stmt FROM 'SELECT CAST(? AS INTEGER), CAST(? AS STRING);';
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+EXECUTE stmt USING 1, 'hello';
+
++----------+---------------+
+| Int64(1) | Utf8("hello") |
++----------+---------------+
+| 1        | hello         |
++----------+---------------+
+
+-- SQLNESS PROTOCOL MYSQL
+DEALLOCATE stmt;
+
+affected_rows: 0
+
