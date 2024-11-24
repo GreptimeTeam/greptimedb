@@ -458,7 +458,7 @@ impl MetricEngineInner {
 
         // remove TTL and APPEND_MODE option
         let mut options = request.options.clone();
-        options.remove(TTL_KEY);
+        options.insert(TTL_KEY.to_string(), "10000 years".to_string());
         options.remove(APPEND_MODE_KEY);
 
         RegionCreateRequest {
@@ -724,6 +724,9 @@ mod test {
             metadata_region_request.region_dir,
             "/test_dir/metadata/".to_string()
         );
-        assert!(!metadata_region_request.options.contains_key("ttl"));
+        assert_eq!(
+            metadata_region_request.options.get("ttl").unwrap(),
+            "10000 years"
+        );
     }
 }
