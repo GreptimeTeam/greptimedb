@@ -425,9 +425,9 @@ impl FlowWorkerManager {
                 .collect_vec();
             let schema = meta.schema.column_schemas;
             let time_index = meta.schema.timestamp_index;
-            return Ok(Some((primary_keys, time_index, schema)));
+            Ok(Some((primary_keys, time_index, schema)))
         } else {
-            return Ok(None);
+            Ok(None)
         }
     }
 
@@ -534,14 +534,13 @@ impl FlowWorkerManager {
                         .get_by_name(table_name)
                         .map(|x| x.1)
                         .unwrap();
-                    let schema = node_ctx
+                    node_ctx
                         .schema
                         .get(&gid)
                         .with_context(|| TableNotFoundSnafu {
                             name: format!("Table name = {:?}", table_name),
                         })?
-                        .clone();
-                    schema
+                        .clone()
                 };
                 self.adjust_auto_created_table_schema(&schema).await?
             };
