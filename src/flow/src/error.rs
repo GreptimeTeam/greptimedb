@@ -25,6 +25,7 @@ use snafu::{Location, Snafu};
 
 use crate::adapter::FlowId;
 use crate::expr::EvalError;
+use crate::repr::RelationDesc;
 
 /// This error is used to represent all possible errors that can occur in the flow module.
 #[derive(Snafu)]
@@ -184,6 +185,18 @@ pub enum Error {
         location: Location,
         name: String,
     },
+
+    #[snafu(display(
+        "Sink table schema mismatch, expected: {:?}, actual: {:?}",
+        expected,
+        actual
+    ))]
+    SinkTableSchemaMismatch {
+        expected: RelationDesc,
+        actual: RelationDesc,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 /// Result type for flow module
@@ -213,7 +226,9 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Self::MetaClientInit { source, .. } => source.status_code(),
-            Self::ParseAddr { .. } => StatusCode::InvalidArguments,
+            Self::ParseAddr { .. } | Self::SinkTableSchemaMismatch { .. } => {
+                StatusCode::InvalidArguments
+            }
         }
     }
 

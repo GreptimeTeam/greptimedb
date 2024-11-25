@@ -16,11 +16,49 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{ColumnDataType, ColumnDataTypeExtension, SemanticType};
 use common_error::ext::BoxedError;
+use common_meta::key::table_info::TableInfoValue;
 use datatypes::schema::ColumnSchema;
 use itertools::Itertools;
 use snafu::ResultExt;
 
 use crate::error::{Error, ExternalSnafu};
+use crate::repr::{ColumnType, RelationDesc, RelationType};
+
+pub fn table_info_value_to_relation_desc(
+    table_info_value: TableInfoValue,
+) -> Result<RelationDesc, Error> {
+    let raw_schema = table_info_value.table_info.meta.schema;
+    let (column_types, col_names): (Vec<_>, Vec<_>) = raw_schema
+        .column_schemas
+        .clone()
+        .into_iter()
+        .map(|col| {
+            (
+                ColumnType {
+                    nullable: col.is_nullable(),
+                    scalar_type: col.data_type,
+                },
+                Some(col.name),
+            )
+        })
+        .unzip();
+
+    let key = table_info_value.table_info.meta.primary_key_indices;
+    let keys = vec![crate::repr::Key::from(key)];
+
+    let time_index = raw_schema.timestamp_index;
+
+    Ok(RelationDesc {
+        typ: RelationType {
+            column_types,
+            keys,
+            time_index,
+            // by default table schema's column are all non-auto
+            auto_columns: vec![],
+        },
+        names: col_names,
+    })
+}
 
 /// convert `ColumnSchema` lists to it's corresponding proto type
 pub fn column_schemas_to_proto(
