@@ -29,6 +29,8 @@ pub(crate) async fn new_gcs_object_store(gcs_config: &GcsConfig) -> Result<Objec
         gcs_config.bucket, &root
     );
 
+    let client = build_http_client(&gcs_config.http_client);
+
     let builder = Gcs::default()
         .root(&root)
         .bucket(&gcs_config.bucket)
@@ -36,7 +38,7 @@ pub(crate) async fn new_gcs_object_store(gcs_config: &GcsConfig) -> Result<Objec
         .credential_path(gcs_config.credential_path.expose_secret())
         .credential(gcs_config.credential.expose_secret())
         .endpoint(&gcs_config.endpoint)
-        .http_client(build_http_client()?);
+        .http_client(client?);
 
     Ok(ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?

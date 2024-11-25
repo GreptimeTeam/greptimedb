@@ -413,6 +413,23 @@ endpoint = "https://s3.amazonaws.com"
 ## @toml2docs:none-default
 region = "us-west-2"
 
+## The http client options to the storage.
+## **It's only used when the storage type is `S3`, `Oss`, `Gcs` and `Azblob`**.
+[storage.http_client]
+
+## The maximum idle connection per host allowed in the pool.
+pool_max_idle_per_host = 1024
+
+## The timeout for only the connect phase of a http client.
+connect_timeout = "30s"
+
+## The total request timeout, applied from when the request starts connecting until the response body has finished.
+## Also considered a total deadline.
+timeout = "30s"
+
+## The timeout for idle sockets being kept-alive.
+pool_idle_timeout = "90s"
+
 # Custom storage options
 # [[storage.providers]]
 # name = "S3"

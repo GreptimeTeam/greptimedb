@@ -30,13 +30,15 @@ pub(crate) async fn new_azblob_object_store(azblob_config: &AzblobConfig) -> Res
         azblob_config.container, &root
     );
 
+    let client = build_http_client(&azblob_config.http_client)?;
+
     let mut builder = Azblob::default()
         .root(&root)
         .container(&azblob_config.container)
         .endpoint(&azblob_config.endpoint)
         .account_name(azblob_config.account_name.expose_secret())
         .account_key(azblob_config.account_key.expose_secret())
-        .http_client(build_http_client()?);
+        .http_client(client);
 
     if let Some(token) = &azblob_config.sas_token {
         builder = builder.sas_token(token);
