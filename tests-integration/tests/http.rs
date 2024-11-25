@@ -799,6 +799,28 @@ pub async fn test_config_api(store_type: StorageType) {
     let res_get = client.get("/config").send().await;
     assert_eq!(res_get.status(), StatusCode::OK);
 
+    let storage = if store_type != StorageType::File {
+        format!(
+            r#"[storage]
+type = "{}"
+providers = []
+
+[storage.http_client]
+pool_max_idle_per_host = 1024
+connect_timeout = "30s"
+timeout = "30s"
+pool_idle_timeout = "1m 30s""#,
+            store_type
+        )
+    } else {
+        format!(
+            r#"[storage]
+type = "{}"
+providers = []"#,
+            store_type
+        )
+    };
+
     let expected_toml_str = format!(
         r#"
 mode = "standalone"
@@ -867,9 +889,7 @@ sync_write = false
 enable_log_recycle = true
 prefill_log_files = false
 
-[storage]
-type = "{}"
-providers = []
+{storage}
 
 [metadata_store]
 file_size = "256MiB"
@@ -933,7 +953,6 @@ enable = false
 write_interval = "30s"
 
 [tracing]"#,
-        store_type
     )
     .trim()
     .to_string();
