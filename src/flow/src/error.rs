@@ -25,7 +25,6 @@ use snafu::{Location, Snafu};
 
 use crate::adapter::FlowId;
 use crate::expr::EvalError;
-use crate::repr::RelationDesc;
 
 /// This error is used to represent all possible errors that can occur in the flow module.
 #[derive(Snafu)]

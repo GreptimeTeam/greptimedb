@@ -25,7 +25,7 @@ use crate::adapter::TableName;
 use crate::error::{
     Error, ExternalSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu, UnexpectedSnafu,
 };
-use crate::repr::{self, ColumnType, RelationDesc, RelationType};
+use crate::repr::RelationDesc;
 
 /// mapping of table name <-> table id should be query from tableinfo manager
 pub struct TableSource {
