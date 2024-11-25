@@ -877,7 +877,7 @@ impl FlowWorkerManager {
             if !is_same {
                 // print a user friendly error message about mismatch and how to correct them
                 for (idx, (auto, real)) in auto_schema.iter().zip(real_schema.iter()).enumerate() {
-                    if !(auto.data_type == real.data_type) {
+                    if auto.data_type != real.data_type {
                         InvalidQuerySnafu {
                             reason: format!(
                                 "Column {}(name is {})'s data type mismatch, expect {:?} got {:?}",
