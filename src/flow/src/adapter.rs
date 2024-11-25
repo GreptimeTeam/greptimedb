@@ -46,17 +46,17 @@ use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 pub(crate) use crate::adapter::node_context::FlownodeContext;
 use crate::adapter::table_source::TableSource;
-use crate::adapter::util::column_schemas_to_proto;
+use crate::adapter::util::{column_schemas_to_proto, table_info_value_to_relation_desc};
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
 use crate::df_optimizer::sql_to_flow_plan;
 use crate::error::{
-    EvalSnafu, ExternalSnafu, FlowAlreadyExistSnafu, InternalSnafu, TableNotFoundSnafu,
-    UnexpectedSnafu,
+    EvalSnafu, ExternalSnafu, FlowAlreadyExistSnafu, InternalSnafu, InvalidQuerySnafu,
+    TableNotFoundSnafu, UnexpectedSnafu,
 };
 use crate::expr::{Batch, GlobalId};
 use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_ROWS, METRIC_FLOW_RUN_INTERVAL_MS};
-use crate::repr::{self, DiffRow, Row, BATCH_SIZE};
+use crate::repr::{self, DiffRow, RelationDesc, Row, BATCH_SIZE};
 
 mod flownode_impl;
 mod parse_expr;
@@ -396,14 +396,12 @@ impl FlowWorkerManager {
         Ok(output)
     }
 
-    /// Fetch table info or create table from flow's schema if not exist
-    async fn try_fetch_or_create_table(
+    /// Fetch table schema and primary key from table info source, if table not exist return None
+    async fn fetch_table_pk_schema(
         &self,
         table_name: &TableName,
-    ) -> Result<(bool, Vec<api::v1::ColumnSchema>), Error> {
-        // TODO(discord9): instead of auto build table from request schema, actually build table
-        // before `create flow` to be able to assign pk and ts etc.
-        let (primary_keys, schema, is_ts_placeholder) = if let Some(table_id) = self
+    ) -> Result<Option<(Vec<String>, Option<usize>, Vec<ColumnSchema>)>, Error> {
+        if let Some(table_id) = self
             .table_info_source
             .get_table_id_from_name(table_name)
             .await?
@@ -420,95 +418,127 @@ impl FlowWorkerManager {
                 .map(|i| meta.schema.column_schemas[i].name.clone())
                 .collect_vec();
             let schema = meta.schema.column_schemas;
-            // check if the last column is the auto created timestamp column, hence the table is auto created from
-            // flow's plan type
-            let is_auto_create = {
-                let correct_name = schema
-                    .last()
-                    .map(|s| s.name == AUTO_CREATED_PLACEHOLDER_TS_COL)
-                    .unwrap_or(false);
-                let correct_time_index = meta.schema.timestamp_index == Some(schema.len() - 1);
-                correct_name && correct_time_index
-            };
-            (primary_keys, schema, is_auto_create)
+            let time_index = meta.schema.timestamp_index;
+            return Ok(Some((primary_keys, time_index, schema)));
         } else {
-            // TODO(discord9): condiser remove buggy auto create by schema
+            return Ok(None);
+        }
+    }
 
-            let node_ctx = self.node_context.read().await;
-            let gid: GlobalId = node_ctx
-                .table_repr
-                .get_by_name(table_name)
-                .map(|x| x.1)
-                .unwrap();
-            let schema = node_ctx
-                .schema
-                .get(&gid)
-                .with_context(|| TableNotFoundSnafu {
-                    name: format!("Table name = {:?}", table_name),
-                })?
-                .clone();
-            // TODO(discord9): use default key from schema
-            let primary_keys = schema
-                .typ()
-                .keys
-                .first()
-                .map(|v| {
-                    v.column_indices
-                        .iter()
-                        .map(|i| {
-                            schema
-                                .get_name(*i)
-                                .clone()
-                                .unwrap_or_else(|| format!("col_{i}"))
-                        })
-                        .collect_vec()
-                })
-                .unwrap_or_default();
-            let update_at = ColumnSchema::new(
-                UPDATE_AT_TS_COL,
+    /// return primary keys, schema and if the table have a placeholder timestamp column
+    /// schema of the table comes from flow's output plan
+    ///
+    /// adjust to add `update_at` column and ts placeholder if needed
+    async fn adjust_auto_created_table_schema(
+        &self,
+        schema: &RelationDesc,
+    ) -> Result<(Vec<String>, Vec<ColumnSchema>, bool), Error> {
+        // TODO(discord9): condiser remove buggy auto create by schema
+
+        // TODO(discord9): use default key from schema
+        let primary_keys = schema
+            .typ()
+            .keys
+            .first()
+            .map(|v| {
+                v.column_indices
+                    .iter()
+                    .map(|i| {
+                        schema
+                            .get_name(*i)
+                            .clone()
+                            .unwrap_or_else(|| format!("col_{i}"))
+                    })
+                    .collect_vec()
+            })
+            .unwrap_or_default();
+        let update_at = ColumnSchema::new(
+            UPDATE_AT_TS_COL,
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            true,
+        );
+
+        let original_schema = schema
+            .typ()
+            .column_types
+            .clone()
+            .into_iter()
+            .enumerate()
+            .map(|(idx, typ)| {
+                let name = schema
+                    .names
+                    .get(idx)
+                    .cloned()
+                    .flatten()
+                    .unwrap_or(format!("col_{}", idx));
+                let ret = ColumnSchema::new(name, typ.scalar_type, typ.nullable);
+                if schema.typ().time_index == Some(idx) {
+                    ret.with_time_index(true)
+                } else {
+                    ret
+                }
+            })
+            .collect_vec();
+
+        let mut with_auto_added_col = original_schema.clone();
+        with_auto_added_col.push(update_at);
+
+        // if no time index, add one as placeholder
+        let no_time_index = schema.typ().time_index.is_none();
+        if no_time_index {
+            let ts_col = ColumnSchema::new(
+                AUTO_CREATED_PLACEHOLDER_TS_COL,
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 true,
-            );
+            )
+            .with_time_index(true);
+            with_auto_added_col.push(ts_col);
+        }
 
-            let original_schema = schema
-                .typ()
-                .column_types
-                .clone()
-                .into_iter()
-                .enumerate()
-                .map(|(idx, typ)| {
-                    let name = schema
-                        .names
-                        .get(idx)
-                        .cloned()
-                        .flatten()
-                        .unwrap_or(format!("col_{}", idx));
-                    let ret = ColumnSchema::new(name, typ.scalar_type, typ.nullable);
-                    if schema.typ().time_index == Some(idx) {
-                        ret.with_time_index(true)
-                    } else {
-                        ret
-                    }
-                })
-                .collect_vec();
+        Ok((primary_keys, with_auto_added_col, no_time_index))
+    }
 
-            let mut with_auto_added_col = original_schema.clone();
-            with_auto_added_col.push(update_at);
-
-            // if no time index, add one as placeholder
-            let no_time_index = schema.typ().time_index.is_none();
-            if no_time_index {
-                let ts_col = ColumnSchema::new(
-                    AUTO_CREATED_PLACEHOLDER_TS_COL,
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    true,
-                )
-                .with_time_index(true);
-                with_auto_added_col.push(ts_col);
-            }
-
-            (primary_keys, with_auto_added_col, no_time_index)
-        };
+    /// Fetch table info or create table from flow's schema if not exist
+    async fn try_fetch_or_create_table(
+        &self,
+        table_name: &TableName,
+    ) -> Result<(bool, Vec<api::v1::ColumnSchema>), Error> {
+        // TODO(discord9): instead of auto build table from request schema, actually build table
+        // before `create flow` to be able to assign pk and ts etc.
+        let (primary_keys, schema, is_ts_placeholder) =
+            if let Some((primary_keys, time_index, schema)) =
+                self.fetch_table_pk_schema(table_name).await?
+            {
+                // check if the last column is the auto created timestamp column, hence the table is auto created from
+                // flow's plan type
+                let is_auto_create = {
+                    let correct_name = schema
+                        .last()
+                        .map(|s| s.name == AUTO_CREATED_PLACEHOLDER_TS_COL)
+                        .unwrap_or(false);
+                    let correct_time_index = time_index == Some(schema.len() - 1);
+                    correct_name && correct_time_index
+                };
+                (primary_keys, schema, is_auto_create)
+            } else {
+                let schema = {
+                    let node_ctx = self.node_context.read().await;
+                    let gid: GlobalId = node_ctx
+                        .table_repr
+                        .get_by_name(table_name)
+                        .map(|x| x.1)
+                        .unwrap();
+                    let schema = node_ctx
+                        .schema
+                        .get(&gid)
+                        .with_context(|| TableNotFoundSnafu {
+                            name: format!("Table name = {:?}", table_name),
+                        })?
+                        .clone();
+                    schema
+                };
+                self.adjust_auto_created_table_schema(&schema).await?
+            };
         let proto_schema = column_schemas_to_proto(schema, &primary_keys)?;
         Ok((is_ts_placeholder, proto_schema))
     }
@@ -813,7 +843,73 @@ impl FlowWorkerManager {
         let flow_plan = sql_to_flow_plan(&mut node_ctx, &self.query_engine, &sql).await?;
 
         debug!("Flow {:?}'s Plan is {:?}", flow_id, flow_plan);
-        node_ctx.assign_table_schema(&sink_table_name, flow_plan.schema.clone())?;
+
+        // TODO(discord9): check schema against actual table schema if exists
+        if let Some((primary_keys, time_index, real_schema)) =
+            self.fetch_table_pk_schema(&sink_table_name).await?
+        {
+            let (auto_pks, auto_schema, _) = self
+                .adjust_auto_created_table_schema(&flow_plan.schema)
+                .await?;
+
+            let pk_with_time_index = primary_keys
+                .iter()
+                .chain(time_index.map(|i| &real_schema[i].name))
+                .collect_vec();
+            // make sure auto pks are subset of actual
+            ensure!(
+                auto_pks.iter().all(|pk| pk_with_time_index.contains(&pk)),
+                InvalidQuerySnafu {
+                    reason: format!(
+                        "flow's output primary keys {:?} are not subset of actual primary keys or time index in sink table {:?}",
+                        auto_pks, primary_keys
+                    )
+                }
+            );
+
+            // for column schema, only `data_type` need to be check for equality
+            // since one can omit flow's column name when write flow query
+            let is_same = auto_schema
+                .iter()
+                .zip(real_schema.iter())
+                .all(|(auto, actual)| auto.data_type == actual.data_type);
+
+            if !is_same {
+                // print a user friendly error message about mismatch and how to correct them
+                for (idx, (auto, real)) in auto_schema.iter().zip(real_schema.iter()).enumerate() {
+                    if !(auto.data_type == real.data_type) {
+                        InvalidQuerySnafu {
+                            reason: format!(
+                                "Column {}(name is {})'s data type mismatch, expect {:?} got {:?}",
+                                idx, real.name, real.data_type, auto.data_type
+                            ),
+                        }
+                        .fail()?;
+                    }
+                    // auto time index might be incorrect, just override it with real time index
+                }
+            }
+
+            let table_id = self
+                .table_info_source
+                .get_table_id_from_name(&sink_table_name)
+                .await?
+                .context(UnexpectedSnafu {
+                    reason: format!("Can't get table id for table name {:?}", sink_table_name),
+                })?;
+            let table_info_value = self
+                .table_info_source
+                .get_table_info_value(&table_id)
+                .await?
+                .context(UnexpectedSnafu {
+                    reason: format!("Can't get table info value for table id {:?}", table_id),
+                })?;
+            let real_schema = table_info_value_to_relation_desc(table_info_value)?;
+            node_ctx.assign_table_schema(&sink_table_name, real_schema.clone())?;
+        } else {
+            // assign inferred schema to sink table
+            node_ctx.assign_table_schema(&sink_table_name, flow_plan.schema.clone())?;
+        }
 
         let _ = comment;
         let _ = flow_options;
