@@ -755,3 +755,125 @@ DROP FLOW calc_android_log_abnormal;
 DROP TABLE android_log_abnormal;
 
 DROP TABLE android_log;
+
+CREATE TABLE numbers_input_basic (
+    number INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(number),
+    TIME INDEX(ts)
+);
+
+CREATE FLOW test_numbers_basic SINK TO out_num_cnt_basic AS
+SELECT
+    sum(case when number > 10 then 1 else 0 end)/count(number) as avg_after_filter_num
+FROM
+    numbers_input_basic;
+
+-- TODO(discord9): confirm if it's necessary to flush flow here?
+-- because flush_flow result is at most 1
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('test_numbers_basic');
+
+-- SQLNESS ARG restart=true
+INSERT INTO
+    numbers_input_basic
+VALUES
+    (20, "2021-07-01 00:00:00.200"),
+    (22, "2021-07-01 00:00:00.600");
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('test_numbers_basic');
+
+SELECT avg_after_filter_num FROM out_num_cnt_basic;
+
+INSERT INTO
+    numbers_input_basic
+VALUES
+    (10, "2021-07-01 00:00:00.200"),
+    (23, "2021-07-01 00:00:00.600");
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('test_numbers_basic');
+
+DROP FLOW test_numbers_basic;
+DROP TABLE numbers_input_basic;
+DROP TABLE out_num_cnt_basic;
+
+CREATE TABLE `live_connection_log`
+(
+    `device_model` STRING NULL,
+    `connect_protocol` INT NULL,
+    `connect_mode` INT NULL,
+    `connect_retry_times` DOUBLE NULL,
+    `connect_result` INT NULL,
+    `first_frame_time` DOUBLE NULL,
+    `record_time` TIMESTAMP TIME INDEX,
+    `iot_online` INT NULL,
+    PRIMARY KEY (`device_model`,`connect_protocol`),
+);
+
+CREATE TABLE `live_connection_statistics_detail`
+(
+  `device_model` STRING NULL,
+  `connect_protocol` INT NULL,
+  `connect_mode` INT NULL,
+  `avg_connect_retry_times` DOUBLE NULL,
+  `total_connect_result_ok` INT64 NULL,
+  `total_connect_result_fail` INT64 NULL,
+  `total_connect` INT64 NULL,
+  `conection_rate` DOUBLE NULL,
+  `avg_first_frame_time` DOUBLE NULL,
+  `max_first_frame_time` DOUBLE NULL,
+  `ok_conection_rate` DOUBLE NULL,
+  `record_time_window` TIMESTAMP TIME INDEX,
+  `update_at` TIMESTAMP,
+  PRIMARY KEY (`device_model`,`connect_protocol`),
+);
+
+CREATE FLOW live_connection_aggregation_detail
+SINK TO live_connection_statistics_detail
+AS
+SELECT
+    device_model,
+    connect_protocol,
+    connect_mode,
+    avg(connect_retry_times) as avg_connect_retry_times,
+    sum(case when connect_result = 1 then 1 else 0 end) as total_connect_result_ok,
+    sum(case when connect_result = 0 then 1 else 0 end) as total_connect_result_fail,
+    count(connect_result) as total_connect,
+    avg(first_frame_time) as avg_first_frame_time,
+    max(first_frame_time) as max_first_frame_time,
+    sum(case when connect_result = 1 then 1 else 0 end) / count(connect_result) as ok_conection_rate,
+    date_bin(INTERVAL '1 minutes', record_time) as record_time_window,
+FROM live_connection_log
+WHERE iot_online = 1
+GROUP BY
+    device_model,
+    connect_protocol,
+    connect_mode,
+    record_time_window;
+
+INSERT INTO
+    live_connection_log
+VALUES
+    ("STM51", 1, 1, 0.5, 1, 0.1, 0, 1);
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('live_connection_aggregation_detail');
+
+SELECT device_model,
+  connect_protocol,
+  connect_mode,
+  avg_connect_retry_times,
+  total_connect_result_ok,
+  total_connect_result_fail,
+  total_connect,
+  conection_rate,
+  avg_first_frame_time,
+  max_first_frame_time,
+  ok_conection_rate,
+  record_time_window FROM live_connection_statistics_detail;
+
+DROP FLOW live_connection_aggregation_detail;
+DROP TABLE live_connection_log;
+DROP TABLE live_connection_statistics_detail;
