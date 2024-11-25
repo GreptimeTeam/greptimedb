@@ -185,18 +185,6 @@ pub enum Error {
         location: Location,
         name: String,
     },
-
-    #[snafu(display(
-        "Sink table schema mismatch, expected: {:?}, actual: {:?}",
-        expected,
-        actual
-    ))]
-    SinkTableSchemaMismatch {
-        expected: RelationDesc,
-        actual: RelationDesc,
-        #[snafu(implicit)]
-        location: Location,
-    },
 }
 
 /// Result type for flow module
@@ -226,9 +214,7 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Self::MetaClientInit { source, .. } => source.status_code(),
-            Self::ParseAddr { .. } | Self::SinkTableSchemaMismatch { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Self::ParseAddr { .. } => StatusCode::InvalidArguments,
         }
     }
 
