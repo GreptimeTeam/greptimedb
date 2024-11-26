@@ -30,7 +30,7 @@ use common_meta::heartbeat::handler::{
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
-use common_meta::instruction::Instruction;
+use common_meta::instruction::{CacheIdent, Instruction};
 use common_telemetry::{debug, error, info, trace, warn};
 use meta_client::client::{HeartbeatSender, MetaClient};
 use meta_client::MetaClientRef;
@@ -393,8 +393,14 @@ impl HeartbeatResponseHandler for InvalidateSchemaCacheHandler {
             "InvalidateSchemaCacheHandler: invalidating caches: {:?}",
             caches
         );
+
+        let schema_caches = caches
+            .into_iter()
+            .filter(|i| matches!(i, CacheIdent::SchemaName(_)))
+            .collect::<Vec<_>>();
+
         self.cached_kv_backend
-            .invalidate(&Context::default(), &caches)
+            .invalidate(&Context::default(), &schema_caches)
             .await?;
         Ok(HandleControl::Done)
     }
