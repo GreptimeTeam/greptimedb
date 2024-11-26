@@ -170,7 +170,7 @@ pub(crate) fn scan_file_ranges(
 
         for range in ranges {
             let build_reader_start = Instant::now();
-            let reader = range.reader(None).await?;
+            let reader = range.reader(stream_ctx.input.series_row_selector).await?;
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
             let compat_batch = range.compat_batch();
