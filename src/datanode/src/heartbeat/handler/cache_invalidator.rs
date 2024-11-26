@@ -18,11 +18,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use catalog::kvbackend::CachedKvBackend;
-use common_meta::cache_invalidator::{CacheInvalidator, Context};
+use common_meta::cache_invalidator::KvCacheInvalidator;
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
 };
 use common_meta::instruction::{CacheIdent, Instruction};
+use common_meta::key::schema_name::SchemaNameKey;
+use common_meta::key::MetadataKey;
+use common_meta::kv_backend::KvBackend;
 use common_telemetry::debug;
 
 #[derive(Clone)]
@@ -52,14 +55,17 @@ impl HeartbeatResponseHandler for InvalidateSchemaCacheHandler {
             caches
         );
 
-        let schema_caches = caches
-            .into_iter()
-            .filter(|i| matches!(i, CacheIdent::SchemaName(_)))
-            .collect::<Vec<_>>();
+        for cache in caches {
+            let CacheIdent::SchemaName(schema_name) = cache else {
+                continue;
+            };
+            let key: SchemaNameKey = (&schema_name).into();
+            let key_bytes = key.to_bytes();
+            // invalidate and refill cache
+            self.cached_kv_backend.invalidate_key(&key_bytes).await;
+            let _ = self.cached_kv_backend.get(&key_bytes).await?;
+        }
 
-        self.cached_kv_backend
-            .invalidate(&Context::default(), &schema_caches)
-            .await?;
         Ok(HandleControl::Done)
     }
 }
