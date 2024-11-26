@@ -209,10 +209,10 @@ impl DatanodeBuilder {
             (Box::new(NoopRegionServerEventListener) as _, None)
         };
 
-        let cached_kv_backend =
-            Arc::new(CachedKvBackendBuilder::new(kv_backend.clone()).build()) as KvBackendRef;
+        let cached_kv_backend = Arc::new(CachedKvBackendBuilder::new(kv_backend.clone()).build());
 
-        let schema_metadata_manager = Arc::new(SchemaMetadataManager::new(cached_kv_backend));
+        let schema_metadata_manager =
+            Arc::new(SchemaMetadataManager::new(cached_kv_backend.clone()));
         let region_server = self
             .new_region_server(schema_metadata_manager, region_event_listener)
             .await?;
@@ -243,7 +243,15 @@ impl DatanodeBuilder {
         }
 
         let heartbeat_task = if let Some(meta_client) = meta_client {
-            Some(HeartbeatTask::try_new(&self.opts, region_server.clone(), meta_client).await?)
+            Some(
+                HeartbeatTask::try_new(
+                    &self.opts,
+                    region_server.clone(),
+                    meta_client,
+                    cached_kv_backend,
+                )
+                .await?,
+            )
         } else {
             None
         };

@@ -18,14 +18,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::{HeartbeatRequest, NodeInfo, Peer, RegionRole, RegionStat};
+use async_trait::async_trait;
+use catalog::kvbackend::CachedKvBackend;
+use common_meta::cache_invalidator::{CacheInvalidator, Context};
 use common_meta::datanode::REGION_STATISTIC_KEY;
 use common_meta::distributed_time_constants::META_KEEP_ALIVE_INTERVAL_SECS;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::{
-    HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
+    HandleControl, HandlerGroupExecutor, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
+    HeartbeatResponseHandlerExecutorRef,
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
+use common_meta::instruction::Instruction;
 use common_telemetry::{debug, error, info, trace, warn};
 use meta_client::client::{HeartbeatSender, MetaClient};
 use meta_client::MetaClientRef;
@@ -70,6 +75,7 @@ impl HeartbeatTask {
         opts: &DatanodeOptions,
         region_server: RegionServer,
         meta_client: MetaClientRef,
+        cache_kv_backend: Arc<CachedKvBackend>,
     ) -> Result<Self> {
         let region_alive_keeper = Arc::new(RegionAliveKeeper::new(
             region_server.clone(),
@@ -79,6 +85,7 @@ impl HeartbeatTask {
             region_alive_keeper.clone(),
             Arc::new(ParseMailboxMessageHandler),
             Arc::new(RegionHeartbeatResponseHandler::new(region_server.clone())),
+            Arc::new(InvalidateSchemaCacheHandler::new(cache_kv_backend)),
         ]));
 
         Ok(Self {
@@ -357,5 +364,44 @@ impl HeartbeatTask {
         }
 
         Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub struct InvalidateSchemaCacheHandler {
+    cached_kv_backend: Arc<CachedKvBackend>,
+}
+
+#[async_trait]
+impl HeartbeatResponseHandler for InvalidateSchemaCacheHandler {
+    fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
+        matches!(
+            ctx.incoming_message.as_ref(),
+            Some((_, Instruction::InvalidateCaches(_)))
+        )
+    }
+
+    async fn handle(
+        &self,
+        ctx: &mut HeartbeatResponseHandlerContext,
+    ) -> common_meta::error::Result<HandleControl> {
+        let Some((_, Instruction::InvalidateCaches(caches))) = ctx.incoming_message.take() else {
+            unreachable!("InvalidateSchemaCacheHandler: should be guarded by 'is_acceptable'")
+        };
+
+        debug!(
+            "InvalidateSchemaCacheHandler: invalidating caches: {:?}",
+            caches
+        );
+        self.cached_kv_backend
+            .invalidate(&Context::default(), &caches)
+            .await?;
+        Ok(HandleControl::Done)
+    }
+}
+
+impl InvalidateSchemaCacheHandler {
+    pub fn new(cached_kv_backend: Arc<CachedKvBackend>) -> Self {
+        Self { cached_kv_backend }
     }
 }
