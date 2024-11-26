@@ -25,7 +25,6 @@ use common_meta::heartbeat::handler::{
 use common_meta::instruction::{CacheIdent, Instruction};
 use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::MetadataKey;
-use common_meta::kv_backend::KvBackend;
 use common_telemetry::debug;
 
 #[derive(Clone)]
