@@ -24,6 +24,7 @@ use futures::future::BoxFuture;
 use snafu::OptionExt;
 use store_api::storage::RegionId;
 
+pub(crate) mod cache_invalidator;
 mod close_region;
 mod downgrade_region;
 mod open_region;
