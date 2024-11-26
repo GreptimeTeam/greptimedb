@@ -134,7 +134,7 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
             }
         });
 
-        Ok(HandleControl::Done)
+        Ok(HandleControl::Continue)
     }
 }
 

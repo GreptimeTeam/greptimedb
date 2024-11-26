@@ -22,6 +22,7 @@ use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::KvCacheInvalidator;
 use common_meta::error::Error::CacheNotGet;
 use common_meta::error::{CacheNotGetSnafu, Error, ExternalSnafu, GetKvCacheSnafu, Result};
+use common_meta::kv_backend::txn::{Txn, TxnResponse};
 use common_meta::kv_backend::{KvBackend, KvBackendRef, TxnService};
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -116,8 +117,18 @@ pub struct CachedKvBackend {
     version: AtomicUsize,
 }
 
+#[async_trait::async_trait]
 impl TxnService for CachedKvBackend {
     type Error = Error;
+
+    async fn txn(&self, txn: Txn) -> std::result::Result<TxnResponse, Self::Error> {
+        //todo(hl): txn of CachedKvBackend simply pass through to inner backend without invalidating caches.
+        self.kv_backend.txn(txn).await
+    }
+
+    fn max_txn_ops(&self) -> usize {
+        self.kv_backend.max_txn_ops()
+    }
 }
 
 #[async_trait::async_trait]
