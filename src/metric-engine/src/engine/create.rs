@@ -32,7 +32,7 @@ use store_api::metric_engine_consts::{
     METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX, METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
     METADATA_SCHEMA_VALUE_COLUMN_INDEX, METADATA_SCHEMA_VALUE_COLUMN_NAME,
 };
-use store_api::mito_engine_options::TTL_KEY;
+use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionCreateRequest, RegionRequest};
 use store_api::storage::consts::ReservedColumnId;
@@ -456,7 +456,7 @@ impl MetricEngineInner {
         // concat region dir
         let metadata_region_dir = join_dir(&request.region_dir, METADATA_REGION_SUBDIR);
 
-        let options = region_options_for_metadata_region();
+        let options = region_options_for_metadata_region(request.options.clone());
         RegionCreateRequest {
             engine: MITO_ENGINE_NAME.to_string(),
             column_metadatas: vec![
@@ -536,10 +536,12 @@ impl MetricEngineInner {
 }
 
 /// Creates the region options for metadata region in metric engine.
-pub(crate) fn region_options_for_metadata_region() -> HashMap<String, String> {
-    [(TTL_KEY.to_string(), "10000 years".to_string())]
-        .into_iter()
-        .collect()
+pub(crate) fn region_options_for_metadata_region(
+    mut original: HashMap<String, String>,
+) -> HashMap<String, String> {
+    original.remove(APPEND_MODE_KEY);
+    original.insert(TTL_KEY.to_string(), "10000 years".to_string());
+    original
 }
 
 #[cfg(test)]

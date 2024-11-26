@@ -69,7 +69,7 @@ impl MetricEngineInner {
         let metadata_region_dir = join_dir(&request.region_dir, METADATA_REGION_SUBDIR);
         let data_region_dir = join_dir(&request.region_dir, DATA_REGION_SUBDIR);
 
-        let metadata_region_options = region_options_for_metadata_region();
+        let metadata_region_options = region_options_for_metadata_region(request.options.clone());
         let open_metadata_region_request = RegionOpenRequest {
             region_dir: metadata_region_dir,
             options: metadata_region_options,
