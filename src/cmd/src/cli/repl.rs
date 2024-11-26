@@ -21,13 +21,14 @@ use cache::{
     TABLE_ROUTE_CACHE_NAME,
 };
 use catalog::kvbackend::{
-    CachedMetaKvBackend, CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend,
+    CachedKvBackend, CachedKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend,
 };
 use client::{Client, Database, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_base::Plugins;
 use common_config::Mode;
 use common_error::ext::ErrorExt;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
+use common_meta::kv_backend::KvBackendRef;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::debug;
@@ -258,8 +259,9 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
         .context(StartMetaClientSnafu)?;
     let meta_client = Arc::new(meta_client);
 
-    let cached_meta_backend =
-        Arc::new(CachedMetaKvBackendBuilder::new(meta_client.clone()).build());
+    let cached_meta_backend = Arc::new(
+        CachedKvBackendBuilder::new(Arc::new(MetaKvBackend::new(meta_client.clone()))).build(),
+    );
     let layered_cache_builder = LayeredCacheRegistryBuilder::default().add_cache_registry(
         CacheRegistryBuilder::default()
             .add_cache(cached_meta_backend.clone())

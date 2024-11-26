@@ -24,6 +24,7 @@ use futures::future::BoxFuture;
 use snafu::OptionExt;
 use store_api::storage::RegionId;
 
+pub(crate) mod cache_invalidator;
 mod close_region;
 mod downgrade_region;
 mod open_region;
@@ -134,7 +135,7 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
             }
         });
 
-        Ok(HandleControl::Done)
+        Ok(HandleControl::Continue)
     }
 }
 
@@ -285,7 +286,7 @@ mod tests {
 
             let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
             let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
-            assert_matches!(control, HandleControl::Done);
+            assert_matches!(control, HandleControl::Continue);
 
             let (_, reply) = heartbeat_env.receiver.recv().await.unwrap();
 
@@ -340,7 +341,7 @@ mod tests {
 
             let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
             let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
-            assert_matches!(control, HandleControl::Done);
+            assert_matches!(control, HandleControl::Continue);
 
             let (_, reply) = heartbeat_env.receiver.recv().await.unwrap();
 
@@ -373,7 +374,7 @@ mod tests {
 
         let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
         let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
-        assert_matches!(control, HandleControl::Done);
+        assert_matches!(control, HandleControl::Continue);
 
         let (_, reply) = heartbeat_env.receiver.recv().await.unwrap();
 
@@ -420,7 +421,7 @@ mod tests {
 
             let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
             let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
-            assert_matches!(control, HandleControl::Done);
+            assert_matches!(control, HandleControl::Continue);
 
             let (_, reply) = heartbeat_env.receiver.recv().await.unwrap();
 
@@ -442,7 +443,7 @@ mod tests {
         });
         let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
         let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
-        assert_matches!(control, HandleControl::Done);
+        assert_matches!(control, HandleControl::Continue);
 
         let (_, reply) = heartbeat_env.receiver.recv().await.unwrap();
 
