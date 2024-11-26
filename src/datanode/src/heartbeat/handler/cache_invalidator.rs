@@ -63,7 +63,6 @@ impl HeartbeatResponseHandler for InvalidateSchemaCacheHandler {
             let key_bytes = key.to_bytes();
             // invalidate and refill cache
             self.cached_kv_backend.invalidate_key(&key_bytes).await;
-            let _ = self.cached_kv_backend.get(&key_bytes).await?;
         }
 
         Ok(HandleControl::Done)
