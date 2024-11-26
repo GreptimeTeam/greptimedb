@@ -172,6 +172,7 @@ pub(crate) fn scan_file_ranges(
             let build_reader_start = Instant::now();
             let reader = range.reader(stream_ctx.input.series_row_selector).await?;
             let build_cost = build_reader_start.elapsed();
+            // common_telemetry::info!("DEBUG_SCAN: scan file ranges, build reader, file_id: {}, index: {:?}, build_cost: {:?}", range.file_handle().file_id(), index, build_cost);
             part_metrics.inc_build_reader_cost(build_cost);
             let compat_batch = range.compat_batch();
             let mut source = Source::PruneReader(reader);

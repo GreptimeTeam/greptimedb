@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BinaryHeap;
 use std::sync::Arc;
 
 use common_telemetry::debug;
@@ -114,16 +115,48 @@ impl ParallelizeScan {
     /// if the number of ranges is smaller than `expected_partition_num`. But this will
     /// return at least one partition.
     fn assign_partition_range(
-        ranges: Vec<PartitionRange>,
+        mut ranges: Vec<PartitionRange>,
         expected_partition_num: usize,
     ) -> Vec<Vec<PartitionRange>> {
         let actual_partition_num = expected_partition_num.min(ranges.len()).max(1);
         let mut partition_ranges = vec![vec![]; actual_partition_num];
 
-        // round-robin assignment
-        for (i, range) in ranges.into_iter().enumerate() {
-            let partition_idx = i % expected_partition_num;
+        // Sort ranges by number of rows in descending order.
+        ranges.sort_by(|a, b| b.num_rows.cmp(&a.num_rows));
+
+        #[derive(Eq, PartialEq)]
+        struct HeapNode {
+            num_rows: usize,
+            partition_idx: usize,
+        }
+
+        impl Ord for HeapNode {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                // Reverse for min-heap.
+                self.num_rows.cmp(&other.num_rows).reverse()
+            }
+        }
+
+        impl PartialOrd for HeapNode {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        let mut part_heap =
+            BinaryHeap::from_iter((0..actual_partition_num).map(|partition_idx| HeapNode {
+                num_rows: 0,
+                partition_idx,
+            }));
+
+        // Assigns the range to the partition with the smallest number of rows.
+        for range in ranges {
+            // Safety: actual_partition_num always > 0.
+            let mut node = part_heap.pop().unwrap();
+            let partition_idx = node.partition_idx;
+            node.num_rows += range.num_rows;
             partition_ranges[partition_idx].push(range);
+            part_heap.push(node);
         }
 
         partition_ranges
@@ -173,16 +206,16 @@ mod test {
         let expected = vec![
             vec![
                 PartitionRange {
+                    start: Timestamp::new(30, TimeUnit::Second),
+                    end: Timestamp::new(40, TimeUnit::Second),
+                    num_rows: 250,
+                    identifier: 4,
+                },
+                PartitionRange {
                     start: Timestamp::new(0, TimeUnit::Second),
                     end: Timestamp::new(10, TimeUnit::Second),
                     num_rows: 100,
                     identifier: 1,
-                },
-                PartitionRange {
-                    start: Timestamp::new(20, TimeUnit::Second),
-                    end: Timestamp::new(30, TimeUnit::Second),
-                    num_rows: 150,
-                    identifier: 3,
                 },
             ],
             vec![
@@ -193,10 +226,10 @@ mod test {
                     identifier: 2,
                 },
                 PartitionRange {
-                    start: Timestamp::new(30, TimeUnit::Second),
-                    end: Timestamp::new(40, TimeUnit::Second),
-                    num_rows: 250,
-                    identifier: 4,
+                    start: Timestamp::new(20, TimeUnit::Second),
+                    end: Timestamp::new(30, TimeUnit::Second),
+                    num_rows: 150,
+                    identifier: 3,
                 },
             ],
         ];
@@ -204,7 +237,8 @@ mod test {
 
         // assign 4 ranges to 5 partitions. Only 4 partitions are returned.
         let expected_partition_num = 5;
-        let result = ParallelizeScan::assign_partition_range(ranges, expected_partition_num);
+        let mut result = ParallelizeScan::assign_partition_range(ranges, expected_partition_num);
+        result.sort_by_key(|ranges| ranges[0].identifier);
         let expected = vec![
             vec![PartitionRange {
                 start: Timestamp::new(0, TimeUnit::Second),
@@ -236,5 +270,69 @@ mod test {
         // assign 0 ranges to 5 partitions. Only 1 partition is returned.
         let result = ParallelizeScan::assign_partition_range(vec![], 5);
         assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_assign_unbalance_partition_range() {
+        let ranges = vec![
+            PartitionRange {
+                start: Timestamp::new(0, TimeUnit::Second),
+                end: Timestamp::new(10, TimeUnit::Second),
+                num_rows: 100,
+                identifier: 1,
+            },
+            PartitionRange {
+                start: Timestamp::new(10, TimeUnit::Second),
+                end: Timestamp::new(20, TimeUnit::Second),
+                num_rows: 200,
+                identifier: 2,
+            },
+            PartitionRange {
+                start: Timestamp::new(20, TimeUnit::Second),
+                end: Timestamp::new(30, TimeUnit::Second),
+                num_rows: 150,
+                identifier: 3,
+            },
+            PartitionRange {
+                start: Timestamp::new(30, TimeUnit::Second),
+                end: Timestamp::new(40, TimeUnit::Second),
+                num_rows: 2500,
+                identifier: 4,
+            },
+        ];
+
+        // assign to 2 partitions
+        let expected_partition_num = 2;
+        let result =
+            ParallelizeScan::assign_partition_range(ranges.clone(), expected_partition_num);
+        let expected = vec![
+            vec![PartitionRange {
+                start: Timestamp::new(30, TimeUnit::Second),
+                end: Timestamp::new(40, TimeUnit::Second),
+                num_rows: 2500,
+                identifier: 4,
+            }],
+            vec![
+                PartitionRange {
+                    start: Timestamp::new(10, TimeUnit::Second),
+                    end: Timestamp::new(20, TimeUnit::Second),
+                    num_rows: 200,
+                    identifier: 2,
+                },
+                PartitionRange {
+                    start: Timestamp::new(20, TimeUnit::Second),
+                    end: Timestamp::new(30, TimeUnit::Second),
+                    num_rows: 150,
+                    identifier: 3,
+                },
+                PartitionRange {
+                    start: Timestamp::new(0, TimeUnit::Second),
+                    end: Timestamp::new(10, TimeUnit::Second),
+                    num_rows: 100,
+                    identifier: 1,
+                },
+            ],
+        ];
+        assert_eq!(result, expected);
     }
 }

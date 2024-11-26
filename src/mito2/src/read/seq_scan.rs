@@ -36,7 +36,7 @@ use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
 use crate::read::last_row::LastRowReader;
 use crate::read::merge::MergeReaderBuilder;
-use crate::read::range::RangeBuilderList;
+use crate::read::range::{RangeBuilderList, RowGroupIndex, ALL_ROW_GROUPS};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{scan_file_ranges, scan_mem_ranges, PartitionMetrics};
 use crate::read::{BatchReader, BoxedBatchReader, ScannerMetrics, Source};
@@ -160,7 +160,7 @@ impl SeqScan {
             // by the semaphore.
             sources = stream_ctx
                 .input
-                .create_parallel_sources(sources, semaphore.clone())?;
+                .create_parallel_sources_no_semaphore(sources)?;
         }
 
         let mut builder = MergeReaderBuilder::from_sources(sources);
@@ -230,6 +230,7 @@ impl SeqScan {
                 stream_ctx.input.num_files(),
             ));
             // Scans each part.
+            // common_telemetry::info!("DEBUG_SCAN: scan partition range, partition: {}, num_ranges: {}", partition, partition_ranges.len());
             for part_range in partition_ranges {
                 let mut sources = Vec::new();
                 build_sources(
@@ -241,6 +242,7 @@ impl SeqScan {
                     &mut sources,
                 );
 
+                // common_telemetry::info!("DEBUG_SCAN: scan part range, partition: {}, num_sources: {}, part_range: {:?}", partition, sources.len(), part_range);
                 let mut reader =
                     Self::build_reader_from_sources(&stream_ctx, sources, semaphore.clone())
                         .await
@@ -330,6 +332,12 @@ impl RegionScanner for SeqScan {
         ranges: Vec<Vec<PartitionRange>>,
         distinguish_partition_range: bool,
     ) -> Result<(), BoxedError> {
+        let num_partitions = ranges.len();
+        let available_permits = self.semaphore.available_permits();
+        if available_permits < num_partitions {
+            self.semaphore
+                .add_permits(num_partitions - available_permits);
+        }
         self.properties.partitions = ranges;
         self.properties.distinguish_partition_range = distinguish_partition_range;
         Ok(())

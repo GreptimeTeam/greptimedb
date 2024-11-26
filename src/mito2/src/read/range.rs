@@ -32,7 +32,7 @@ use crate::sst::parquet::format::parquet_row_group_time_range;
 use crate::sst::parquet::reader::ReaderMetrics;
 use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 
-const ALL_ROW_GROUPS: i64 = -1;
+pub(crate) const ALL_ROW_GROUPS: i64 = -1;
 
 /// Index to access a row group.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -52,7 +52,7 @@ pub(crate) struct RangeMeta {
     /// The time range of the range.
     pub(crate) time_range: FileTimeRange,
     /// Indices to memtables or files.
-    indices: SmallVec<[usize; 2]>,
+    pub(crate) indices: SmallVec<[usize; 2]>,
     /// Indices to memtable/file row groups that this range scans.
     pub(crate) row_group_indices: SmallVec<[RowGroupIndex; 2]>,
     /// Estimated number of rows in the range. This can be 0 if the statistics are not available.
@@ -87,7 +87,19 @@ impl RangeMeta {
         Self::push_seq_file_ranges(input.memtables.len(), &input.files, &mut ranges);
 
         let ranges = group_ranges_for_seq_scan(ranges);
-        maybe_split_ranges_for_seq_scan(ranges)
+        // common_telemetry::info!(
+        //     "DEBUG_SCAN: seq_scan_ranges before split, num_ranges: {}",
+        //     ranges.len(),
+        // );
+        // maybe_split_ranges_for_seq_scan(ranges)
+        // let ranges =
+        //     maybe_split_ranges_for_seq_scan_groups(ranges, input.memtables.len(), &input.files);
+        // common_telemetry::info!(
+        //     "DEBUG_SCAN: seq_scan_ranges after split, num_ranges: {}, ranges: {:?}",
+        //     ranges.len(),
+        //     ranges,
+        // );
+        ranges
     }
 
     /// Creates a list of ranges from the `input` for unordered scan.
@@ -132,7 +144,18 @@ impl RangeMeta {
     /// still preserve the order for [SeqScan].
     pub(crate) fn can_split_preserve_order(&self) -> bool {
         // Only one source and multiple row groups.
-        self.indices.len() == 1 && self.row_group_indices.len() > 1
+        if self.indices.len() == 1 {
+            if self.row_group_indices.len() > 1 {
+                return true;
+            } else if self.row_group_indices.len() == 1
+                && self.row_group_indices[0].row_group_index == ALL_ROW_GROUPS
+            {
+                return true;
+            }
+        }
+        false
+        // fixme(yingwen): Remove this.
+        // self.indices.len() == 1 && self.row_group_indices.len() > 1
     }
 
     /// Splits the range if it can preserve the order.
@@ -146,6 +169,28 @@ impl RangeMeta {
                     time_range: self.time_range,
                     indices: self.indices.clone(),
                     row_group_indices: smallvec![index],
+                    num_rows,
+                });
+            }
+        } else {
+            output.push(self);
+        }
+    }
+
+    /// Splits the range if it can preserve the order.
+    pub(crate) fn maybe_split_groups(self, num_row_groups: u64, output: &mut Vec<RangeMeta>) {
+        if self.can_split_preserve_order() && num_row_groups > 0 {
+            output.reserve(self.row_group_indices.len());
+            let num_rows = self.num_rows / num_row_groups as usize;
+            // Splits by row group.
+            for row_group_index in 0..num_row_groups {
+                output.push(RangeMeta {
+                    time_range: self.time_range,
+                    indices: self.indices.clone(),
+                    row_group_indices: smallvec![RowGroupIndex {
+                        index: self.indices[0],
+                        row_group_index: row_group_index as i64,
+                    }],
                     num_rows,
                 });
             }
@@ -263,31 +308,40 @@ impl RangeMeta {
         // For non append-only mode, each range only contains one file.
         for (i, file) in files.iter().enumerate() {
             let file_index = num_memtables + i;
-            if file.meta_ref().num_row_groups > 0 {
-                // All row groups share the same time range.
-                let row_group_indices = (0..file.meta_ref().num_row_groups)
-                    .map(|row_group_index| RowGroupIndex {
-                        index: file_index,
-                        row_group_index: row_group_index as i64,
-                    })
-                    .collect();
-                ranges.push(RangeMeta {
-                    time_range: file.time_range(),
-                    indices: smallvec![file_index],
-                    row_group_indices,
-                    num_rows: file.meta_ref().num_rows as usize,
-                });
-            } else {
-                ranges.push(RangeMeta {
-                    time_range: file.time_range(),
-                    indices: smallvec![file_index],
-                    row_group_indices: smallvec![RowGroupIndex {
-                        index: file_index,
-                        row_group_index: ALL_ROW_GROUPS,
-                    }],
-                    num_rows: file.meta_ref().num_rows as usize,
-                });
-            }
+            ranges.push(RangeMeta {
+                time_range: file.time_range(),
+                indices: smallvec![file_index],
+                row_group_indices: smallvec![RowGroupIndex {
+                    index: file_index,
+                    row_group_index: ALL_ROW_GROUPS,
+                }],
+                num_rows: file.meta_ref().num_rows as usize,
+            });
+            // if file.meta_ref().num_row_groups > 0 {
+            //     // All row groups share the same time range.
+            //     let row_group_indices = (0..file.meta_ref().num_row_groups)
+            //         .map(|row_group_index| RowGroupIndex {
+            //             index: file_index,
+            //             row_group_index: row_group_index as i64,
+            //         })
+            //         .collect();
+            //     ranges.push(RangeMeta {
+            //         time_range: file.time_range(),
+            //         indices: smallvec![file_index],
+            //         row_group_indices,
+            //         num_rows: file.meta_ref().num_rows as usize,
+            //     });
+            // } else {
+            //     ranges.push(RangeMeta {
+            //         time_range: file.time_range(),
+            //         indices: smallvec![file_index],
+            //         row_group_indices: smallvec![RowGroupIndex {
+            //             index: file_index,
+            //             row_group_index: ALL_ROW_GROUPS,
+            //         }],
+            //         num_rows: file.meta_ref().num_rows as usize,
+            //     });
+            // }
         }
     }
 }
@@ -336,6 +390,27 @@ fn maybe_split_ranges_for_seq_scan(ranges: Vec<RangeMeta>) -> Vec<RangeMeta> {
     let mut new_ranges = Vec::with_capacity(ranges.len());
     for range in ranges {
         range.maybe_split(&mut new_ranges);
+    }
+
+    new_ranges
+}
+
+/// Splits the range into multiple smaller ranges.
+/// It assumes the input `ranges` list is created by [group_ranges_for_seq_scan()].
+fn maybe_split_ranges_for_seq_scan_groups(
+    ranges: Vec<RangeMeta>,
+    num_memtables: usize,
+    files: &[FileHandle],
+) -> Vec<RangeMeta> {
+    let mut new_ranges = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        if range.indices[0] < num_memtables {
+            range.maybe_split(&mut new_ranges);
+        } else {
+            let index = range.indices[0] - num_memtables;
+            let file = &files[index];
+            range.maybe_split_groups(file.meta_ref().num_row_groups, &mut new_ranges);
+        }
     }
 
     new_ranges
@@ -457,6 +532,11 @@ impl RangeBuilderList {
             Some(builder) => builder.build_ranges(index.row_group_index, &mut ranges),
             None => {
                 let builder = input.prune_file(file_index, reader_metrics).await?;
+                // common_telemetry::info!(
+                //     "DEBUG_SCAN: build file ranges, file_index: {}, build_cost: {:?}",
+                //     file_index,
+                //     reader_metrics.build_cost
+                // );
                 builder.build_ranges(index.row_group_index, &mut ranges);
                 self.set_file_builder(file_index, Arc::new(builder));
             }

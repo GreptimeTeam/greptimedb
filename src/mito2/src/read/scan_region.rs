@@ -635,6 +635,55 @@ impl ScanInput {
         Ok(sources)
     }
 
+    /// Scans sources in parallel.
+    ///
+    /// # Panics if the input doesn't allow parallel scan.
+    pub(crate) fn create_parallel_sources_no_semaphore(
+        &self,
+        sources: Vec<Source>,
+    ) -> Result<Vec<Source>> {
+        // Spawn a task for each source.
+        let sources = sources
+            .into_iter()
+            .map(|source| {
+                let (sender, receiver) = mpsc::channel(self.parallelism.channel_size);
+                self.spawn_scan_task_no_semaphore(source, sender);
+                let stream = Box::pin(ReceiverStream::new(receiver));
+                Source::Stream(stream)
+            })
+            .collect();
+        Ok(sources)
+    }
+
+    /// Scans the input source in another task and sends batches to the sender.
+    pub(crate) fn spawn_scan_task_no_semaphore(
+        &self,
+        mut input: Source,
+        sender: mpsc::Sender<Result<Batch>>,
+    ) {
+        common_runtime::spawn_global(async move {
+            loop {
+                // We release the permit before sending result to avoid the task waiting on
+                // the channel with the permit held.
+                let maybe_batch = {
+                    // // Safety: We never close the semaphore.
+                    // let _permit = semaphore.acquire().await.unwrap();
+                    input.next_batch().await
+                };
+                match maybe_batch {
+                    Ok(Some(batch)) => {
+                        let _ = sender.send(Ok(batch)).await;
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        let _ = sender.send(Err(e)).await;
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
     /// Prunes a memtable to scan and returns the builder to build readers.
     pub(crate) fn prune_memtable(&self, mem_index: usize) -> MemRangeBuilder {
         let memtable = &self.memtables[mem_index];
@@ -764,6 +813,11 @@ impl StreamContext {
     pub(crate) fn seq_scan_ctx(input: ScanInput) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::seq_scan_ranges(&input);
+        // common_telemetry::info!(
+        //     "DEBUG_SCAN: seq_scan_ctx, num_ranges: {}, ranges: {:?}",
+        //     ranges.len(),
+        //     ranges
+        // );
         READ_SST_COUNT.observe(input.num_files() as f64);
 
         Self {
