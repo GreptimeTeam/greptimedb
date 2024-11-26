@@ -42,20 +42,20 @@ const DEFAULT_CACHE_MAX_CAPACITY: u64 = 10000;
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const DEFAULT_CACHE_TTI: Duration = Duration::from_secs(5 * 60);
 
-pub struct CachedMetaKvBackendBuilder {
+pub struct CachedKvBackendBuilder {
     cache_max_capacity: Option<u64>,
     cache_ttl: Option<Duration>,
     cache_tti: Option<Duration>,
-    meta_client: Arc<MetaClient>,
+    inner: KvBackendRef,
 }
 
-impl CachedMetaKvBackendBuilder {
-    pub fn new(meta_client: Arc<MetaClient>) -> Self {
+impl CachedKvBackendBuilder {
+    pub fn new(inner: KvBackendRef) -> Self {
         Self {
             cache_max_capacity: None,
             cache_ttl: None,
             cache_tti: None,
-            meta_client,
+            inner,
         }
     }
 
@@ -74,7 +74,7 @@ impl CachedMetaKvBackendBuilder {
         self
     }
 
-    pub fn build(self) -> CachedMetaKvBackend {
+    pub fn build(self) -> CachedKvBackend {
         let cache_max_capacity = self
             .cache_max_capacity
             .unwrap_or(DEFAULT_CACHE_MAX_CAPACITY);
@@ -85,14 +85,11 @@ impl CachedMetaKvBackendBuilder {
             .time_to_live(cache_ttl)
             .time_to_idle(cache_tti)
             .build();
-
-        let kv_backend = Arc::new(MetaKvBackend {
-            client: self.meta_client,
-        });
+        let kv_backend = self.inner;
         let name = format!("CachedKvBackend({})", kv_backend.name());
         let version = AtomicUsize::new(0);
 
-        CachedMetaKvBackend {
+        CachedKvBackend {
             kv_backend,
             cache,
             name,
@@ -112,19 +109,19 @@ pub type CacheBackend = Cache<Vec<u8>, KeyValue>;
 /// Therefore, it is recommended to use CachedMetaKvBackend to only read metadata related
 /// information. Note: If you read other information, you may read expired data, which depends on
 /// TTL and TTI for cache.
-pub struct CachedMetaKvBackend {
+pub struct CachedKvBackend {
     kv_backend: KvBackendRef,
     cache: CacheBackend,
     name: String,
     version: AtomicUsize,
 }
 
-impl TxnService for CachedMetaKvBackend {
+impl TxnService for CachedKvBackend {
     type Error = Error;
 }
 
 #[async_trait::async_trait]
-impl KvBackend for CachedMetaKvBackend {
+impl KvBackend for CachedKvBackend {
     fn name(&self) -> &str {
         &self.name
     }
@@ -305,7 +302,7 @@ impl KvBackend for CachedMetaKvBackend {
 }
 
 #[async_trait::async_trait]
-impl KvCacheInvalidator for CachedMetaKvBackend {
+impl KvCacheInvalidator for CachedKvBackend {
     async fn invalidate_key(&self, key: &[u8]) {
         self.create_new_version();
         self.cache.invalidate(key).await;
@@ -313,7 +310,7 @@ impl KvCacheInvalidator for CachedMetaKvBackend {
     }
 }
 
-impl CachedMetaKvBackend {
+impl CachedKvBackend {
     // only for test
     #[cfg(test)]
     fn wrap(kv_backend: KvBackendRef) -> Self {
@@ -466,7 +463,7 @@ mod tests {
     use common_meta::rpc::KeyValue;
     use dashmap::DashMap;
 
-    use super::CachedMetaKvBackend;
+    use super::CachedKvBackend;
 
     #[derive(Default)]
     pub struct SimpleKvBackend {
@@ -540,7 +537,7 @@ mod tests {
     async fn test_cached_kv_backend() {
         let simple_kv = Arc::new(SimpleKvBackend::default());
         let get_execute_times = simple_kv.get_execute_times.clone();
-        let cached_kv = CachedMetaKvBackend::wrap(simple_kv);
+        let cached_kv = CachedKvBackend::wrap(simple_kv);
 
         add_some_vals(&cached_kv).await;
 

@@ -18,6 +18,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use catalog::kvbackend::CachedKvBackendBuilder;
 use catalog::memory::MemoryCatalogManager;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
@@ -208,7 +209,10 @@ impl DatanodeBuilder {
             (Box::new(NoopRegionServerEventListener) as _, None)
         };
 
-        let schema_metadata_manager = Arc::new(SchemaMetadataManager::new(kv_backend.clone()));
+        let cached_kv_backend =
+            Arc::new(CachedKvBackendBuilder::new(kv_backend.clone()).build()) as KvBackendRef;
+
+        let schema_metadata_manager = Arc::new(SchemaMetadataManager::new(cached_kv_backend));
         let region_server = self
             .new_region_server(schema_metadata_manager, region_event_listener)
             .await?;
