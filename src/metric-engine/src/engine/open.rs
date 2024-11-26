@@ -19,12 +19,12 @@ use mito2::engine::MITO_ENGINE_NAME;
 use object_store::util::join_dir;
 use snafu::ResultExt;
 use store_api::metric_engine_consts::{DATA_REGION_SUBDIR, METADATA_REGION_SUBDIR};
-use store_api::mito_engine_options::TTL_KEY;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use super::MetricEngineInner;
+use crate::engine::create::region_options_for_metadata_region;
 use crate::engine::options::set_data_region_options;
 use crate::error::{OpenMitoRegionSnafu, Result};
 use crate::metrics::{LOGICAL_REGION_COUNT, PHYSICAL_REGION_COUNT};
@@ -69,9 +69,7 @@ impl MetricEngineInner {
         let metadata_region_dir = join_dir(&request.region_dir, METADATA_REGION_SUBDIR);
         let data_region_dir = join_dir(&request.region_dir, DATA_REGION_SUBDIR);
 
-        let metadata_region_options = [(TTL_KEY.to_string(), "10000 years".to_string())]
-            .into_iter()
-            .collect();
+        let metadata_region_options = region_options_for_metadata_region();
         let open_metadata_region_request = RegionOpenRequest {
             region_dir: metadata_region_dir,
             options: metadata_region_options,
