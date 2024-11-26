@@ -122,7 +122,7 @@ impl TxnService for CachedKvBackend {
     type Error = Error;
 
     async fn txn(&self, txn: Txn) -> std::result::Result<TxnResponse, Self::Error> {
-        //todo(hl): txn of CachedKvBackend simply pass through to inner backend without invalidating caches.
+        // TODO(hl): txn of CachedKvBackend simply pass through to inner backend without invalidating caches.
         self.kv_backend.txn(txn).await
     }
 
