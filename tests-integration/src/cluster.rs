@@ -20,7 +20,7 @@ use std::time::Duration;
 use api::v1::region::region_server::RegionServer;
 use arrow_flight::flight_service_server::FlightServiceServer;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
-use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
+use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use client::client_manager::NodeClients;
 use client::Client;
 use cmd::DistributedInformationExtension;
@@ -351,8 +351,9 @@ impl GreptimeDbClusterBuilder {
         meta_client.start(&[&metasrv.server_addr]).await.unwrap();
         let meta_client = Arc::new(meta_client);
 
-        let cached_meta_backend =
-            Arc::new(CachedMetaKvBackendBuilder::new(meta_client.clone()).build());
+        let cached_meta_backend = Arc::new(
+            CachedKvBackendBuilder::new(Arc::new(MetaKvBackend::new(meta_client.clone()))).build(),
+        );
 
         let layered_cache_builder = LayeredCacheRegistryBuilder::default().add_cache_registry(
             CacheRegistryBuilder::default()

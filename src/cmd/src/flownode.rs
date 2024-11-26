@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
-use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
+use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use clap::Parser;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
@@ -246,11 +246,12 @@ impl StartCommand {
         let cache_tti = meta_config.metadata_cache_tti;
 
         // TODO(discord9): add helper function to ease the creation of cache registry&such
-        let cached_meta_backend = CachedMetaKvBackendBuilder::new(meta_client.clone())
-            .cache_max_capacity(cache_max_capacity)
-            .cache_ttl(cache_ttl)
-            .cache_tti(cache_tti)
-            .build();
+        let cached_meta_backend =
+            CachedKvBackendBuilder::new(Arc::new(MetaKvBackend::new(meta_client.clone())))
+                .cache_max_capacity(cache_max_capacity)
+                .cache_ttl(cache_ttl)
+                .cache_tti(cache_tti)
+                .build();
         let cached_meta_backend = Arc::new(cached_meta_backend);
 
         // Builds cache registry
