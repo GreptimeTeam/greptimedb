@@ -456,11 +456,7 @@ impl MetricEngineInner {
         // concat region dir
         let metadata_region_dir = join_dir(&request.region_dir, METADATA_REGION_SUBDIR);
 
-        // remove TTL and APPEND_MODE option
-        let mut options = request.options.clone();
-        options.insert(TTL_KEY.to_string(), "10000 years".to_string());
-        options.remove(APPEND_MODE_KEY);
-
+        let options = region_options_for_metadata_region(request.options.clone());
         RegionCreateRequest {
             engine: MITO_ENGINE_NAME.to_string(),
             column_metadatas: vec![
@@ -537,6 +533,15 @@ impl MetricEngineInner {
         };
         [metric_name_col, tsid_col]
     }
+}
+
+/// Creates the region options for metadata region in metric engine.
+pub(crate) fn region_options_for_metadata_region(
+    mut original: HashMap<String, String>,
+) -> HashMap<String, String> {
+    original.remove(APPEND_MODE_KEY);
+    original.insert(TTL_KEY.to_string(), "10000 years".to_string());
+    original
 }
 
 #[cfg(test)]
