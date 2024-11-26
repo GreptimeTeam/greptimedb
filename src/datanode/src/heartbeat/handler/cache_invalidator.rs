@@ -61,7 +61,7 @@ impl HeartbeatResponseHandler for InvalidateSchemaCacheHandler {
             };
             let key: SchemaNameKey = (&schema_name).into();
             let key_bytes = key.to_bytes();
-            // invalidate and refill cache
+            // invalidate cache
             self.cached_kv_backend.invalidate_key(&key_bytes).await;
         }
 
