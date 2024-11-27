@@ -263,6 +263,7 @@ impl<'a> ParserContext<'a> {
         if let Token::Word(word) = self.parser.peek_token().token
             && word.value.to_uppercase() == SINK
         {
+            self.parser.next_token();
         } else {
             Err(ParserError::ParserError(
                 "Expect `SINK` keyword".to_string(),
