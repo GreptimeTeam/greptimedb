@@ -27,6 +27,7 @@ use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
     AddColumn, AddColumnLocation, AlterKind, RegionAlterRequest, RegionOpenRequest, RegionRequest,
+    SetRegionOption,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -571,6 +572,62 @@ async fn test_alter_column_fulltext_options() {
         .unwrap();
     check_fulltext_options(&engine, &expect_fulltext_options);
     check_region_version(&engine, region_id, 1, 3, 1, 3);
+}
+
+#[tokio::test]
+async fn test_alter_region_ttl_options() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new();
+    let listener = Arc::new(AlterFlushListener::default());
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()))
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let engine_cloned = engine.clone();
+    let alter_ttl_request = RegionAlterRequest {
+        schema_version: 0,
+        kind: AlterKind::SetRegionOptions {
+            options: vec![SetRegionOption::TTL(Duration::from_secs(500))],
+        },
+    };
+    let alter_job = tokio::spawn(async move {
+        engine_cloned
+            .handle_request(region_id, RegionRequest::Alter(alter_ttl_request))
+            .await
+            .unwrap();
+    });
+
+    alter_job.await.unwrap();
+
+    let check_ttl = |engine: &MitoEngine, expected: &Duration| {
+        let current_ttl = engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .ttl
+            .unwrap();
+        assert_eq!(*expected, current_ttl);
+    };
+    // Verify the ttl.
+    check_ttl(&engine, &Duration::from_secs(500));
 }
 
 #[tokio::test]

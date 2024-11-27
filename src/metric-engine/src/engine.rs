@@ -96,9 +96,10 @@ use crate::utils;
 /// |    Read    |       ✅        |        ✅        |
 /// |   Close    |       ✅        |        ✅        |
 /// |    Open    |       ✅        |        ✅        |
-/// |   Alter    |       ✅        |        ❌        |
+/// |   Alter    |       ✅        |        ❓*       |
 ///
 /// *: Physical region can be dropped only when all related logical regions are dropped.
+/// *: Alter: Physical regions only support altering region options.
 ///
 /// ## Internal Columns
 ///
