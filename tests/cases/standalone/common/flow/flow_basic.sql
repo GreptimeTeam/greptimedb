@@ -69,7 +69,7 @@ CREATE TABLE input_basic (
     TIME INDEX(ts)
 );
 
-CREATE FLOW test_wildcard_basic SINK TO out_basic AS
+CREATE FLOW test_wildcard_basic SiNk TO out_basic AS
 SELECT
     COUNT(*) as wildcard
 FROM

@@ -259,7 +259,7 @@ impl<'a> ParserContext<'a> {
 
         let flow_name = self.intern_parse_table_name()?;
 
-        // make `SINK` case in-sensitve
+        // make `SINK` case in-sensitive
         if let Token::Word(word) = self.parser.peek_token().token
             && word.value.to_uppercase() == SINK
         {
