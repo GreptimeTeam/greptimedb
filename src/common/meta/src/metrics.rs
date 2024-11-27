@@ -108,4 +108,9 @@ lazy_static! {
         &["name"]
     )
     .unwrap();
+
+    pub static ref METRIC_META_TABLE_INFO_GET: Histogram =
+        register_histogram!("greptime_meta_table_info_get", "get table info from kvbackend").unwrap();
+    pub static ref METRIC_META_SCHEMA_INFO_GET: Histogram =
+        register_histogram!("greptime_meta_schema_info_get", "get schema info from kvbackend").unwrap();
 }

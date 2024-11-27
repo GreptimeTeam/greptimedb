@@ -29,6 +29,7 @@ use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{DeserializedValueWithBytes, MetadataKey, MetadataValue, TABLE_INFO_KEY_PREFIX};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
+use crate::metrics::METRIC_META_TABLE_INFO_GET;
 use crate::rpc::store::BatchGetRequest;
 
 /// The key stores the metadata of the table.
@@ -194,6 +195,8 @@ impl TableInfoManager {
         &self,
         table_id: TableId,
     ) -> Result<Option<DeserializedValueWithBytes<TableInfoValue>>> {
+        let _timer = METRIC_META_TABLE_INFO_GET.start_timer();
+
         let key = TableInfoKey::new(table_id);
         let raw_key = key.to_bytes();
         self.kv_backend
