@@ -17,7 +17,7 @@ ADMIN compact_table('phy');
 --- should be expired --
 SELECT val, host FROM test_ttl;
 
-ALTER TABLE phy SET ttl = '1 minute';
+ALTER TABLE phy SET ttl = '1 day';
 
 INSERT INTO test_ttl(ts, val, host) VALUES
        (now(), 1, 'host1'),
@@ -31,6 +31,9 @@ ADMIN compact_table('phy');
 --- should not be expired --
 SELECT val, host FROM test_ttl;
 
+-- restar the cluster, ensure everything is ok
+-- SQLNESS ARG restart=true
+SELECT val, host FROM test_ttl;
 
 DROP TABLE test_ttl;
 

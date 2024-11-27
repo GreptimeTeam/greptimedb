@@ -46,7 +46,7 @@ SELECT val, host FROM test_ttl;
 ++
 ++
 
-ALTER TABLE phy SET ttl = '1 minute';
+ALTER TABLE phy SET ttl = '1 day';
 
 Affected Rows: 0
 
@@ -74,6 +74,18 @@ ADMIN compact_table('phy');
 +----------------------------+
 
 --- should not be expired --
+SELECT val, host FROM test_ttl;
+
++-----+-------+
+| val | host  |
++-----+-------+
+| 2.0 | host2 |
+| 3.0 | host3 |
+| 1.0 | host1 |
++-----+-------+
+
+-- restar the cluster, ensure everything is ok
+-- SQLNESS ARG restart=true
 SELECT val, host FROM test_ttl;
 
 +-----+-------+
