@@ -1,0 +1,94 @@
+CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "", ttl = '1 second');
+
+Affected Rows: 0
+
+CREATE TABLE test_ttl (ts timestamp time index, val double, host string primary key) engine = metric with ("on_physical_table" = "phy");
+
+Affected Rows: 0
+
+INSERT INTO test_ttl(ts, val, host) VALUES
+       (now(), 1, 'host1'),
+       (now(), 2, 'host2'),
+       (now(), 3, 'host3');
+
+Affected Rows: 3
+
+SELECT val, host FROM test_ttl;
+
++-----+-------+
+| val | host  |
++-----+-------+
+| 2.0 | host2 |
+| 3.0 | host3 |
+| 1.0 | host1 |
++-----+-------+
+
+-- SQLNESS SLEEP 2s
+ADMIN flush_table('phy');
+
++--------------------------+
+| ADMIN flush_table('phy') |
++--------------------------+
+| 0                        |
++--------------------------+
+
+ADMIN compact_table('phy');
+
++----------------------------+
+| ADMIN compact_table('phy') |
++----------------------------+
+| 0                          |
++----------------------------+
+
+--- should be expired --
+SELECT val, host FROM test_ttl;
+
+++
+++
+
+ALTER TABLE phy SET ttl = '1 minute';
+
+Affected Rows: 0
+
+INSERT INTO test_ttl(ts, val, host) VALUES
+       (now(), 1, 'host1'),
+       (now(), 2, 'host2'),
+       (now(), 3, 'host3');
+
+Affected Rows: 3
+
+ADMIN flush_table('phy');
+
++--------------------------+
+| ADMIN flush_table('phy') |
++--------------------------+
+| 0                        |
++--------------------------+
+
+ADMIN compact_table('phy');
+
++----------------------------+
+| ADMIN compact_table('phy') |
++----------------------------+
+| 0                          |
++----------------------------+
+
+--- should not be expired --
+SELECT val, host FROM test_ttl;
+
++-----+-------+
+| val | host  |
++-----+-------+
+| 2.0 | host2 |
+| 3.0 | host3 |
+| 1.0 | host1 |
++-----+-------+
+
+DROP TABLE test_ttl;
+
+Affected Rows: 0
+
+DROP TABLE phy;
+
+Affected Rows: 0
+
