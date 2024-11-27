@@ -31,7 +31,7 @@ ADMIN compact_table('phy');
 --- should not be expired --
 SELECT val, host FROM test_ttl;
 
--- restar the cluster, ensure everything is ok
+-- restart the db, ensure everything is ok
 -- SQLNESS ARG restart=true
 SELECT val, host FROM test_ttl;
 

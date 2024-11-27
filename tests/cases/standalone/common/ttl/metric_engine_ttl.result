@@ -84,7 +84,7 @@ SELECT val, host FROM test_ttl;
 | 1.0 | host1 |
 +-----+-------+
 
--- restar the cluster, ensure everything is ok
+-- restart the db, ensure everything is ok
 -- SQLNESS ARG restart=true
 SELECT val, host FROM test_ttl;
 
