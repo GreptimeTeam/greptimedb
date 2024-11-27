@@ -29,6 +29,7 @@ use crate::error::{self, Error, InvalidMetadataSnafu, ParseOptionSnafu, Result};
 use crate::key::{MetadataKey, SCHEMA_NAME_KEY_PATTERN, SCHEMA_NAME_KEY_PREFIX};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
+use crate::metrics::METRIC_META_SCHEMA_INFO_GET;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use crate::rpc::store::RangeRequest;
 use crate::rpc::KeyValue;
@@ -209,6 +210,8 @@ impl SchemaManager {
         &self,
         schema: SchemaNameKey<'_>,
     ) -> Result<Option<DeserializedValueWithBytes<SchemaNameValue>>> {
+        let _timer = METRIC_META_SCHEMA_INFO_GET.start_timer();
+
         let raw_key = schema.to_bytes();
         self.kv_backend
             .get(&raw_key)

@@ -62,6 +62,13 @@ impl Instance {
     pub fn datanode(&self) -> &Datanode {
         &self.datanode
     }
+
+    /// Get mutable Datanode instance for changing some internal state, before starting it.
+    // Useful for wrapping Datanode instance. Please do not remove this method even if you find
+    // nowhere it is called.
+    pub fn datanode_mut(&mut self) -> &mut Datanode {
+        &mut self.datanode
+    }
 }
 
 #[async_trait]

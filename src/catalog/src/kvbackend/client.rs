@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_meta::cache_invalidator::KvCacheInvalidator;
 use common_meta::error::Error::CacheNotGet;
 use common_meta::error::{CacheNotGetSnafu, Error, ExternalSnafu, GetKvCacheSnafu, Result};
@@ -37,6 +37,7 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::metrics::{
     METRIC_CATALOG_KV_BATCH_GET, METRIC_CATALOG_KV_GET, METRIC_CATALOG_KV_REMOTE_GET,
+    METRIC_META_CLIENT_GET,
 };
 
 const DEFAULT_CACHE_MAX_CAPACITY: u64 = 10000;
@@ -292,7 +293,7 @@ impl KvBackend for CachedKvBackend {
         }
         .map_err(|e| {
             GetKvCacheSnafu {
-                err_msg: e.to_string(),
+                err_msg: e.output_msg(),
             }
             .build()
         });
@@ -445,6 +446,8 @@ impl KvBackend for MetaKvBackend {
     }
 
     async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>> {
+        let _timer = METRIC_META_CLIENT_GET.start_timer();
+
         let mut response = self
             .client
             .range(RangeRequest::new().with_key(key))
