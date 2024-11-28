@@ -38,7 +38,6 @@ use promql_parser::parser::{
     UnaryExpr, VectorSelector,
 };
 use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
-use schemars::JsonSchema;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -55,7 +54,7 @@ use crate::prom_store::{FIELD_NAME_LABEL, METRIC_NAME_LABEL};
 use crate::prometheus_handler::PrometheusHandlerRef;
 
 /// For [ValueType::Vector] result type
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct PromSeriesVector {
     pub metric: HashMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -63,14 +62,14 @@ pub struct PromSeriesVector {
 }
 
 /// For [ValueType::Matrix] result type
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct PromSeriesMatrix {
     pub metric: HashMap<String, String>,
     pub values: Vec<(f64, String)>,
 }
 
 /// Variants corresponding to [ValueType]
-#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum PromQueryResult {
     Matrix(Vec<PromSeriesMatrix>),
@@ -85,14 +84,14 @@ impl Default for PromQueryResult {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct PromData {
     #[serde(rename = "resultType")]
     pub result_type: String,
     pub result: PromQueryResult,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum PrometheusResponse {
     PromData(PromData),
@@ -101,7 +100,6 @@ pub enum PrometheusResponse {
     LabelValues(Vec<String>),
     FormatQuery(String),
     BuildInfo(OwnedBuildInfo),
-    #[schemars(skip)]
     #[serde(skip_deserializing)]
     ParseResult(promql_parser::parser::Expr),
 }
@@ -112,7 +110,7 @@ impl Default for PrometheusResponse {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct FormatQuery {
     query: Option<String>,
 }
@@ -141,7 +139,7 @@ pub async fn format_query(
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct BuildInfoQuery {}
 
 #[axum_macros::debug_handler]
@@ -154,7 +152,7 @@ pub async fn build_info_query() -> PrometheusJsonResponse {
     PrometheusJsonResponse::success(PrometheusResponse::BuildInfo(build_info.into()))
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct InstantQuery {
     query: Option<String>,
     lookback: Option<String>,
@@ -209,7 +207,7 @@ pub async fn instant_query(
     PrometheusJsonResponse::from_query_result(result, metric_name, result_type).await
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RangeQuery {
     query: Option<String>,
     start: Option<String>,
@@ -261,10 +259,10 @@ pub async fn range_query(
     PrometheusJsonResponse::from_query_result(result, metric_name, ValueType::Matrix).await
 }
 
-#[derive(Debug, Default, Serialize, JsonSchema)]
+#[derive(Debug, Default, Serialize)]
 struct Matches(Vec<String>);
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct LabelsQuery {
     start: Option<String>,
     end: Option<String>,
@@ -663,7 +661,7 @@ fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct LabelValueQuery {
     start: Option<String>,
     end: Option<String>,
@@ -927,7 +925,7 @@ fn retrieve_metric_name_from_promql(query: &str) -> Option<String> {
     visitor.metric_name
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SeriesQuery {
     start: Option<String>,
     end: Option<String>,
@@ -1018,7 +1016,7 @@ pub async fn series_query(
     resp
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ParseQuery {
     query: Option<String>,
     db: Option<String>,

@@ -16,14 +16,13 @@ use axum::response::IntoResponse;
 use axum::Json;
 use http::header::CONTENT_TYPE;
 use http::HeaderValue;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
 
 /// Greptimedb Manage Api Response struct
 /// Currently we have `Pipelines` and `Scripts` as control panel api
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct GreptimedbManageResponse {
     #[serde(flatten)]
     pub(crate) manage_result: ManageResult,
@@ -57,7 +56,7 @@ impl GreptimedbManageResponse {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
 pub enum ManageResult {
     Pipelines { pipelines: Vec<PipelineOutput> },
@@ -65,7 +64,7 @@ pub enum ManageResult {
     Scripts(),
 }
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct PipelineOutput {
     name: String,
     version: String,

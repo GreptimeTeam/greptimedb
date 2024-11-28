@@ -167,7 +167,6 @@ rstest = "0.21"
 rstest_reuse = "0.7"
 rust_decimal = "1.33"
 rustc-hash = "2.0"
-schemars = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_with = "3"

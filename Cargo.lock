@@ -75,26 +75,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aide"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "befdff0b4683a0824fc8719ce639a252d9d62cd89c8d0004c39e2417128c1eb8"
-dependencies = [
- "axum",
- "bytes",
- "cfg-if",
- "http 0.2.12",
- "indexmap 1.9.3",
- "schemars",
- "serde",
- "serde_json",
- "thiserror",
- "tower-layer",
- "tower-service",
- "tracing",
-]
-
-[[package]]
 name = "alloc-no-stdlib"
 version = "2.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2443,7 +2423,6 @@ version = "0.11.0"
 dependencies = [
  "build-data",
  "const_format",
- "schemars",
  "serde",
  "shadow-rs",
 ]
@@ -10651,7 +10630,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09c024468a378b7e36765cd36702b7a90cc3cba11654f6685c8f233408e89e92"
 dependencies = [
  "dyn-clone",
- "indexmap 1.9.3",
  "schemars_derive",
  "serde",
  "serde_json",
@@ -10974,7 +10952,6 @@ name = "servers"
 version = "0.11.0"
 dependencies = [
  "ahash 0.8.11",
- "aide",
  "api",
  "arrow",
  "arrow-flight",
@@ -11056,7 +11033,6 @@ dependencies = [
  "rustls 0.23.13",
  "rustls-pemfile 2.2.0",
  "rustls-pki-types",
- "schemars",
  "script",
  "serde",
  "serde_json",

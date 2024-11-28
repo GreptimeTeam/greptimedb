@@ -40,7 +40,6 @@ use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
 use pipeline::PipelineVersion;
 use prost::Message;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Deserializer, Map, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -89,7 +88,7 @@ lazy_static! {
     ];
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct LogIngesterQueryParams {
     pub table: Option<String>,
     pub db: Option<String>,

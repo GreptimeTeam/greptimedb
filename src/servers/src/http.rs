@@ -18,20 +18,10 @@ use std::net::SocketAddr;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
-#[cfg(feature = "apidocs")]
-use aide::{
-    axum::{routing as apirouting, ApiRouter, IntoApiResponse},
-    openapi::{Info, OpenApi, Server as OpenAPIServer},
-    OperationOutput,
-};
 use async_trait::async_trait;
 use auth::UserProviderRef;
-#[cfg(feature = "apidocs")]
-use axem::Extension;
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::DefaultBodyLimit;
-#[cfg(feature = "apidocs")]
-use axum::response::Html;
 use axum::response::{IntoResponse, Json, Response};
 use axum::{middleware, routing, BoxError, Router};
 use common_base::readable_size::ReadableSize;
@@ -46,7 +36,6 @@ use datatypes::schema::SchemaRef;
 use datatypes::value::transform_value_ref_to_json_value;
 use event::{LogState, LogValidatorRef};
 use futures::FutureExt;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ensure, ResultExt};
@@ -155,7 +144,7 @@ impl Default for HttpOptions {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ColumnSchema {
     name: String,
     data_type: String,
@@ -167,7 +156,7 @@ impl ColumnSchema {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct OutputSchema {
     column_schemas: Vec<ColumnSchema>,
 }
@@ -195,7 +184,7 @@ impl From<SchemaRef> for OutputSchema {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct HttpRecordsOutput {
     schema: OutputSchema,
     rows: Vec<Vec<Value>>,
@@ -271,7 +260,7 @@ impl HttpRecordsOutput {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum GreptimeQueryOutput {
     AffectedRows(usize),
@@ -359,7 +348,7 @@ impl Display for Epoch {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum HttpResponse {
     Arrow(ArrowResponse),
     Csv(CsvResponse),
@@ -427,11 +416,6 @@ impl IntoResponse for HttpResponse {
     }
 }
 
-#[cfg(feature = "apidocs")]
-impl OperationOutput for HttpResponse {
-    type Inner = Response;
-}
-
 impl From<ArrowResponse> for HttpResponse {
     fn from(value: ArrowResponse) -> Self {
         HttpResponse::Arrow(value)
@@ -474,16 +458,6 @@ impl From<JsonResponse> for HttpResponse {
     }
 }
 
-#[cfg(feature = "apidocs")]
-async fn serve_api(Extension(api): Extension<OpenApi>) -> impl IntoApiResponse {
-    Json(api)
-}
-
-#[cfg(feature = "apidocs")]
-async fn serve_docs() -> Html<String> {
-    Html(include_str!("http/redoc.html").to_owned())
-}
-
 #[derive(Clone)]
 pub struct ApiState {
     pub sql_handler: ServerSqlQueryHandlerRef,
@@ -500,61 +474,19 @@ pub struct HttpServerBuilder {
     options: HttpOptions,
     plugins: Plugins,
     user_provider: Option<UserProviderRef>,
-    #[cfg(feature = "apidocs")]
-    api: OpenApi,
     router: Router,
 }
 
 impl HttpServerBuilder {
     pub fn new(options: HttpOptions) -> Self {
-        #[cfg(feature = "apidocs")]
-        let api = OpenApi {
-            info: Info {
-                title: "GreptimeDB HTTP API".to_string(),
-                description: Some("HTTP APIs to interact with GreptimeDB".to_string()),
-                version: HTTP_API_VERSION.to_string(),
-                ..Info::default()
-            },
-            servers: vec![OpenAPIServer {
-                url: format!("/{HTTP_API_VERSION}"),
-                ..OpenAPIServer::default()
-            }],
-            ..OpenApi::default()
-        };
         Self {
             options,
             plugins: Plugins::default(),
             user_provider: None,
-            #[cfg(feature = "apidocs")]
-            api,
             router: Router::new(),
         }
     }
 
-    #[cfg(feature = "apidocs")]
-    pub fn with_sql_handler(
-        mut self,
-        sql_handler: ServerSqlQueryHandlerRef,
-        script_handler: Option<ScriptHandlerRef>,
-    ) -> Self {
-        let sql_router = HttpServer::route_sql(ApiState {
-            sql_handler,
-            script_handler,
-        });
-
-        let sql_router = sql_router
-            .finish_api(&mut self.api)
-            .layer(Extension(self.api.clone()));
-
-        Self {
-            router: self
-                .router
-                .nest(&format!("/{HTTP_API_VERSION}"), sql_router),
-            ..self
-        }
-    }
-
-    #[cfg(not(feature = "apidocs"))]
     pub fn with_sql_handler(
         self,
         sql_handler: ServerSqlQueryHandlerRef,
@@ -825,27 +757,6 @@ impl HttpServer {
             .with_state(log_state)
     }
 
-    #[cfg(feature = "apidocs")]
-    fn route_sql<S>(api_state: ApiState) -> ApiRouter<S> {
-        ApiRouter::new()
-            .api_route(
-                "/sql",
-                apirouting::get_with(handler::sql, handler::sql_docs)
-                    .post_with(handler::sql, handler::sql_docs),
-            )
-            .api_route(
-                "/promql",
-                apirouting::get_with(handler::promql, handler::sql_docs)
-                    .post_with(handler::promql, handler::sql_docs),
-            )
-            .api_route("/scripts", apirouting::post(script::scripts))
-            .api_route("/run-script", apirouting::post(script::run_script))
-            .route("/private/api.json", apirouting::get(serve_api))
-            .route("/private/docs", apirouting::get(serve_docs))
-            .with_state(api_state)
-    }
-
-    #[cfg(not(feature = "apidocs"))]
     fn route_sql<S>(api_state: ApiState) -> Router<S> {
         Router::new()
             .route("/sql", routing::get(handler::sql).post(handler::sql))

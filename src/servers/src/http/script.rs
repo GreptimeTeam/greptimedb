@@ -20,7 +20,6 @@ use axum::extract::{Query, RawBody, State};
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session::context::QueryContext;
 use snafu::ResultExt;
@@ -96,7 +95,7 @@ pub async fn scripts(
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct ScriptQuery {
     pub catalog: Option<String>,
     pub db: Option<String>,

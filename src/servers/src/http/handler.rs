@@ -16,8 +16,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-#[cfg(feature = "apidocs")]
-use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
@@ -29,7 +27,6 @@ use common_query::{Output, OutputData};
 use common_recordbatch::util;
 use common_telemetry::tracing;
 use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -49,7 +46,7 @@ use crate::http::{
 use crate::metrics_handler::MetricsHandler;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SqlQuery {
     pub db: Option<String>,
     pub sql: Option<String>,
@@ -220,7 +217,7 @@ pub async fn from_output(
     Ok((results, merge_map))
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PromqlQuery {
     pub query: String,
     pub start: String,
@@ -278,11 +275,6 @@ pub async fn promql(
         .into_response()
 }
 
-#[cfg(feature = "apidocs")]
-pub(crate) fn sql_docs(op: TransformOperation) -> TransformOperation {
-    op.response::<200, Json<HttpResponse>>()
-}
-
 /// Handler to export metrics
 #[axum_macros::debug_handler]
 pub async fn metrics(
@@ -302,10 +294,10 @@ pub async fn metrics(
     state.render()
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct HealthQuery {}
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {}
 
 /// Handler to export healthy check
@@ -316,7 +308,7 @@ pub async fn health(Query(_params): Query<HealthQuery>) -> Json<HealthResponse> 
     Json(HealthResponse {})
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StatusResponse<'a> {
     pub source_time: &'a str,
     pub commit: &'a str,
