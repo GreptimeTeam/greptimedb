@@ -51,6 +51,7 @@ use crate::config::MitoConfig;
 use crate::error::{
     CompactRegionSnafu, Error, GetSchemaMetadataSnafu, RegionClosedSnafu, RegionDroppedSnafu,
     RegionTruncatedSnafu, RemoteCompactionSnafu, Result, TimeRangePredicateOverflowSnafu,
+    TimeoutSnafu,
 };
 use crate::metrics::COMPACTION_STAGE_ELAPSED;
 use crate::read::projection::ProjectionMapper;
@@ -445,13 +446,17 @@ async fn find_ttl(
         return Ok(table_ttl);
     }
 
-    let ttl = schema_metadata_manager
-        .get_schema_options_by_table_id(table_id)
-        .await
-        .context(GetSchemaMetadataSnafu)?
-        .and_then(|options| options.ttl)
-        .unwrap_or_default()
-        .into();
+    let ttl = tokio::time::timeout(
+        crate::config::FETCH_OPTION_TIMEOUT,
+        schema_metadata_manager.get_schema_options_by_table_id(table_id),
+    )
+    .await
+    .context(TimeoutSnafu)?
+    .context(GetSchemaMetadataSnafu)?
+    .and_then(|options| options.ttl)
+    .unwrap_or_default()
+    .into();
+
     Ok(ttl)
 }
 
