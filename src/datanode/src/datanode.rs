@@ -257,7 +257,15 @@ impl DatanodeBuilder {
         }
 
         let heartbeat_task = if let Some(meta_client) = meta_client {
-            Some(HeartbeatTask::try_new(&self.opts, region_server.clone(), meta_client).await?)
+            Some(
+                HeartbeatTask::try_new(
+                    &self.opts,
+                    region_server.clone(),
+                    meta_client,
+                    cache_registry,
+                )
+                .await?,
+            )
         } else {
             None
         };
@@ -597,7 +605,9 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
 
+    use cache::build_datanode_cache_registry;
     use common_base::Plugins;
+    use common_meta::cache::LayeredCacheRegistryBuilder;
     use common_meta::key::datanode_table::DatanodeTableManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::KvBackendRef;
@@ -634,13 +644,21 @@ mod tests {
 
         mock_region_server.register_engine(mock_region.clone());
 
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let layered_cache_registry = Arc::new(
+            LayeredCacheRegistryBuilder::default()
+                .add_cache_registry(build_datanode_cache_registry(kv_backend))
+                .build(),
+        );
+
         let builder = DatanodeBuilder::new(
             DatanodeOptions {
                 node_id: Some(0),
                 ..Default::default()
             },
             Plugins::default(),
-        );
+        )
+        .with_cache_registry(layered_cache_registry);
 
         let kv = Arc::new(MemoryKvBackend::default()) as _;
         setup_table_datanode(&kv).await;

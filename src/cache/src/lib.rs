@@ -41,6 +41,36 @@ pub const SCHEMA_CACHE_NAME: &str = "schema_cache";
 pub const TABLE_FLOWNODE_SET_CACHE_NAME: &str = "table_flownode_set_cache";
 pub const TABLE_ROUTE_CACHE_NAME: &str = "table_route_cache";
 
+/// Builds cache registry for datanode.
+pub fn build_datanode_cache_registry(kv_backend: KvBackendRef) -> CacheRegistry {
+    // Builds table info cache
+    let cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
+        .time_to_live(DEFAULT_CACHE_TTL)
+        .time_to_idle(DEFAULT_CACHE_TTI)
+        .build();
+    let table_info_cache = Arc::new(new_table_info_cache(
+        TABLE_INFO_CACHE_NAME.to_string(),
+        cache,
+        kv_backend.clone(),
+    ));
+
+    // Builds schema cache
+    let cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
+        .time_to_live(DEFAULT_CACHE_TTL)
+        .time_to_idle(DEFAULT_CACHE_TTI)
+        .build();
+    let schema_cache = Arc::new(new_schema_cache(
+        SCHEMA_CACHE_NAME.to_string(),
+        cache,
+        kv_backend.clone(),
+    ));
+
+    CacheRegistryBuilder::default()
+        .add_cache(table_info_cache)
+        .add_cache(schema_cache)
+        .build()
+}
+
 pub fn build_fundamental_cache_registry(kv_backend: KvBackendRef) -> CacheRegistry {
     // Builds table info cache
     let cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)

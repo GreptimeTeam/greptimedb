@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use api::v1::meta::HeartbeatResponse;
 use common_meta::cache_invalidator::KvCacheInvalidator;
+use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::{
     HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
 };
@@ -28,8 +29,6 @@ use common_meta::key::MetadataKey;
 use partition::manager::TableRouteCacheInvalidator;
 use table::metadata::TableId;
 use tokio::sync::mpsc;
-
-use super::invalidate_table_cache::InvalidateTableCacheHandler;
 
 #[derive(Default)]
 pub struct MockKvCacheInvalidator {
@@ -85,7 +84,7 @@ async fn test_invalidate_table_cache_handler() {
     });
 
     let executor = Arc::new(HandlerGroupExecutor::new(vec![Arc::new(
-        InvalidateTableCacheHandler::new(backend.clone()),
+        InvalidateCacheHandler::new(backend.clone()),
     )]));
 
     let (tx, _) = mpsc::channel(8);
@@ -124,7 +123,7 @@ async fn test_invalidate_schema_key_handler() {
     });
 
     let executor = Arc::new(HandlerGroupExecutor::new(vec![Arc::new(
-        InvalidateTableCacheHandler::new(backend.clone()),
+        InvalidateCacheHandler::new(backend.clone()),
     )]));
 
     let (tx, _) = mpsc::channel(8);
