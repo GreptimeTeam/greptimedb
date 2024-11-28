@@ -365,8 +365,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Expect CacheRegistry but not found"))]
-    MissingCacheRegistry {
+    #[snafu(display("Cache not found in registry"))]
+    MissingCache {
         #[snafu(implicit)]
         location: Location,
     },
@@ -437,7 +437,7 @@ impl ErrorExt for Error {
             ConcurrentQueryLimiterClosed { .. } | ConcurrentQueryLimiterTimeout { .. } => {
                 StatusCode::RegionBusy
             }
-            MissingCacheRegistry { .. } => StatusCode::Internal,
+            MissingCache { .. } => StatusCode::Internal,
         }
     }
 

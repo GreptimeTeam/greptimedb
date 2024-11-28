@@ -15,33 +15,34 @@
 //! Schema-level metadata manager.
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use snafu::OptionExt;
 use store_api::storage::TableId;
 
-use crate::cache::SchemaCacheRef;
+use crate::cache::{SchemaCacheRef, TableInfoCacheRef};
 use crate::error::TableInfoNotFoundSnafu;
 use crate::key::schema_name::{SchemaManager, SchemaName, SchemaNameKey};
-use crate::key::table_info::{TableInfoManager, TableInfoManagerRef};
+use crate::key::table_info::TableInfoManager;
 use crate::kv_backend::KvBackendRef;
 use crate::{error, SchemaOptions};
 
 pub type SchemaMetadataManagerRef = Arc<SchemaMetadataManager>;
 
 pub struct SchemaMetadataManager {
-    table_info_manager: TableInfoManagerRef,
+    table_cache: TableInfoCacheRef,
     schema_cache: SchemaCacheRef,
     kv_backend: KvBackendRef,
 }
 
 impl SchemaMetadataManager {
     /// Creates a new database meta
-    pub fn new(kv_backend: KvBackendRef, schema_cache: SchemaCacheRef) -> Self {
-        let table_info_manager = Arc::new(TableInfoManager::new(kv_backend.clone()));
+    pub fn new(
+        kv_backend: KvBackendRef,
+        table_cache: TableInfoCacheRef,
+        schema_cache: SchemaCacheRef,
+    ) -> Self {
         Self {
-            table_info_manager,
+            table_cache,
             schema_cache,
             kv_backend,
         }
@@ -52,18 +53,18 @@ impl SchemaMetadataManager {
         &self,
         table_id: TableId,
     ) -> error::Result<Option<Arc<SchemaOptions>>> {
-        let table_info = self
-            .table_info_manager
-            .get(table_id)
-            .await?
-            .with_context(|| TableInfoNotFoundSnafu {
-                table: format!("table id: {}", table_id),
-            })?;
+        let table_info =
+            self.table_cache
+                .get(table_id)
+                .await?
+                .with_context(|| TableInfoNotFoundSnafu {
+                    table: format!("table id: {}", table_id),
+                })?;
 
         self.schema_cache
             .get_by_ref(&SchemaName {
-                catalog_name: table_info.table_info.catalog_name.clone(),
-                schema_name: table_info.table_info.schema_name.clone(),
+                catalog_name: table_info.catalog_name.clone(),
+                schema_name: table_info.schema_name.clone(),
             })
             .await
     }
@@ -87,8 +88,8 @@ impl SchemaMetadataManager {
             meta: Default::default(),
             table_type: TableType::Base,
         });
-        let (txn, _) = self
-            .table_info_manager
+        let table_info_manager = TableInfoManager::new(self.kv_backend.clone());
+        let (txn, _) = table_info_manager
             .build_create_txn(table_id, &value)
             .unwrap();
         let resp = self.kv_backend.txn(txn).await.unwrap();

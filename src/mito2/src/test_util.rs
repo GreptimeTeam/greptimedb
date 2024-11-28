@@ -35,7 +35,7 @@ use api::v1::{OpType, Row, Rows, SemanticType};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_datasource::compression::CompressionType;
-use common_meta::cache::new_schema_cache;
+use common_meta::cache::{new_schema_cache, new_table_info_cache};
 use common_meta::key::schema_name::{SchemaName, SchemaNameValue};
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -213,7 +213,7 @@ impl Default for TestEnv {
 impl TestEnv {
     /// Returns a new env with empty prefix for test.
     pub fn new() -> TestEnv {
-        let schema_metadata_manager =mock_schema_metadata_manager();
+        let schema_metadata_manager = mock_schema_metadata_manager();
         TestEnv {
             data_home: create_temp_dir(""),
             log_store: None,
@@ -225,7 +225,7 @@ impl TestEnv {
 
     /// Returns a new env with specific `prefix` for test.
     pub fn with_prefix(prefix: &str) -> TestEnv {
-        let schema_metadata_manager =mock_schema_metadata_manager();
+        let schema_metadata_manager = mock_schema_metadata_manager();
         TestEnv {
             data_home: create_temp_dir(prefix),
             log_store: None,
@@ -237,7 +237,7 @@ impl TestEnv {
 
     /// Returns a new env with specific `data_home` for test.
     pub fn with_data_home(data_home: TempDir) -> TestEnv {
-        let schema_metadata_manager =mock_schema_metadata_manager();
+        let schema_metadata_manager = mock_schema_metadata_manager();
         TestEnv {
             data_home,
             log_store: None,
@@ -1152,15 +1152,21 @@ pub async fn reopen_region(
     }
 }
 
-pub(crate) fn mock_schema_metadata_manager()->Arc<SchemaMetadataManager>{
+pub(crate) fn mock_schema_metadata_manager() -> Arc<SchemaMetadataManager> {
     let kv_backend = Arc::new(MemoryKvBackend::new());
+    let table_cache = Arc::new(new_table_info_cache(
+        "table_info_cache".to_string(),
+        CacheBuilder::default().build(),
+        kv_backend.clone(),
+    ));
     let schema_cache = Arc::new(new_schema_cache(
         "schema_cache".to_string(),
-        moka::future::CacheBuilder::default().build(),
+        CacheBuilder::default().build(),
         kv_backend.clone(),
     ));
     Arc::new(SchemaMetadataManager::new(
         kv_backend as KvBackendRef,
+        table_cache,
         schema_cache,
     ))
 }

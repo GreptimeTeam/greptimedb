@@ -22,7 +22,7 @@ use catalog::memory::MemoryCatalogManager;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
-use common_meta::cache::{CacheRegistry, LayeredCacheRegistry, SchemaCacheRef};
+use common_meta::cache::{LayeredCacheRegistry, SchemaCacheRef, TableInfoCacheRef};
 use common_meta::key::datanode_table::{DatanodeTableManager, DatanodeTableValue};
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
@@ -57,7 +57,7 @@ use tokio::sync::Notify;
 
 use crate::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use crate::error::{
-    self, BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu, MissingCacheRegistrySnafu,
+    self, BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu, MissingCacheSnafu,
     MissingKvBackendSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result, ShutdownInstanceSnafu,
     ShutdownServerSnafu, StartServerSnafu,
 };
@@ -218,15 +218,15 @@ impl DatanodeBuilder {
             (Box::new(NoopRegionServerEventListener) as _, None)
         };
 
-        let schema_cache: SchemaCacheRef = self
-            .cache_registry
-            .take()
-            .context(MissingCacheRegistrySnafu)?
-            .get()
-            .context(MissingCacheRegistrySnafu)?;
+        let cache_registry = self.cache_registry.take().context(MissingCacheSnafu)?;
+        let table_cache: TableInfoCacheRef = cache_registry.get().context(MissingCacheSnafu)?;
+        let schema_cache: SchemaCacheRef = cache_registry.get().context(MissingCacheSnafu)?;
 
-        let schema_metadata_manager =
-            Arc::new(SchemaMetadataManager::new(kv_backend.clone(), schema_cache));
+        let schema_metadata_manager = Arc::new(SchemaMetadataManager::new(
+            kv_backend.clone(),
+            table_cache,
+            schema_cache,
+        ));
         let region_server = self
             .new_region_server(schema_metadata_manager, region_event_listener)
             .await?;
