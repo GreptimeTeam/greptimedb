@@ -56,7 +56,7 @@
 - [Project Status](#project-status)
 - [Join the community](#community)
   - [Contributing](#contributing)
-- [Extension](#extension )
+- [Tools & Extensions](#extension )
 - [License](#license)
 - [Acknowledgement](#acknowledgement)
 
@@ -152,7 +152,7 @@ Run a standalone server:
 cargo run -- standalone start
 ```
 
-## Extension
+## Tools & Extensions
 
 ### Dashboard
 
@@ -173,10 +173,15 @@ Our official Grafana dashboard is available at [grafana](grafana/README.md) dire
 
 ## Project Status
 
-The current version has not yet reached the standards for General Availability.
-According to our Greptime 2024 Roadmap, we aim to achieve a production-level version with the release of v1.0 by the end of 2024. [Join Us](https://github.com/GreptimeTeam/greptimedb/issues/3412)
+GreptimeDB is currently in Beta. We are targeting GA (General Availability) with v1.0 release by Early 2025. 
 
-We welcome you to test and use GreptimeDB. Some users have already adopted it in their production environments. If you're interested in trying it out, please use the latest stable release available.
+While in Beta, GreptimeDB is already:
+
+* Being used in production by early adopters
+* Actively maintained with regular releases, [about version number](https://docs.greptime.com/nightly/reference/about-greptimedb-version)
+* Suitable for testing and evaluation
+
+For production use, we recommend using the latest stable release.
 
 ## Community
 
@@ -195,12 +200,12 @@ In addition, you may:
 - Connect us with [Linkedin](https://www.linkedin.com/company/greptime/)
 - Follow us on [Twitter](https://twitter.com/greptime)
 
-## Commerial Support
+## Commercial Support
 
 If you are running GreptimeDB OSS in your organization, we offer additional
-enterprise addons, installation service, training and consulting. [Contact
+enterprise add-ons, installation services, training, and consulting. [Contact
 us](https://greptime.com/contactus) and we will reach out to you with more
-detail of our commerial license.
+detail of our commercial license.
 
 ## License
 
