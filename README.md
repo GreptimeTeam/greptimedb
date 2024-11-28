@@ -66,31 +66,33 @@
 
 ## Why GreptimeDB
 
-Our core developers have been building time-series data platforms for years. Based on our best-practices, GreptimeDB is born to give you:
+Our core developers have been building time-series data platforms for years. Based on our best practices, GreptimeDB was born to give you:
 
-* **Unified all kinds of time series**
+* **Unified Processing of Metrics, Logs, and Events**
 
-  GreptimeDB treats all time series as contextual events with timestamp, and thus unifies the processing of metrics, logs, and events. It supports analyzing metrics, logs, and events with SQL and PromQL, and doing streaming with continuous aggregation.
+GreptimeDB unifies time series data processing by treating all data - whether metrics, logs, or events - as timestamped events with context. Users can analyze this data using either [SQL](https://docs.greptime.com/user-guide/query-data/sql) or [PromQL](https://docs.greptime.com/user-guide/query-data/promql) and leverage stream processing ([Flow](https://docs.greptime.com/user-guide/continuous-aggregation/overview)) to enable continuous aggregation. [Read more](https://docs.greptime.com/user-guide/concepts/data-model).
 
-* **Cloud-Edge collaboration**
+* **Cloud-native Distributed Database**
 
-  GreptimeDB can be deployed on ARM architecture-compatible Android/Linux systems as well as cloud environments from various vendors. Both sides run the same software, providing identical APIs and control planes, so your application can run at the edge or on the cloud without modification, and data synchronization also becomes extremely easy and efficient.
-
-* **Cloud-native distributed database**
-
-  By leveraging object storage (S3 and others), separating compute and storage, scaling stateless compute nodes arbitrarily, GreptimeDB implements seamless scalability. It also supports cross-cloud deployment with a built-in unified data access layer over different object storages.
+Built for [Kubernetes](https://docs.greptime.com/user-guide/deployments/deploy-on-kubernetes/greptimedb-operator-management). GreptimeDB achieves seamless scalability with its cloud-native architecture of separated compute and storage, built on object storage (AWS S3, Azure Blob Storage, etc.) while enabling cross-cloud deployment through a unified data access layer.  [Read more](https://docs.greptime.com/user-guide/concepts/architecture).
 
 * **Performance and Cost-effective**
 
-  Flexible indexing capabilities and distributed, parallel-processing query engine, tackling high cardinality issues down. Optimized columnar layout for handling time-series data; compacted, compressed, and stored on various storage backends, particularly cloud object storage with 50x cost efficiency.
+Written in pure Rust for superior performance and reliability. GreptimeDB features a distributed query engine with intelligent indexing to handle high cardinality data efficiently. Its optimized columnar storage achieves 50x cost efficiency on cloud object storage through advanced compression. [Read benchmark reports](https://www.greptime.com/blogs/2024-09-09-report-summary).
 
-* **Compatible with InfluxDB, Prometheus and more protocols**
+* **Cloud-Edge Collaboration**
 
-  Widely adopted database protocols and APIs, including MySQL, PostgreSQL, and Prometheus Remote Storage, etc. [Read more](https://docs.greptime.com/user-guide/protocols/overview).
+GreptimeDB seamlessly operates across cloud and edge (ARM/Android/Linux), providing consistent APIs and control plane for unified data management and efficient synchronization. [Read more](https://docs.greptime.com/user-guide/deployments/run-on-android/).
+
+* **Ecosystem Integration**
+
+Widely adopted database protocols and APIs, including MySQL, PostgreSQL, InfluxDB, OpenTelemetry, Loki and Prometheus, etc. Effortless Adoption & Seamless Migration. [Read more](https://docs.greptime.com/user-guide/protocols/overview).
+
+For more detailed info please read  [Why GreptimeDB](https://docs.greptime.com/user-guide/concepts/why-greptimedb).
 
 ## Try GreptimeDB
 
-### 1. [GreptimePlay](https://greptime.com/playground)
+### 1. [Live Demo](https://greptime.com/playground)
 
 Try out the features of GreptimeDB right from your browser.
 
@@ -109,8 +111,17 @@ docker pull greptime/greptimedb
 Start a GreptimeDB container with:
 
 ```shell
-docker run --rm --name greptime --net=host greptime/greptimedb standalone start
+docker run -p 127.0.0.1:4000-4003:4000-4003 \
+  -v "$(pwd)/greptimedb:/tmp/greptimedb" \
+  --name greptime --rm \
+  greptime/greptimedb:latest standalone start \
+  --http-addr 0.0.0.0:4000 \
+  --rpc-addr 0.0.0.0:4001 \
+  --mysql-addr 0.0.0.0:4002 \
+  --postgres-addr 0.0.0.0:4003
 ```
+
+Access the dashboard via `http://localhost:4000/dashboard`.
 
 Read more about [Installation](https://docs.greptime.com/getting-started/installation/overview) on docs.
 
