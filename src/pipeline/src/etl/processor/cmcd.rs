@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Pipeline Processer for CMCD (Common Media Client Data) data.
+//! Pipeline Processor for CMCD (Common Media Client Data) data.
 //!
 //! Refer to [`CmcdProcessor`] for more information.
 
