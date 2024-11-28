@@ -15,6 +15,7 @@
 pub mod cmcd;
 pub mod csv;
 pub mod date;
+pub mod decolorize;
 pub mod dissect;
 pub mod epoch;
 pub mod gsub;
@@ -29,6 +30,7 @@ use ahash::{HashSet, HashSetExt};
 use cmcd::{CmcdProcessor, CmcdProcessorBuilder};
 use csv::{CsvProcessor, CsvProcessorBuilder};
 use date::{DateProcessor, DateProcessorBuilder};
+use decolorize::{DecolorizeProcessor, DecolorizeProcessorBuilder};
 use dissect::{DissectProcessor, DissectProcessorBuilder};
 use enum_dispatch::enum_dispatch;
 use epoch::{EpochProcessor, EpochProcessorBuilder};
@@ -60,11 +62,6 @@ const SEPARATOR_NAME: &str = "separator";
 const TARGET_FIELDS_NAME: &str = "target_fields";
 const JSON_PATH_NAME: &str = "json_path";
 const JSON_PATH_RESULT_INDEX_NAME: &str = "result_index";
-
-// const IF_NAME: &str = "if";
-// const IGNORE_FAILURE_NAME: &str = "ignore_failure";
-// const ON_FAILURE_NAME: &str = "on_failure";
-// const TAG_NAME: &str = "tag";
 
 /// Processor trait defines the interface for all processors.
 ///
@@ -99,6 +96,7 @@ pub enum ProcessorKind {
     Epoch(EpochProcessor),
     Date(DateProcessor),
     JsonPath(JsonPathProcessor),
+    Decolorize(DecolorizeProcessor),
 }
 
 /// ProcessorBuilder trait defines the interface for all processor builders
@@ -128,6 +126,7 @@ pub enum ProcessorBuilders {
     Epoch(EpochProcessorBuilder),
     Date(DateProcessorBuilder),
     JsonPath(JsonPathProcessorBuilder),
+    Decolorize(DecolorizeProcessorBuilder),
 }
 
 #[derive(Debug, Default)]
@@ -274,6 +273,9 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorBuilders> {
         }
         json_path::PROCESSOR_JSON_PATH => {
             ProcessorBuilders::JsonPath(json_path::JsonPathProcessorBuilder::try_from(value)?)
+        }
+        decolorize::PROCESSOR_DECOLORIZE => {
+            ProcessorBuilders::Decolorize(DecolorizeProcessorBuilder::try_from(value)?)
         }
         _ => return UnsupportedProcessorSnafu { processor: str_key }.fail(),
     };
