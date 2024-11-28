@@ -75,6 +75,14 @@ SELECT
 FROM
     input_basic;
 
+DROP FLOW test_wildcard_basic;
+
+CREATE FLOW test_wildcard_basic sink TO out_basic AS
+SELECT
+    COUNT(*) as wildcard
+FROM
+    input_basic;
+
 INSERT INTO
     input_basic
 VALUES

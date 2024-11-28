@@ -130,6 +130,18 @@ FROM
 
 Affected Rows: 0
 
+DROP FLOW test_wildcard_basic;
+
+Affected Rows: 0
+
+CREATE FLOW test_wildcard_basic sink TO out_basic AS
+SELECT
+    COUNT(*) as wildcard
+FROM
+    input_basic;
+
+Affected Rows: 0
+
 INSERT INTO
     input_basic
 VALUES

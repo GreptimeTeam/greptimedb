@@ -261,7 +261,7 @@ impl<'a> ParserContext<'a> {
 
         // make `SINK` case in-sensitive
         if let Token::Word(word) = self.parser.peek_token().token
-            && word.value.to_uppercase() == SINK
+            && word.value.eq_ignore_ascii_case(SINK)
         {
             self.parser.next_token();
         } else {
