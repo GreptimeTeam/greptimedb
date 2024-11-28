@@ -35,6 +35,8 @@ use api::v1::{OpType, Row, Rows, SemanticType};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_datasource::compression::CompressionType;
+use common_meta::cache::new_schema_cache;
+use common_meta::key::schema_name::{SchemaName, SchemaNameValue};
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
@@ -47,6 +49,7 @@ use datatypes::schema::ColumnSchema;
 use log_store::kafka::log_store::KafkaLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
+use moka::future::{Cache, CacheBuilder};
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::services::Fs;
 use object_store::ObjectStore;
@@ -210,43 +213,37 @@ impl Default for TestEnv {
 impl TestEnv {
     /// Returns a new env with empty prefix for test.
     pub fn new() -> TestEnv {
+        let schema_metadata_manager =mock_schema_metadata_manager();
         TestEnv {
             data_home: create_temp_dir(""),
             log_store: None,
             log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
-            schema_metadata_manager: Arc::new(SchemaMetadataManager::new(Arc::new(
-                MemoryKvBackend::new(),
-            )
-                as KvBackendRef)),
+            schema_metadata_manager,
         }
     }
 
     /// Returns a new env with specific `prefix` for test.
     pub fn with_prefix(prefix: &str) -> TestEnv {
+        let schema_metadata_manager =mock_schema_metadata_manager();
         TestEnv {
             data_home: create_temp_dir(prefix),
             log_store: None,
             log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
-            schema_metadata_manager: Arc::new(SchemaMetadataManager::new(Arc::new(
-                MemoryKvBackend::new(),
-            )
-                as KvBackendRef)),
+            schema_metadata_manager,
         }
     }
 
     /// Returns a new env with specific `data_home` for test.
     pub fn with_data_home(data_home: TempDir) -> TestEnv {
+        let schema_metadata_manager =mock_schema_metadata_manager();
         TestEnv {
             data_home,
             log_store: None,
             log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
-            schema_metadata_manager: Arc::new(SchemaMetadataManager::new(Arc::new(
-                MemoryKvBackend::new(),
-            )
-                as KvBackendRef)),
+            schema_metadata_manager,
         }
     }
 
@@ -1153,4 +1150,17 @@ pub async fn reopen_region(
             .set_region_role(region_id, RegionRole::Leader)
             .unwrap();
     }
+}
+
+pub(crate) fn mock_schema_metadata_manager()->Arc<SchemaMetadataManager>{
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let schema_cache = Arc::new(new_schema_cache(
+        "schema_cache".to_string(),
+        moka::future::CacheBuilder::default().build(),
+        kv_backend.clone(),
+    ));
+    Arc::new(SchemaMetadataManager::new(
+        kv_backend as KvBackendRef,
+        schema_cache,
+    ))
 }

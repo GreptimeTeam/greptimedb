@@ -171,6 +171,7 @@ impl<'a> TryFrom<&'a str> for SchemaNameKey<'a> {
     }
 }
 
+#[derive(Clone)]
 pub struct SchemaManager {
     kv_backend: KvBackendRef,
 }

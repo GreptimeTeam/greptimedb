@@ -18,11 +18,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use catalog::kvbackend::CachedKvBackendBuilder;
 use catalog::memory::MemoryCatalogManager;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
+use common_meta::cache::{CacheRegistry, LayeredCacheRegistry, SchemaCacheRef};
 use common_meta::key::datanode_table::{DatanodeTableManager, DatanodeTableValue};
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
@@ -57,9 +57,9 @@ use tokio::sync::Notify;
 
 use crate::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use crate::error::{
-    self, BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu, MissingKvBackendSnafu,
-    MissingNodeIdSnafu, OpenLogStoreSnafu, Result, ShutdownInstanceSnafu, ShutdownServerSnafu,
-    StartServerSnafu,
+    self, BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu, MissingCacheRegistrySnafu,
+    MissingKvBackendSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result, ShutdownInstanceSnafu,
+    ShutdownServerSnafu, StartServerSnafu,
 };
 use crate::event_listener::{
     new_region_server_event_channel, NoopRegionServerEventListener, RegionServerEventListenerRef,
@@ -160,6 +160,7 @@ pub struct DatanodeBuilder {
     plugins: Plugins,
     meta_client: Option<MetaClientRef>,
     kv_backend: Option<KvBackendRef>,
+    cache_registry: Option<Arc<LayeredCacheRegistry>>,
 }
 
 impl DatanodeBuilder {
@@ -171,12 +172,20 @@ impl DatanodeBuilder {
             plugins,
             meta_client: None,
             kv_backend: None,
+            cache_registry: None,
         }
     }
 
     pub fn with_meta_client(self, meta_client: MetaClientRef) -> Self {
         Self {
             meta_client: Some(meta_client),
+            ..self
+        }
+    }
+
+    pub fn with_cache_registry(self, cache_registry: Arc<LayeredCacheRegistry>) -> Self {
+        Self {
+            cache_registry: Some(cache_registry),
             ..self
         }
     }
@@ -209,10 +218,15 @@ impl DatanodeBuilder {
             (Box::new(NoopRegionServerEventListener) as _, None)
         };
 
-        let cached_kv_backend = Arc::new(CachedKvBackendBuilder::new(kv_backend.clone()).build());
+        let schema_cache: SchemaCacheRef = self
+            .cache_registry
+            .take()
+            .context(MissingCacheRegistrySnafu)?
+            .get()
+            .context(MissingCacheRegistrySnafu)?;
 
         let schema_metadata_manager =
-            Arc::new(SchemaMetadataManager::new(cached_kv_backend.clone()));
+            Arc::new(SchemaMetadataManager::new(kv_backend.clone(), schema_cache));
         let region_server = self
             .new_region_server(schema_metadata_manager, region_event_listener)
             .await?;
@@ -243,15 +257,7 @@ impl DatanodeBuilder {
         }
 
         let heartbeat_task = if let Some(meta_client) = meta_client {
-            Some(
-                HeartbeatTask::try_new(
-                    &self.opts,
-                    region_server.clone(),
-                    meta_client,
-                    cached_kv_backend,
-                )
-                .await?,
-            )
+            Some(HeartbeatTask::try_new(&self.opts, region_server.clone(), meta_client).await?)
         } else {
             None
         };

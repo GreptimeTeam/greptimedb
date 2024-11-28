@@ -679,11 +679,13 @@ fn get_expired_ssts(
 
 #[cfg(test)]
 mod tests {
+    use common_meta::cache::new_schema_cache;
     use common_meta::key::SchemaMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::KvBackendRef;
+    use moka::future::CacheBuilder;
     use tokio::sync::oneshot;
-
+    use crate::test_util::mock_schema_metadata_manager;
     use super::*;
     use crate::test_util::scheduler_util::{SchedulerEnv, VecScheduler};
     use crate::test_util::version_util::{apply_edit, VersionControlBuilder};
@@ -694,10 +696,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let mut scheduler = env.mock_compaction_scheduler(tx);
         let mut builder = VersionControlBuilder::new();
-        let schema_metadata_manager = Arc::new(SchemaMetadataManager::new(Arc::new(
-            MemoryKvBackend::new(),
-        )
-            as KvBackendRef));
+        let schema_metadata_manager = mock_schema_metadata_manager();
         schema_metadata_manager
             .register_region_table_info(
                 builder.region_id().table_id(),
@@ -760,10 +759,8 @@ mod tests {
         let mut builder = VersionControlBuilder::new();
         let purger = builder.file_purger();
         let region_id = builder.region_id();
-        let schema_metadata_manager = Arc::new(SchemaMetadataManager::new(Arc::new(
-            MemoryKvBackend::new(),
-        )
-            as KvBackendRef));
+
+        let schema_metadata_manager =mock_schema_metadata_manager();
         schema_metadata_manager
             .register_region_table_info(
                 builder.region_id().table_id(),

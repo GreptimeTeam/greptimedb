@@ -15,12 +15,15 @@
 //! Schema-level metadata manager.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use snafu::OptionExt;
 use store_api::storage::TableId;
 
+use crate::cache::SchemaCacheRef;
 use crate::error::TableInfoNotFoundSnafu;
-use crate::key::schema_name::{SchemaManager, SchemaNameKey};
+use crate::key::schema_name::{SchemaManager, SchemaName, SchemaNameKey};
 use crate::key::table_info::{TableInfoManager, TableInfoManagerRef};
 use crate::kv_backend::KvBackendRef;
 use crate::{error, SchemaOptions};
@@ -29,31 +32,17 @@ pub type SchemaMetadataManagerRef = Arc<SchemaMetadataManager>;
 
 pub struct SchemaMetadataManager {
     table_info_manager: TableInfoManagerRef,
-    schema_manager: SchemaManager,
-    #[cfg(any(test, feature = "testing"))]
+    schema_cache: SchemaCacheRef,
     kv_backend: KvBackendRef,
 }
 
 impl SchemaMetadataManager {
     /// Creates a new database meta
-    #[cfg(not(any(test, feature = "testing")))]
-    pub fn new(kv_backend: KvBackendRef) -> Self {
+    pub fn new(kv_backend: KvBackendRef, schema_cache: SchemaCacheRef) -> Self {
         let table_info_manager = Arc::new(TableInfoManager::new(kv_backend.clone()));
-        let schema_manager = SchemaManager::new(kv_backend);
         Self {
             table_info_manager,
-            schema_manager,
-        }
-    }
-
-    /// Creates a new database meta
-    #[cfg(any(test, feature = "testing"))]
-    pub fn new(kv_backend: KvBackendRef) -> Self {
-        let table_info_manager = Arc::new(TableInfoManager::new(kv_backend.clone()));
-        let schema_manager = SchemaManager::new(kv_backend.clone());
-        Self {
-            table_info_manager,
-            schema_manager,
+            schema_cache,
             kv_backend,
         }
     }
@@ -62,7 +51,7 @@ impl SchemaMetadataManager {
     pub async fn get_schema_options_by_table_id(
         &self,
         table_id: TableId,
-    ) -> error::Result<Option<SchemaOptions>> {
+    ) -> error::Result<Option<Arc<SchemaOptions>>> {
         let table_info = self
             .table_info_manager
             .get(table_id)
@@ -71,14 +60,12 @@ impl SchemaMetadataManager {
                 table: format!("table id: {}", table_id),
             })?;
 
-        let key = SchemaNameKey::new(
-            &table_info.table_info.catalog_name,
-            &table_info.table_info.schema_name,
-        );
-        self.schema_manager
-            .get(key)
+        self.schema_cache
+            .get_by_ref(&SchemaName {
+                catalog_name: table_info.table_info.catalog_name.clone(),
+                schema_name: table_info.table_info.schema_name.clone(),
+            })
             .await
-            .map(|v| v.map(|v| v.into_inner()))
     }
 
     #[cfg(any(test, feature = "testing"))]
@@ -110,7 +97,8 @@ impl SchemaMetadataManager {
             catalog: catalog_name,
             schema: schema_name,
         };
-        self.schema_manager
+
+        SchemaManager::new(self.kv_backend.clone())
             .create(key, schema_value, false)
             .await
             .expect("Failed to create schema metadata");

@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::{HeartbeatRequest, NodeInfo, Peer, RegionRole, RegionStat};
-use catalog::kvbackend::CachedKvBackend;
 use common_meta::datanode::REGION_STATISTIC_KEY;
 use common_meta::distributed_time_constants::META_KEEP_ALIVE_INTERVAL_SECS;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
@@ -40,7 +39,6 @@ use crate::alive_keeper::RegionAliveKeeper;
 use crate::config::DatanodeOptions;
 use crate::error::{self, MetaClientInitSnafu, Result};
 use crate::event_listener::RegionServerEventReceiver;
-use crate::heartbeat::handler::cache_invalidator::InvalidateSchemaCacheHandler;
 use crate::metrics::{self, HEARTBEAT_RECV_COUNT, HEARTBEAT_SENT_COUNT};
 use crate::region_server::RegionServer;
 
@@ -72,7 +70,6 @@ impl HeartbeatTask {
         opts: &DatanodeOptions,
         region_server: RegionServer,
         meta_client: MetaClientRef,
-        cache_kv_backend: Arc<CachedKvBackend>,
     ) -> Result<Self> {
         let region_alive_keeper = Arc::new(RegionAliveKeeper::new(
             region_server.clone(),
@@ -82,7 +79,6 @@ impl HeartbeatTask {
             region_alive_keeper.clone(),
             Arc::new(ParseMailboxMessageHandler),
             Arc::new(RegionHeartbeatResponseHandler::new(region_server.clone())),
-            Arc::new(InvalidateSchemaCacheHandler::new(cache_kv_backend)),
         ]));
 
         Ok(Self {
