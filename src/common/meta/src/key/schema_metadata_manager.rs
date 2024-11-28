@@ -21,9 +21,7 @@ use store_api::storage::TableId;
 
 use crate::cache::{SchemaCacheRef, TableInfoCacheRef};
 use crate::error::TableInfoNotFoundSnafu;
-use crate::key::schema_name::{SchemaManager, SchemaName, SchemaNameKey};
-use crate::key::table_info::TableInfoManager;
-use crate::kv_backend::KvBackendRef;
+use crate::key::schema_name::SchemaName;
 use crate::{error, SchemaOptions};
 
 pub type SchemaMetadataManagerRef = Arc<SchemaMetadataManager>;
@@ -31,13 +29,24 @@ pub type SchemaMetadataManagerRef = Arc<SchemaMetadataManager>;
 pub struct SchemaMetadataManager {
     table_cache: TableInfoCacheRef,
     schema_cache: SchemaCacheRef,
-    kv_backend: KvBackendRef,
+    #[cfg(any(test, feature = "testing"))]
+    kv_backend: crate::kv_backend::KvBackendRef,
 }
 
 impl SchemaMetadataManager {
     /// Creates a new database meta
+    #[cfg(not(any(test, feature = "testing")))]
+    pub fn new(table_cache: TableInfoCacheRef, schema_cache: SchemaCacheRef) -> Self {
+        Self {
+            table_cache,
+            schema_cache,
+        }
+    }
+
+    /// Creates a new database meta
+    #[cfg(any(test, feature = "testing"))]
     pub fn new(
-        kv_backend: KvBackendRef,
+        kv_backend: crate::kv_backend::KvBackendRef,
         table_cache: TableInfoCacheRef,
         schema_cache: SchemaCacheRef,
     ) -> Self {
@@ -88,18 +97,19 @@ impl SchemaMetadataManager {
             meta: Default::default(),
             table_type: TableType::Base,
         });
-        let table_info_manager = TableInfoManager::new(self.kv_backend.clone());
+        let table_info_manager =
+            crate::key::table_info::TableInfoManager::new(self.kv_backend.clone());
         let (txn, _) = table_info_manager
             .build_create_txn(table_id, &value)
             .unwrap();
         let resp = self.kv_backend.txn(txn).await.unwrap();
         assert!(resp.succeeded, "Failed to create table metadata");
-        let key = SchemaNameKey {
+        let key = crate::key::schema_name::SchemaNameKey {
             catalog: catalog_name,
             schema: schema_name,
         };
 
-        SchemaManager::new(self.kv_backend.clone())
+        crate::key::schema_name::SchemaManager::new(self.kv_backend.clone())
             .create(key, schema_value, false)
             .await
             .expect("Failed to create schema metadata");
