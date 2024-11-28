@@ -56,7 +56,7 @@
 - [Project Status](#project-status)
 - [Join the community](#community)
   - [Contributing](#contributing)
-- [Tools & Extensions](#extension )
+- [Tools & Extensions](#tools--extensions)
 - [License](#license)
 - [Acknowledgement](#acknowledgement)
 
@@ -169,7 +169,7 @@ cargo run -- standalone start
 
 ### Grafana Dashboard
 
-Our official Grafana dashboard is available at [grafana](grafana/README.md) directory.
+Our official Grafana dashboard for monitoring GreptimeDB is available at [grafana](grafana/README.md) directory.
 
 ## Project Status
 
