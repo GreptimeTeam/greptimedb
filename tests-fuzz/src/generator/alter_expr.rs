@@ -219,9 +219,9 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprSetTableOptionsGenerator<
         let options = option_templates_idx
             .iter()
             .map(|idx| match all_options[*idx] {
-                AlterTableOption::TTL(_) => {
+                AlterTableOption::Ttl(_) => {
                     let ttl: u32 = rng.gen();
-                    AlterTableOption::TTL((ttl as i64).into())
+                    AlterTableOption::Ttl((ttl as i64).into())
                 }
                 AlterTableOption::TwcsTimeWindow(_) => {
                     let time_window: u32 = rng.gen();
