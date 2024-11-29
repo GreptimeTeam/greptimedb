@@ -13,18 +13,21 @@
 // limitations under the License.
 
 use std::marker::PhantomData;
+use std::str::FromStr;
 
+use common_base::readable_size::ReadableSize;
 use common_query::AddColumnLocation;
 use datatypes::data_type::ConcreteDataType;
 use derive_builder::Builder;
 use rand::Rng;
 use snafu::ensure;
+use strum::IntoEnumIterator;
 
 use crate::context::TableContextRef;
 use crate::error::{self, Error, Result};
 use crate::fake::WordGenerator;
 use crate::generator::{ColumnOptionGenerator, ConcreteDataTypeGenerator, Generator, Random};
-use crate::ir::alter_expr::{AlterTableExpr, AlterTableOperation};
+use crate::ir::alter_expr::{AlterTableExpr, AlterTableOperation, AlterTableOption};
 use crate::ir::create_expr::ColumnOption;
 use crate::ir::{
     droppable_columns, generate_columns, generate_random_value, modifiable_columns, Column,
@@ -107,7 +110,7 @@ impl<R: Rng + 'static> Generator<AlterTableExpr, R> for AlterExprAddColumnGenera
         .remove(0);
         Ok(AlterTableExpr {
             table_name: self.table_ctx.name.clone(),
-            alter_options: AlterTableOperation::AddColumn { column, location },
+            alter_kinds: AlterTableOperation::AddColumn { column, location },
         })
     }
 }
@@ -130,7 +133,7 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprDropColumnGenerator<R> {
         let name = droppable[rng.gen_range(0..droppable.len())].name.clone();
         Ok(AlterTableExpr {
             table_name: self.table_ctx.name.clone(),
-            alter_options: AlterTableOperation::DropColumn { name },
+            alter_kinds: AlterTableOperation::DropColumn { name },
         })
     }
 }
@@ -153,7 +156,7 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprRenameGenerator<R> {
             .generate_unique_table_name(rng, self.name_generator.as_ref());
         Ok(AlterTableExpr {
             table_name: self.table_ctx.name.clone(),
-            alter_options: AlterTableOperation::RenameTable { new_table_name },
+            alter_kinds: AlterTableOperation::RenameTable { new_table_name },
         })
     }
 }
@@ -180,13 +183,79 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprModifyDataTypeGenerator<R
 
         Ok(AlterTableExpr {
             table_name: self.table_ctx.name.clone(),
-            alter_options: AlterTableOperation::ModifyDataType {
+            alter_kinds: AlterTableOperation::ModifyDataType {
                 column: Column {
                     name: changed.name,
                     column_type: to_type,
                     options: vec![],
                 },
             },
+        })
+    }
+}
+
+/// Generates the [AlterTableOperation::SetTableOptions] of [AlterTableExpr].
+#[derive(Builder)]
+#[builder(pattern = "owned")]
+pub struct AlterExprSetTableOptionsGenerator<R: Rng> {
+    table_ctx: TableContextRef,
+    #[builder(default)]
+    _phantom: PhantomData<R>,
+}
+
+impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprSetTableOptionsGenerator<R> {
+    type Error = Error;
+
+    fn generate(&self, rng: &mut R) -> Result<AlterTableExpr> {
+        let all_options = AlterTableOption::iter().collect::<Vec<_>>();
+        // Generate random distinct options
+        let mut option_templates_idx = vec![];
+        for _ in 1..rng.gen_range(2..=all_options.len()) {
+            let option = rng.gen_range(0..all_options.len());
+            if !option_templates_idx.contains(&option) {
+                option_templates_idx.push(option);
+            }
+        }
+        let options = option_templates_idx
+            .iter()
+            .map(|idx| match all_options[*idx] {
+                AlterTableOption::TTL(_) => {
+                    let ttl: u32 = rng.gen();
+                    AlterTableOption::TTL((ttl as i64).into())
+                }
+                AlterTableOption::TwcsTimeWindow(_) => {
+                    let time_window: u32 = rng.gen();
+                    AlterTableOption::TwcsTimeWindow((time_window as i64).into())
+                }
+                AlterTableOption::TwcsMaxOutputFileSize(_) => {
+                    let max_output_file_size: u64 = rng.gen();
+                    // Use B as the unit by default
+                    let max_output_file_size_str = max_output_file_size.to_string() + "B";
+                    AlterTableOption::TwcsMaxOutputFileSize(
+                        ReadableSize::from_str(&max_output_file_size_str).unwrap(),
+                    )
+                }
+                AlterTableOption::TwcsMaxInactiveWindowRuns(_) => {
+                    let max_inactive_window_runs: u64 = rng.gen();
+                    AlterTableOption::TwcsMaxInactiveWindowRuns(max_inactive_window_runs)
+                }
+                AlterTableOption::TwcsMaxActiveWindowFiles(_) => {
+                    let max_active_window_files: u64 = rng.gen();
+                    AlterTableOption::TwcsMaxActiveWindowFiles(max_active_window_files)
+                }
+                AlterTableOption::TwcsMaxActiveWindowRuns(_) => {
+                    let max_active_window_runs: u64 = rng.gen();
+                    AlterTableOption::TwcsMaxActiveWindowRuns(max_active_window_runs)
+                }
+                AlterTableOption::TwcsMaxInactiveWindowFiles(_) => {
+                    let max_inactive_window_files: u64 = rng.gen();
+                    AlterTableOption::TwcsMaxInactiveWindowFiles(max_inactive_window_files)
+                }
+            })
+            .collect();
+        Ok(AlterTableExpr {
+            table_name: self.table_ctx.name.clone(),
+            alter_kinds: AlterTableOperation::SetTableOptions { options },
         })
     }
 }

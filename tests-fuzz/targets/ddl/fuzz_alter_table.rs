@@ -34,6 +34,7 @@ use tests_fuzz::fake::{
 use tests_fuzz::generator::alter_expr::{
     AlterExprAddColumnGeneratorBuilder, AlterExprDropColumnGeneratorBuilder,
     AlterExprModifyDataTypeGeneratorBuilder, AlterExprRenameGeneratorBuilder,
+    AlterExprSetTableOptionsGeneratorBuilder,
 };
 use tests_fuzz::generator::create_expr::CreateTableExprGeneratorBuilder;
 use tests_fuzz::generator::Generator;
@@ -62,11 +63,12 @@ struct FuzzInput {
 }
 
 #[derive(Debug, EnumIter)]
-enum AlterTableOption {
+enum AlterTableKind {
     AddColumn,
     DropColumn,
     RenameTable,
     ModifyDataType,
+    SetTableOptions,
 }
 
 fn generate_create_table_expr<R: Rng + 'static>(rng: &mut R) -> Result<CreateTableExpr> {
@@ -93,23 +95,23 @@ fn generate_alter_table_expr<R: Rng + 'static>(
     table_ctx: TableContextRef,
     rng: &mut R,
 ) -> Result<AlterTableExpr> {
-    let options = AlterTableOption::iter().collect::<Vec<_>>();
-    match options[rng.gen_range(0..options.len())] {
-        AlterTableOption::DropColumn if !droppable_columns(&table_ctx.columns).is_empty() => {
+    let kinds = AlterTableKind::iter().collect::<Vec<_>>();
+    match kinds[rng.gen_range(0..kinds.len())] {
+        AlterTableKind::DropColumn if !droppable_columns(&table_ctx.columns).is_empty() => {
             AlterExprDropColumnGeneratorBuilder::default()
                 .table_ctx(table_ctx)
                 .build()
                 .unwrap()
                 .generate(rng)
         }
-        AlterTableOption::ModifyDataType if !modifiable_columns(&table_ctx.columns).is_empty() => {
+        AlterTableKind::ModifyDataType if !modifiable_columns(&table_ctx.columns).is_empty() => {
             AlterExprModifyDataTypeGeneratorBuilder::default()
                 .table_ctx(table_ctx)
                 .build()
                 .unwrap()
                 .generate(rng)
         }
-        AlterTableOption::RenameTable => AlterExprRenameGeneratorBuilder::default()
+        AlterTableKind::RenameTable => AlterExprRenameGeneratorBuilder::default()
             .table_ctx(table_ctx)
             .name_generator(Box::new(MappedGenerator::new(
                 WordGenerator,
@@ -118,6 +120,13 @@ fn generate_alter_table_expr<R: Rng + 'static>(
             .build()
             .unwrap()
             .generate(rng),
+        AlterTableKind::SetTableOptions => {
+            let expr_generator = AlterExprSetTableOptionsGeneratorBuilder::default()
+                .table_ctx(table_ctx)
+                .build()
+                .unwrap();
+            expr_generator.generate(rng)
+        }
         _ => {
             let location = rng.gen_bool(0.5);
             let expr_generator = AlterExprAddColumnGeneratorBuilder::default()
