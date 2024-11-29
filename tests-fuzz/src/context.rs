@@ -64,7 +64,7 @@ impl TableContext {
 
     /// Applies the [AlterTableExpr].
     pub fn alter(mut self, expr: AlterTableExpr) -> Result<TableContext> {
-        match expr.alter_options {
+        match expr.alter_kinds {
             AlterTableOperation::AddColumn { column, location } => {
                 ensure!(
                     !self.columns.iter().any(|col| col.name == column.name),
@@ -140,6 +140,7 @@ impl TableContext {
                 }
                 Ok(self)
             }
+            _ => Ok(self),
         }
     }
 
@@ -189,7 +190,7 @@ mod tests {
         // Add a column
         let expr = AlterTableExpr {
             table_name: "foo".into(),
-            alter_options: AlterTableOperation::AddColumn {
+            alter_kinds: AlterTableOperation::AddColumn {
                 column: Column {
                     name: "a".into(),
                     column_type: ConcreteDataType::timestamp_microsecond_datatype(),
@@ -205,7 +206,7 @@ mod tests {
         // Add a column at first
         let expr = AlterTableExpr {
             table_name: "foo".into(),
-            alter_options: AlterTableOperation::AddColumn {
+            alter_kinds: AlterTableOperation::AddColumn {
                 column: Column {
                     name: "b".into(),
                     column_type: ConcreteDataType::timestamp_microsecond_datatype(),
@@ -221,7 +222,7 @@ mod tests {
         // Add a column after "b"
         let expr = AlterTableExpr {
             table_name: "foo".into(),
-            alter_options: AlterTableOperation::AddColumn {
+            alter_kinds: AlterTableOperation::AddColumn {
                 column: Column {
                     name: "c".into(),
                     column_type: ConcreteDataType::timestamp_microsecond_datatype(),
@@ -239,7 +240,7 @@ mod tests {
         // Drop the column "b"
         let expr = AlterTableExpr {
             table_name: "foo".into(),
-            alter_options: AlterTableOperation::DropColumn { name: "b".into() },
+            alter_kinds: AlterTableOperation::DropColumn { name: "b".into() },
         };
         let table_ctx = table_ctx.alter(expr).unwrap();
         assert_eq!(table_ctx.columns[1].name, Ident::new("a"));
