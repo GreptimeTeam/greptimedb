@@ -53,7 +53,7 @@ pub enum AlterTableOperation {
 
 #[derive(Debug, EnumIter, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AlterTableOption {
-    TTL(Duration),
+    Ttl(Duration),
     TwcsTimeWindow(Duration),
     TwcsMaxOutputFileSize(ReadableSize),
     TwcsMaxInactiveWindowFiles(u64),
@@ -65,7 +65,7 @@ pub enum AlterTableOption {
 impl Display for AlterTableOption {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AlterTableOption::TTL(d) => write!(f, "'{}' = '{}'", TTL_KEY, d),
+            AlterTableOption::Ttl(d) => write!(f, "'{}' = '{}'", TTL_KEY, d),
             AlterTableOption::TwcsTimeWindow(d) => write!(f, "'{}' = '{}'", TWCS_TIME_WINDOW, d),
             AlterTableOption::TwcsMaxOutputFileSize(s) => {
                 write!(f, "'{}' = '{}'", TWCS_MAX_OUTPUT_FILE_SIZE, s)

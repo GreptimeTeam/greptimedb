@@ -201,7 +201,7 @@ mod tests {
             table_name: "test".into(),
             alter_kinds: AlterTableOperation::SetTableOptions {
                 options: vec![
-                    AlterTableOption::TTL(Duration::new_second(60)),
+                    AlterTableOption::Ttl(Duration::new_second(60)),
                     AlterTableOption::TwcsTimeWindow(Duration::new_second(60)),
                     AlterTableOption::TwcsMaxOutputFileSize(ReadableSize::from_str("1GB").unwrap()),
                     AlterTableOption::TwcsMaxActiveWindowFiles(10),
