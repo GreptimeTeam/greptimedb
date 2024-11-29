@@ -843,8 +843,12 @@ impl FlowWorkerManager {
                         if auto.data_type != real.data_type {
                             InvalidQuerySnafu {
                                     reason: format!(
-                                        "Column {}(name is '{}')'s data type mismatch, expect {:?} got {:?}",
-                                        idx, real.name, real.data_type, auto.data_type
+                                        "Column {}(name is '{}', flow inferred name is '{}')'s data type mismatch, expect {:?} got {:?}",
+                                        idx,
+                                        real.name,
+                                        auto.name,
+                                        real.data_type,
+                                        auto.data_type
                                     ),
                                 }
                                 .fail()?;

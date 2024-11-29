@@ -113,3 +113,29 @@ pub fn column_schemas_to_proto(
         .collect();
     Ok(ret)
 }
+
+/// Convert `RelationDesc` to `ColumnSchema` list,
+/// if the column name is not present, use `col_{idx}` as the column name
+pub fn relation_desc_to_column_schemas_with_fallback(schema: &RelationDesc) -> Vec<ColumnSchema> {
+    schema
+        .typ()
+        .column_types
+        .clone()
+        .into_iter()
+        .enumerate()
+        .map(|(idx, typ)| {
+            let name = schema
+                .names
+                .get(idx)
+                .cloned()
+                .flatten()
+                .unwrap_or(format!("col_{}", idx));
+            let ret = ColumnSchema::new(name, typ.scalar_type, typ.nullable);
+            if schema.typ().time_index == Some(idx) {
+                ret.with_time_index(true)
+            } else {
+                ret
+            }
+        })
+        .collect_vec()
+}
