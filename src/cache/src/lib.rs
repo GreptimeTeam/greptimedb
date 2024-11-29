@@ -41,7 +41,9 @@ pub const SCHEMA_CACHE_NAME: &str = "schema_cache";
 pub const TABLE_FLOWNODE_SET_CACHE_NAME: &str = "table_flownode_set_cache";
 pub const TABLE_ROUTE_CACHE_NAME: &str = "table_route_cache";
 
-/// Builds cache registry for datanode.
+/// Builds cache registry for datanode, including:
+/// - Table info cache
+/// - Schema cache.
 pub fn build_datanode_cache_registry(kv_backend: KvBackendRef) -> CacheRegistry {
     // Builds table info cache
     let cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
@@ -71,6 +73,13 @@ pub fn build_datanode_cache_registry(kv_backend: KvBackendRef) -> CacheRegistry 
         .build()
 }
 
+/// Builds cache registry for frontend and datanode, including:
+/// - Table info cache
+/// - Table name cache
+/// - Table route cache
+/// - Table flow node cache
+/// - View cache
+/// - Schema cache
 pub fn build_fundamental_cache_registry(kv_backend: KvBackendRef) -> CacheRegistry {
     // Builds table info cache
     let cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
