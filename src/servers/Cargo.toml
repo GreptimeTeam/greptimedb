@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+default = []
 dashboard = []
 mem-prof = ["dep:common-mem-prof"]
 pprof = ["dep:common-pprof"]
@@ -15,7 +16,6 @@ workspace = true
 
 [dependencies]
 ahash = "0.8"
-aide = { version = "0.9", features = ["axum"] }
 api.workspace = true
 arrow.workspace = true
 arrow-flight.workspace = true
@@ -92,7 +92,6 @@ rust-embed = { version = "6.6", features = ["debug-embed"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-pemfile = "2.0"
 rustls-pki-types = "1.0"
-schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 session.workspace = true

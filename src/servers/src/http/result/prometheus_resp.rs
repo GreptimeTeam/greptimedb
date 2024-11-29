@@ -27,7 +27,6 @@ use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
 use promql_parser::label::METRIC_NAME;
 use promql_parser::parser::value::ValueType;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
@@ -40,7 +39,7 @@ use crate::http::prometheus::{
     PromData, PromQueryResult, PromSeriesMatrix, PromSeriesVector, PrometheusResponse,
 };
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct PrometheusJsonResponse {
     pub status: String,
     pub data: PrometheusResponse,

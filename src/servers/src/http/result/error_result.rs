@@ -18,14 +18,13 @@ use axum::Json;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_telemetry::{debug, error};
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::error::status_code_to_http_status;
 use crate::http::header::constants::GREPTIME_DB_HEADER_ERROR_CODE;
 use crate::http::header::GREPTIME_DB_HEADER_EXECUTION_TIME;
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ErrorResponse {
     code: u32,
     error: String,
