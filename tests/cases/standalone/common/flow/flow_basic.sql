@@ -168,7 +168,9 @@ CREATE TABLE numbers_input_basic (
 );
 
 create table out_num_cnt_basic (
-    number INT,
+    a INTERVAL,
+    b INTERVAL,
+    c INTERVAL,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP TIME INDEX
 );
 
@@ -841,9 +843,10 @@ SELECT
     sum(case when connect_result = 1 then 1 else 0 end) as total_connect_result_ok,
     sum(case when connect_result = 0 then 1 else 0 end) as total_connect_result_fail,
     count(connect_result) as total_connect,
+    sum(case when connect_result = 1 then 1 else 0 end)::double / count(connect_result) as conection_rate,
     avg(first_frame_time) as avg_first_frame_time,
     max(first_frame_time) as max_first_frame_time,
-    sum(case when connect_result = 1 then 1 else 0 end) / count(connect_result) as ok_conection_rate,
+    sum(case when connect_result = 1 then 1 else 0 end)::double / count(connect_result) as ok_conection_rate,
     date_bin(INTERVAL '1 minutes', record_time) as record_time_window,
 FROM live_connection_log
 WHERE iot_online = 1

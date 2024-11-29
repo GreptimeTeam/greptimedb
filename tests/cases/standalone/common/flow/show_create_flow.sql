@@ -138,16 +138,20 @@ create table out_num_cnt_show (
     PRIMARY KEY(number),
 );
 
-CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number FROM numbers_input_show where number > 10;
+CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number as n1 FROM numbers_input_show where number > 10;
 
 INSERT INTO numbers_input_show VALUES (10, 0),(15, 1),(16, 2);
 
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('filter_numbers_show');
 
-SELECT number, ts FROM out_num_cnt_show;
+SELECT number FROM out_num_cnt_show;
 
--- should mismatch once insert
+
+-- should mismatch
+CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number AS n1, number AS n2 FROM numbers_input_show where number > 15;
+
+-- should mismatch
 CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number AS n1, number AS n2, number AS n3 FROM numbers_input_show where number > 15;
 
 INSERT INTO numbers_input_show VALUES (10, 6),(15, 7),(18, 3);
@@ -156,7 +160,7 @@ INSERT INTO numbers_input_show VALUES (10, 6),(15, 7),(18, 3);
 ADMIN FLUSH_FLOW('filter_numbers_show');
 
 -- sink table stays the same since the flow error out due to column mismatch
-SELECT number, ts FROM out_num_cnt_show;
+SELECT number FROM out_num_cnt_show;
 
 DROP FLOW filter_numbers_show;
 
