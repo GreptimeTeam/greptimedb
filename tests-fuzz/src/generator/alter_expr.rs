@@ -289,7 +289,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_options":{"AddColumn":{"column":{"name":{"value":"velit","quote_style":null},"column_type":{"Int32":{}},"options":[{"DefaultValue":{"Int32":1606462472}}]},"location":null}}}"#;
+        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_kinds":{"AddColumn":{"column":{"name":{"value":"velit","quote_style":null},"column_type":{"Int32":{}},"options":[{"DefaultValue":{"Int32":1606462472}}]},"location":null}}}"#;
         assert_eq!(expected, serialized);
 
         let expr = AlterExprRenameGeneratorBuilder::default()
@@ -299,7 +299,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_options":{"RenameTable":{"new_table_name":{"value":"nihil","quote_style":null}}}}"#;
+        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_kinds":{"RenameTable":{"new_table_name":{"value":"nihil","quote_style":null}}}}"#;
         assert_eq!(expected, serialized);
 
         let expr = AlterExprDropColumnGeneratorBuilder::default()
@@ -309,7 +309,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_options":{"DropColumn":{"name":{"value":"cUmquE","quote_style":null}}}}"#;
+        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_kinds":{"DropColumn":{"name":{"value":"cUmquE","quote_style":null}}}}"#;
         assert_eq!(expected, serialized);
 
         let expr = AlterExprModifyDataTypeGeneratorBuilder::default()
@@ -319,7 +319,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_options":{"ModifyDataType":{"column":{"name":{"value":"toTAm","quote_style":null},"column_type":{"Int64":{}},"options":[]}}}}"#;
+        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_kinds":{"ModifyDataType":{"column":{"name":{"value":"toTAm","quote_style":null},"column_type":{"Int64":{}},"options":[]}}}}"#;
         assert_eq!(expected, serialized);
     }
 }
