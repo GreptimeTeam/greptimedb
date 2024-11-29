@@ -30,7 +30,7 @@ use common_telemetry::{debug, info, trace};
 use datatypes::schema::ColumnSchema;
 use datatypes::value::Value;
 use greptime_proto::v1;
-use itertools::Itertools;
+use itertools::{EitherOrBoth, Itertools};
 use meta_client::MetaClientOptions;
 use query::QueryEngine;
 use serde::{Deserialize, Serialize};
@@ -46,7 +46,10 @@ use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 pub(crate) use crate::adapter::node_context::FlownodeContext;
 use crate::adapter::table_source::TableSource;
-use crate::adapter::util::{column_schemas_to_proto, table_info_value_to_relation_desc};
+use crate::adapter::util::{
+    column_schemas_to_proto, relation_desc_to_column_schemas_with_fallback,
+    table_info_value_to_relation_desc,
+};
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
 use crate::df_optimizer::sql_to_flow_plan;
@@ -458,27 +461,7 @@ impl FlowWorkerManager {
             true,
         );
 
-        let original_schema = schema
-            .typ()
-            .column_types
-            .clone()
-            .into_iter()
-            .enumerate()
-            .map(|(idx, typ)| {
-                let name = schema
-                    .names
-                    .get(idx)
-                    .cloned()
-                    .flatten()
-                    .unwrap_or(format!("col_{}", idx));
-                let ret = ColumnSchema::new(name, typ.scalar_type, typ.nullable);
-                if schema.typ().time_index == Some(idx) {
-                    ret.with_time_index(true)
-                } else {
-                    ret
-                }
-            })
-            .collect_vec();
+        let original_schema = relation_desc_to_column_schemas_with_fallback(schema);
 
         let mut with_auto_added_col = original_schema.clone();
         with_auto_added_col.push(update_at);
@@ -498,7 +481,7 @@ impl FlowWorkerManager {
         Ok((primary_keys, with_auto_added_col, no_time_index))
     }
 
-    /// Fetch table info or create table from flow's schema if not exist
+    /// Fetch table info or create table('s schema) from flow's schema if not exist
     async fn try_fetch_or_create_table(
         &self,
         table_name: &TableName,
@@ -844,48 +827,41 @@ impl FlowWorkerManager {
         debug!("Flow {:?}'s Plan is {:?}", flow_id, flow_plan);
 
         // TODO(discord9): check schema against actual table schema if exists
-        if let Some((primary_keys, time_index, real_schema)) =
-            self.fetch_table_pk_schema(&sink_table_name).await?
-        {
-            let (auto_pks, auto_schema, _) = self
-                .adjust_auto_created_table_schema(&flow_plan.schema)
-                .await?;
-
-            let pk_with_time_index = primary_keys
-                .iter()
-                .chain(time_index.map(|i| &real_schema[i].name))
-                .collect_vec();
-            // make sure auto pks are subset of actual
-            ensure!(
-                auto_pks.iter().all(|pk| pk_with_time_index.contains(&pk)),
-                InvalidQuerySnafu {
-                    reason: format!(
-                        "flow's output primary keys {:?} are not subset of actual primary keys or time index in sink table {:?}",
-                        auto_pks, primary_keys
-                    )
-                }
-            );
+        if let Some((_, _, real_schema)) = self.fetch_table_pk_schema(&sink_table_name).await? {
+            let auto_schema = relation_desc_to_column_schemas_with_fallback(&flow_plan.schema);
 
             // for column schema, only `data_type` need to be check for equality
             // since one can omit flow's column name when write flow query
-            let is_same = auto_schema
+            // print a user friendly error message about mismatch and how to correct them
+            for (idx, zipped) in auto_schema
                 .iter()
-                .zip(real_schema.iter())
-                .all(|(auto, actual)| auto.data_type == actual.data_type);
-
-            if !is_same {
-                // print a user friendly error message about mismatch and how to correct them
-                for (idx, (auto, real)) in auto_schema.iter().zip(real_schema.iter()).enumerate() {
-                    if auto.data_type != real.data_type {
-                        InvalidQuerySnafu {
-                            reason: format!(
-                                "Column {}(name is {})'s data type mismatch, expect {:?} got {:?}",
-                                idx, real.name, real.data_type, auto.data_type
-                            ),
+                .zip_longest(real_schema.iter())
+                .enumerate()
+            {
+                match zipped {
+                    EitherOrBoth::Both(auto, real) => {
+                        if auto.data_type != real.data_type {
+                            InvalidQuerySnafu {
+                                    reason: format!(
+                                        "Column {}(name is '{}')'s data type mismatch, expect {:?} got {:?}",
+                                        idx, real.name, real.data_type, auto.data_type
+                                    ),
+                                }
+                                .fail()?;
                         }
-                        .fail()?;
                     }
-                    // auto time index might be incorrect, just override it with real time index
+                    EitherOrBoth::Right(real) if real.data_type.is_timestamp() => {
+                        // if table is auto created, the last one or two column should be timestamp(update at and ts placeholder)
+                        continue;
+                    }
+                    _ => InvalidQuerySnafu {
+                        reason: format!(
+                            "schema length mismatched, expected {} found {}",
+                            real_schema.len(),
+                            auto_schema.len()
+                        ),
+                    }
+                    .fail()?,
                 }
             }
 
