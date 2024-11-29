@@ -674,3 +674,36 @@ transform:
 
     assert_eq!(expected, r);
 }
+
+#[test]
+fn test_decolorize() {
+    let input_value = serde_json::json!({
+        "message": "\u{001b}[32mSuccess\u{001b}[0m and \u{001b}[31mError\u{001b}[0m"
+    });
+
+    let pipeline_yaml = r#"
+processors:
+  - decolorize:
+      fields:
+        - message
+transform:
+  - fields:
+      - message
+    type: string
+"#;
+    let yaml_content = Content::Yaml(pipeline_yaml.into());
+    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
+
+    let mut status = pipeline.init_intermediate_state();
+    pipeline.prepare(input_value, &mut status).unwrap();
+    let row = pipeline.exec_mut(&mut status).unwrap();
+
+    let r = row
+        .values
+        .into_iter()
+        .map(|v| v.value_data.unwrap())
+        .collect::<Vec<_>>();
+
+    let expected = StringValue("Success and Error".into());
+    assert_eq!(expected, r[0]);
+}

@@ -12,34 +12,38 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Removes ANSI color control codes from the input text.
+//!
+//! Similar to [`decolorize`](https://grafana.com/docs/loki/latest/query/log_queries/#removing-color-codes)
+//! from Grafana Loki and [`strip_ansi_escape_codes`](https://vector.dev/docs/reference/vrl/functions/#strip_ansi_escape_codes)
+//! from Vector VRL.
+
 use ahash::HashSet;
+use once_cell::sync::Lazy;
 use regex::Regex;
-use snafu::{OptionExt, ResultExt};
+use snafu::OptionExt;
 
 use crate::etl::error::{
-    Error, GsubPatternRequiredSnafu, GsubReplacementRequiredSnafu, KeyMustBeStringSnafu,
-    ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, RegexSnafu, Result,
+    Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, Result,
 };
 use crate::etl::field::{Fields, OneInputOneOutputField};
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, ProcessorBuilder, ProcessorKind,
-    FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, PATTERN_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fields, ProcessorBuilder, ProcessorKind, FIELDS_NAME,
+    FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::Value;
 
-pub(crate) const PROCESSOR_GSUB: &str = "gsub";
+pub(crate) const PROCESSOR_DECOLORIZE: &str = "decolorize";
 
-const REPLACEMENT_NAME: &str = "replacement";
+static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\x1b\[[0-9;]*m").unwrap());
 
 #[derive(Debug, Default)]
-pub struct GsubProcessorBuilder {
+pub struct DecolorizeProcessorBuilder {
     fields: Fields,
-    pattern: Option<Regex>,
-    replacement: Option<String>,
     ignore_missing: bool,
 }
 
-impl ProcessorBuilder for GsubProcessorBuilder {
+impl ProcessorBuilder for DecolorizeProcessorBuilder {
     fn output_keys(&self) -> HashSet<&str> {
         self.fields
             .iter()
@@ -52,83 +56,46 @@ impl ProcessorBuilder for GsubProcessorBuilder {
     }
 
     fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind> {
-        self.build(intermediate_keys).map(ProcessorKind::Gsub)
+        self.build(intermediate_keys).map(ProcessorKind::Decolorize)
     }
 }
 
-impl GsubProcessorBuilder {
-    fn check(self) -> Result<Self> {
-        if self.pattern.is_none() {
-            return GsubPatternRequiredSnafu.fail();
-        }
-
-        if self.replacement.is_none() {
-            return GsubReplacementRequiredSnafu.fail();
-        }
-
-        Ok(self)
-    }
-
-    fn build(self, intermediate_keys: &[String]) -> Result<GsubProcessor> {
+impl DecolorizeProcessorBuilder {
+    fn build(self, intermediate_keys: &[String]) -> Result<DecolorizeProcessor> {
         let mut real_fields = vec![];
         for field in self.fields.into_iter() {
             let input = OneInputOneOutputField::build(
-                "gsub",
+                "decolorize",
                 intermediate_keys,
                 field.input_field(),
                 field.target_or_input_field(),
             )?;
             real_fields.push(input);
         }
-        Ok(GsubProcessor {
+        Ok(DecolorizeProcessor {
             fields: real_fields,
-            pattern: self.pattern,
-            replacement: self.replacement,
             ignore_missing: self.ignore_missing,
         })
     }
 }
 
-/// A processor to replace all matches of a pattern in string by a replacement, only support string value, and array string value
+/// Remove ANSI color control codes from the input text.
 #[derive(Debug, Default)]
-pub struct GsubProcessor {
+pub struct DecolorizeProcessor {
     fields: Vec<OneInputOneOutputField>,
-    pattern: Option<Regex>,
-    replacement: Option<String>,
     ignore_missing: bool,
 }
 
-impl GsubProcessor {
-    fn check(self) -> Result<Self> {
-        if self.pattern.is_none() {
-            return GsubPatternRequiredSnafu.fail();
-        }
-
-        if self.replacement.is_none() {
-            return GsubReplacementRequiredSnafu.fail();
-        }
-
-        Ok(self)
-    }
-
+impl DecolorizeProcessor {
     fn process_string(&self, val: &str) -> Result<Value> {
-        let replacement = self.replacement.as_ref().unwrap();
-        let new_val = self
-            .pattern
-            .as_ref()
-            .unwrap()
-            .replace_all(val, replacement)
-            .to_string();
-        let val = Value::String(new_val);
-
-        Ok(val)
+        Ok(Value::String(RE.replace_all(val, "").into_owned()))
     }
 
     fn process(&self, val: &Value) -> Result<Value> {
         match val {
             Value::String(val) => self.process_string(val),
             _ => ProcessorExpectStringSnafu {
-                processor: PROCESSOR_GSUB,
+                processor: PROCESSOR_DECOLORIZE,
                 v: val.clone(),
             }
             .fail(),
@@ -136,14 +103,12 @@ impl GsubProcessor {
     }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for GsubProcessorBuilder {
+impl TryFrom<&yaml_rust::yaml::Hash> for DecolorizeProcessorBuilder {
     type Error = Error;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self> {
         let mut fields = Fields::default();
         let mut ignore_missing = false;
-        let mut pattern = None;
-        let mut replacement = None;
 
         for (k, v) in value.iter() {
             let key = k
@@ -157,39 +122,23 @@ impl TryFrom<&yaml_rust::yaml::Hash> for GsubProcessorBuilder {
                 FIELDS_NAME => {
                     fields = yaml_new_fields(v, FIELDS_NAME)?;
                 }
-                PATTERN_NAME => {
-                    let pattern_str = yaml_string(v, PATTERN_NAME)?;
-                    pattern = Some(Regex::new(&pattern_str).context(RegexSnafu {
-                        pattern: pattern_str,
-                    })?);
-                }
-                REPLACEMENT_NAME => {
-                    let replacement_str = yaml_string(v, REPLACEMENT_NAME)?;
-                    replacement = Some(replacement_str);
-                }
-
                 IGNORE_MISSING_NAME => {
                     ignore_missing = yaml_bool(v, IGNORE_MISSING_NAME)?;
                 }
-
                 _ => {}
             }
         }
 
-        let builder = GsubProcessorBuilder {
+        Ok(DecolorizeProcessorBuilder {
             fields,
-            pattern,
-            replacement,
             ignore_missing,
-        };
-
-        builder.check()
+        })
     }
 }
 
-impl crate::etl::processor::Processor for GsubProcessor {
+impl crate::etl::processor::Processor for DecolorizeProcessor {
     fn kind(&self) -> &str {
-        PROCESSOR_GSUB
+        PROCESSOR_DECOLORIZE
     }
 
     fn ignore_missing(&self) -> bool {
@@ -222,20 +171,25 @@ impl crate::etl::processor::Processor for GsubProcessor {
 
 #[cfg(test)]
 mod tests {
-    use crate::etl::processor::gsub::GsubProcessor;
-    use crate::etl::value::Value;
+    use super::*;
 
     #[test]
-    fn test_string_value() {
-        let processor = GsubProcessor {
-            pattern: Some(regex::Regex::new(r"\d+").unwrap()),
-            replacement: Some("xxx".to_string()),
-            ..Default::default()
+    fn test_decolorize_processor() {
+        let processor = DecolorizeProcessor {
+            fields: vec![],
+            ignore_missing: false,
         };
 
-        let val = Value::String("123".to_string());
+        let val = Value::String("\x1b[32mGreen\x1b[0m".to_string());
         let result = processor.process(&val).unwrap();
+        assert_eq!(result, Value::String("Green".to_string()));
 
-        assert_eq!(result, Value::String("xxx".to_string()));
+        let val = Value::String("Plain text".to_string());
+        let result = processor.process(&val).unwrap();
+        assert_eq!(result, Value::String("Plain text".to_string()));
+
+        let val = Value::String("\x1b[46mfoo\x1b[0m bar".to_string());
+        let result = processor.process(&val).unwrap();
+        assert_eq!(result, Value::String("foo bar".to_string()));
     }
 }
