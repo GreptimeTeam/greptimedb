@@ -21,7 +21,8 @@ use api::v1::{RowDeleteRequests, RowInsertRequests};
 use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::from_err_code_msg_to_header;
 use common_meta::cache::{LayeredCacheRegistryRef, TableFlownodeSetCacheRef, TableRouteCacheRef};
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::flow::FlowMetadataManagerRef;
@@ -32,6 +33,7 @@ use common_query::Output;
 use common_telemetry::tracing::info;
 use futures::{FutureExt, TryStreamExt};
 use greptime_proto::v1::flow::{flow_server, FlowRequest, FlowResponse, InsertRequests};
+use http::HeaderValue;
 use itertools::Itertools;
 use operator::delete::Deleter;
 use operator::insert::Inserter;
@@ -45,13 +47,14 @@ use snafu::{ensure, OptionExt, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, oneshot, Mutex};
 use tonic::codec::CompressionEncoding;
+use tonic::metadata::MetadataMap;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
 use crate::adapter::{CreateFlowArgs, FlowWorkerManagerRef};
 use crate::error::{
-    CacheRequiredSnafu, ExternalSnafu, FlowNotFoundSnafu, ListFlowsSnafu, ParseAddrSnafu,
-    ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
+    to_status_with_last_err, CacheRequiredSnafu, ExternalSnafu, FlowNotFoundSnafu, ListFlowsSnafu,
+    ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::transform::register_function_to_query_engine;
@@ -81,10 +84,7 @@ impl flow_server::Flow for FlowService {
             .handle(request)
             .await
             .map(Response::new)
-            .map_err(|e| {
-                let msg = format!("failed to handle request: {:?}", e);
-                Status::internal(msg)
-            })
+            .map_err(to_status_with_last_err)
     }
 
     async fn handle_mirror_request(
@@ -107,10 +107,7 @@ impl flow_server::Flow for FlowService {
             .handle_inserts(request)
             .await
             .map(Response::new)
-            .map_err(|e| {
-                let msg = format!("failed to handle request: {:?}", e);
-                Status::internal(msg)
-            })
+            .map_err(to_status_with_last_err)
     }
 }
 
