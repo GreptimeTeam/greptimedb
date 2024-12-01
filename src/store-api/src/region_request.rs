@@ -23,7 +23,7 @@ use api::v1::region::{
     CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
     FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
-use api::v1::{self, Analyzer, Option as PbOption, Rows, SemanticType};
+use api::v1::{self, set_index, Analyzer, Option as PbOption, Rows, SemanticType};
 pub use common_base::AffectedRows;
 use common_time::TimeToLive;
 use datatypes::data_type::ConcreteDataType;
@@ -416,13 +416,59 @@ pub enum AlterKind {
     SetRegionOptions { options: Vec<SetRegionOption> },
     /// Unset region options.
     UnsetRegionOptions { keys: Vec<UnsetRegionOption> },
-    /// Set fulltext index options.
-    SetColumnFulltext {
+    /// Set index options.
+    SetIndex { options: ApiSetIndexOptions },
+    /// Unset index options.
+    UnsetIndex { options: ApiUnsetIndexOptions },
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum ApiSetIndexOptions {
+    Fulltext {
         column_name: String,
         options: FulltextOptions,
     },
-    /// Unset fulltext index options.
-    UnsetColumnFulltext { column_name: String },
+    Inverted {
+        column_name: String,
+    },
+}
+
+impl ApiSetIndexOptions {
+    pub fn column_name(&self) -> &String {
+        match self {
+            ApiSetIndexOptions::Fulltext { column_name, .. } => column_name,
+            ApiSetIndexOptions::Inverted { column_name } => column_name,
+        }
+    }
+
+    pub fn is_fulltext(&self) -> bool {
+        match self {
+            ApiSetIndexOptions::Fulltext { .. } => true,
+            ApiSetIndexOptions::Inverted { .. } => false,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum ApiUnsetIndexOptions {
+    Fulltext { column_name: String },
+    Inverted { column_name: String },
+}
+
+impl ApiUnsetIndexOptions {
+    pub fn column_name(&self) -> &String {
+        match self {
+            ApiUnsetIndexOptions::Fulltext { column_name } => column_name,
+            ApiUnsetIndexOptions::Inverted { column_name } => column_name,
+        }
+    }
+
+    pub fn is_fulltext(&self) -> bool {
+        match self {
+            ApiUnsetIndexOptions::Fulltext { .. } => true,
+            ApiUnsetIndexOptions::Inverted { .. } => false,
+        }
+    }
 }
 
 impl AlterKind {
@@ -448,9 +494,19 @@ impl AlterKind {
             }
             AlterKind::SetRegionOptions { .. } => {}
             AlterKind::UnsetRegionOptions { .. } => {}
-            AlterKind::SetColumnFulltext { column_name, .. }
-            | AlterKind::UnsetColumnFulltext { column_name } => {
-                Self::validate_column_fulltext_option(column_name, metadata)?;
+            AlterKind::SetIndex { options } => {
+                Self::validate_column_alter_index_option(
+                    options.column_name(),
+                    metadata,
+                    options.is_fulltext(),
+                )?;
+            }
+            AlterKind::UnsetIndex { options } => {
+                Self::validate_column_alter_index_option(
+                    options.column_name(),
+                    metadata,
+                    options.is_fulltext(),
+                )?;
             }
         }
         Ok(())
@@ -475,11 +531,11 @@ impl AlterKind {
                 true
             }
             AlterKind::UnsetRegionOptions { .. } => true,
-            AlterKind::SetColumnFulltext { column_name, .. } => {
-                metadata.column_by_name(column_name).is_some()
+            AlterKind::SetIndex { options, .. } => {
+                metadata.column_by_name(options.column_name()).is_some()
             }
-            AlterKind::UnsetColumnFulltext { column_name } => {
-                metadata.column_by_name(column_name).is_some()
+            AlterKind::UnsetIndex { options } => {
+                metadata.column_by_name(options.column_name()).is_some()
             }
         }
     }
@@ -499,10 +555,11 @@ impl AlterKind {
         Ok(())
     }
 
-    /// Returns an error if the column to change fulltext index option is invalid.
-    fn validate_column_fulltext_option(
+    /// Returns an error if the column's alter index option is invalid.
+    fn validate_column_alter_index_option(
         column_name: &String,
         metadata: &RegionMetadata,
+        is_fulltext: bool,
     ) -> Result<()> {
         let column = metadata
             .column_by_name(column_name)
@@ -511,16 +568,18 @@ impl AlterKind {
                 err: format!("column {} not found", column_name),
             })?;
 
-        ensure!(
-            column.column_schema.data_type.is_string(),
-            InvalidRegionRequestSnafu {
-                region_id: metadata.region_id,
-                err: format!(
-                    "cannot change fulltext index options for non-string column {}",
-                    column_name
-                ),
-            }
-        );
+        if is_fulltext {
+            ensure!(
+                column.column_schema.data_type.is_string(),
+                InvalidRegionRequestSnafu {
+                    region_id: metadata.region_id,
+                    err: format!(
+                        "cannot change alter index options for non-string column {}",
+                        column_name
+                    ),
+                }
+            );
+        }
 
         Ok(())
     }
@@ -565,18 +624,36 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                     .map(|key| UnsetRegionOption::try_from(key.as_str()))
                     .collect::<Result<Vec<_>>>()?,
             },
-            alter_request::Kind::SetColumnFulltext(x) => AlterKind::SetColumnFulltext {
-                column_name: x.column_name.clone(),
-                options: FulltextOptions {
-                    enable: x.enable,
-                    analyzer: as_fulltext_option(
-                        Analyzer::try_from(x.analyzer).context(DecodeProtoSnafu)?,
-                    ),
-                    case_sensitive: x.case_sensitive,
+            alter_request::Kind::SetIndex(o) => match o.options.unwrap() {
+                set_index::Options::Fulltext(x) => AlterKind::SetIndex {
+                    options: ApiSetIndexOptions::Fulltext {
+                        column_name: x.column_name.clone(),
+                        options: FulltextOptions {
+                            enable: x.enable,
+                            analyzer: as_fulltext_option(
+                                Analyzer::try_from(x.analyzer).context(DecodeProtoSnafu)?,
+                            ),
+                            case_sensitive: x.case_sensitive,
+                        },
+                    },
+                },
+                set_index::Options::Inverted(i) => AlterKind::SetIndex {
+                    options: ApiSetIndexOptions::Inverted {
+                        column_name: i.column_name,
+                    },
                 },
             },
-            alter_request::Kind::UnsetColumnFulltext(x) => AlterKind::UnsetColumnFulltext {
-                column_name: x.column_name,
+            alter_request::Kind::UnsetIndex(o) => match o.options.unwrap() {
+                v1::unset_index::Options::Fulltext(f) => AlterKind::UnsetIndex {
+                    options: ApiUnsetIndexOptions::Fulltext {
+                        column_name: f.column_name,
+                    },
+                },
+                v1::unset_index::Options::Inverted(i) => AlterKind::UnsetIndex {
+                    options: ApiUnsetIndexOptions::Inverted {
+                        column_name: i.column_name,
+                    },
+                },
             },
         };
 
@@ -1425,12 +1502,14 @@ mod tests {
 
     #[test]
     fn test_validate_modify_column_fulltext_options() {
-        let kind = AlterKind::SetColumnFulltext {
-            column_name: "tag_0".to_string(),
-            options: FulltextOptions {
-                enable: true,
-                analyzer: FulltextAnalyzer::Chinese,
-                case_sensitive: false,
+        let kind = AlterKind::SetIndex {
+            options: ApiSetIndexOptions::Fulltext {
+                column_name: "tag_0".to_string(),
+                options: FulltextOptions {
+                    enable: true,
+                    analyzer: FulltextAnalyzer::Chinese,
+                    case_sensitive: false,
+                },
             },
         };
         let request = RegionAlterRequest {
@@ -1441,8 +1520,10 @@ mod tests {
         metadata.schema_version = 1;
         request.validate(&metadata).unwrap();
 
-        let kind = AlterKind::UnsetColumnFulltext {
-            column_name: "tag_0".to_string(),
+        let kind = AlterKind::UnsetIndex {
+            options: ApiUnsetIndexOptions::Fulltext {
+                column_name: "tag_0".to_string(),
+            },
         };
         let request = RegionAlterRequest {
             schema_version: 1,

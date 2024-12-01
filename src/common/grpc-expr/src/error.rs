@@ -139,6 +139,12 @@ pub enum Error {
         #[snafu(source)]
         error: prost::DecodeError,
     },
+
+    #[snafu(display("Missing alter index options"))]
+    MissingAlterIndexOption {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -164,7 +170,8 @@ impl ErrorExt for Error {
             }
             Error::InvalidSetTableOptionRequest { .. }
             | Error::InvalidUnsetTableOptionRequest { .. }
-            | Error::InvalidSetFulltextOptionRequest { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidSetFulltextOptionRequest { .. }
+            | Error::MissingAlterIndexOption { .. } => StatusCode::InvalidArguments,
         }
     }
 
