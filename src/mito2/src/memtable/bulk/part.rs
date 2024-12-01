@@ -170,15 +170,6 @@ impl BulkPartEncoder {
     }
 }
 
-/// Loads metadata.
-fn load_metadata(buf: &Bytes) -> Result<Arc<ParquetMetaData>> {
-    let options = ArrowReaderOptions::new()
-        .with_page_index(true)
-        .with_skip_arrow_metadata(true);
-    let metadata = ArrowReaderMetadata::load(buf, options).context(error::ReadDataPartSnafu)?;
-    Ok(metadata.metadata().clone())
-}
-
 /// Converts mutations to record batches.
 fn mutations_to_record_batch(
     mutations: &[Mutation],
