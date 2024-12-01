@@ -94,6 +94,15 @@ pub enum AlterTableOperation {
     UnsetColumnFulltext {
         column_name: Ident,
     },
+    /// `MODIFY COLUMN <column_name> SET INVERTED INDEX`
+    SetColumnInvertedIndex {
+        column_name: Ident,
+    },
+    /// `MODIFY COLUMN <column_name> UNSET INVERTED INDEX`
+    UnsetColumnInvertedIndex {
+        column_name: Ident,
+    },
+    
 }
 
 impl Display for AlterTableOperation {
@@ -146,6 +155,14 @@ impl Display for AlterTableOperation {
             }
             AlterTableOperation::UnsetColumnFulltext { column_name } => {
                 write!(f, "MODIFY COLUMN {column_name} UNSET FULLTEXT")
+            }
+            AlterTableOperation::SetColumnInvertedIndex {
+                column_name,
+            } => {
+                write!(f, "MODIFY COLUMN {column_name} SET INVERTED INDEX")
+            }
+            AlterTableOperation::UnsetColumnInvertedIndex { column_name } => {
+                write!(f, "MODIFY COLUMN {column_name} UNSET INVERTED INDEX")
             }
         }
     }

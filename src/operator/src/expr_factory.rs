@@ -556,6 +556,22 @@ pub(crate) fn to_alter_table_expr(
             AlterTableKind::UnsetColumnFulltext(UnsetColumnFulltext {
                 column_name: column_name.value,
             })
+        },
+        AlterTableOperation::SetColumnInvertedIndex {
+            column_name,
+        } => AlterTableKind::SetColumnFulltext(SetColumnFulltext {
+            column_name: column_name.value,
+            enable: options.enable,
+            analyzer: match options.analyzer {
+                FulltextAnalyzer::English => Analyzer::English.into(),
+                FulltextAnalyzer::Chinese => Analyzer::Chinese.into(),
+            },
+            case_sensitive: options.case_sensitive,
+        }),
+        AlterTableOperation::UnsetColumnFulltext { column_name } => {
+            AlterTableKind::UnsetColumnFulltext(UnsetColumnFulltext {
+                column_name: column_name.value,
+            })
         }
     };
 

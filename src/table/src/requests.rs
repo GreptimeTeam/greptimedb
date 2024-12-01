@@ -226,6 +226,12 @@ pub enum AlterKind {
     UnsetColumnFulltext {
         column_name: String,
     },
+    SetColumnInvertedIndex {
+        column_name: String,
+    },
+    UnsetColumnInvertedIndex {
+        column_name: String,
+    },
 }
 
 #[derive(Debug)]

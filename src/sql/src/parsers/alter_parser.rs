@@ -20,7 +20,7 @@ use snafu::{ensure, ResultExt};
 use sqlparser::ast::Ident;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
-use sqlparser::tokenizer::Token;
+use sqlparser::tokenizer::{Token, TokenWithLocation};
 
 use crate::error::{self, InvalidColumnOptionSnafu, Result, SetFulltextOptionSnafu};
 use crate::parser::ParserContext;
@@ -30,6 +30,8 @@ use crate::statements::alter::{
 };
 use crate::statements::statement::Statement;
 use crate::util::parse_option_string;
+
+use super::create_parser::INVERTED;
 
 impl ParserContext<'_> {
     pub(crate) fn parse_alter(&mut self) -> Result<Statement> {
@@ -226,13 +228,25 @@ impl ParserContext<'_> {
         match self.parser.peek_token().token {
             Token::Word(w) => {
                 if w.value.eq_ignore_ascii_case("UNSET") {
-                    let _ = self.parser.next_token();
+                    match self.parser.next_token() {
+                        TokenWithLocation {
+                            token: Token::Word(w),
+                            ..
+                        } if w.keyword == Keyword::FULLTEXT => {    
+                            Ok(AlterTableOperation::UnsetColumnFulltext { column_name })
+                        },
 
-                    self.parser
-                        .expect_keyword(Keyword::FULLTEXT)
-                        .context(error::SyntaxSnafu)?;
-
-                    Ok(AlterTableOperation::UnsetColumnFulltext { column_name })
+                        TokenWithLocation {
+                            token: Token::Word(w),
+                            ..
+                        } if  w.value.eq_ignore_ascii_case(INVERTED)=> {
+                            self.parser.expect_keyword(Keyword::INDEX).context(error::SyntaxSnafu)?;
+                            Ok(AlterTableOperation::UnsetColumnInvertedIndex { column_name })
+                        },
+                        _ => {
+                            self.expected(format!("{:?}", Keyword::FULLTEXT).as_str(), self.parser.peek_token())
+                        }
+                    }
                 } else if w.keyword == Keyword::SET {
                     self.parse_alter_column_fulltext(column_name)
                 } else {

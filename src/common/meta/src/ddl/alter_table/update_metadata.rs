@@ -56,7 +56,9 @@ impl AlterTableProcedure {
             | AlterKind::SetTableOptions { .. }
             | AlterKind::UnsetTableOptions { .. }
             | AlterKind::SetColumnFulltext { .. }
-            | AlterKind::UnsetColumnFulltext { .. } => {}
+            | AlterKind::UnsetColumnFulltext { .. }
+            | AlterKind::SetColumnInvertedIndex { .. }
+            | AlterKind::UnsetColumnInvertedIndex { .. } => {}
         }
 
         Ok(new_info)
