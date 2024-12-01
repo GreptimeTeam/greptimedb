@@ -156,6 +156,8 @@ impl<'a> RowGroupBase<'a> {
             .collect::<Vec<_>>()
     }
 
+    /// Assigns uncompressed chunk binary data to [RowGroupBase::column_chunks]
+    /// and returns the chunk offset and binary data assigned.
     pub(crate) fn assign_dense_chunk(
         &mut self,
         projection: &ProjectionMask,
