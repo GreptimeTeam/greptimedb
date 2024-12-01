@@ -27,7 +27,7 @@ use store_api::storage::ColumnId;
 use crate::sst::parquet::format::ReadFormat;
 
 /// Statistics for pruning row groups.
-pub struct RowGroupPruningStats<'a, T> {
+pub(crate) struct RowGroupPruningStats<'a, T> {
     /// Metadata of SST row groups.
     row_groups: &'a [T],
     /// Helper to read the SST.
