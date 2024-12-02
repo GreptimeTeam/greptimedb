@@ -24,8 +24,10 @@ use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
+use tonic::codec::CompressionEncoding;
 use tower::service_fn;
 
+use crate::add_compressed_service;
 use crate::metasrv::builder::MetasrvBuilder;
 use crate::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
 
@@ -80,11 +82,14 @@ pub async fn mock(
     let (client, server) = tokio::io::duplex(1024);
     let metasrv = Arc::new(metasrv);
     let service = metasrv.clone();
+
     let _handle = tokio::spawn(async move {
-        tonic::transport::Server::builder()
-            .add_service(HeartbeatServer::from_arc(service.clone()))
-            .add_service(StoreServer::from_arc(service.clone()))
-            .add_service(ProcedureServiceServer::from_arc(service.clone()))
+        let mut router = tonic::transport::Server::builder();
+        let router = add_compressed_service!(router, HeartbeatServer::from_arc(service.clone()));
+        let router = add_compressed_service!(router, StoreServer::from_arc(service.clone()));
+        let router =
+            add_compressed_service!(router, ProcedureServiceServer::from_arc(service.clone()));
+        router
             .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
             .await
     });

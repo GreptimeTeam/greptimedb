@@ -31,6 +31,7 @@ use common_meta::rpc::store::{
 use common_telemetry::{info, warn};
 use snafu::{ensure, ResultExt};
 use tokio::sync::RwLock;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
 use tonic::Status;
 
@@ -173,7 +174,10 @@ impl Inner {
     fn make_client(&self, addr: impl AsRef<str>) -> Result<ClusterClient<Channel>> {
         let channel = self.channel_manager.get(addr).context(CreateChannelSnafu)?;
 
-        Ok(ClusterClient::new(channel))
+        Ok(ClusterClient::new(channel)
+            .accept_compressed(CompressionEncoding::Gzip)
+            .accept_compressed(CompressionEncoding::Zstd)
+            .send_compressed(CompressionEncoding::Zstd))
     }
 
     #[inline]
