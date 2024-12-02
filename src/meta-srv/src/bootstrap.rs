@@ -179,6 +179,7 @@ pub async fn bootstrap_metasrv_with_router(
     Ok(())
 }
 
+#[macro_export]
 macro_rules! add_compressed_service {
     ($builder:expr, $server:expr) => {
         $builder.add_service(
