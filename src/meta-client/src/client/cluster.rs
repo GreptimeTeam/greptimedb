@@ -22,7 +22,7 @@ use api::v1::meta::{MetasrvNodeInfo, MetasrvPeersRequest, ResponseHeader, Role};
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::ChannelManager;
 use common_meta::error::{
-    Error as MetaError, ExternalSnafu, MetaClientExceededSizeLimitSnafu, Result as MetaResult,
+    Error as MetaError, ExternalSnafu, ResponseExceededSizeLimitSnafu, Result as MetaResult,
 };
 use common_meta::kv_backend::{KvBackend, TxnService};
 use common_meta::rpc::store::{
@@ -109,7 +109,7 @@ impl KvBackend for Client {
         match resp {
             Ok(resp) => Ok(resp),
             Err(err) if err.is_exceeded_size_limit() => {
-                Err(BoxedError::new(err)).context(MetaClientExceededSizeLimitSnafu)
+                Err(BoxedError::new(err)).context(ResponseExceededSizeLimitSnafu)
             }
             Err(err) => Err(BoxedError::new(err)).context(ExternalSnafu),
         }

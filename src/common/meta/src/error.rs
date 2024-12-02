@@ -425,8 +425,8 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Meta client exceeded size limit"))]
-    MetaClientExceededSizeLimit {
+    #[snafu(display("The response exceeded size limit"))]
+    ResponseExceededSizeLimit {
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
@@ -770,7 +770,7 @@ impl ErrorExt for Error {
             | StopProcedureManager { source, .. } => source.status_code(),
             RegisterProcedureLoader { source, .. } => source.status_code(),
             External { source, .. } => source.status_code(),
-            MetaClientExceededSizeLimit { source, .. } => source.status_code(),
+            ResponseExceededSizeLimit { source, .. } => source.status_code(),
             OperateDatanode { source, .. } => source.status_code(),
             Table { source, .. } => source.status_code(),
             RetryLater { source, .. } => source.status_code(),
@@ -818,7 +818,7 @@ impl Error {
                 error: etcd_client::Error::GRpcStatus(status),
                 ..
             } => status.code() == tonic::Code::OutOfRange,
-            Error::MetaClientExceededSizeLimit { .. } => true,
+            Error::ResponseExceededSizeLimit { .. } => true,
             _ => false,
         }
     }
