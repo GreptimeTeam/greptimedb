@@ -53,6 +53,10 @@ static SET_TRANSACTION_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^SET TRANSACTION (.*?);?$").unwrap());
 static TRANSACTION_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(BEGIN|ROLLBACK|COMMIT);?").unwrap());
+static START_TRANSACTION_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new("(?i)^START TRANSACTION .*").unwrap());
+static ABORT_TRANSACTION_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new("(?i)^ABORT TRANSACTION;?").unwrap());
 
 /// Test if given query statement matches the patterns
 pub(crate) fn matches(query: &str) -> bool {
@@ -67,6 +71,10 @@ pub(crate) fn process<'a>(query: &str, _query_ctx: QueryContextRef) -> Option<Ve
     if let Some(tx) = TRANSACTION_PATTERN.captures(query) {
         let tx_tag = &tx[1];
         Some(vec![Response::Execution(Tag::new(&tx_tag.to_uppercase()))])
+    } else if START_TRANSACTION_PATTERN.is_match(query) {
+        Some(vec![Response::Execution(Tag::new("START TRANSACTION"))])
+    } else if ABORT_TRANSACTION_PATTERN.is_match(query) {
+        Some(vec![Response::Execution(Tag::new("ROLLBACK"))])
     } else if let Some(show_var) = SHOW_PATTERN.captures(query) {
         let show_var = show_var[1].to_lowercase();
         if let Some(value) = VAR_VALUES.get(&show_var.as_ref()) {
@@ -150,6 +158,17 @@ mod test {
             "SET",
             query_context.clone(),
         );
+        assert_tag(
+            "START TRANSACTION isolation level READ COMMITTED;",
+            "START TRANSACTION",
+            query_context.clone(),
+        );
+        assert_tag(
+            "start transaction isolation level READ COMMITTED;",
+            "START TRANSACTION",
+            query_context.clone(),
+        );
+        assert_tag("abort transaction;", "ROLLBACK", query_context.clone());
 
         let resp = get_data("SHOW transaction isolation level", query_context.clone());
         assert_eq!(1, resp.row_schema().len());
