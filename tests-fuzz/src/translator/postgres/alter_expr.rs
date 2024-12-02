@@ -44,6 +44,9 @@ impl DslTranslator<AlterTableExpr, String> for AlterTableExprTranslator {
             AlterTableOperation::SetTableOptions { options } => {
                 Self::format_set_table_options(&input.table_name, options)
             }
+            AlterTableOperation::UnsetTableOptions { keys } => {
+                Self::format_unset_table_options(&input.table_name, keys)
+            }
         })
     }
 }
@@ -122,6 +125,16 @@ impl AlterTableExprTranslator {
             options
                 .iter()
                 .map(|option| option.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+
+    fn format_unset_table_options(name: impl Display, keys: &[String]) -> String {
+        format!(
+            "ALTER TABLE {name} UNSET {};",
+            keys.iter()
+                .map(|key| format!("'{}'", key))
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -222,6 +235,20 @@ mod tests {
             "'compaction.twcs.max_inactive_window_files' = '5', ",
             "'compaction.twcs.max_inactive_window_runs' = '5';"
         );
+        assert_eq!(expected, output);
+    }
+
+    #[test]
+    fn test_alter_table_expr_unset_table_options() {
+        let alter_expr = AlterTableExpr {
+            table_name: "test".into(),
+            alter_kinds: AlterTableOperation::UnsetTableOptions {
+                keys: vec!["ttl".into(), "compaction.twcs.time_window".into()],
+            },
+        };
+
+        let output = AlterTableExprTranslator.translate(&alter_expr).unwrap();
+        let expected = "ALTER TABLE test UNSET 'ttl', 'compaction.twcs.time_window';";
         assert_eq!(expected, output);
     }
 }

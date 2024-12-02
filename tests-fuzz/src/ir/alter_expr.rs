@@ -49,6 +49,8 @@ pub enum AlterTableOperation {
     ModifyDataType { column: Column },
     /// `SET <table attrs key> = <table attr value>`
     SetTableOptions { options: Vec<AlterTableOption> },
+    /// `UNSET <table attrs key>`
+    UnsetTableOptions { keys: Vec<String> },
 }
 
 #[derive(Debug, EnumIter, Clone, Serialize, Deserialize, PartialEq)]
@@ -60,6 +62,20 @@ pub enum AlterTableOption {
     TwcsMaxActiveWindowFiles(u64),
     TwcsMaxInactiveWindowRuns(u64),
     TwcsMaxActiveWindowRuns(u64),
+}
+
+impl AlterTableOption {
+    pub fn key(&self) -> &str {
+        match self {
+            AlterTableOption::Ttl(_) => TTL_KEY,
+            AlterTableOption::TwcsTimeWindow(_) => TWCS_TIME_WINDOW,
+            AlterTableOption::TwcsMaxOutputFileSize(_) => TWCS_MAX_OUTPUT_FILE_SIZE,
+            AlterTableOption::TwcsMaxInactiveWindowFiles(_) => TWCS_MAX_INACTIVE_WINDOW_FILES,
+            AlterTableOption::TwcsMaxActiveWindowFiles(_) => TWCS_MAX_ACTIVE_WINDOW_FILES,
+            AlterTableOption::TwcsMaxInactiveWindowRuns(_) => TWCS_MAX_INACTIVE_WINDOW_RUNS,
+            AlterTableOption::TwcsMaxActiveWindowRuns(_) => TWCS_MAX_ACTIVE_WINDOW_RUNS,
+        }
+    }
 }
 
 impl Display for AlterTableOption {
