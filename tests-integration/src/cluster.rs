@@ -190,6 +190,7 @@ impl GreptimeDbClusterBuilder {
             self.kv_backend.clone(),
             self.meta_selector.clone(),
             Some(datanode_clients.clone()),
+            None,
         )
         .await;
 
