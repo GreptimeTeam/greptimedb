@@ -34,7 +34,7 @@ use tests_fuzz::fake::{
 use tests_fuzz::generator::alter_expr::{
     AlterExprAddColumnGeneratorBuilder, AlterExprDropColumnGeneratorBuilder,
     AlterExprModifyDataTypeGeneratorBuilder, AlterExprRenameGeneratorBuilder,
-    AlterExprSetTableOptionsGeneratorBuilder,
+    AlterExprSetTableOptionsGeneratorBuilder, AlterExprUnsetTableOptionsGeneratorBuilder,
 };
 use tests_fuzz::generator::create_expr::CreateTableExprGeneratorBuilder;
 use tests_fuzz::generator::Generator;
@@ -69,6 +69,7 @@ enum AlterTableKind {
     RenameTable,
     ModifyDataType,
     SetTableOptions,
+    UnsetTableOptions,
 }
 
 fn generate_create_table_expr<R: Rng + 'static>(rng: &mut R) -> Result<CreateTableExpr> {
@@ -122,6 +123,13 @@ fn generate_alter_table_expr<R: Rng + 'static>(
             .generate(rng),
         AlterTableKind::SetTableOptions => {
             let expr_generator = AlterExprSetTableOptionsGeneratorBuilder::default()
+                .table_ctx(table_ctx)
+                .build()
+                .unwrap();
+            expr_generator.generate(rng)
+        }
+        AlterTableKind::UnsetTableOptions => {
+            let expr_generator = AlterExprUnsetTableOptionsGeneratorBuilder::default()
                 .table_ctx(table_ctx)
                 .build()
                 .unwrap();

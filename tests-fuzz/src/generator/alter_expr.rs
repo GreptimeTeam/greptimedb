@@ -260,6 +260,39 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprSetTableOptionsGenerator<
     }
 }
 
+/// Generates the [AlterTableOperation::UnsetTableOptions] of [AlterTableExpr].
+#[derive(Builder)]
+#[builder(pattern = "owned")]
+pub struct AlterExprUnsetTableOptionsGenerator<R: Rng> {
+    table_ctx: TableContextRef,
+    #[builder(default)]
+    _phantom: PhantomData<R>,
+}
+
+impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprUnsetTableOptionsGenerator<R> {
+    type Error = Error;
+
+    fn generate(&self, rng: &mut R) -> Result<AlterTableExpr> {
+        let all_options = AlterTableOption::iter().collect::<Vec<_>>();
+        // Generate random distinct options
+        let mut option_templates_idx = vec![];
+        for _ in 1..rng.gen_range(2..=all_options.len()) {
+            let option = rng.gen_range(0..all_options.len());
+            if !option_templates_idx.contains(&option) {
+                option_templates_idx.push(option);
+            }
+        }
+        let options = option_templates_idx
+            .iter()
+            .map(|idx| all_options[*idx].key().to_string())
+            .collect();
+        Ok(AlterTableExpr {
+            table_name: self.table_ctx.name.clone(),
+            alter_kinds: AlterTableOperation::UnsetTableOptions { keys: options },
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -313,13 +346,33 @@ mod tests {
         assert_eq!(expected, serialized);
 
         let expr = AlterExprModifyDataTypeGeneratorBuilder::default()
-            .table_ctx(table_ctx)
+            .table_ctx(table_ctx.clone())
             .build()
             .unwrap()
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
         let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_kinds":{"ModifyDataType":{"column":{"name":{"value":"toTAm","quote_style":null},"column_type":{"Int64":{}},"options":[]}}}}"#;
+        assert_eq!(expected, serialized);
+
+        let expr = AlterExprSetTableOptionsGeneratorBuilder::default()
+            .table_ctx(table_ctx.clone())
+            .build()
+            .unwrap()
+            .generate(&mut rng)
+            .unwrap();
+        let serialized = serde_json::to_string(&expr).unwrap();
+        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_kinds":{"SetTableOptions":{"options":[{"TwcsMaxActiveWindowRuns":14908016120444947142},{"TwcsMaxActiveWindowFiles":5840340123887173415},{"TwcsMaxOutputFileSize":"17324522916573342KiB"}]}}}"#;
+        assert_eq!(expected, serialized);
+
+        let expr = AlterExprUnsetTableOptionsGeneratorBuilder::default()
+            .table_ctx(table_ctx)
+            .build()
+            .unwrap()
+            .generate(&mut rng)
+            .unwrap();
+        let serialized = serde_json::to_string(&expr).unwrap();
+        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_kinds":{"UnsetTableOptions":{"keys":["'compaction.twcs.max_active_window_runs' = '0'"]}}}"#;
         assert_eq!(expected, serialized);
     }
 }
