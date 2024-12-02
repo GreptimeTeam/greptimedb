@@ -372,7 +372,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_kinds":{"UnsetTableOptions":{"keys":["'compaction.twcs.max_active_window_runs' = '0'"]}}}"#;
+        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_kinds":{"UnsetTableOptions":{"keys":["compaction.twcs.max_active_window_runs"]}}}"#;
         assert_eq!(expected, serialized);
     }
 }
