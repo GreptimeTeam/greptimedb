@@ -425,6 +425,13 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("The response exceeded size limit"))]
+    ResponseExceededSizeLimit {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Invalid heartbeat response"))]
     InvalidHeartbeatResponse {
         #[snafu(implicit)]
@@ -763,6 +770,7 @@ impl ErrorExt for Error {
             | StopProcedureManager { source, .. } => source.status_code(),
             RegisterProcedureLoader { source, .. } => source.status_code(),
             External { source, .. } => source.status_code(),
+            ResponseExceededSizeLimit { source, .. } => source.status_code(),
             OperateDatanode { source, .. } => source.status_code(),
             Table { source, .. } => source.status_code(),
             RetryLater { source, .. } => source.status_code(),
@@ -805,13 +813,13 @@ impl Error {
 
     /// Returns true if the response exceeds the size limit.
     pub fn is_exceeded_size_limit(&self) -> bool {
-        if let Error::EtcdFailed {
-            error: etcd_client::Error::GRpcStatus(status),
-            ..
-        } = self
-        {
-            return status.code() == tonic::Code::OutOfRange;
+        match self {
+            Error::EtcdFailed {
+                error: etcd_client::Error::GRpcStatus(status),
+                ..
+            } => status.code() == tonic::Code::OutOfRange,
+            Error::ResponseExceededSizeLimit { .. } => true,
+            _ => false,
         }
-        false
     }
 }
