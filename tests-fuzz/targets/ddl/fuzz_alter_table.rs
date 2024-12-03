@@ -38,7 +38,9 @@ use tests_fuzz::generator::alter_expr::{
 };
 use tests_fuzz::generator::create_expr::CreateTableExprGeneratorBuilder;
 use tests_fuzz::generator::Generator;
-use tests_fuzz::ir::{droppable_columns, modifiable_columns, AlterTableExpr, CreateTableExpr};
+use tests_fuzz::ir::{
+    droppable_columns, modifiable_columns, AlterTableExpr, AlterTableOption, CreateTableExpr,
+};
 use tests_fuzz::translator::mysql::alter_expr::AlterTableExprTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::DslTranslator;
@@ -196,6 +198,28 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         let mut columns = table_ctx.columns.clone();
         columns.sort_by(|a, b| a.name.value.cmp(&b.name.value));
         validator::column::assert_eq(&column_entries, &columns)?;
+
+        // Validates table options
+        let sql = format!("SHOW CREATE TABLE {}", table_ctx.name);
+        let mut table_options = validator::table::fetch_table_options(&ctx.greptime, &sql).await?;
+        table_options.sort_by(|a, b| a.key().cmp(b.key()));
+        let mut expected_table_options = table_ctx.table_options.clone();
+        expected_table_options.sort_by(|a, b| a.key().cmp(b.key()));
+        table_options
+            .iter()
+            .zip(expected_table_options.iter())
+            .for_each(|(a, b)| {
+                if let (
+                    AlterTableOption::TwcsMaxOutputFileSize(a),
+                    AlterTableOption::TwcsMaxOutputFileSize(b),
+                ) = (a, b)
+                {
+                    // File size is not exact, so we compare string representation
+                    assert_eq!(a.to_string(), b.to_string());
+                } else {
+                    assert_eq!(a, b);
+                }
+            });
     }
 
     // Cleans up
