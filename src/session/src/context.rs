@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use ahash::HashSet;
 use api::v1::region::RegionRequestHeader;
 use arc_swap::ArcSwap;
 use auth::UserInfoRef;
@@ -60,7 +61,7 @@ pub struct QueryContext {
 pub struct QueryContextMutableFields {
     warning: Option<String>,
     /// regions with ttl=0
-    ttl_zero_regions: BTreeSet<u64>,
+    ttl_zero_regions: HashSet<u64>,
 }
 
 impl Display for QueryContext {
@@ -294,7 +295,7 @@ impl QueryContext {
             .extend(region_ids);
     }
 
-    pub fn ttl_zero_regions(&self) -> BTreeSet<u64> {
+    pub fn ttl_zero_regions(&self) -> HashSet<u64> {
         self.mutable_query_context_data
             .read()
             .unwrap()

@@ -471,12 +471,9 @@ impl Inserter {
     ) -> Result<HashMap<String, TableId>> {
         fn add_ttl_zero_table(ctx: &QueryContextRef, table_info: &TableInfo) {
             let ttl = table_info.meta.options.ttl;
-            if let Some(ttl) = ttl {
-                if ttl.is_zero() {
-                    ctx.add_ttl_zero_regions(
-                        table_info.region_ids().into_iter().map(|i| i.as_u64()),
-                    );
-                }
+
+            if ttl.is_immediate() {
+                ctx.add_ttl_zero_regions(table_info.region_ids().into_iter().map(|i| i.as_u64()));
             }
         }
         let _timer = crate::metrics::CREATE_ALTER_ON_DEMAND

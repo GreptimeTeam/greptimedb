@@ -14,7 +14,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::result;
-use std::time::Duration;
 
 use api::v1::alter_database_expr::Kind as PbAlterDatabaseKind;
 use api::v1::meta::ddl_task_request::Task;
@@ -36,7 +35,7 @@ use api::v1::{
 };
 use base64::engine::general_purpose;
 use base64::Engine as _;
-use humantime_serde::re::humantime;
+use common_base::TimeToLive;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DefaultOnNull};
@@ -1009,12 +1008,8 @@ impl TryFrom<PbOption> for SetDatabaseOption {
     fn try_from(PbOption { key, value }: PbOption) -> Result<Self> {
         match key.to_ascii_lowercase().as_str() {
             TTL_KEY => {
-                let ttl = if value.is_empty() {
-                    Duration::from_secs(0)
-                } else {
-                    humantime::parse_duration(&value)
-                        .map_err(|_| InvalidSetDatabaseOptionSnafu { key, value }.build())?
-                };
+                let ttl = TimeToLive::from_humantime_or_str(&value)
+                    .map_err(|_| InvalidSetDatabaseOptionSnafu { key, value }.build())?;
 
                 Ok(SetDatabaseOption::Ttl(ttl))
             }
@@ -1025,7 +1020,7 @@ impl TryFrom<PbOption> for SetDatabaseOption {
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum SetDatabaseOption {
-    Ttl(Duration),
+    Ttl(TimeToLive),
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]

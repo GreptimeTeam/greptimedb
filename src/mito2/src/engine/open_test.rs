@@ -180,8 +180,8 @@ async fn test_engine_region_open_with_options() {
 
     let region = engine.get_region(region_id).unwrap();
     assert_eq!(
-        Duration::from_secs(3600 * 24 * 4),
-        region.version().options.ttl.unwrap()
+        region.version().options.ttl,
+        Duration::from_secs(3600 * 24 * 4).into()
     );
 }
 

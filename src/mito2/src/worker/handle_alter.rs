@@ -189,11 +189,7 @@ impl<S> RegionWorkerLoop<S> {
                         "Update region ttl: {}, previous: {:?} new: {:?}",
                         region.region_id, current_options.ttl, new_ttl
                     );
-                    if new_ttl.is_zero() {
-                        current_options.ttl = None;
-                    } else {
-                        current_options.ttl = Some(new_ttl);
-                    }
+                    current_options.ttl = new_ttl;
                 }
                 SetRegionOption::Twsc(key, value) => {
                     let Twcs(options) = &mut current_options.compaction;

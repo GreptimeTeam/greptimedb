@@ -24,10 +24,10 @@ mod window;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use api::v1::region::compact_request;
-use common_base::Plugins;
+use common_base::{Plugins, TimeToLive};
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{debug, error, info, warn};
 use common_time::range::TimestampRange;
@@ -273,7 +273,7 @@ impl CompactionScheduler {
         .await
         .unwrap_or_else(|e| {
             warn!(e; "Failed to get ttl for region: {}", region_id);
-            None
+            TimeToLive::default()
         });
 
         debug!(
@@ -437,18 +437,20 @@ impl PendingCompaction {
 /// Finds TTL of table by first examine table options then database options.
 async fn find_ttl(
     table_id: TableId,
-    table_ttl: Option<Duration>,
+    table_ttl: TimeToLive,
     schema_metadata_manager: &SchemaMetadataManagerRef,
-) -> Result<Option<Duration>> {
-    if let Some(table_ttl) = table_ttl {
-        return Ok(Some(table_ttl));
+) -> Result<TimeToLive> {
+    // If table TTL is not forever, we use it.
+    if !table_ttl.is_forever() {
+        return Ok(table_ttl);
     }
 
     let ttl = schema_metadata_manager
         .get_schema_options_by_table_id(table_id)
         .await
         .context(GetSchemaMetadataSnafu)?
-        .and_then(|options| options.ttl);
+        .map(|options| options.ttl)
+        .unwrap_or_default();
     Ok(ttl)
 }
 
@@ -654,12 +656,8 @@ fn ts_to_lit(ts: Timestamp, ts_col_unit: TimeUnit) -> Result<Expr> {
 }
 
 /// Finds all expired SSTs across levels.
-fn get_expired_ssts(
-    levels: &[LevelMeta],
-    ttl: Option<Duration>,
-    now: Timestamp,
-) -> Vec<FileHandle> {
-    let Some(ttl) = ttl else {
+fn get_expired_ssts(levels: &[LevelMeta], ttl: TimeToLive, now: Timestamp) -> Vec<FileHandle> {
+    let Some(ttl) = ttl.get_duration() else {
         return vec![];
     };
 

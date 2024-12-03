@@ -225,11 +225,7 @@ impl TableMeta {
         for request in requests {
             match request {
                 SetRegionOption::TTL(new_ttl) => {
-                    if new_ttl.is_zero() {
-                        new_options.ttl = None;
-                    } else {
-                        new_options.ttl = Some(*new_ttl);
-                    }
+                    new_options.ttl = *new_ttl;
                 }
                 SetRegionOption::Twsc(key, value) => {
                     if !value.is_empty() {

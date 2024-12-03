@@ -1899,6 +1899,8 @@ dependencies = [
  "common-macro",
  "common-test-util",
  "futures",
+ "humantime",
+ "humantime-serde",
  "paste",
  "pin-project",
  "serde",
@@ -10908,6 +10910,7 @@ dependencies = [
 name = "session"
 version = "0.11.0"
 dependencies = [
+ "ahash 0.8.11",
  "api",
  "arc-swap",
  "auth",
