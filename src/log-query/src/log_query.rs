@@ -152,21 +152,28 @@ impl TimeFilter {
         } else {
             let formats = ["%Y-%m-%d", "%Y-%m", "%Y"];
             for format in &formats {
-                if let Ok(nd) = NaiveDate::parse_from_str(s, format) {
-                    let start = Utc
-                        .from_utc_datetime(&nd.and_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap()));
+                if let Ok(naive_date) = NaiveDate::parse_from_str(s, format) {
+                    let start = Utc.from_utc_datetime(
+                        &naive_date.and_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+                    );
                     let end = match *format {
                         "%Y-%m-%d" => start + Duration::days(1),
                         "%Y-%m" => {
-                            let next_month = if nd.month() == 12 {
-                                NaiveDate::from_ymd_opt(nd.year() + 1, 1, 1).unwrap()
+                            let next_month = if naive_date.month() == 12 {
+                                NaiveDate::from_ymd_opt(naive_date.year() + 1, 1, 1).unwrap()
                             } else {
-                                NaiveDate::from_ymd_opt(nd.year(), nd.month() + 1, 1).unwrap()
+                                NaiveDate::from_ymd_opt(
+                                    naive_date.year(),
+                                    naive_date.month() + 1,
+                                    1,
+                                )
+                                .unwrap()
                             };
                             Utc.from_utc_datetime(&next_month.and_hms_opt(0, 0, 0).unwrap())
                         }
                         "%Y" => {
-                            let next_year = NaiveDate::from_ymd_opt(nd.year() + 1, 1, 1).unwrap();
+                            let next_year =
+                                NaiveDate::from_ymd_opt(naive_date.year() + 1, 1, 1).unwrap();
                             Utc.from_utc_datetime(&next_year.and_hms_opt(0, 0, 0).unwrap())
                         }
                         _ => unreachable!(),
@@ -180,7 +187,7 @@ impl TimeFilter {
         }
     }
 
-    /// Util functio handles durations like "1 week", "1 month", etc (unimplemented).
+    /// Util function handles durations like "1 week", "1 month", etc (unimplemented).
     fn parse_span(s: &str) -> Result<Duration> {
         // Simplified parsing logic
         if let Ok(seconds) = s.parse::<i64>() {
