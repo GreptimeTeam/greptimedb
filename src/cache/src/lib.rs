@@ -144,7 +144,7 @@ pub fn build_fundamental_cache_registry(kv_backend: KvBackendRef) -> CacheRegist
         kv_backend.clone(),
     ));
 
-    let table_schema_name_cache = Arc::new(new_table_schema_cache(
+    let table_id_schema_cache = Arc::new(new_table_id_schema_cache(
         TABLE_SCHEMA_NAME_CACHE_NAME.to_string(),
         CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY).build(),
         kv_backend,
