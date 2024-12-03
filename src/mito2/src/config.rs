@@ -30,7 +30,7 @@ use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
 const MULTIPART_UPLOAD_MINIMUM_SIZE: ReadableSize = ReadableSize::mb(5);
 /// Default channel size for parallel scan task.
-const DEFAULT_SCAN_CHANNEL_SIZE: usize = 32;
+pub(crate) const DEFAULT_SCAN_CHANNEL_SIZE: usize = 32;
 
 // Use `1/GLOBAL_WRITE_BUFFER_SIZE_FACTOR` of OS memory as global write buffer size in default mode
 const GLOBAL_WRITE_BUFFER_SIZE_FACTOR: u64 = 8;
@@ -104,11 +104,6 @@ pub struct MitoConfig {
     // Other configs:
     /// Buffer size for SST writing.
     pub sst_write_buffer_size: ReadableSize,
-    /// Parallelism to scan a region (default: 1/4 of cpu cores).
-    /// - 0: using the default value (1/4 of cpu cores).
-    /// - 1: scan in current thread.
-    /// - n: scan in parallelism n.
-    pub scan_parallelism: usize,
     /// Capacity of the channel to send data from parallel scan tasks to the main task (default 32).
     pub parallel_scan_channel_size: usize,
     /// Whether to allow stale entries read during replay.
@@ -153,7 +148,6 @@ impl Default for MitoConfig {
             experimental_write_cache_size: ReadableSize::gb(1),
             experimental_write_cache_ttl: None,
             sst_write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
-            scan_parallelism: divide_num_cpus(4),
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             allow_stale_entries: false,
             index: IndexConfig::default(),
@@ -224,11 +218,6 @@ impl MitoConfig {
                 "Sanitize sst write buffer size to {}",
                 self.sst_write_buffer_size
             );
-        }
-
-        // Use default value if `scan_parallelism` is 0.
-        if self.scan_parallelism == 0 {
-            self.scan_parallelism = divide_num_cpus(4);
         }
 
         if self.parallel_scan_channel_size < 1 {
