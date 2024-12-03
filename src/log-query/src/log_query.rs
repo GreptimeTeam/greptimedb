@@ -27,6 +27,8 @@ pub struct LogQuery {
     pub columns: Vec<ColumnFilters>,
     /// Maximum number of logs to return. If not provided, it will return all matched logs.
     pub limit: Option<usize>,
+    /// Adjacent lines to return.
+    pub context: Context,
 }
 
 /// Represents a time range for log query.
@@ -220,6 +222,16 @@ pub enum ContentFilter {
 pub enum BinaryOperator {
     And,
     Or,
+}
+
+pub enum Context {
+    None,
+    Before(usize),
+    After(usize),
+    /// Specify the number of lines before and after the matched line.
+    Symmetric(usize),
+    /// Specify the number of lines before and after the matched line separately.
+    Complex(usize, usize),
 }
 
 #[cfg(test)]
