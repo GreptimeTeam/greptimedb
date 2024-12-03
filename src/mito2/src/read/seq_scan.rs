@@ -36,7 +36,7 @@ use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
 use crate::read::last_row::LastRowReader;
 use crate::read::merge::MergeReaderBuilder;
-use crate::read::range::{RangeBuilderList, RowGroupIndex, ALL_ROW_GROUPS};
+use crate::read::range::RangeBuilderList;
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{scan_file_ranges, scan_mem_ranges, PartitionMetrics};
 use crate::read::{BatchReader, BoxedBatchReader, ScannerMetrics, Source};
@@ -51,37 +51,25 @@ pub struct SeqScan {
     properties: ScannerProperties,
     /// Context of streams.
     stream_ctx: Arc<StreamContext>,
-    /// Semaphore to control scan parallelism of files.
-    /// Streams created by the scanner share the same semaphore.
-    semaphore: Arc<Semaphore>,
     /// The scanner is used for compaction.
     compaction: bool,
 }
 
 impl SeqScan {
-    /// Creates a new [SeqScan].
-    pub(crate) fn new(input: ScanInput) -> Self {
-        // TODO(yingwen): Set permits according to partition num. But we need to support file
-        // level parallelism.
-        let parallelism = input.parallelism.parallelism.max(1);
+    /// Creates a new [SeqScan] with the given input and compaction flag.
+    /// If `compaction` is true, the scanner will not attempt to split ranges.
+    pub(crate) fn new(input: ScanInput, compaction: bool) -> Self {
         let mut properties = ScannerProperties::default()
             .with_append_mode(input.append_mode)
             .with_total_rows(input.total_rows());
-        let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(input));
+        let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(input, compaction));
         properties.partitions = vec![stream_ctx.partition_ranges()];
 
         Self {
             properties,
             stream_ctx,
-            semaphore: Arc::new(Semaphore::new(parallelism)),
             compaction: false,
         }
-    }
-
-    /// Sets the scanner to be used for compaction.
-    pub(crate) fn with_compaction(mut self) -> Self {
-        self.compaction = true;
-        self
     }
 
     /// Builds a stream for the query.
@@ -115,7 +103,6 @@ impl SeqScan {
         let reader = Self::build_all_merge_reader(
             &self.stream_ctx,
             partition_ranges,
-            self.semaphore.clone(),
             self.compaction,
             &part_metrics,
         )
@@ -127,7 +114,6 @@ impl SeqScan {
     async fn build_all_merge_reader(
         stream_ctx: &Arc<StreamContext>,
         partition_ranges: &[PartitionRange],
-        semaphore: Arc<Semaphore>,
         compaction: bool,
         part_metrics: &PartitionMetrics,
     ) -> Result<BoxedBatchReader> {
@@ -146,21 +132,21 @@ impl SeqScan {
                 &mut sources,
             );
         }
-        Self::build_reader_from_sources(stream_ctx, sources, semaphore).await
+        Self::build_reader_from_sources(stream_ctx, sources, None).await
     }
 
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     async fn build_reader_from_sources(
         stream_ctx: &StreamContext,
         mut sources: Vec<Source>,
-        semaphore: Arc<Semaphore>,
+        semaphore: Option<Arc<Semaphore>>,
     ) -> Result<BoxedBatchReader> {
-        if stream_ctx.input.parallelism.parallelism > 1 {
+        if let Some(semaphore) = semaphore.as_ref() {
             // Read sources in parallel. We always spawn a task so we can control the parallelism
             // by the semaphore.
             sources = stream_ctx
                 .input
-                .create_parallel_sources_no_semaphore(sources)?;
+                .create_parallel_sources(sources, semaphore.clone())?;
         }
 
         let mut builder = MergeReaderBuilder::from_sources(sources);
@@ -207,7 +193,8 @@ impl SeqScan {
         }
 
         let stream_ctx = self.stream_ctx.clone();
-        let semaphore = self.semaphore.clone();
+        // FIXME(yingwen): Get target partition from prepare.
+        let semaphore = Arc::new(Semaphore::new(self.properties.partitions.len()));
         let partition_ranges = self.properties.partitions[partition].clone();
         let compaction = self.compaction;
         let distinguish_range = self.properties.distinguish_partition_range();
@@ -230,7 +217,6 @@ impl SeqScan {
                 stream_ctx.input.num_files(),
             ));
             // Scans each part.
-            // common_telemetry::info!("DEBUG_SCAN: scan partition range, partition: {}, num_ranges: {}", partition, partition_ranges.len());
             for part_range in partition_ranges {
                 let mut sources = Vec::new();
                 build_sources(
@@ -242,9 +228,8 @@ impl SeqScan {
                     &mut sources,
                 );
 
-                // common_telemetry::info!("DEBUG_SCAN: scan part range, partition: {}, num_sources: {}, part_range: {:?}", partition, sources.len(), part_range);
                 let mut reader =
-                    Self::build_reader_from_sources(&stream_ctx, sources, semaphore.clone())
+                    Self::build_reader_from_sources(&stream_ctx, sources, Some(semaphore.clone()))
                         .await
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?;
@@ -332,12 +317,6 @@ impl RegionScanner for SeqScan {
         ranges: Vec<Vec<PartitionRange>>,
         distinguish_partition_range: bool,
     ) -> Result<(), BoxedError> {
-        let num_partitions = ranges.len();
-        let available_permits = self.semaphore.available_permits();
-        if available_permits < num_partitions {
-            self.semaphore
-                .add_permits(num_partitions - available_permits);
-        }
         self.properties.partitions = ranges;
         self.properties.distinguish_partition_range = distinguish_partition_range;
         Ok(())

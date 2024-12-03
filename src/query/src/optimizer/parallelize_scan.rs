@@ -251,14 +251,13 @@ mod test {
 
         // assign 4 ranges to 5 partitions. Only 4 partitions are returned.
         let expected_partition_num = 5;
-        let mut result = ParallelizeScan::assign_partition_range(ranges, expected_partition_num);
-        result.sort_by_key(|ranges| ranges[0].identifier);
+        let result = ParallelizeScan::assign_partition_range(ranges, expected_partition_num);
         let expected = vec![
             vec![PartitionRange {
-                start: Timestamp::new(0, TimeUnit::Second),
-                end: Timestamp::new(10, TimeUnit::Second),
-                num_rows: 100,
-                identifier: 1,
+                start: Timestamp::new(30, TimeUnit::Second),
+                end: Timestamp::new(40, TimeUnit::Second),
+                num_rows: 250,
+                identifier: 4,
             }],
             vec![PartitionRange {
                 start: Timestamp::new(10, TimeUnit::Second),
@@ -266,18 +265,20 @@ mod test {
                 num_rows: 200,
                 identifier: 2,
             }],
-            vec![PartitionRange {
-                start: Timestamp::new(20, TimeUnit::Second),
-                end: Timestamp::new(30, TimeUnit::Second),
-                num_rows: 150,
-                identifier: 3,
-            }],
-            vec![PartitionRange {
-                start: Timestamp::new(30, TimeUnit::Second),
-                end: Timestamp::new(40, TimeUnit::Second),
-                num_rows: 250,
-                identifier: 4,
-            }],
+            vec![
+                PartitionRange {
+                    start: Timestamp::new(20, TimeUnit::Second),
+                    end: Timestamp::new(30, TimeUnit::Second),
+                    num_rows: 150,
+                    identifier: 3,
+                },
+                PartitionRange {
+                    start: Timestamp::new(0, TimeUnit::Second),
+                    end: Timestamp::new(10, TimeUnit::Second),
+                    num_rows: 100,
+                    identifier: 1,
+                },
+            ],
         ];
         assert_eq!(result, expected);
 
