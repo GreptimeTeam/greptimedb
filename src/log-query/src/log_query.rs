@@ -15,7 +15,10 @@
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, TimeZone, Utc};
 use table::table_name::TableName;
 
-use crate::error::{Error, Result};
+use crate::error::{
+    EndBeforeStartSnafu, InvalidDateFormatSnafu, InvalidSpanFormatSnafu, InvalidTimeFilterSnafu,
+    Result,
+};
 
 /// GreptimeDB's log query request.
 pub struct LogQuery {
@@ -77,9 +80,10 @@ impl TimeFilter {
             let s = self.start.as_ref().unwrap();
             let (start, end_opt) = Self::parse_datetime(s)?;
             if end_opt.is_none() {
-                return Err(Error::InvalidTimeFilter {
+                return Err(InvalidTimeFilterSnafu {
                     filter: self.clone(),
-                });
+                }
+                .build());
             }
             start_dt = Some(start);
             end_dt = end_opt;
@@ -118,18 +122,20 @@ impl TimeFilter {
             end_dt = Some(end);
         } else {
             // Exception
-            return Err(Error::InvalidTimeFilter {
+            return Err(InvalidTimeFilterSnafu {
                 filter: self.clone(),
-            });
+            }
+            .build());
         }
 
         // Validate that end is after start
         if let (Some(start), Some(end)) = (&start_dt, &end_dt) {
             if end <= start {
-                return Err(Error::EndBeforeStart {
+                return Err(EndBeforeStartSnafu {
                     start: start.to_rfc3339(),
                     end: end.to_rfc3339(),
-                });
+                }
+                .build());
             }
         }
 
@@ -181,9 +187,10 @@ impl TimeFilter {
                     return Ok((start, Some(end)));
                 }
             }
-            Err(Error::InvalidDateFormat {
+            Err(InvalidDateFormatSnafu {
                 input: s.to_string(),
-            })
+            }
+            .build())
         }
     }
 
@@ -193,9 +200,10 @@ impl TimeFilter {
         if let Ok(seconds) = s.parse::<i64>() {
             Ok(Duration::seconds(seconds))
         } else {
-            Err(Error::InvalidSpanFormat {
+            Err(InvalidSpanFormatSnafu {
                 input: s.to_string(),
-            })
+            }
+            .build())
         }
     }
 }
