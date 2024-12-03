@@ -153,9 +153,8 @@ async fn build_cache_layer(
             .context(error::InitBackendSnafu)?;
 
         let cache_layer = LruCacheLayer::new(Arc::new(cache_store), cache_capacity.0 as usize)
-            .await
             .context(error::InitBackendSnafu)?;
-
+        cache_layer.recover_cache(false).await;
         info!(
             "Enabled local object storage cache, path: {}, capacity: {}.",
             path, cache_capacity

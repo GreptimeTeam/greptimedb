@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
-use common_telemetry::{info, warn};
+use common_telemetry::{error, info, warn};
 use futures::{FutureExt, TryStreamExt};
 use moka::future::Cache;
 use moka::notification::RemovalCause;
@@ -188,10 +188,8 @@ impl FileCache {
         }
     }
 
-    /// Recovers the index from local store.
-    pub(crate) async fn recover(&self) -> Result<()> {
+    async fn recover_inner(&self) -> Result<()> {
         let now = Instant::now();
-
         let mut lister = self
             .local_store
             .lister_with(FILE_DIR)
@@ -225,8 +223,21 @@ impl FileCache {
             total_size,
             now.elapsed()
         );
-
         Ok(())
+    }
+
+    /// Recovers the index from local store.
+    pub(crate) async fn recover(self: &Arc<Self>, sync: bool) {
+        let moved_self = self.clone();
+        let handle = tokio::spawn(async move {
+            if let Err(err) = moved_self.recover_inner().await {
+                error!(err; "Failed to recover file cache.")
+            }
+        });
+
+        if sync {
+            let _ = handle.await;
+        }
     }
 
     /// Returns the cache file path for the key.
@@ -536,13 +547,17 @@ mod tests {
         }
 
         // Recover the cache.
-        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None);
+        let cache = Arc::new(FileCache::new(
+            local_store.clone(),
+            ReadableSize::mb(10),
+            None,
+        ));
         // No entry before recovery.
         assert!(cache
             .reader(IndexKey::new(region_id, file_ids[0], file_type))
             .await
             .is_none());
-        cache.recover().await.unwrap();
+        cache.recover(true).await;
 
         // Check size.
         cache.memory_index.run_pending_tasks().await;
