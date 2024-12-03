@@ -621,7 +621,7 @@ impl ScanInput {
         sources: Vec<Source>,
         semaphore: Arc<Semaphore>,
     ) -> Result<Vec<Source>> {
-        if sources.len() > 1 {
+        if sources.len() <= 1 {
             return Ok(sources);
         }
 
