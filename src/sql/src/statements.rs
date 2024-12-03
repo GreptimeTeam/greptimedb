@@ -16,6 +16,7 @@ pub mod admin;
 pub mod alter;
 pub mod copy;
 pub mod create;
+pub mod cursor;
 pub mod delete;
 pub mod describe;
 pub mod drop;
