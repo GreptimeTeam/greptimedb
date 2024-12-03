@@ -200,7 +200,7 @@ mod tests {
             AlterTableOption::TwcsMaxInactiveWindowFiles(6028716566907830876),
             AlterTableOption::TwcsMaxInactiveWindowRuns(10622283085591494074),
             AlterTableOption::TwcsMaxOutputFileSize(ReadableSize::from_str("15686.4PiB").unwrap()),
-            AlterTableOption::TwcsTimeWindow(Duration::new_nanosecond(2061999256_000_000)),
+            AlterTableOption::TwcsTimeWindow(Duration::new_nanosecond(2_061_999_256_000_000)),
             AlterTableOption::Ttl(Duration::new_millisecond(
                 // A month is 2_630_016 seconds
                 2_630_016 * 1000
