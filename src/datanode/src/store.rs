@@ -25,7 +25,7 @@ use std::time::Duration;
 use std::{env, path};
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{info, warn};
 use object_store::layers::{LruCacheLayer, RetryInterceptor, RetryLayer};
 use object_store::services::Fs;
 use object_store::util::{join_dir, normalize_dir, with_instrument_layers};
@@ -154,13 +154,7 @@ async fn build_cache_layer(
 
         let cache_layer = LruCacheLayer::new(Arc::new(cache_store), cache_capacity.0 as usize)
             .context(error::InitBackendSnafu)?;
-        let moved_cache_layer = cache_layer.clone();
-        tokio::spawn(async move {
-            if let Err(err) = moved_cache_layer.recover_cache().await {
-                error!(err; "Failed to recover file cache.")
-            }
-        });
-
+        cache_layer.recover_cache(false).await;
         info!(
             "Enabled local object storage cache, path: {}, capacity: {}.",
             path, cache_capacity

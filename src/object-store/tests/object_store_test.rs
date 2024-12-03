@@ -234,7 +234,7 @@ async fn test_file_backend_with_lru_cache() -> Result<()> {
         let file_cache = Arc::new(builder.build().unwrap());
 
         let cache_layer = LruCacheLayer::new(file_cache, 32).unwrap();
-        cache_layer.recover_cache().await.unwrap();
+        cache_layer.recover_cache(true).await;
         cache_layer
     };
 
@@ -311,7 +311,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
 
     // create operator for cache dir to verify cache file
     let cache_layer = LruCacheLayer::new(cache_store.clone(), 38).unwrap();
-    cache_layer.recover_cache().await.unwrap();
+    cache_layer.recover_cache(true).await;
     let store = store.layer(cache_layer.clone());
 
     // create several object handler.
@@ -440,7 +440,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
     drop(cache_layer);
     // Test recover
     let cache_layer = LruCacheLayer::new(cache_store, 38).unwrap();
-    cache_layer.recover_cache().await.unwrap();
+    cache_layer.recover_cache(true).await;
 
     // The p2 `NotFound` cache will not be recovered
     assert_eq!(cache_layer.read_cache_stat().await, (3, 34));
