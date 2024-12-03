@@ -239,14 +239,13 @@ pub enum BinaryOperator {
     Or,
 }
 
+/// Controls how many adjacent lines to return.
 pub enum Context {
     None,
-    Before(usize),
-    After(usize),
-    /// Specify the number of lines before and after the matched line.
-    Symmetric(usize),
     /// Specify the number of lines before and after the matched line separately.
-    Complex(usize, usize),
+    Lines(usize, usize),
+    /// Specify the number of seconds before and after the matched line occurred.
+    Seconds(usize, usize),
 }
 
 #[cfg(test)]
