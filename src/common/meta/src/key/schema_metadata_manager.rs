@@ -35,7 +35,7 @@ pub struct SchemaMetadataManager {
 impl SchemaMetadataManager {
     /// Creates a new database meta
     #[cfg(not(any(test, feature = "testing")))]
-    pub fn new(table_schema_cache: TableSchemaCacheRef, schema_cache: SchemaCacheRef) -> Self {
+    pub fn new(table_id_schema_cache: TableSchemaCacheRef, schema_cache: SchemaCacheRef) -> Self {
         Self {
             table_id_schema_cache,
             schema_cache,
