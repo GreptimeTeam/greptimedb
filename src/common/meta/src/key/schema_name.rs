@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn test_display_schema_value() {
         let schema_value = SchemaNameValue {
-            ttl: TimeToLive::Forever,
+            ttl: TimeToLive::default(),
         };
         assert_eq!("", schema_value.to_string());
 
@@ -355,9 +355,7 @@ mod tests {
         assert_eq!(value, from_value);
 
         let parsed = SchemaNameValue::try_from_raw_value(
-            serde_json::json!({"ttl": {"Duration": "10s"}})
-                .to_string()
-                .as_bytes(),
+            serde_json::json!({"ttl": "10s"}).to_string().as_bytes(),
         )
         .unwrap();
         assert_eq!(Some(value), parsed);
@@ -366,7 +364,7 @@ mod tests {
             ttl: TimeToLive::Immediate,
         };
         let parsed = SchemaNameValue::try_from_raw_value(
-            serde_json::json!({"ttl": "Immediate"})
+            serde_json::json!({"ttl": "immediate"})
                 .to_string()
                 .as_bytes(),
         )
@@ -374,10 +372,10 @@ mod tests {
         assert_eq!(Some(imme), parsed);
 
         let forever = SchemaNameValue {
-            ttl: TimeToLive::Forever,
+            ttl: TimeToLive::default(),
         };
         let parsed = SchemaNameValue::try_from_raw_value(
-            serde_json::json!({"ttl": "Forever"}).to_string().as_bytes(),
+            serde_json::json!({"ttl": "forever"}).to_string().as_bytes(),
         )
         .unwrap();
         assert_eq!(Some(forever), parsed);

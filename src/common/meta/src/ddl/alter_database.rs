@@ -55,7 +55,7 @@ fn build_new_schema_value(
         AlterDatabaseKind::UnsetDatabaseOptions(keys) => {
             for key in keys.0.iter() {
                 match key {
-                    UnsetDatabaseOption::Ttl => value.ttl = TimeToLive::Forever,
+                    UnsetDatabaseOption::Ttl => value.ttl = TimeToLive::default(),
                 }
             }
         }
@@ -242,6 +242,6 @@ mod tests {
             ]));
         let new_schema_value =
             build_new_schema_value(current_schema_value, &unset_ttl_alter_kind).unwrap();
-        assert_eq!(new_schema_value.ttl, TimeToLive::Forever);
+        assert_eq!(new_schema_value.ttl, TimeToLive::default());
     }
 }

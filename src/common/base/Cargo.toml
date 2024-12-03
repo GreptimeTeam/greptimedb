@@ -26,4 +26,5 @@ zeroize = { version = "1.6", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 common-test-util.workspace = true
+serde_json.workspace = true
 toml.workspace = true

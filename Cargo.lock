@@ -1904,6 +1904,7 @@ dependencies = [
  "paste",
  "pin-project",
  "serde",
+ "serde_json",
  "snafu 0.8.5",
  "tokio",
  "toml 0.8.19",

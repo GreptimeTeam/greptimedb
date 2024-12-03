@@ -15,20 +15,65 @@
 use std::fmt::Display;
 use std::time::Duration;
 
+use serde::de::Visitor;
 use serde::{Deserialize, Serialize};
 
 /// Time To Live
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Default)]
 pub enum TimeToLive {
     /// immediately throw away on insert
     Immediate,
     /// Duration to keep the data, this duration should be non-zero
-    #[serde(with = "humantime_serde")]
     Duration(Duration),
     /// Keep the data forever
     #[default]
     Forever,
+    // TODO(discord9): add a new variant
+    // that can't be overridden by database level ttl? call it ForceForever?
+}
+
+impl Serialize for TimeToLive {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Immediate => serializer.serialize_str("immediate"),
+            Self::Duration(d) => humantime_serde::serialize(d, serializer),
+            Self::Forever => serializer.serialize_str("forever"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TimeToLive {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct StrVisitor;
+        impl Visitor<'_> for StrVisitor {
+            type Value = TimeToLive;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a string of time, 'immediate', 'forever' or null")
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(TimeToLive::Forever)
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                TimeToLive::from_humantime_or_str(value).map_err(serde::de::Error::custom)
+            }
+        }
+        // deser a string or null
+        let any = deserializer.deserialize_any(StrVisitor)?;
+        Ok(any)
+    }
 }
 
 impl Display for TimeToLive {
@@ -104,5 +149,33 @@ impl From<Option<Duration>> for TimeToLive {
 impl From<humantime::Duration> for TimeToLive {
     fn from(duration: humantime::Duration) -> Self {
         Self::from(*duration)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_serde() {
+        let cases = vec![
+            ("\"immediate\"", TimeToLive::Immediate),
+            ("\"forever\"", TimeToLive::Forever),
+            ("\"10d\"", Duration::from_secs(86400 * 10).into()),
+            (
+                "\"10000 years\"",
+                humantime::parse_duration("10000 years").unwrap().into(),
+            ),
+            ("null", TimeToLive::Forever),
+        ];
+
+        for (s, expected) in cases {
+            let serialized = serde_json::to_string(&expected).unwrap();
+            let deserialized: TimeToLive = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, expected);
+
+            let deserialized: TimeToLive = serde_json::from_str(s).unwrap();
+            assert_eq!(deserialized, expected);
+        }
     }
 }
