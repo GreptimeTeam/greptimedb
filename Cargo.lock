@@ -3225,6 +3225,7 @@ dependencies = [
  "arrow-flight",
  "async-trait",
  "bytes",
+ "cache",
  "catalog",
  "client",
  "common-base",

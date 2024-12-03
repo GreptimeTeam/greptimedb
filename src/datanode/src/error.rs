@@ -364,6 +364,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Cache not found in registry"))]
+    MissingCache {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -431,6 +437,7 @@ impl ErrorExt for Error {
             ConcurrentQueryLimiterClosed { .. } | ConcurrentQueryLimiterTimeout { .. } => {
                 StatusCode::RegionBusy
             }
+            MissingCache { .. } => StatusCode::Internal,
         }
     }
 

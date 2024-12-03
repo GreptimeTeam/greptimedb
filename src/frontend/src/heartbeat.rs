@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(test)]
+mod tests;
+
 use std::sync::Arc;
 
 use api::v1::meta::{HeartbeatRequest, NodeInfo, Peer};
@@ -33,8 +36,6 @@ use crate::error;
 use crate::error::Result;
 use crate::frontend::FrontendOptions;
 use crate::metrics::{HEARTBEAT_RECV_COUNT, HEARTBEAT_SENT_COUNT};
-
-pub mod handler;
 
 /// The frontend heartbeat task which sending `[HeartbeatRequest]` to Metasrv periodically in background.
 #[derive(Clone)]

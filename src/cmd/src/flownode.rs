@@ -22,6 +22,7 @@ use common_base::Plugins;
 use common_config::Configurable;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
+use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::key::flow::FlowMetadataManager;
@@ -30,7 +31,6 @@ use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use common_version::{short_version, version};
 use flow::{FlownodeBuilder, FlownodeInstance, FrontendInvoker};
-use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use meta_client::{MetaClientOptions, MetaClientType};
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
@@ -288,9 +288,7 @@ impl StartCommand {
 
         let executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
-            Arc::new(InvalidateTableCacheHandler::new(
-                layered_cache_registry.clone(),
-            )),
+            Arc::new(InvalidateCacheHandler::new(layered_cache_registry.clone())),
         ]);
 
         let heartbeat_task = flow::heartbeat::HeartbeatTask::new(

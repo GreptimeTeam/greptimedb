@@ -14,7 +14,10 @@
 
 use std::sync::Arc;
 
-use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
+use cache::{
+    build_datanode_cache_registry, build_fundamental_cache_registry,
+    with_default_composite_cache_registry,
+};
 use catalog::information_schema::NoopInformationExtension;
 use catalog::kvbackend::KvBackendCatalogManager;
 use cmd::error::StartFlownodeSnafu;
@@ -125,8 +128,15 @@ impl GreptimeDbStandaloneBuilder {
     ) -> GreptimeDbStandalone {
         let plugins = self.plugin.clone().unwrap_or_default();
 
+        let layered_cache_registry = Arc::new(
+            LayeredCacheRegistryBuilder::default()
+                .add_cache_registry(build_datanode_cache_registry(kv_backend.clone()))
+                .build(),
+        );
+
         let datanode = DatanodeBuilder::new(opts.datanode_options(), plugins.clone())
             .with_kv_backend(kv_backend.clone())
+            .with_cache_registry(layered_cache_registry)
             .build()
             .await
             .unwrap();

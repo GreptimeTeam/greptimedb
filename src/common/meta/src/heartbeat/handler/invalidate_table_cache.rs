@@ -13,21 +13,22 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use common_meta::cache_invalidator::{CacheInvalidatorRef, Context};
-use common_meta::error::Result as MetaResult;
-use common_meta::heartbeat::handler::{
-    HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
-};
-use common_meta::instruction::Instruction;
 use common_telemetry::debug;
 
+use crate::cache_invalidator::{CacheInvalidatorRef, Context};
+use crate::error::Result as MetaResult;
+use crate::heartbeat::handler::{
+    HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
+};
+use crate::instruction::Instruction;
+
 #[derive(Clone)]
-pub struct InvalidateTableCacheHandler {
+pub struct InvalidateCacheHandler {
     cache_invalidator: CacheInvalidatorRef,
 }
 
 #[async_trait]
-impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
+impl HeartbeatResponseHandler for InvalidateCacheHandler {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
         matches!(
             ctx.incoming_message.as_ref(),
@@ -37,13 +38,10 @@ impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
 
     async fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
         let Some((_, Instruction::InvalidateCaches(caches))) = ctx.incoming_message.take() else {
-            unreachable!("InvalidateTableCacheHandler: should be guarded by 'is_acceptable'")
+            unreachable!("InvalidateCacheHandler: should be guarded by 'is_acceptable'")
         };
 
-        debug!(
-            "InvalidateTableCacheHandler: invalidating caches: {:?}",
-            caches
-        );
+        debug!("InvalidateCacheHandler: invalidating caches: {:?}", caches);
 
         // Invalidate local cache always success
         let _ = self
@@ -55,7 +53,7 @@ impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
     }
 }
 
-impl InvalidateTableCacheHandler {
+impl InvalidateCacheHandler {
     pub fn new(cache_invalidator: CacheInvalidatorRef) -> Self {
         Self { cache_invalidator }
     }
