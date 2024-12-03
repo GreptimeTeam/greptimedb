@@ -21,6 +21,8 @@ use opendal::raw::{
 };
 use opendal::Result;
 mod read_cache;
+use std::time::Instant;
+
 use common_telemetry::info;
 use read_cache::ReadCache;
 
@@ -39,17 +41,23 @@ impl<C: Access> Clone for LruCacheLayer<C> {
 }
 
 impl<C: Access> LruCacheLayer<C> {
-    /// Create a `[LruCacheLayer]` with local file cache and capacity in bytes.
-    pub async fn new(file_cache: Arc<C>, capacity: usize) -> Result<Self> {
+    /// Create a [`LruCacheLayer`] with local file cache and capacity in bytes.
+    pub fn new(file_cache: Arc<C>, capacity: usize) -> Result<Self> {
         let read_cache = ReadCache::new(file_cache, capacity);
-        let (entries, bytes) = read_cache.recover_cache().await?;
-
-        info!(
-            "Recovered {} entries and total size {} in bytes for LruCacheLayer",
-            entries, bytes
-        );
-
         Ok(Self { read_cache })
+    }
+
+    /// Recovers cache
+    pub async fn recover_cache(&self) -> Result<()> {
+        let now = Instant::now();
+        let (entries, bytes) = self.read_cache.recover_cache().await?;
+        info!(
+            "Recovered {} entries and total size {} in bytes for LruCacheLayer, cost: {:?}",
+            entries,
+            bytes,
+            now.elapsed()
+        );
+        Ok(())
     }
 
     /// Returns true when the local cache contains the specific file

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::{debug, info};
+use common_telemetry::{debug, error, info};
 use futures::AsyncWriteExt;
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::ObjectStore;
@@ -67,11 +67,16 @@ impl WriteCache {
         puffin_manager_factory: PuffinManagerFactory,
         intermediate_manager: IntermediateManager,
     ) -> Result<Self> {
-        let file_cache = FileCache::new(local_store, cache_capacity, ttl);
-        file_cache.recover().await?;
+        let file_cache = Arc::new(FileCache::new(local_store, cache_capacity, ttl));
+        let moved_file_cache = file_cache.clone();
+        tokio::spawn(async move {
+            if let Err(err) = moved_file_cache.recover().await {
+                error!(err; "Failed to recover file cache.")
+            }
+        });
 
         Ok(Self {
-            file_cache: Arc::new(file_cache),
+            file_cache,
             object_store_manager,
             puffin_manager_factory,
             intermediate_manager,
