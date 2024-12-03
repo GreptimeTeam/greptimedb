@@ -679,12 +679,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Failed to connect to Postgres"))]
-    FetchTableSchemaCache {
-        #[snafu(source)]
-        error: Arc<Error>,
-    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -788,7 +782,6 @@ impl ErrorExt for Error {
             #[cfg(feature = "pg_kvbackend")]
             ConnectPostgres { .. } => StatusCode::Internal,
             Error::DatanodeTableInfoNotFound { .. } => StatusCode::Internal,
-            FetchTableSchemaCache { .. } => StatusCode::Internal,
         }
     }
 
