@@ -21,7 +21,7 @@ use snafu::{ensure, OptionExt};
 
 use crate::error::{self, Result};
 use crate::generator::Random;
-use crate::ir::alter_expr::AlterTableOperation;
+use crate::ir::alter_expr::{AlterTableOperation, AlterTableOption};
 use crate::ir::{AlterTableExpr, Column, CreateTableExpr, Ident};
 
 pub type TableContextRef = Arc<TableContext>;
@@ -35,6 +35,7 @@ pub struct TableContext {
     // GreptimeDB specific options
     pub partition: Option<PartitionDef>,
     pub primary_keys: Vec<usize>,
+    pub table_options: Vec<AlterTableOption>,
 }
 
 impl From<&CreateTableExpr> for TableContext {
@@ -52,6 +53,7 @@ impl From<&CreateTableExpr> for TableContext {
             columns: columns.clone(),
             partition: partition.clone(),
             primary_keys: primary_keys.clone(),
+            table_options: vec![],
         }
     }
 }
@@ -140,7 +142,30 @@ impl TableContext {
                 }
                 Ok(self)
             }
-            _ => Ok(self),
+            AlterTableOperation::SetTableOptions { options } => {
+                for option in options {
+                    if self
+                        .table_options
+                        .iter()
+                        .any(|opt| opt.key() == option.key())
+                    {
+                        let position = self
+                            .table_options
+                            .iter()
+                            .position(|opt| opt.key() == option.key())
+                            .unwrap();
+                        self.table_options[position] = option;
+                    } else {
+                        self.table_options.push(option);
+                    }
+                }
+                Ok(self)
+            }
+            AlterTableOperation::UnsetTableOptions { keys } => {
+                self.table_options
+                    .retain(|opt| !keys.contains(&opt.key().to_string()));
+                Ok(self)
+            }
         }
     }
 
@@ -172,10 +197,11 @@ impl TableContext {
 #[cfg(test)]
 mod tests {
     use common_query::AddColumnLocation;
+    use common_time::Duration;
     use datatypes::data_type::ConcreteDataType;
 
     use super::TableContext;
-    use crate::ir::alter_expr::AlterTableOperation;
+    use crate::ir::alter_expr::{AlterTableOperation, AlterTableOption};
     use crate::ir::create_expr::ColumnOption;
     use crate::ir::{AlterTableExpr, Column, Ident};
 
@@ -186,6 +212,7 @@ mod tests {
             columns: vec![],
             partition: None,
             primary_keys: vec![],
+            table_options: vec![],
         };
         // Add a column
         let expr = AlterTableExpr {
@@ -245,5 +272,27 @@ mod tests {
         let table_ctx = table_ctx.alter(expr).unwrap();
         assert_eq!(table_ctx.columns[1].name, Ident::new("a"));
         assert_eq!(table_ctx.primary_keys, vec![0, 1]);
+
+        // Set table options
+        let ttl_option = AlterTableOption::Ttl(Duration::new_second(10));
+        let expr = AlterTableExpr {
+            table_name: "foo".into(),
+            alter_kinds: AlterTableOperation::SetTableOptions {
+                options: vec![ttl_option.clone()],
+            },
+        };
+        let table_ctx = table_ctx.alter(expr).unwrap();
+        assert_eq!(table_ctx.table_options.len(), 1);
+        assert_eq!(table_ctx.table_options[0], ttl_option);
+
+        // Unset table options
+        let expr = AlterTableExpr {
+            table_name: "foo".into(),
+            alter_kinds: AlterTableOperation::UnsetTableOptions {
+                keys: vec![ttl_option.key().to_string()],
+            },
+        };
+        let table_ctx = table_ctx.alter(expr).unwrap();
+        assert_eq!(table_ctx.table_options.len(), 0);
     }
 }
