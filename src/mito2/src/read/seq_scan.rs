@@ -28,7 +28,7 @@ use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{PartitionRange, RegionScanner, ScannerProperties};
+use store_api::region_engine::{PartitionRange, PrepareRequest, RegionScanner, ScannerProperties};
 use store_api::storage::TimeSeriesRowSelector;
 use tokio::sync::Semaphore;
 
@@ -135,7 +135,8 @@ impl SeqScan {
         Self::build_reader_from_sources(stream_ctx, sources, None).await
     }
 
-    // TODO(yingwen): Only merge and dedup when num source > 1.
+    /// Builds a reader to read sources. If `semaphore` is provided, reads sources in parallel
+    /// if possible.
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     async fn build_reader_from_sources(
         stream_ctx: &StreamContext,
@@ -143,11 +144,12 @@ impl SeqScan {
         semaphore: Option<Arc<Semaphore>>,
     ) -> Result<BoxedBatchReader> {
         if let Some(semaphore) = semaphore.as_ref() {
-            // Read sources in parallel. We always spawn a task so we can control the parallelism
-            // by the semaphore.
-            sources = stream_ctx
-                .input
-                .create_parallel_sources(sources, semaphore.clone())?;
+            // Read sources in parallel.
+            if sources.len() > 1 {
+                sources = stream_ctx
+                    .input
+                    .create_parallel_sources(sources, semaphore.clone())?;
+            }
         }
 
         let mut builder = MergeReaderBuilder::from_sources(sources);
@@ -194,11 +196,20 @@ impl SeqScan {
         }
 
         let stream_ctx = self.stream_ctx.clone();
-        // FIXME(yingwen): 1. Get target partition from prepare. 2. Get parallelism from prepare.
-        let semaphore = Arc::new(Semaphore::new(self.properties.partitions.len()));
+        let semaphore = if self.properties.target_partitions() > self.properties.num_partitions() {
+            // We can use addtional tasks to read the data. This semaphore is partition level.
+            // We don't use a global semaphore to avoid a partition waiting for others. The final concurrency
+            // of tasks usually won't exceed the target partitions a lot as compaction can reduce the number of
+            // files in a part range.
+            Some(Arc::new(Semaphore::new(
+                self.properties.target_partitions() - self.properties.num_partitions() + 1,
+            )))
+        } else {
+            Some(Arc::new(Semaphore::new(1)))
+        };
         let partition_ranges = self.properties.partitions[partition].clone();
         let compaction = self.compaction;
-        let distinguish_range = self.properties.distinguish_partition_range();
+        let distinguish_range = self.properties.distinguish_partition_range;
         let part_metrics = PartitionMetrics::new(
             self.stream_ctx.input.mapper.metadata().region_id,
             partition,
@@ -230,7 +241,7 @@ impl SeqScan {
                 );
 
                 let mut reader =
-                    Self::build_reader_from_sources(&stream_ctx, sources, Some(semaphore.clone()))
+                    Self::build_reader_from_sources(&stream_ctx, sources, semaphore.clone())
                         .await
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?;
@@ -313,13 +324,8 @@ impl RegionScanner for SeqScan {
         self.scan_partition_impl(partition)
     }
 
-    fn prepare(
-        &mut self,
-        ranges: Vec<Vec<PartitionRange>>,
-        distinguish_partition_range: bool,
-    ) -> Result<(), BoxedError> {
-        self.properties.partitions = ranges;
-        self.properties.distinguish_partition_range = distinguish_partition_range;
+    fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
+        self.properties.prepare(request);
         Ok(())
     }
 

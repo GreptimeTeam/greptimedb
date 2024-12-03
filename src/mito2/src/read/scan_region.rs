@@ -625,7 +625,6 @@ impl ScanInput {
             return Ok(sources);
         }
 
-        debug_assert!(self.parallelism.parallelism > 1);
         // Spawn a task for each source.
         let sources = sources
             .into_iter()

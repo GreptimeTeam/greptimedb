@@ -94,7 +94,7 @@ impl ParallelizeScan {
 
                     // update the partition ranges
                     let new_exec = region_scan_exec
-                        .with_new_partitions(partition_ranges)
+                        .with_new_partitions(partition_ranges, expected_partition_num)
                         .map_err(|e| DataFusionError::External(e.into_inner()))?;
                     return Ok(Transformed::yes(Arc::new(new_exec)));
                 }
