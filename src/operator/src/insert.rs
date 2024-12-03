@@ -44,6 +44,7 @@ use store_api::metric_engine_consts::{
 };
 use store_api::mito_engine_options::{APPEND_MODE_KEY, MERGE_MODE_KEY};
 use store_api::storage::{RegionId, TableId};
+use table::metadata::TableInfo;
 use table::requests::{InsertRequest as TableInsertRequest, AUTO_CREATE_TABLE_KEY, TTL_KEY};
 use table::table_reference::TableReference;
 use table::TableRef;
@@ -320,7 +321,7 @@ impl Inserter {
         }
 
         let write_tasks = self
-            .group_requests_by_peer(requests)
+            .group_requests_by_peer(requests, ctx)
             .await?
             .into_iter()
             .map(|(peer, inserts)| {
@@ -418,12 +419,17 @@ impl Inserter {
     async fn group_requests_by_peer(
         &self,
         requests: RegionInsertRequests,
+        ctx: &QueryContextRef,
     ) -> Result<HashMap<Peer, RegionInsertRequests>> {
         // group by region ids first to reduce repeatedly call `find_region_leader`
         // TODO(discord9): determine if a addition clone is worth it
         let mut requests_per_region: HashMap<RegionId, RegionInsertRequests> = HashMap::new();
-
+        let ttl_zero_regions = ctx.ttl_zero_regions();
         for req in requests.requests {
+            // filter out ttl zero regions
+            if ttl_zero_regions.contains(&req.region_id) {
+                continue;
+            }
             let region_id = RegionId::from_u64(req.region_id);
             requests_per_region
                 .entry(region_id)
@@ -463,6 +469,16 @@ impl Inserter {
         auto_create_table_type: AutoCreateTableType,
         statement_executor: &StatementExecutor,
     ) -> Result<HashMap<String, TableId>> {
+        fn add_ttl_zero_table(ctx: &QueryContextRef, table_info: &TableInfo) {
+            let ttl = table_info.meta.options.ttl;
+            if let Some(ttl) = ttl {
+                if ttl.is_zero() {
+                    ctx.add_ttl_zero_regions(
+                        table_info.region_ids().into_iter().map(|i| i.as_u64()),
+                    );
+                }
+            }
+        }
         let _timer = crate::metrics::CREATE_ALTER_ON_DEMAND
             .with_label_values(&[auto_create_table_type.as_str()])
             .start_timer();
@@ -494,6 +510,7 @@ impl Inserter {
                         ),
                     })?;
                 let table_info = table.table_info();
+                add_ttl_zero_table(ctx, &table_info);
                 table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
             }
             return Ok(table_name_to_ids);
@@ -556,6 +573,16 @@ impl Inserter {
                         .await?;
                 }
             }
+        }
+
+        for table_name in table_name_to_ids.keys() {
+            let table = if let Some(table) = self.get_table(catalog, &schema, table_name).await? {
+                table
+            } else {
+                continue;
+            };
+            let table_info = table.table_info();
+            add_ttl_zero_table(ctx, &table_info);
         }
 
         Ok(table_name_to_ids)

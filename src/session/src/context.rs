@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
@@ -59,6 +59,8 @@ pub struct QueryContext {
 #[derive(Debug, Builder, Clone, Default)]
 pub struct QueryContextMutableFields {
     warning: Option<String>,
+    /// regions with ttl=0
+    ttl_zero_regions: BTreeSet<u64>,
 }
 
 impl Display for QueryContext {
@@ -282,6 +284,22 @@ impl QueryContext {
 
     pub fn set_warning(&self, msg: String) {
         self.mutable_query_context_data.write().unwrap().warning = Some(msg);
+    }
+
+    pub fn add_ttl_zero_regions(&self, region_ids: impl Iterator<Item = u64>) {
+        self.mutable_query_context_data
+            .write()
+            .unwrap()
+            .ttl_zero_regions
+            .extend(region_ids);
+    }
+
+    pub fn ttl_zero_regions(&self) -> BTreeSet<u64> {
+        self.mutable_query_context_data
+            .read()
+            .unwrap()
+            .ttl_zero_regions
+            .clone()
     }
 
     pub fn query_timeout(&self) -> Option<Duration> {
