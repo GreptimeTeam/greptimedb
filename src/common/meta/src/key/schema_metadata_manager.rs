@@ -19,15 +19,14 @@ use std::sync::Arc;
 use snafu::OptionExt;
 use store_api::storage::TableId;
 
-use crate::cache::{SchemaCacheRef, TableInfoCacheRef};
+use crate::cache::{SchemaCacheRef, TableSchemaCacheRef};
 use crate::error::TableInfoNotFoundSnafu;
-use crate::key::schema_name::SchemaName;
 use crate::{error, SchemaOptions};
 
 pub type SchemaMetadataManagerRef = Arc<SchemaMetadataManager>;
 
 pub struct SchemaMetadataManager {
-    table_cache: TableInfoCacheRef,
+    table_id_schema_cache: TableSchemaCacheRef,
     schema_cache: SchemaCacheRef,
     #[cfg(any(test, feature = "testing"))]
     kv_backend: crate::kv_backend::KvBackendRef,
@@ -36,9 +35,9 @@ pub struct SchemaMetadataManager {
 impl SchemaMetadataManager {
     /// Creates a new database meta
     #[cfg(not(any(test, feature = "testing")))]
-    pub fn new(table_cache: TableInfoCacheRef, schema_cache: SchemaCacheRef) -> Self {
+    pub fn new(table_schema_cache: TableSchemaCacheRef, schema_cache: SchemaCacheRef) -> Self {
         Self {
-            table_cache,
+            table_id_schema_cache,
             schema_cache,
         }
     }
@@ -47,11 +46,11 @@ impl SchemaMetadataManager {
     #[cfg(any(test, feature = "testing"))]
     pub fn new(
         kv_backend: crate::kv_backend::KvBackendRef,
-        table_cache: TableInfoCacheRef,
+        table_id_schema_cache: TableSchemaCacheRef,
         schema_cache: SchemaCacheRef,
     ) -> Self {
         Self {
-            table_cache,
+            table_id_schema_cache,
             schema_cache,
             kv_backend,
         }
@@ -62,20 +61,15 @@ impl SchemaMetadataManager {
         &self,
         table_id: TableId,
     ) -> error::Result<Option<Arc<SchemaOptions>>> {
-        let table_info =
-            self.table_cache
-                .get(table_id)
-                .await?
-                .with_context(|| TableInfoNotFoundSnafu {
-                    table: format!("table id: {}", table_id),
-                })?;
+        let schema_name = self
+            .table_id_schema_cache
+            .get(table_id)
+            .await?
+            .with_context(|| TableInfoNotFoundSnafu {
+                table: format!("table id: {}", table_id),
+            })?;
 
-        self.schema_cache
-            .get_by_ref(&SchemaName {
-                catalog_name: table_info.catalog_name.clone(),
-                schema_name: table_info.schema_name.clone(),
-            })
-            .await
+        self.schema_cache.get_by_ref(&schema_name).await
     }
 
     #[cfg(any(test, feature = "testing"))]

@@ -35,7 +35,7 @@ use api::v1::{OpType, Row, Rows, SemanticType};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_datasource::compression::CompressionType;
-use common_meta::cache::{new_schema_cache, new_table_info_cache};
+use common_meta::cache::{new_schema_cache, new_table_info_cache, new_table_schema_cache};
 use common_meta::key::schema_name::{SchemaName, SchemaNameValue};
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -1154,8 +1154,8 @@ pub async fn reopen_region(
 
 pub(crate) fn mock_schema_metadata_manager() -> Arc<SchemaMetadataManager> {
     let kv_backend = Arc::new(MemoryKvBackend::new());
-    let table_cache = Arc::new(new_table_info_cache(
-        "table_info_cache".to_string(),
+    let table_schema_cache = Arc::new(new_table_schema_cache(
+        "table_schema_name_cache".to_string(),
         CacheBuilder::default().build(),
         kv_backend.clone(),
     ));
@@ -1166,7 +1166,7 @@ pub(crate) fn mock_schema_metadata_manager() -> Arc<SchemaMetadataManager> {
     ));
     Arc::new(SchemaMetadataManager::new(
         kv_backend as KvBackendRef,
-        table_cache,
+        table_schema_cache,
         schema_cache,
     ))
 }

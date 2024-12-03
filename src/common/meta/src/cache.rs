@@ -25,7 +25,7 @@ pub use registry::{
 };
 pub use table::{
     new_schema_cache, new_table_info_cache, new_table_name_cache, new_table_route_cache,
-    new_view_info_cache, SchemaCache, SchemaCacheRef, TableInfoCache, TableInfoCacheRef,
-    TableNameCache, TableNameCacheRef, TableRoute, TableRouteCache, TableRouteCacheRef,
-    ViewInfoCache, ViewInfoCacheRef,
+    new_table_schema_cache, new_view_info_cache, SchemaCache, SchemaCacheRef, TableInfoCache,
+    TableInfoCacheRef, TableNameCache, TableNameCacheRef, TableRoute, TableRouteCache,
+    TableRouteCacheRef, TableSchemaCache, TableSchemaCacheRef, ViewInfoCache, ViewInfoCacheRef,
 };

@@ -22,7 +22,7 @@ use catalog::memory::MemoryCatalogManager;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
-use common_meta::cache::{LayeredCacheRegistry, SchemaCacheRef, TableInfoCacheRef};
+use common_meta::cache::{LayeredCacheRegistry, SchemaCacheRef, TableSchemaCacheRef};
 use common_meta::key::datanode_table::{DatanodeTableManager, DatanodeTableValue};
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
@@ -219,12 +219,13 @@ impl DatanodeBuilder {
         };
 
         let cache_registry = self.cache_registry.take().context(MissingCacheSnafu)?;
-        let table_cache: TableInfoCacheRef = cache_registry.get().context(MissingCacheSnafu)?;
         let schema_cache: SchemaCacheRef = cache_registry.get().context(MissingCacheSnafu)?;
+        let table_id_schema_cache: TableSchemaCacheRef =
+            cache_registry.get().context(MissingCacheSnafu)?;
 
         let schema_metadata_manager = Arc::new(SchemaMetadataManager::new(
             kv_backend.clone(),
-            table_cache,
+            table_id_schema_cache,
             schema_cache,
         ));
         let region_server = self
