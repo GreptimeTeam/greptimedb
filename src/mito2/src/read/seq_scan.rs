@@ -197,7 +197,7 @@ impl SeqScan {
 
         let stream_ctx = self.stream_ctx.clone();
         let semaphore = if self.properties.target_partitions() > self.properties.num_partitions() {
-            // We can use addtional tasks to read the data if we have more target partitions than acutal partitions.
+            // We can use additional tasks to read the data if we have more target partitions than actual partitions.
             // This semaphore is partition level.
             // We don't use a global semaphore to avoid a partition waiting for others. The final concurrency
             // of tasks usually won't exceed the target partitions a lot as compaction can reduce the number of

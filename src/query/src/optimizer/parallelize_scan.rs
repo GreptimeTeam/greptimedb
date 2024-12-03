@@ -108,10 +108,10 @@ impl ParallelizeScan {
         Ok(result)
     }
 
-    // TODO(yingwen): Update comment.
     /// Distribute [`PartitionRange`]s to each partition.
     ///
-    /// Currently we use a simple round-robin strategy to assign ranges to partitions.
+    /// Currently we assign ranges to partitions according to their rows so each partition
+    /// has similar number of rows.
     /// This method may return partitions with smaller number than `expected_partition_num`
     /// if the number of ranges is smaller than `expected_partition_num`. But this will
     /// return at least one partition.
