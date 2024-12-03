@@ -156,7 +156,7 @@ pub fn build_fundamental_cache_registry(kv_backend: KvBackendRef) -> CacheRegist
         .add_cache(view_info_cache)
         .add_cache(table_flownode_set_cache)
         .add_cache(schema_cache)
-        .add_cache(table_schema_name_cache)
+        .add_cache(table_id_schema_cache)
         .build()
 }
 
