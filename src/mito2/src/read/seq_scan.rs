@@ -135,6 +135,7 @@ impl SeqScan {
         Self::build_reader_from_sources(stream_ctx, sources, None).await
     }
 
+    // TODO(yingwen): Only merge and dedup when num source > 1.
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     async fn build_reader_from_sources(
         stream_ctx: &StreamContext,
@@ -193,7 +194,7 @@ impl SeqScan {
         }
 
         let stream_ctx = self.stream_ctx.clone();
-        // FIXME(yingwen): Get target partition from prepare.
+        // FIXME(yingwen): 1. Get target partition from prepare. 2. Get parallelism from prepare.
         let semaphore = Arc::new(Semaphore::new(self.properties.partitions.len()));
         let partition_ranges = self.properties.partitions[partition].clone();
         let compaction = self.compaction;
