@@ -19,7 +19,7 @@ use super::{KvBackend, *};
 use crate::error::Error;
 use crate::rpc::store::{BatchGetRequest, PutRequest};
 use crate::rpc::KeyValue;
-use crate::util;
+use crate::utils;
 
 pub fn mock_kvs(prefix: Vec<u8>) -> Vec<KeyValue> {
     vec![
@@ -58,7 +58,7 @@ pub async fn prepare_kv_with_prefix(kv_backend: &impl KvBackend, prefix: Vec<u8>
 }
 
 pub async fn unprepare_kv(kv_backend: &impl KvBackend, prefix: &[u8]) {
-    let range_end = util::get_prefix_end_key(prefix);
+    let range_end = utils::get_prefix_end_key(prefix);
     assert!(kv_backend
         .delete_range(DeleteRangeRequest {
             key: prefix.to_vec(),
@@ -105,7 +105,7 @@ pub async fn test_kv_range(kv_backend: &impl KvBackend) {
 pub async fn test_kv_range_with_prefix(kv_backend: &impl KvBackend, prefix: Vec<u8>) {
     let key = [prefix.clone(), b"key1".to_vec()].concat();
     let key11 = [prefix.clone(), b"key11".to_vec()].concat();
-    let range_end = util::get_prefix_end_key(&key);
+    let range_end = utils::get_prefix_end_key(&key);
 
     let resp = kv_backend
         .range(RangeRequest {
@@ -195,7 +195,7 @@ pub async fn test_kv_range_2_with_prefix(kv_backend: impl KvBackend, prefix: Vec
     let all_end = if prefix.is_empty() {
         b"\0".to_vec()
     } else {
-        util::get_prefix_end_key(&prefix)
+        utils::get_prefix_end_key(&prefix)
     };
     let result = kv_backend
         .range(RangeRequest::new().with_range(all_start, all_end.clone()))
@@ -382,7 +382,7 @@ pub async fn test_kv_delete_range_with_prefix(kv_backend: impl KvBackend, prefix
     assert!(resp.is_none());
 
     let key = [prefix.clone(), b"key1".to_vec()].concat();
-    let range_end = util::get_prefix_end_key(&key);
+    let range_end = utils::get_prefix_end_key(&key);
 
     let req = DeleteRangeRequest {
         key: key.clone(),

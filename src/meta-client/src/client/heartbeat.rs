@@ -17,7 +17,7 @@ use std::sync::Arc;
 use api::v1::meta::heartbeat_client::HeartbeatClient;
 use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, RequestHeader, Role};
 use common_grpc::channel_manager::ChannelManager;
-use common_meta::util;
+use common_meta::utils;
 use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -87,7 +87,7 @@ impl HeartbeatStream {
     pub async fn message(&mut self) -> Result<Option<HeartbeatResponse>> {
         let res = self.stream.message().await.map_err(error::Error::from);
         if let Ok(Some(heartbeat)) = &res {
-            util::check_response_header(heartbeat.header.as_ref())
+            utils::check_response_header(heartbeat.header.as_ref())
                 .context(InvalidResponseHeaderSnafu)?;
         }
         res

@@ -44,7 +44,7 @@ pub mod sequence;
 pub mod state_store;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;
-pub mod util;
+pub mod utils;
 pub mod wal_options_allocator;
 
 // The id of the cluster.

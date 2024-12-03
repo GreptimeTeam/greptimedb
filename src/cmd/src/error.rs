@@ -44,6 +44,20 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to decode value"))]
+    DecodeValue {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to process metadata"))]
+    MetadataProcessor {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to init default timezone"))]
     InitTimezone {
         #[snafu(implicit)]
@@ -116,6 +130,13 @@ pub enum Error {
 
     #[snafu(display("Failed to build meta server"))]
     BuildMetaServer {
+        #[snafu(implicit)]
+        location: Location,
+        source: meta_srv::error::Error,
+    },
+
+    #[snafu(display("Failed to key value backend"))]
+    BuildKvBackend {
         #[snafu(implicit)]
         location: Location,
         source: meta_srv::error::Error,
@@ -345,7 +366,11 @@ impl ErrorExt for Error {
             Error::StartMetaServer { source, .. } => source.status_code(),
             Error::ShutdownMetaServer { source, .. } => source.status_code(),
             Error::BuildMetaServer { source, .. } => source.status_code(),
+            Error::BuildKvBackend { source, .. } => source.status_code(),
             Error::UnsupportedSelectorType { source, .. } => source.status_code(),
+            Error::DecodeValue { source, .. } | Error::MetadataProcessor { source, .. } => {
+                source.status_code()
+            }
 
             Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {
                 source.status_code()

@@ -12,7 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod transformer;
+
 use api::v1::meta::ResponseHeader;
+pub use transformer::{
+    KvBackendMetadataApplier, MetadataApplier, MetadataProcessor, MetadataTransformer,
+    NoopMetadataApplier, RellocateRegionWalOptions,
+};
 
 use crate::error::{IllegalServerStateSnafu, Result};
 

@@ -25,6 +25,7 @@ mod database;
 mod import;
 #[allow(unused)]
 mod repl;
+mod wal_switch;
 
 use async_trait::async_trait;
 use bench::BenchTableMetadataCommand;
@@ -32,6 +33,7 @@ use clap::Parser;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 pub use repl::Repl;
 use tracing_appender::non_blocking::WorkerGuard;
+use wal_switch::{SwitchToLocalWalCommand, SwitchToRemoteWalCommand};
 
 use self::export::ExportCommand;
 use crate::cli::import::ImportCommand;
@@ -118,6 +120,8 @@ enum SubCommand {
     Bench(BenchTableMetadataCommand),
     Export(ExportCommand),
     Import(ImportCommand),
+    SwitchToRemoteWal(SwitchToRemoteWalCommand),
+    SwitchToLocalWal(SwitchToLocalWalCommand),
 }
 
 impl SubCommand {
@@ -127,6 +131,8 @@ impl SubCommand {
             SubCommand::Bench(cmd) => cmd.build(guard).await,
             SubCommand::Export(cmd) => cmd.build(guard).await,
             SubCommand::Import(cmd) => cmd.build(guard).await,
+            SubCommand::SwitchToRemoteWal(cmd) => cmd.build(guard).await,
+            SubCommand::SwitchToLocalWal(cmd) => cmd.build(guard).await,
         }
     }
 }

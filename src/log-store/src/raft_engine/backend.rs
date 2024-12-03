@@ -29,7 +29,7 @@ use common_meta::rpc::store::{
     RangeRequest, RangeResponse,
 };
 use common_meta::rpc::KeyValue;
-use common_meta::util::get_next_prefix_key;
+use common_meta::utils::get_next_prefix_key;
 use raft_engine::{Config, Engine, LogBatch};
 use snafu::{IntoError, ResultExt};
 

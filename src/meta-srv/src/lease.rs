@@ -18,7 +18,7 @@ use std::hash::Hash;
 use common_error::ext::BoxedError;
 use common_meta::kv_backend::KvBackend;
 use common_meta::peer::{Peer, PeerLookupService};
-use common_meta::{util, ClusterId, DatanodeId, FlownodeId};
+use common_meta::{utils, ClusterId, DatanodeId, FlownodeId};
 use common_time::util as time_util;
 use snafu::ResultExt;
 
@@ -129,7 +129,7 @@ where
     P: Fn(&LeaseValue) -> bool,
     K: Eq + Hash + TryFrom<Vec<u8>, Error = Error>,
 {
-    let range_end = util::get_prefix_end_key(&key);
+    let range_end = utils::get_prefix_end_key(&key);
     let range_req = common_meta::rpc::store::RangeRequest {
         key,
         range_end,

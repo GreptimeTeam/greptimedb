@@ -23,7 +23,7 @@ use crate::error::{self, Result};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::{RangeRequest, RangeResponse};
 use crate::rpc::KeyValue;
-use crate::util::get_next_prefix_key;
+use crate::utils::get_next_prefix_key;
 
 pub type KeyValueDecoderFn<T> = dyn Fn(KeyValue) -> Result<T> + Send + Sync;
 

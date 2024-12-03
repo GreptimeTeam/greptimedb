@@ -28,7 +28,7 @@ use api::v1::meta::{
 
 use crate::error::Result;
 use crate::rpc::KeyValue;
-use crate::{error, util};
+use crate::{error, utils};
 
 pub fn to_range(key: Vec<u8>, range_end: Vec<u8>) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
     match (&key[..], &range_end[..]) {
@@ -137,7 +137,7 @@ impl RangeRequest {
     /// range_end is the key plus one (e.g., "aa"+1 == "ab", "a\xff"+1 == "b"),
     pub fn with_prefix(mut self, key: impl Into<Vec<u8>>) -> Self {
         self.key = key.into();
-        self.range_end = util::get_prefix_end_key(&self.key);
+        self.range_end = utils::get_prefix_end_key(&self.key);
         self
     }
 
@@ -180,7 +180,7 @@ impl TryFrom<PbRangeResponse> for RangeResponse {
     type Error = error::Error;
 
     fn try_from(pb: PbRangeResponse) -> Result<Self> {
-        util::check_response_header(pb.header.as_ref())?;
+        utils::check_response_header(pb.header.as_ref())?;
 
         Ok(Self {
             kvs: pb.kvs.into_iter().map(KeyValue::new).collect(),
@@ -275,7 +275,7 @@ impl TryFrom<PbPutResponse> for PutResponse {
     type Error = error::Error;
 
     fn try_from(pb: PbPutResponse) -> Result<Self> {
-        util::check_response_header(pb.header.as_ref())?;
+        utils::check_response_header(pb.header.as_ref())?;
 
         Ok(Self {
             prev_kv: pb.prev_kv.map(KeyValue::new),
@@ -357,7 +357,7 @@ impl TryFrom<PbBatchGetResponse> for BatchGetResponse {
     type Error = error::Error;
 
     fn try_from(pb: PbBatchGetResponse) -> Result<Self> {
-        util::check_response_header(pb.header.as_ref())?;
+        utils::check_response_header(pb.header.as_ref())?;
 
         Ok(Self {
             kvs: pb.kvs.into_iter().map(KeyValue::new).collect(),
@@ -434,7 +434,7 @@ impl TryFrom<PbBatchPutResponse> for BatchPutResponse {
     type Error = error::Error;
 
     fn try_from(pb: PbBatchPutResponse) -> Result<Self> {
-        util::check_response_header(pb.header.as_ref())?;
+        utils::check_response_header(pb.header.as_ref())?;
 
         Ok(Self {
             prev_kvs: pb.prev_kvs.into_iter().map(KeyValue::new).collect(),
@@ -518,7 +518,7 @@ impl TryFrom<PbBatchDeleteResponse> for BatchDeleteResponse {
     type Error = error::Error;
 
     fn try_from(pb: PbBatchDeleteResponse) -> Result<Self> {
-        util::check_response_header(pb.header.as_ref())?;
+        utils::check_response_header(pb.header.as_ref())?;
 
         Ok(Self {
             prev_kvs: pb.prev_kvs.into_iter().map(KeyValue::new).collect(),
@@ -605,7 +605,7 @@ impl TryFrom<PbCompareAndPutResponse> for CompareAndPutResponse {
     type Error = error::Error;
 
     fn try_from(pb: PbCompareAndPutResponse) -> Result<Self> {
-        util::check_response_header(pb.header.as_ref())?;
+        utils::check_response_header(pb.header.as_ref())?;
 
         Ok(Self {
             success: pb.success,
@@ -722,7 +722,7 @@ impl DeleteRangeRequest {
     /// range_end is one bit larger than the given key.
     pub fn with_prefix(mut self, key: impl Into<Vec<u8>>) -> Self {
         self.key = key.into();
-        self.range_end = util::get_prefix_end_key(&self.key);
+        self.range_end = utils::get_prefix_end_key(&self.key);
         self
     }
 
@@ -744,7 +744,7 @@ impl TryFrom<PbDeleteRangeResponse> for DeleteRangeResponse {
     type Error = error::Error;
 
     fn try_from(pb: PbDeleteRangeResponse) -> Result<Self> {
-        util::check_response_header(pb.header.as_ref())?;
+        utils::check_response_header(pb.header.as_ref())?;
 
         Ok(Self {
             deleted: pb.deleted,

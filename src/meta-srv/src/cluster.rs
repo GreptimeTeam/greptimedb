@@ -31,7 +31,7 @@ use common_meta::rpc::store::{
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
 use common_meta::rpc::KeyValue;
-use common_meta::util;
+use common_meta::utils;
 use common_telemetry::warn;
 use derive_builder::Builder;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -198,7 +198,7 @@ impl KvBackend for MetaPeerClient {
 impl MetaPeerClient {
     async fn get_dn_key_value(&self, keys_only: bool) -> Result<Vec<KeyValue>> {
         let key = DatanodeStatKey::prefix_key();
-        let range_end = util::get_prefix_end_key(&key);
+        let range_end = utils::get_prefix_end_key(&key);
         let range_request = RangeRequest {
             key,
             range_end,
