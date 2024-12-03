@@ -200,12 +200,20 @@ pub struct ColumnFilters {
 }
 
 pub enum ContentFilter {
-    Term(String),
+    /// Only match the exact content.
+    ///
+    /// For example, if the content is "pale blue dot", the filter "pale" or "pale blue" will match.
+    Exact(String),
+    /// Match the content with a prefix.
+    ///
+    /// For example, if the content is "error message", the filter "err" or "error mess" will match.
     Prefix(String),
+    /// Match the content with a postfix. Similar to `Prefix`.
     Postfix(String),
+    /// Match the content with a substring.
     Contains(String),
+    /// Match the content with a regex pattern. The pattern should be a valid Rust regex.
     Regex(String),
-    Phase(String),
     Compound(Vec<ContentFilter>, BinaryOperator),
 }
 
