@@ -23,7 +23,7 @@ use datatypes::value::Value;
 use datatypes::vectors::{Helper, VectorRef};
 use serde::ser::{Error, SerializeStruct};
 use serde::{Serialize, Serializer};
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
     self, CastVectorSnafu, ColumnNotExistsSnafu, DataTypesSnafu, ProjectArrowRecordBatchSnafu,
@@ -197,6 +197,10 @@ impl RecordBatch {
 
     /// Return a slice record batch starts from offset to len
     pub fn slice(&self, offset: usize, len: usize) -> Result<RecordBatch> {
+        ensure!(
+            offset + len <= self.num_rows(),
+            error::RecordBatchSliceIndexOverflowSnafu
+        );
         let columns = self.columns.iter().map(|vector| vector.slice(offset, len));
         RecordBatch::new(self.schema.clone(), columns)
     }
@@ -410,5 +414,81 @@ mod tests {
         );
 
         assert!(record_batch_iter.next().is_none());
+    }
+
+    #[test]
+    fn test_record_batch_slice() {
+        let column_schemas = vec![
+            ColumnSchema::new("numbers", ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new("strings", ConcreteDataType::string_datatype(), true),
+        ];
+        let schema = Arc::new(Schema::new(column_schemas));
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(UInt32Vector::from_slice(vec![1, 2, 3, 4])),
+            Arc::new(StringVector::from(vec![
+                None,
+                Some("hello"),
+                Some("greptime"),
+                None,
+            ])),
+        ];
+        let recordbatch = RecordBatch::new(schema, columns).unwrap();
+        let recordbatch = recordbatch.slice(1, 2).expect("recordbatch slice");
+        let mut record_batch_iter = recordbatch.rows();
+        assert_eq!(
+            vec![Value::UInt32(2), Value::String("hello".into())],
+            record_batch_iter
+                .next()
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<Value>>()
+        );
+
+        assert_eq!(
+            vec![Value::UInt32(3), Value::String("greptime".into())],
+            record_batch_iter
+                .next()
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<Value>>()
+        );
+
+        assert!(record_batch_iter.next().is_none());
+
+        assert!(recordbatch.slice(1, 5).is_err());
+    }
+
+    #[test]
+    fn test_merge_record_batch() {
+        let column_schemas = vec![
+            ColumnSchema::new("numbers", ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new("strings", ConcreteDataType::string_datatype(), true),
+        ];
+        let schema = Arc::new(Schema::new(column_schemas));
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(UInt32Vector::from_slice(vec![1, 2, 3, 4])),
+            Arc::new(StringVector::from(vec![
+                None,
+                Some("hello"),
+                Some("greptime"),
+                None,
+            ])),
+        ];
+        let recordbatch = RecordBatch::new(schema.clone(), columns).unwrap();
+
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(UInt32Vector::from_slice(vec![1, 2, 3, 4])),
+            Arc::new(StringVector::from(vec![
+                None,
+                Some("hello"),
+                Some("greptime"),
+                None,
+            ])),
+        ];
+        let recordbatch2 = RecordBatch::new(schema.clone(), columns).unwrap();
+
+        let merged = merge_record_batches(schema.clone(), &[recordbatch, recordbatch2])
+            .expect("merge recordbatch");
+        assert_eq!(merged.num_rows(), 8);
     }
 }

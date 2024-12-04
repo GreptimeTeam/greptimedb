@@ -168,6 +168,11 @@ pub enum Error {
         #[snafu(source)]
         error: tokio::time::error::Elapsed,
     },
+    #[snafu(display("RecordBatch slice index overflow"))]
+    RecordBatchSliceIndexOverflow {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -182,7 +187,8 @@ impl ErrorExt for Error {
             | Error::Format { .. }
             | Error::ToArrowScalar { .. }
             | Error::ProjectArrowRecordBatch { .. }
-            | Error::PhysicalExpr { .. } => StatusCode::Internal,
+            | Error::PhysicalExpr { .. }
+            | Error::RecordBatchSliceIndexOverflow { .. } => StatusCode::Internal,
 
             Error::PollStream { .. } => StatusCode::EngineExecuteQuery,
 

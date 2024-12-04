@@ -72,6 +72,7 @@ macro_rules! sql_tests {
                 test_postgres_parameter_inference,
                 test_postgres_array_types,
                 test_mysql_prepare_stmt_insert_timestamp,
+                test_declare_fetch_close_cursor,
             );
         )*
     };
@@ -1190,6 +1191,43 @@ pub async fn test_postgres_array_types(store_type: StorageType) {
         .unwrap();
 
     assert_eq!(1, rows.len());
+
+    // Shutdown the client.
+    drop(client);
+    rx.await.unwrap();
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_declare_fetch_close_cursor(store_type: StorageType) {
+    let (addr, mut guard, fe_pg_server) = setup_pg_server(store_type, "sql_inference").await;
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+        tx.send(()).unwrap();
+    });
+
+    client
+        .execute(
+            "DECLARE c1 CURSOR FOR SELECT * FROM numbers WHERE number > 2",
+            &[],
+        )
+        .await
+        .expect("declare cursor");
+
+    let rows = client.query("FETCH 5 FROM c1", &[]).await.unwrap();
+    assert_eq!(5, rows.len());
+
+    let rows = client.query("FETCH 100 FROM c1", &[]).await.unwrap();
+    assert_eq!(92, rows.len());
+
+    client.execute("CLOSE c1", &[]).await.expect("close cursor");
 
     // Shutdown the client.
     drop(client);

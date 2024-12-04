@@ -26,6 +26,7 @@ struct Inner {
     total_rows_in_current_batch: usize,
 }
 
+/// A cursor on RecordBatchStream that fetches data batch by batch
 pub struct RecordBatchStreamCursor {
     inner: Mutex<Inner>,
 }
@@ -91,7 +92,7 @@ impl RecordBatchStreamCursor {
             remaining_rows_to_take -= rows_to_take_from_batch;
         }
 
-        // If no rows were accumulated, return None
+        // If no rows were accumulated, return empty
         if accumulated_rows.is_empty() {
             return Ok(RecordBatch::new_empty(inner.stream.schema()));
         }
@@ -103,5 +104,70 @@ impl RecordBatchStreamCursor {
 
         // Merge multiple batches
         merge_record_batches(inner.stream.schema(), &accumulated_rows)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::StringVector;
+
+    use super::*;
+    use crate::RecordBatches;
+
+    #[tokio::test]
+    async fn test_cursor() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::string_datatype(),
+            false,
+        )]));
+
+        let rbs = RecordBatches::try_from_columns(
+            schema.clone(),
+            vec![Arc::new(StringVector::from(vec!["hello", "world"])) as _],
+        )
+        .unwrap();
+
+        let cursor = RecordBatchStreamCursor::new(rbs.as_stream());
+        let result_rb = cursor.take(1).await.expect("take from cursor failed");
+        assert_eq!(result_rb.num_rows(), 1);
+
+        let result_rb = cursor.take(1).await.expect("take from cursor failed");
+        assert_eq!(result_rb.num_rows(), 1);
+
+        let result_rb = cursor.take(1).await.expect("take from cursor failed");
+        assert_eq!(result_rb.num_rows(), 0);
+
+        let rb = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(StringVector::from(vec!["hello", "world"])) as _],
+        )
+        .unwrap();
+        let rbs2 =
+            RecordBatches::try_new(schema.clone(), vec![rb.clone(), rb.clone(), rb]).unwrap();
+        let cursor = RecordBatchStreamCursor::new(rbs2.as_stream());
+        let result_rb = cursor.take(3).await.expect("take from cursor failed");
+        assert_eq!(result_rb.num_rows(), 3);
+        let result_rb = cursor.take(2).await.expect("take from cursor failed");
+        assert_eq!(result_rb.num_rows(), 2);
+        let result_rb = cursor.take(2).await.expect("take from cursor failed");
+        assert_eq!(result_rb.num_rows(), 1);
+        let result_rb = cursor.take(2).await.expect("take from cursor failed");
+        assert_eq!(result_rb.num_rows(), 0);
+
+        let rb = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(StringVector::from(vec!["hello", "world"])) as _],
+        )
+        .unwrap();
+        let rbs3 =
+            RecordBatches::try_new(schema.clone(), vec![rb.clone(), rb.clone(), rb]).unwrap();
+        let cursor = RecordBatchStreamCursor::new(rbs3.as_stream());
+        let result_rb = cursor.take(10).await.expect("take from cursor failed");
+        assert_eq!(result_rb.num_rows(), 6);
     }
 }
