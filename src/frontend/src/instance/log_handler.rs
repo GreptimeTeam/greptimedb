@@ -32,11 +32,7 @@ use crate::instance::Instance;
 
 #[async_trait]
 impl PipelineHandler for Instance {
-    async fn transform(
-        &self,
-        log: RowInsertRequests,
-        ctx: QueryContextRef,
-    ) -> ServerResult<Output> {
+    async fn insert(&self, log: RowInsertRequests, ctx: QueryContextRef) -> ServerResult<Output> {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()

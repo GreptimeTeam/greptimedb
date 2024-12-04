@@ -141,7 +141,7 @@ pub trait OpenTelemetryProtocolHandler: PipelineHandler {
 /// The pipeline is stored in the database and can be retrieved by its name.
 #[async_trait]
 pub trait PipelineHandler {
-    async fn transform(&self, input: RowInsertRequests, ctx: QueryContextRef) -> Result<Output>;
+    async fn insert(&self, input: RowInsertRequests, ctx: QueryContextRef) -> Result<Output>;
 
     async fn get_pipeline(
         &self,
