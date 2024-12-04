@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use datatypes::vectors::UInt32Vector;
-use snafu::ResultExt;
 use store_api::storage::TimeSeriesRowSelector;
 
 use crate::cache::{
