@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use common_base::TimeToLive;
+use common_base::Ttl;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use futures::stream::BoxStream;
 use humantime_serde::re::humantime;
@@ -57,7 +57,7 @@ impl Default for SchemaNameKey<'_> {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SchemaNameValue {
     #[serde(default)]
-    pub ttl: Option<TimeToLive>,
+    pub ttl: Option<Ttl>,
 }
 
 impl Display for SchemaNameValue {
@@ -329,7 +329,7 @@ mod tests {
         assert_eq!("ttl='forever'", schema_value.to_string());
 
         let schema_value = SchemaNameValue {
-            ttl: Some(TimeToLive::Immediate),
+            ttl: Some(Ttl::Immediate),
         };
         assert_eq!("ttl='immediate'", schema_value.to_string());
     }
@@ -358,7 +358,7 @@ mod tests {
         assert_eq!(Some(value), parsed);
 
         let imme = SchemaNameValue {
-            ttl: Some(TimeToLive::Immediate),
+            ttl: Some(Ttl::Immediate),
         };
         let parsed = SchemaNameValue::try_from_raw_value(
             serde_json::json!({"ttl": "immediate"})
@@ -369,7 +369,7 @@ mod tests {
         assert_eq!(Some(imme), parsed);
 
         let forever = SchemaNameValue {
-            ttl: Some(TimeToLive::default()),
+            ttl: Some(Ttl::default()),
         };
         let parsed = SchemaNameValue::try_from_raw_value(
             serde_json::json!({"ttl": "forever"}).to_string().as_bytes(),
@@ -433,5 +433,14 @@ mod tests {
             .update(schema_key, &incorrect_schema_value, &new_schema_value)
             .await
             .unwrap_err();
+
+        let new_schema_value = SchemaNameValue { ttl: None };
+        manager
+            .update(schema_key, &current_schema_value, &new_schema_value)
+            .await
+            .unwrap();
+
+        let current_schema_value = manager.get(schema_key).await.unwrap().unwrap();
+        assert_eq!(new_schema_value, *current_schema_value);
     }
 }

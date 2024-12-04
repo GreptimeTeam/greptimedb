@@ -92,6 +92,14 @@ impl AutoCreateTableType {
     }
 }
 
+#[derive(Clone)]
+pub struct InsertRequestsWithImmeTtl {
+    /// Requests with normal ttl.
+    pub normal_requests: InsertRequests,
+    /// Requests with ttl=immediate.
+    pub imme_requests: InsertRequests,
+}
+
 impl Inserter {
     pub fn new(
         catalog_manager: CatalogManagerRef,
@@ -244,7 +252,7 @@ impl Inserter {
             table_name: common_catalog::format_full_table_name(catalog, schema, table_name),
         })?;
         let table_info = table.table_info();
-        check_ttl_zero_table(&ctx, &table_info);
+        add_ttl_imme_region(&ctx, &table_info);
 
         let inserts = TableToRegion::new(&table_info, &self.partition_manager)
             .convert(request)
@@ -268,11 +276,11 @@ impl Inserter {
 }
 
 /// Check and add regions with ttl=0 to context
-pub(crate) fn check_ttl_zero_table(ctx: &QueryContextRef, table_info: &TableInfo) {
+pub(crate) fn add_ttl_imme_region(ctx: &QueryContextRef, table_info: &TableInfo) {
     let ttl = table_info.meta.options.ttl;
 
     if ttl.map(|t| t.is_immediate()).unwrap_or(false) {
-        ctx.add_ttl_zero_regions(table_info.region_ids().into_iter().map(|i| i.as_u64()));
+        ctx.add_ttl_imme_regions(table_info.region_ids().into_iter().map(|i| i.as_u64()));
     }
 }
 
@@ -510,7 +518,7 @@ impl Inserter {
                         ),
                     })?;
                 let table_info = table.table_info();
-                check_ttl_zero_table(ctx, &table_info);
+                add_ttl_imme_region(ctx, &table_info);
                 table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
             }
             return Ok(table_name_to_ids);
@@ -583,7 +591,7 @@ impl Inserter {
                 continue;
             };
             let table_info = table.table_info();
-            check_ttl_zero_table(ctx, &table_info);
+            add_ttl_imme_region(ctx, &table_info);
         }
 
         Ok(table_name_to_ids)

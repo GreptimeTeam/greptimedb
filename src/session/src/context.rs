@@ -60,8 +60,8 @@ pub struct QueryContext {
 #[derive(Debug, Builder, Clone, Default)]
 pub struct QueryContextMutableFields {
     warning: Option<String>,
-    /// regions with ttl=0
-    ttl_zero_regions: HashSet<u64>,
+    /// regions with ttl=immediate
+    ttl_imme_regions: HashSet<u64>,
 }
 
 impl Display for QueryContext {
@@ -287,11 +287,11 @@ impl QueryContext {
         self.mutable_query_context_data.write().unwrap().warning = Some(msg);
     }
 
-    pub fn add_ttl_zero_regions(&self, region_ids: impl Iterator<Item = u64>) {
+    pub fn add_ttl_imme_regions(&self, region_ids: impl Iterator<Item = u64>) {
         self.mutable_query_context_data
             .write()
             .unwrap()
-            .ttl_zero_regions
+            .ttl_imme_regions
             .extend(region_ids);
     }
 
@@ -299,7 +299,7 @@ impl QueryContext {
         self.mutable_query_context_data
             .read()
             .unwrap()
-            .ttl_zero_regions
+            .ttl_imme_regions
             .clone()
     }
 

@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::region::compact_request;
-use common_base::TimeToLive;
+use common_base::Ttl;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{info, warn};
 use object_store::manager::ObjectStoreManagerRef;
@@ -64,7 +64,7 @@ pub struct CompactionRegion {
     pub(crate) manifest_ctx: Arc<ManifestContext>,
     pub(crate) current_version: VersionRef,
     pub(crate) file_purger: Option<Arc<LocalFilePurger>>,
-    pub(crate) ttl: Option<TimeToLive>,
+    pub(crate) ttl: Option<Ttl>,
 }
 
 /// OpenCompactionRegionRequest represents the request to open a compaction region.
@@ -181,7 +181,7 @@ pub async fn open_compaction_region(
     .await
     .unwrap_or_else(|e| {
         warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
-        TimeToLive::default()
+        Ttl::default()
     });
     Ok(CompactionRegion {
         region_id: req.region_id,

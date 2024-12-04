@@ -25,7 +25,7 @@ use api::v1::region::{
 };
 use api::v1::{self, Analyzer, Option as PbOption, Rows, SemanticType};
 pub use common_base::AffectedRows;
-use common_base::TimeToLive;
+use common_base::Ttl;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::FulltextOptions;
 use serde::{Deserialize, Serialize};
@@ -746,7 +746,7 @@ impl From<v1::ModifyColumnType> for ModifyColumnType {
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub enum SetRegionOption {
-    TTL(Option<TimeToLive>),
+    TTL(Option<Ttl>),
     // Modifying TwscOptions with values as (option name, new value).
     Twsc(String, String),
 }
@@ -758,7 +758,7 @@ impl TryFrom<&PbOption> for SetRegionOption {
         let PbOption { key, value } = value;
         match key.as_str() {
             TTL_KEY => {
-                let ttl = TimeToLive::from_humantime_or_str(value)
+                let ttl = Ttl::from_humantime_or_str(value)
                     .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
 
                 Ok(Self::TTL(Some(ttl)))

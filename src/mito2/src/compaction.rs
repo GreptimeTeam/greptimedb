@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use api::v1::region::compact_request;
-use common_base::{Plugins, TimeToLive};
+use common_base::{Plugins, Ttl};
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{debug, error, info, warn};
 use common_time::range::TimestampRange;
@@ -273,7 +273,7 @@ impl CompactionScheduler {
         .await
         .unwrap_or_else(|e| {
             warn!(e; "Failed to get ttl for region: {}", region_id);
-            TimeToLive::default()
+            Ttl::default()
         });
 
         debug!(
@@ -437,9 +437,9 @@ impl PendingCompaction {
 /// Finds TTL of table by first examine table options then database options.
 async fn find_ttl(
     table_id: TableId,
-    table_ttl: Option<TimeToLive>,
+    table_ttl: Option<Ttl>,
     schema_metadata_manager: &SchemaMetadataManagerRef,
-) -> Result<TimeToLive> {
+) -> Result<Ttl> {
     // If table TTL is set, we use it.
     if let Some(table_ttl) = table_ttl {
         return Ok(table_ttl);
@@ -656,11 +656,7 @@ fn ts_to_lit(ts: Timestamp, ts_col_unit: TimeUnit) -> Result<Expr> {
 }
 
 /// Finds all expired SSTs across levels.
-fn get_expired_ssts(
-    levels: &[LevelMeta],
-    ttl: Option<TimeToLive>,
-    now: Timestamp,
-) -> Vec<FileHandle> {
+fn get_expired_ssts(levels: &[LevelMeta], ttl: Option<Ttl>, now: Timestamp) -> Vec<FileHandle> {
     let Some(ttl) = ttl.and_then(|t| t.get_duration()) else {
         return vec![];
     };
