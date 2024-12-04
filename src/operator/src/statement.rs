@@ -16,6 +16,7 @@ mod admin;
 mod copy_database;
 mod copy_table_from;
 mod copy_table_to;
+mod cursor;
 mod ddl;
 mod describe;
 mod dml;
@@ -131,6 +132,16 @@ impl StatementExecutor {
         match stmt {
             Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
                 self.plan_exec(QueryStatement::Sql(stmt), query_ctx).await
+            }
+
+            Statement::DeclareCursor(declare_cursor) => {
+                self.declare_cursor(declare_cursor, query_ctx).await
+            }
+            Statement::FetchCursor(fetch_cursor) => {
+                self.fetch_cursor(fetch_cursor, query_ctx).await
+            }
+            Statement::CloseCursor(close_cursor) => {
+                self.close_cursor(close_cursor, query_ctx).await
             }
 
             Statement::Insert(insert) => self.insert(insert, query_ctx).await,

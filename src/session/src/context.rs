@@ -23,6 +23,7 @@ use arc_swap::ArcSwap;
 use auth::UserInfoRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{build_db_string, parse_catalog_and_schema_from_db_string};
+use common_recordbatch::SendableRecordBatchStream;
 use common_time::timezone::parse_timezone;
 use common_time::Timezone;
 use derive_builder::Builder;
@@ -298,6 +299,22 @@ impl QueryContext {
 
     pub fn set_query_timeout(&self, timeout: Duration) {
         self.mutable_session_data.write().unwrap().query_timeout = Some(timeout);
+    }
+
+    pub fn insert_cursor(&self, name: String, rb: SendableRecordBatchStream) {
+        let mut guard = self.mutable_session_data.write().unwrap();
+        guard.cursors.insert(name, Arc::new(rb));
+    }
+
+    pub fn remove_cursor(&self, name: &str) {
+        let mut guard = self.mutable_session_data.write().unwrap();
+        guard.cursors.remove(name);
+    }
+
+    pub fn get_cursor(&self, name: &str) -> Option<Arc<SendableRecordBatchStream>> {
+        let guard = self.mutable_session_data.read().unwrap();
+        let rb = guard.cursors.get(name);
+        rb.cloned()
     }
 }
 
