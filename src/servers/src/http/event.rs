@@ -61,7 +61,7 @@ use crate::metrics::{
     METRIC_LOKI_LOGS_INGESTION_ELAPSED, METRIC_SUCCESS_VALUE,
 };
 use crate::prom_store;
-use crate::query_handler::LogHandlerRef;
+use crate::query_handler::PipelineHandlerRef;
 
 const GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX: &str = "greptime_";
 const GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME: &str = "greptime_identity";
@@ -599,7 +599,7 @@ fn extract_pipeline_value_by_content_type(
 }
 
 async fn ingest_logs_inner(
-    state: LogHandlerRef,
+    state: PipelineHandlerRef,
     pipeline_name: String,
     version: PipelineVersion,
     table_name: String,
@@ -701,7 +701,7 @@ pub type LogValidatorRef = Arc<dyn LogValidator + 'static>;
 /// axum state struct to hold log handler and validator
 #[derive(Clone)]
 pub struct LogState {
-    pub log_handler: LogHandlerRef,
+    pub log_handler: PipelineHandlerRef,
     pub log_validator: Option<LogValidatorRef>,
     pub ingest_interceptor: Option<LogIngestInterceptorRef<Error>>,
 }

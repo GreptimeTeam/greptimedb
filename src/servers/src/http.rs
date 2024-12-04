@@ -66,8 +66,8 @@ use crate::metrics_handler::MetricsHandler;
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
-    InfluxdbLineProtocolHandlerRef, LogHandlerRef, OpenTelemetryProtocolHandlerRef,
-    OpentsdbProtocolHandlerRef, PromStoreProtocolHandlerRef, ScriptHandlerRef,
+    InfluxdbLineProtocolHandlerRef, OpenTelemetryProtocolHandlerRef, OpentsdbProtocolHandlerRef,
+    PipelineHandlerRef, PromStoreProtocolHandlerRef, ScriptHandlerRef,
 };
 use crate::server::Server;
 
@@ -576,7 +576,7 @@ impl HttpServerBuilder {
 
     pub fn with_log_ingest_handler(
         self,
-        handler: LogHandlerRef,
+        handler: PipelineHandlerRef,
         validator: Option<LogValidatorRef>,
         ingest_interceptor: Option<LogIngestInterceptorRef<Error>>,
     ) -> Self {

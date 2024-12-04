@@ -64,8 +64,8 @@ use servers::prometheus_handler::PrometheusHandler;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{
-    InfluxdbLineProtocolHandler, LogHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
-    PromStoreProtocolHandler, ScriptHandler,
+    InfluxdbLineProtocolHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
+    PipelineHandler, PromStoreProtocolHandler, ScriptHandler,
 };
 use servers::server::ServerHandlers;
 use session::context::QueryContextRef;
@@ -98,7 +98,7 @@ pub trait FrontendInstance:
     + OpenTelemetryProtocolHandler
     + ScriptHandler
     + PrometheusHandler
-    + LogHandler
+    + PipelineHandler
     + Send
     + Sync
     + 'static
