@@ -47,8 +47,10 @@ impl ParserContext<'_> {
     pub(crate) fn parse_fetch_cursor(&mut self) -> Result<Statement> {
         let _ = self.parser.expect_keyword(Keyword::FETCH);
 
-        let fetch_size = self.parser.parse_expr().context(error::SyntaxSnafu)?;
-
+        let fetch_size = self
+            .parser
+            .parse_literal_uint()
+            .context(error::SyntaxSnafu)?;
         let _ = self.parser.parse_keyword(Keyword::FROM);
 
         let cursor_name = self
@@ -76,9 +78,9 @@ impl ParserContext<'_> {
 #[cfg(test)]
 mod tests {
 
-    use crate::{dialect::GreptimeDbDialect, parser::ParseOptions};
-
     use super::*;
+    use crate::dialect::GreptimeDbDialect;
+    use crate::parser::ParseOptions;
 
     #[test]
     fn test_parse_declare_cursor() {

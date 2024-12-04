@@ -16,7 +16,6 @@ pub mod context;
 pub mod session_config;
 pub mod table_name;
 
-use derive_more::Debug;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
@@ -25,10 +24,11 @@ use std::time::Duration;
 use auth::UserInfoRef;
 use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::cursor::RecordBatchStreamCursor;
 use common_time::timezone::get_timezone;
 use common_time::Timezone;
 use context::{ConfigurationVariables, QueryContextBuilder};
+use derive_more::Debug;
 
 use crate::context::{Channel, ConnInfo, QueryContextRef};
 
@@ -51,7 +51,7 @@ pub(crate) struct MutableInner {
     timezone: Timezone,
     query_timeout: Option<Duration>,
     #[debug(skip)]
-    pub(crate) cursors: HashMap<String, Arc<SendableRecordBatchStream>>,
+    pub(crate) cursors: HashMap<String, Arc<RecordBatchStreamCursor>>,
 }
 
 impl Default for MutableInner {

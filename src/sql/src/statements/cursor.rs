@@ -14,7 +14,7 @@
 
 use std::fmt::Display;
 
-use sqlparser::ast::{Expr, ObjectName};
+use sqlparser::ast::ObjectName;
 use sqlparser_derive::{Visit, VisitMut};
 
 use super::query::Query;
@@ -34,7 +34,7 @@ impl Display for DeclareCursor {
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct FetchCursor {
     pub cursor_name: ObjectName,
-    pub fetch_size: Expr,
+    pub fetch_size: u64,
 }
 
 impl Display for FetchCursor {
