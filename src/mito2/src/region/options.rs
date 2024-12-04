@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use common_base::Ttl;
+use common_base::TimeToLive;
 use common_wal::options::{WalOptions, WAL_OPTIONS_KEY};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -56,7 +56,7 @@ pub enum MergeMode {
 #[serde(default)]
 pub struct RegionOptions {
     /// Region SST files TTL.
-    pub ttl: Option<Ttl>,
+    pub ttl: Option<TimeToLive>,
     /// Compaction options.
     pub compaction: CompactionOptions,
     /// Custom storage. Uses default storage if it is `None`.
@@ -252,7 +252,7 @@ impl Default for TwcsOptions {
 #[serde(default)]
 struct RegionOptionsWithoutEnum {
     /// Region SST files TTL.
-    ttl: Option<Ttl>,
+    ttl: Option<TimeToLive>,
     storage: Option<String>,
     #[serde_as(as = "DisplayFromStr")]
     append_mode: bool,

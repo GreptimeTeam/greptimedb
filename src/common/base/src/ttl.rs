@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// Time To Live
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Ttl {
+pub enum TimeToLive {
     /// Immediately throw away on insert
     Immediate,
     /// Keep the data forever
@@ -31,27 +31,27 @@ pub enum Ttl {
     Duration(Duration),
 }
 
-impl Display for Ttl {
+impl Display for TimeToLive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Ttl::Immediate => write!(f, "immediate"),
-            Ttl::Duration(d) => write!(f, "{}", humantime::Duration::from(*d)),
-            Ttl::Forever => write!(f, "forever"),
+            TimeToLive::Immediate => write!(f, "immediate"),
+            TimeToLive::Duration(d) => write!(f, "{}", humantime::Duration::from(*d)),
+            TimeToLive::Forever => write!(f, "forever"),
         }
     }
 }
 
-impl Ttl {
+impl TimeToLive {
     /// Parse a string that is either `immediate`, `forever`, or a duration to `TimeToLive`
     ///
     /// note that a empty string is treat as `forever` too
     pub fn from_humantime_or_str(s: &str) -> Result<Self, String> {
         match s {
-            "immediate" => Ok(Ttl::Immediate),
-            "forever" | "" => Ok(Ttl::Forever),
+            "immediate" => Ok(TimeToLive::Immediate),
+            "forever" | "" => Ok(TimeToLive::Forever),
             _ => {
                 let d = humantime::parse_duration(s).map_err(|e| e.to_string())?;
-                Ok(Ttl::from(d))
+                Ok(TimeToLive::from(d))
             }
         }
     }
@@ -59,41 +59,41 @@ impl Ttl {
     /// Print TimeToLive as string
     pub fn as_repr_opt(&self) -> Option<String> {
         match self {
-            Ttl::Immediate => Some("immediate".to_string()),
-            Ttl::Duration(d) => Some(humantime::format_duration(*d).to_string()),
-            Ttl::Forever => Some("forever".to_string()),
+            TimeToLive::Immediate => Some("immediate".to_string()),
+            TimeToLive::Duration(d) => Some(humantime::format_duration(*d).to_string()),
+            TimeToLive::Forever => Some("forever".to_string()),
         }
     }
 
     pub fn is_immediate(&self) -> bool {
-        matches!(self, Ttl::Immediate)
+        matches!(self, TimeToLive::Immediate)
     }
 
     /// Is the default value, which is `Forever`
     pub fn is_forever(&self) -> bool {
-        matches!(self, Ttl::Forever)
+        matches!(self, TimeToLive::Forever)
     }
 
     pub fn get_duration(&self) -> Option<Duration> {
         match self {
-            Ttl::Duration(d) => Some(*d),
+            TimeToLive::Duration(d) => Some(*d),
             _ => None,
         }
     }
 }
 
-impl From<Duration> for Ttl {
+impl From<Duration> for TimeToLive {
     fn from(duration: Duration) -> Self {
         if duration.is_zero() {
             // compatibility with old code, and inline with cassandra's behavior when ttl set to 0
-            Ttl::Forever
+            TimeToLive::Forever
         } else {
-            Ttl::Duration(duration)
+            TimeToLive::Duration(duration)
         }
     }
 }
 
-impl From<humantime::Duration> for Ttl {
+impl From<humantime::Duration> for TimeToLive {
     fn from(duration: humantime::Duration) -> Self {
         Self::from(*duration)
     }
@@ -106,8 +106,8 @@ mod test {
     #[test]
     fn test_serde() {
         let cases = vec![
-            ("\"immediate\"", Ttl::Immediate),
-            ("\"forever\"", Ttl::Forever),
+            ("\"immediate\"", TimeToLive::Immediate),
+            ("\"forever\"", TimeToLive::Forever),
             ("\"10d\"", Duration::from_secs(86400 * 10).into()),
             (
                 "\"10000 years\"",
@@ -117,10 +117,10 @@ mod test {
 
         for (s, expected) in cases {
             let serialized = serde_json::to_string(&expected).unwrap();
-            let deserialized: Ttl = serde_json::from_str(&serialized).unwrap();
+            let deserialized: TimeToLive = serde_json::from_str(&serialized).unwrap();
             assert_eq!(deserialized, expected);
 
-            let deserialized: Ttl = serde_json::from_str(s).unwrap_or_else(|err| {
+            let deserialized: TimeToLive = serde_json::from_str(s).unwrap_or_else(|err| {
                 panic!("Actual serialized: {}, s=`{s}`, err: {:?}", serialized, err)
             });
             assert_eq!(deserialized, expected);

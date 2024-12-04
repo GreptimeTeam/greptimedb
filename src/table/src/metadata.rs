@@ -224,7 +224,7 @@ impl TableMeta {
 
         for request in requests {
             match request {
-                SetRegionOption::TTL(new_ttl) => {
+                SetRegionOption::Ttl(new_ttl) => {
                     new_options.ttl = *new_ttl;
                 }
                 SetRegionOption::Twsc(key, value) => {

@@ -19,7 +19,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use common_base::readable_size::ReadableSize;
-use common_base::Ttl;
+use common_base::TimeToLive;
 use common_datasource::object_store::s3::is_supported_in_s3;
 use common_query::AddColumnLocation;
 use common_time::range::TimestampRange;
@@ -74,7 +74,7 @@ pub struct TableOptions {
     /// Memtable size of memtable.
     pub write_buffer_size: Option<ReadableSize>,
     /// Time-to-live of table. Expired data will be automatically purged.
-    pub ttl: Option<Ttl>,
+    pub ttl: Option<TimeToLive>,
     /// Extra options that may not applicable to all table engines.
     pub extra_options: HashMap<String, String>,
 }
@@ -108,7 +108,7 @@ impl TableOptions {
         }
 
         if let Some(ttl) = kvs.get(TTL_KEY) {
-            let ttl_value = Ttl::from_humantime_or_str(ttl).map_err(|_| {
+            let ttl_value = TimeToLive::from_humantime_or_str(ttl).map_err(|_| {
                 ParseTableOptionSnafu {
                     key: TTL_KEY,
                     value: ttl,

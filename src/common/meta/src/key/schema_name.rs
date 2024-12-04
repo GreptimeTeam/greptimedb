@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use common_base::Ttl;
+use common_base::TimeToLive;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use futures::stream::BoxStream;
 use humantime_serde::re::humantime;
@@ -57,7 +57,7 @@ impl Default for SchemaNameKey<'_> {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SchemaNameValue {
     #[serde(default)]
-    pub ttl: Option<Ttl>,
+    pub ttl: Option<TimeToLive>,
 }
 
 impl Display for SchemaNameValue {
@@ -329,7 +329,7 @@ mod tests {
         assert_eq!("ttl='forever'", schema_value.to_string());
 
         let schema_value = SchemaNameValue {
-            ttl: Some(Ttl::Immediate),
+            ttl: Some(TimeToLive::Immediate),
         };
         assert_eq!("ttl='immediate'", schema_value.to_string());
     }
@@ -358,7 +358,7 @@ mod tests {
         assert_eq!(Some(value), parsed);
 
         let imme = SchemaNameValue {
-            ttl: Some(Ttl::Immediate),
+            ttl: Some(TimeToLive::Immediate),
         };
         let parsed = SchemaNameValue::try_from_raw_value(
             serde_json::json!({"ttl": "immediate"})
@@ -369,7 +369,7 @@ mod tests {
         assert_eq!(Some(imme), parsed);
 
         let forever = SchemaNameValue {
-            ttl: Some(Ttl::default()),
+            ttl: Some(TimeToLive::default()),
         };
         let parsed = SchemaNameValue::try_from_raw_value(
             serde_json::json!({"ttl": "forever"}).to_string().as_bytes(),

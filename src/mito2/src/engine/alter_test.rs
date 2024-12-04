@@ -604,7 +604,7 @@ async fn test_alter_region_ttl_options() {
     let alter_ttl_request = RegionAlterRequest {
         schema_version: 0,
         kind: AlterKind::SetRegionOptions {
-            options: vec![SetRegionOption::TTL(Some(Duration::from_secs(500).into()))],
+            options: vec![SetRegionOption::Ttl(Some(Duration::from_secs(500).into()))],
         },
     };
     let alter_job = tokio::spawn(async move {

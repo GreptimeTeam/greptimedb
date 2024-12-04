@@ -184,7 +184,7 @@ impl<S> RegionWorkerLoop<S> {
         let mut current_options = version.options.clone();
         for option in options {
             match option {
-                SetRegionOption::TTL(new_ttl) => {
+                SetRegionOption::Ttl(new_ttl) => {
                     info!(
                         "Update region ttl: {}, previous: {:?} new: {:?}",
                         region.region_id, current_options.ttl, new_ttl

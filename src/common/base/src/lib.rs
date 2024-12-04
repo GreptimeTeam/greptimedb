@@ -25,4 +25,4 @@ pub type AffectedRows = usize;
 
 pub use bit_vec::BitVec;
 pub use plugins::Plugins;
-pub use ttl::Ttl;
+pub use ttl::TimeToLive;
