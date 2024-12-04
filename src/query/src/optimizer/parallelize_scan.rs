@@ -131,7 +131,7 @@ impl ParallelizeScan {
         let total_rows = ranges.iter().map(|range| range.num_rows).sum::<usize>();
         // Computes the partition num by the max row number. This eliminates the unbalance of the partitions.
         let balanced_partition_num = if max_rows > 0 {
-            (total_rows + max_rows - 1) / max_rows
+            total_rows.div_ceil(max_rows)
         } else {
             ranges.len()
         };
