@@ -384,9 +384,9 @@ impl Inserter {
     }
 
     /// Mirror requests for source table to flownode
-    async fn mirror_flow_node_requests(
-        &self,
-        requests: impl IntoIterator<Item = &RegionInsertRequest>,
+    async fn mirror_flow_node_requests<'it, 'zelf: 'it>(
+        &'zelf self,
+        requests: impl Iterator<Item = &'it RegionInsertRequest>,
     ) -> Result<HashMap<Peer, RegionInsertRequests>> {
         // store partial source table requests used by flow node(only store what's used)
         let mut src_table_reqs: HashMap<TableId, Option<(Vec<Peer>, RegionInsertRequests)>> =

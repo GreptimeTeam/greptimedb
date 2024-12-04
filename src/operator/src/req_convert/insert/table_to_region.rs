@@ -47,7 +47,7 @@ impl<'a> TableToRegion<'a> {
             .await?;
 
         let requests = RegionInsertRequests { requests };
-        if is_ttl_imme_table(&self.table_info) {
+        if is_ttl_imme_table(self.table_info) {
             Ok(ImmeInsertRequests {
                 normal_requests: Default::default(),
                 imme_requests: requests,
