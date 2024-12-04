@@ -335,7 +335,7 @@ type = "File"
 ## Read cache configuration for object storage such as 'S3' etc, it's configured by default when using object storage. It is recommended to configure it when using object storage for better performance.
 ## The local file cache directory for object storage,defaults to `{data_home}/object_cache/read`. An empty string means disabling.
 ## @toml2docs:none-default
-#+ cache_path = "/tmp/greptimedb/object_cache/read"
+#+ cache_path = ""
 
 ## The local file cache capacity in bytes. If your disk space is sufficient, it is recommended to set it larger.
 ## @toml2docs:none-default

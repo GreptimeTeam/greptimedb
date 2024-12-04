@@ -106,48 +106,53 @@ async fn build_cache_layer(
     store_config: &ObjectStoreConfig,
     data_home: &str,
 ) -> Result<Option<LruCacheLayer<impl Access>>> {
-    let (mut cache_path, cache_capacity) = match store_config {
+    let (name, mut cache_path, cache_capacity) = match store_config {
         ObjectStoreConfig::S3(s3_config) => {
             let path = s3_config.cache.cache_path.clone();
+            let name = &s3_config.name;
             let capacity = s3_config
                 .cache
                 .cache_capacity
                 .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
-            (path, capacity)
+            (name, path, capacity)
         }
         ObjectStoreConfig::Oss(oss_config) => {
             let path = oss_config.cache.cache_path.clone();
+            let name = &oss_config.name;
             let capacity = oss_config
                 .cache
                 .cache_capacity
                 .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
-            (path, capacity)
+            (name, path, capacity)
         }
         ObjectStoreConfig::Azblob(azblob_config) => {
             let path = azblob_config.cache.cache_path.clone();
+            let name = &azblob_config.name;
             let capacity = azblob_config
                 .cache
                 .cache_capacity
                 .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
-            (path, capacity)
+            (name, path, capacity)
         }
         ObjectStoreConfig::Gcs(gcs_config) => {
             let path = gcs_config.cache.cache_path.clone();
+            let name = &gcs_config.name;
             let capacity = gcs_config
                 .cache
                 .cache_capacity
                 .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
-            (path, capacity)
+            (name, path, capacity)
         }
         _ => unreachable!("Already checked above"),
     };
 
     // Enable object cache by default
-    // Set the cache_path to be `${data_home}/object_cache/read` by default
+    // Set the cache_path to be `${data_home}/object_cache/read/{name}` by default
     // if it's not present
     if cache_path.is_none() {
         let object_cache_path = join_dir(data_home, OBJECT_CACHE_DIR);
         let read_cache_path = join_dir(&object_cache_path, "read");
+        let read_cache_path = join_dir(&read_cache_path, &name.to_lowercase());
         tokio::fs::create_dir_all(Path::new(&read_cache_path))
             .await
             .context(CreateDirSnafu {
@@ -155,8 +160,8 @@ async fn build_cache_layer(
             })?;
 
         info!(
-            "The object storage cache path is not set, using the default path: {}",
-            &read_cache_path
+            "The object storage cache path is not set for '{}', using the default path: '{}'",
+            name, &read_cache_path
         );
 
         cache_path = Some(read_cache_path);
