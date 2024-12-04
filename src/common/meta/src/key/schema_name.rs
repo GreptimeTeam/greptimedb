@@ -434,6 +434,7 @@ mod tests {
             .await
             .unwrap_err();
 
+        let current_schema_value = manager.get(schema_key).await.unwrap().unwrap();
         let new_schema_value = SchemaNameValue { ttl: None };
         manager
             .update(schema_key, &current_schema_value, &new_schema_value)

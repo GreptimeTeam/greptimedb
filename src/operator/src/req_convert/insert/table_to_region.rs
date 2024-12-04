@@ -19,6 +19,7 @@ use table::metadata::TableInfo;
 use table::requests::InsertRequest as TableInsertRequest;
 
 use crate::error::Result;
+use crate::insert::{is_ttl_imme_table, ImmeInsertRequests};
 use crate::req_convert::common::partitioner::Partitioner;
 use crate::req_convert::common::{column_schema, row_count};
 
@@ -35,7 +36,7 @@ impl<'a> TableToRegion<'a> {
         }
     }
 
-    pub async fn convert(&self, request: TableInsertRequest) -> Result<RegionInsertRequests> {
+    pub async fn convert(&self, request: TableInsertRequest) -> Result<ImmeInsertRequests> {
         let row_count = row_count(&request.columns_values)?;
         let schema = column_schema(self.table_info, &request.columns_values)?;
         let rows = api::helper::vectors_to_rows(request.columns_values.values(), row_count);
@@ -44,7 +45,19 @@ impl<'a> TableToRegion<'a> {
         let requests = Partitioner::new(self.partition_manager)
             .partition_insert_requests(self.table_info.table_id(), rows)
             .await?;
-        Ok(RegionInsertRequests { requests })
+
+        let requests = RegionInsertRequests { requests };
+        if is_ttl_imme_table(&self.table_info) {
+            Ok(ImmeInsertRequests {
+                normal_requests: Default::default(),
+                imme_requests: requests,
+            })
+        } else {
+            Ok(ImmeInsertRequests {
+                normal_requests: requests,
+                imme_requests: Default::default(),
+            })
+        }
     }
 }
 
@@ -112,6 +125,7 @@ mod tests {
 
         let region_requests = converter.convert(table_request).await.unwrap();
         let mut region_id_to_region_requests = region_requests
+            .normal_requests
             .requests
             .into_iter()
             .map(|r| (r.region_id, r))

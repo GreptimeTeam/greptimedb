@@ -7593,6 +7593,7 @@ dependencies = [
 name = "operator"
 version = "0.11.0"
 dependencies = [
+ "ahash 0.8.11",
  "api",
  "async-stream",
  "async-trait",

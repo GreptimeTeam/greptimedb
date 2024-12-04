@@ -32,7 +32,7 @@ use crate::error::{
     ColumnNotFoundSnafu, InvalidSqlSnafu, MissingInsertBodySnafu, ParseSqlSnafu, Result,
     SchemaReadOnlySnafu, TableNotFoundSnafu,
 };
-use crate::insert::add_ttl_imme_region;
+use crate::insert::{is_ttl_imme_table, ImmeInsertRequests};
 use crate::req_convert::common::partitioner::Partitioner;
 use crate::req_convert::insert::semantic_type;
 
@@ -61,12 +61,11 @@ impl<'a> StatementToRegion<'a> {
         &self,
         stmt: &Insert,
         query_ctx: &QueryContextRef,
-    ) -> Result<RegionInsertRequests> {
+    ) -> Result<ImmeInsertRequests> {
         let (catalog, schema, table_name) = self.get_full_name(stmt.table_name())?;
         let table = self.get_table(&catalog, &schema, &table_name).await?;
         let table_schema = table.schema();
         let table_info = table.table_info();
-        add_ttl_imme_region(query_ctx, &table_info);
 
         ensure!(
             !common_catalog::consts::is_readonly_schema(&schema),
@@ -136,7 +135,18 @@ impl<'a> StatementToRegion<'a> {
         let requests = Partitioner::new(self.partition_manager)
             .partition_insert_requests(table_info.table_id(), Rows { schema, rows })
             .await?;
-        Ok(RegionInsertRequests { requests })
+        let requests = RegionInsertRequests { requests };
+        Ok(if is_ttl_imme_table(&table_info) {
+            ImmeInsertRequests {
+                normal_requests: Default::default(),
+                imme_requests: requests,
+            }
+        } else {
+            ImmeInsertRequests {
+                normal_requests: requests,
+                imme_requests: Default::default(),
+            }
+        })
     }
 
     async fn get_table(&self, catalog: &str, schema: &str, table: &str) -> Result<TableRef> {

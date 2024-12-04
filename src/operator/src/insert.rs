@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
+use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use api::v1::alter_table_expr::Kind;
-use api::v1::region::{InsertRequests as RegionInsertRequests, RegionRequestHeader};
+use api::v1::region::{
+    InsertRequest as RegionInsertRequest, InsertRequests as RegionInsertRequests,
+    RegionRequestHeader,
+};
 use api::v1::{
     AlterTableExpr, ColumnDataType, ColumnSchema, CreateTableExpr, InsertRequests,
     RowInsertRequest, RowInsertRequests, SemanticType,
@@ -93,11 +96,11 @@ impl AutoCreateTableType {
 }
 
 #[derive(Clone)]
-pub struct InsertRequestsWithImmeTtl {
+pub struct ImmeInsertRequests {
     /// Requests with normal ttl.
-    pub normal_requests: InsertRequests,
+    pub normal_requests: RegionInsertRequests,
     /// Requests with ttl=immediate.
-    pub imme_requests: InsertRequests,
+    pub imme_requests: RegionInsertRequests,
 }
 
 impl Inserter {
@@ -192,12 +195,16 @@ impl Inserter {
         });
         validate_column_count_match(&requests)?;
 
-        let table_name_to_ids = self
+        let (table_name_to_ids, imme_table_ids) = self
             .create_or_alter_tables_on_demand(&requests, &ctx, create_type, statement_executor)
             .await?;
-        let inserts = RowToRegion::new(table_name_to_ids, self.partition_manager.as_ref())
-            .convert(requests)
-            .await?;
+        let inserts = RowToRegion::new(
+            table_name_to_ids,
+            imme_table_ids,
+            self.partition_manager.as_ref(),
+        )
+        .convert(requests)
+        .await?;
 
         self.do_request(inserts, &ctx).await
     }
@@ -224,7 +231,7 @@ impl Inserter {
             .await?;
 
         // check and create logical tables
-        let table_name_to_ids = self
+        let (table_name_to_ids, imme_table_ids) = self
             .create_or_alter_tables_on_demand(
                 &requests,
                 &ctx,
@@ -232,7 +239,7 @@ impl Inserter {
                 statement_executor,
             )
             .await?;
-        let inserts = RowToRegion::new(table_name_to_ids, &self.partition_manager)
+        let inserts = RowToRegion::new(table_name_to_ids, imme_table_ids, &self.partition_manager)
             .convert(requests)
             .await?;
 
@@ -252,7 +259,6 @@ impl Inserter {
             table_name: common_catalog::format_full_table_name(catalog, schema, table_name),
         })?;
         let table_info = table.table_info();
-        add_ttl_imme_region(&ctx, &table_info);
 
         let inserts = TableToRegion::new(&table_info, &self.partition_manager)
             .convert(request)
@@ -275,19 +281,15 @@ impl Inserter {
     }
 }
 
-/// Check and add regions with ttl=0 to context
-pub(crate) fn add_ttl_imme_region(ctx: &QueryContextRef, table_info: &TableInfo) {
+pub(crate) fn is_ttl_imme_table(table_info: &TableInfo) -> bool {
     let ttl = table_info.meta.options.ttl;
-
-    if ttl.map(|t| t.is_immediate()).unwrap_or(false) {
-        ctx.add_ttl_imme_regions(table_info.region_ids().into_iter().map(|i| i.as_u64()));
-    }
+    ttl.map(|t| t.is_immediate()).unwrap_or(false)
 }
 
 impl Inserter {
     async fn do_request(
         &self,
-        requests: RegionInsertRequests,
+        requests: ImmeInsertRequests,
         ctx: &QueryContextRef,
     ) -> Result<Output> {
         let write_cost = write_meter!(
@@ -302,8 +304,21 @@ impl Inserter {
             ..Default::default()
         });
 
+        let ImmeInsertRequests {
+            normal_requests,
+            imme_requests,
+        } = requests;
+
         // Mirror requests for source table to flownode
-        match self.mirror_flow_node_requests(&requests).await {
+        match self
+            .mirror_flow_node_requests(
+                normal_requests
+                    .requests
+                    .iter()
+                    .chain(imme_requests.requests.iter()),
+            )
+            .await
+        {
             Ok(flow_requests) => {
                 let node_manager = self.node_manager.clone();
                 let flow_tasks = flow_requests.into_iter().map(|(peer, inserts)| {
@@ -339,7 +354,7 @@ impl Inserter {
         }
 
         let write_tasks = self
-            .group_requests_by_peer(requests, ctx)
+            .group_requests_by_peer(normal_requests)
             .await?
             .into_iter()
             .map(|(peer, inserts)| {
@@ -371,12 +386,12 @@ impl Inserter {
     /// Mirror requests for source table to flownode
     async fn mirror_flow_node_requests(
         &self,
-        requests: &RegionInsertRequests,
+        requests: impl IntoIterator<Item = &RegionInsertRequest>,
     ) -> Result<HashMap<Peer, RegionInsertRequests>> {
         // store partial source table requests used by flow node(only store what's used)
         let mut src_table_reqs: HashMap<TableId, Option<(Vec<Peer>, RegionInsertRequests)>> =
             HashMap::new();
-        for req in &requests.requests {
+        for req in requests {
             let table_id = RegionId::from_u64(req.region_id).table_id();
             match src_table_reqs.get_mut(&table_id) {
                 Some(Some((_peers, reqs))) => reqs.requests.push(req.clone()),
@@ -437,17 +452,11 @@ impl Inserter {
     async fn group_requests_by_peer(
         &self,
         requests: RegionInsertRequests,
-        ctx: &QueryContextRef,
     ) -> Result<HashMap<Peer, RegionInsertRequests>> {
         // group by region ids first to reduce repeatedly call `find_region_leader`
         // TODO(discord9): determine if a addition clone is worth it
         let mut requests_per_region: HashMap<RegionId, RegionInsertRequests> = HashMap::new();
-        let ttl_zero_regions = ctx.ttl_zero_regions();
         for req in requests.requests {
-            // filter out ttl zero regions
-            if ttl_zero_regions.contains(&req.region_id) {
-                continue;
-            }
             let region_id = RegionId::from_u64(req.region_id);
             requests_per_region
                 .entry(region_id)
@@ -486,7 +495,7 @@ impl Inserter {
         ctx: &QueryContextRef,
         auto_create_table_type: AutoCreateTableType,
         statement_executor: &StatementExecutor,
-    ) -> Result<HashMap<String, TableId>> {
+    ) -> Result<(HashMap<String, TableId>, HashSet<TableId>)> {
         let _timer = crate::metrics::CREATE_ALTER_ON_DEMAND
             .with_label_values(&[auto_create_table_type.as_str()])
             .start_timer();
@@ -507,6 +516,7 @@ impl Inserter {
             })?
             .unwrap_or(true);
         if !auto_create_table_hint {
+            let mut imme_table_ids = HashSet::new();
             for req in &requests.inserts {
                 let table = self
                     .get_table(catalog, &schema, &req.table_name)
@@ -518,10 +528,12 @@ impl Inserter {
                         ),
                     })?;
                 let table_info = table.table_info();
-                add_ttl_imme_region(ctx, &table_info);
+                if is_ttl_imme_table(&table_info) {
+                    imme_table_ids.insert(table_info.table_id());
+                }
                 table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
             }
-            return Ok(table_name_to_ids);
+            return Ok((table_name_to_ids, imme_table_ids));
         }
 
         let mut create_tables = vec![];
@@ -583,6 +595,7 @@ impl Inserter {
             }
         }
 
+        let mut imme_table_ids = HashSet::new();
         // add ttl zero regions to context
         for table_name in table_name_to_ids.keys() {
             let table = if let Some(table) = self.get_table(catalog, &schema, table_name).await? {
@@ -591,10 +604,12 @@ impl Inserter {
                 continue;
             };
             let table_info = table.table_info();
-            add_ttl_imme_region(ctx, &table_info);
+            if is_ttl_imme_table(&table_info) {
+                imme_table_ids.insert(table_info.table_id());
+            }
         }
 
-        Ok(table_name_to_ids)
+        Ok((table_name_to_ids, imme_table_ids))
     }
 
     async fn create_physical_table_on_demand(

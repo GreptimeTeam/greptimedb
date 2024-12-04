@@ -18,7 +18,6 @@ use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use ahash::HashSet;
 use api::v1::region::RegionRequestHeader;
 use arc_swap::ArcSwap;
 use auth::UserInfoRef;
@@ -60,8 +59,6 @@ pub struct QueryContext {
 #[derive(Debug, Builder, Clone, Default)]
 pub struct QueryContextMutableFields {
     warning: Option<String>,
-    /// regions with ttl=immediate
-    ttl_imme_regions: HashSet<u64>,
 }
 
 impl Display for QueryContext {
@@ -285,22 +282,6 @@ impl QueryContext {
 
     pub fn set_warning(&self, msg: String) {
         self.mutable_query_context_data.write().unwrap().warning = Some(msg);
-    }
-
-    pub fn add_ttl_imme_regions(&self, region_ids: impl Iterator<Item = u64>) {
-        self.mutable_query_context_data
-            .write()
-            .unwrap()
-            .ttl_imme_regions
-            .extend(region_ids);
-    }
-
-    pub fn ttl_zero_regions(&self) -> HashSet<u64> {
-        self.mutable_query_context_data
-            .read()
-            .unwrap()
-            .ttl_imme_regions
-            .clone()
     }
 
     pub fn query_timeout(&self) -> Option<Duration> {
