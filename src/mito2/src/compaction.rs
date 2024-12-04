@@ -292,7 +292,7 @@ impl CompactionScheduler {
             access_layer: access_layer.clone(),
             manifest_ctx: manifest_ctx.clone(),
             file_purger: None,
-            ttl,
+            ttl: Some(ttl),
         };
 
         let picker_output = {
@@ -437,11 +437,11 @@ impl PendingCompaction {
 /// Finds TTL of table by first examine table options then database options.
 async fn find_ttl(
     table_id: TableId,
-    table_ttl: TimeToLive,
+    table_ttl: Option<TimeToLive>,
     schema_metadata_manager: &SchemaMetadataManagerRef,
 ) -> Result<TimeToLive> {
-    // If table TTL is not forever, we use it.
-    if !table_ttl.is_forever() {
+    // If table TTL is set, we use it.
+    if let Some(table_ttl) = table_ttl {
         return Ok(table_ttl);
     }
 
@@ -449,7 +449,7 @@ async fn find_ttl(
         .get_schema_options_by_table_id(table_id)
         .await
         .context(GetSchemaMetadataSnafu)?
-        .map(|options| options.ttl)
+        .and_then(|options| options.ttl)
         .unwrap_or_default();
     Ok(ttl)
 }
@@ -656,8 +656,12 @@ fn ts_to_lit(ts: Timestamp, ts_col_unit: TimeUnit) -> Result<Expr> {
 }
 
 /// Finds all expired SSTs across levels.
-fn get_expired_ssts(levels: &[LevelMeta], ttl: TimeToLive, now: Timestamp) -> Vec<FileHandle> {
-    let Some(ttl) = ttl.get_duration() else {
+fn get_expired_ssts(
+    levels: &[LevelMeta],
+    ttl: Option<TimeToLive>,
+    now: Timestamp,
+) -> Vec<FileHandle> {
+    let Some(ttl) = ttl.and_then(|t| t.get_duration()) else {
         return vec![];
     };
 

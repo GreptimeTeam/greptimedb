@@ -56,7 +56,7 @@ pub enum MergeMode {
 #[serde(default)]
 pub struct RegionOptions {
     /// Region SST files TTL.
-    pub ttl: TimeToLive,
+    pub ttl: Option<TimeToLive>,
     /// Compaction options.
     pub compaction: CompactionOptions,
     /// Custom storage. Uses default storage if it is `None`.
@@ -252,7 +252,7 @@ impl Default for TwcsOptions {
 #[serde(default)]
 struct RegionOptionsWithoutEnum {
     /// Region SST files TTL.
-    ttl: TimeToLive,
+    ttl: Option<TimeToLive>,
     storage: Option<String>,
     #[serde_as(as = "DisplayFromStr")]
     append_mode: bool,
@@ -457,7 +457,7 @@ mod tests {
         let map = make_map(&[("ttl", "7d")]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
-            ttl: Duration::from_secs(3600 * 24 * 7).into(),
+            ttl: Some(Duration::from_secs(3600 * 24 * 7).into()),
             ..Default::default()
         };
         assert_eq!(expect, options);
@@ -620,7 +620,7 @@ mod tests {
         ]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
-            ttl: Duration::from_secs(3600 * 24 * 7).into(),
+            ttl: Some(Duration::from_secs(3600 * 24 * 7).into()),
             compaction: CompactionOptions::Twcs(TwcsOptions {
                 max_active_window_runs: 8,
                 max_active_window_files: 11,
@@ -653,7 +653,7 @@ mod tests {
     #[test]
     fn test_region_options_serde() {
         let options = RegionOptions {
-            ttl: Duration::from_secs(3600 * 24 * 7).into(),
+            ttl: Some(Duration::from_secs(3600 * 24 * 7).into()),
             compaction: CompactionOptions::Twcs(TwcsOptions {
                 max_active_window_runs: 8,
                 max_active_window_files: usize::MAX,
@@ -721,7 +721,7 @@ mod tests {
 }"#;
         let got: RegionOptions = serde_json::from_str(region_options_json_str).unwrap();
         let options = RegionOptions {
-            ttl: Duration::from_secs(3600 * 24 * 7).into(),
+            ttl: Some(Duration::from_secs(3600 * 24 * 7).into()),
             compaction: CompactionOptions::Twcs(TwcsOptions {
                 max_active_window_runs: 8,
                 max_active_window_files: 11,

@@ -19,7 +19,6 @@ use serde::de::Visitor;
 use serde::{Deserialize, Serialize};
 
 /// Time To Live
-
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Default)]
 pub enum TimeToLive {
     /// immediately throw away on insert
@@ -29,8 +28,6 @@ pub enum TimeToLive {
     /// Keep the data forever
     #[default]
     Forever,
-    // TODO(discord9): add a new variant
-    // that can't be overridden by database level ttl? call it ForceForever?
 }
 
 impl Serialize for TimeToLive {
@@ -100,13 +97,11 @@ impl TimeToLive {
     }
 
     /// Print TimeToLive as string
-    ///
-    /// omit `Forever`` variant
     pub fn as_repr_opt(&self) -> Option<String> {
         match self {
             TimeToLive::Immediate => Some("immediate".to_string()),
             TimeToLive::Duration(d) => Some(humantime::format_duration(*d).to_string()),
-            TimeToLive::Forever => None,
+            TimeToLive::Forever => Some("forever".to_string()),
         }
     }
 
@@ -134,15 +129,6 @@ impl From<Duration> for TimeToLive {
             TimeToLive::Forever
         } else {
             TimeToLive::Duration(duration)
-        }
-    }
-}
-
-impl From<Option<Duration>> for TimeToLive {
-    fn from(duration: Option<Duration>) -> Self {
-        match duration {
-            Some(d) => TimeToLive::from(d),
-            None => TimeToLive::Forever,
         }
     }
 }

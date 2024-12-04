@@ -253,7 +253,7 @@ mod tests {
             truncated_entry_id: None,
             compaction_time_window: None,
             options: RegionOptions {
-                ttl: ttl.into(),
+                ttl: ttl.map(|t| t.into()),
                 compaction: Default::default(),
                 storage: None,
                 append_mode: false,

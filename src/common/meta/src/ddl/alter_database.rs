@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use common_base::TimeToLive;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
 use common_telemetry::tracing::info;
@@ -47,7 +46,7 @@ fn build_new_schema_value(
             for option in options.0.iter() {
                 match option {
                     SetDatabaseOption::Ttl(ttl) => {
-                        value.ttl = *ttl;
+                        value.ttl = Some(*ttl);
                     }
                 }
             }
@@ -55,7 +54,7 @@ fn build_new_schema_value(
         AlterDatabaseKind::UnsetDatabaseOptions(keys) => {
             for key in keys.0.iter() {
                 match key {
-                    UnsetDatabaseOption::Ttl => value.ttl = TimeToLive::default(),
+                    UnsetDatabaseOption::Ttl => value.ttl = None,
                 }
             }
         }
@@ -217,8 +216,6 @@ impl AlterDatabaseData {
 mod tests {
     use std::time::Duration;
 
-    use common_base::TimeToLive;
-
     use crate::ddl::alter_database::build_new_schema_value;
     use crate::key::schema_name::SchemaNameValue;
     use crate::rpc::ddl::{
@@ -234,7 +231,7 @@ mod tests {
         let current_schema_value = SchemaNameValue::default();
         let new_schema_value =
             build_new_schema_value(current_schema_value.clone(), &set_ttl).unwrap();
-        assert_eq!(new_schema_value.ttl, Duration::from_secs(10).into());
+        assert_eq!(new_schema_value.ttl, Some(Duration::from_secs(10).into()));
 
         let unset_ttl_alter_kind =
             AlterDatabaseKind::UnsetDatabaseOptions(UnsetDatabaseOptions(vec![
@@ -242,6 +239,6 @@ mod tests {
             ]));
         let new_schema_value =
             build_new_schema_value(current_schema_value, &unset_ttl_alter_kind).unwrap();
-        assert_eq!(new_schema_value.ttl, TimeToLive::default());
+        assert_eq!(new_schema_value.ttl, None);
     }
 }

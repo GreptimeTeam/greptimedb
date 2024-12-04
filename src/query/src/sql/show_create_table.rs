@@ -45,9 +45,12 @@ fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptio
             write_buffer_size.to_string(),
         );
     }
-    if let Some(ttl) = table_opts.ttl.as_repr_opt() {
+    if let Some(ttl) = table_opts.ttl.and_then(|t| t.as_repr_opt()) {
         options.insert(TTL_KEY.to_string(), ttl);
-    } else if let Some(database_ttl) = schema_options.and_then(|o| o.ttl.as_repr_opt()) {
+    } else if let Some(database_ttl) = schema_options
+        .and_then(|o| o.ttl)
+        .and_then(|ttl| ttl.as_repr_opt())
+    {
         options.insert(TTL_KEY.to_string(), database_ttl);
     };
     for (k, v) in table_opts

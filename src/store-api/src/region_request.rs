@@ -746,7 +746,7 @@ impl From<v1::ModifyColumnType> for ModifyColumnType {
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub enum SetRegionOption {
-    TTL(TimeToLive),
+    TTL(Option<TimeToLive>),
     // Modifying TwscOptions with values as (option name, new value).
     Twsc(String, String),
 }
@@ -761,7 +761,7 @@ impl TryFrom<&PbOption> for SetRegionOption {
                 let ttl = TimeToLive::from_humantime_or_str(value)
                     .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
 
-                Ok(Self::TTL(ttl))
+                Ok(Self::TTL(Some(ttl)))
             }
             TWCS_MAX_ACTIVE_WINDOW_RUNS
             | TWCS_MAX_ACTIVE_WINDOW_FILES

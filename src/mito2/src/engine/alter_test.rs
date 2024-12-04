@@ -604,7 +604,7 @@ async fn test_alter_region_ttl_options() {
     let alter_ttl_request = RegionAlterRequest {
         schema_version: 0,
         kind: AlterKind::SetRegionOptions {
-            options: vec![SetRegionOption::TTL(Duration::from_secs(500).into())],
+            options: vec![SetRegionOption::TTL(Some(Duration::from_secs(500).into()))],
         },
     };
     let alter_job = tokio::spawn(async move {
@@ -618,7 +618,7 @@ async fn test_alter_region_ttl_options() {
 
     let check_ttl = |engine: &MitoEngine, expected: &Duration| {
         let current_ttl = engine.get_region(region_id).unwrap().version().options.ttl;
-        assert_eq!(current_ttl, (*expected).into());
+        assert_eq!(current_ttl, Some((*expected).into()));
     };
     // Verify the ttl.
     check_ttl(&engine, &Duration::from_secs(500));

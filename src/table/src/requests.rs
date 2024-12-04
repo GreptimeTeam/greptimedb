@@ -74,7 +74,7 @@ pub struct TableOptions {
     /// Memtable size of memtable.
     pub write_buffer_size: Option<ReadableSize>,
     /// Time-to-live of table. Expired data will be automatically purged.
-    pub ttl: TimeToLive,
+    pub ttl: Option<TimeToLive>,
     /// Extra options that may not applicable to all table engines.
     pub extra_options: HashMap<String, String>,
 }
@@ -115,7 +115,7 @@ impl TableOptions {
                 }
                 .build()
             })?;
-            options.ttl = ttl_value;
+            options.ttl = Some(ttl_value);
         }
 
         options.extra_options = HashMap::from_iter(
@@ -134,7 +134,7 @@ impl fmt::Display for TableOptions {
             key_vals.push(format!("{}={}", WRITE_BUFFER_SIZE_KEY, size));
         }
 
-        if let Some(ttl) = self.ttl.as_repr_opt() {
+        if let Some(ttl) = self.ttl.and_then(|ttl| ttl.as_repr_opt()) {
             key_vals.push(format!("{}={}", TTL_KEY, ttl));
         }
 
@@ -155,7 +155,7 @@ impl From<&TableOptions> for HashMap<String, String> {
                 write_buffer_size.to_string(),
             );
         }
-        if let Some(ttl_str) = opts.ttl.as_repr_opt() {
+        if let Some(ttl_str) = opts.ttl.and_then(|ttl| ttl.as_repr_opt()) {
             let _ = res.insert(TTL_KEY.to_string(), ttl_str);
         }
         res.extend(
@@ -340,7 +340,7 @@ mod tests {
     fn test_serialize_table_options() {
         let options = TableOptions {
             write_buffer_size: None,
-            ttl: Some(Duration::from_secs(1000)).into(),
+            ttl: Some(Duration::from_secs(1000).into()),
             extra_options: HashMap::new(),
         };
         let serialized = serde_json::to_string(&options).unwrap();
@@ -352,7 +352,7 @@ mod tests {
     fn test_convert_hashmap_between_table_options() {
         let options = TableOptions {
             write_buffer_size: Some(ReadableSize::mb(128)),
-            ttl: Some(Duration::from_secs(1000)).into(),
+            ttl: Some(Duration::from_secs(1000).into()),
             extra_options: HashMap::new(),
         };
         let serialized_map = HashMap::from(&options);
@@ -370,7 +370,7 @@ mod tests {
 
         let options = TableOptions {
             write_buffer_size: Some(ReadableSize::mb(128)),
-            ttl: Some(Duration::from_secs(1000)).into(),
+            ttl: Some(Duration::from_secs(1000).into()),
             extra_options: HashMap::from([("a".to_string(), "A".to_string())]),
         };
         let serialized_map = HashMap::from(&options);
@@ -382,7 +382,7 @@ mod tests {
     fn test_table_options_to_string() {
         let options = TableOptions {
             write_buffer_size: Some(ReadableSize::mb(128)),
-            ttl: Some(Duration::from_secs(1000)).into(),
+            ttl: Some(Duration::from_secs(1000).into()),
             extra_options: HashMap::new(),
         };
 
@@ -393,7 +393,7 @@ mod tests {
 
         let options = TableOptions {
             write_buffer_size: Some(ReadableSize::mb(128)),
-            ttl: Some(Duration::from_secs(1000)).into(),
+            ttl: Some(Duration::from_secs(1000).into()),
             extra_options: HashMap::from([("a".to_string(), "A".to_string())]),
         };
 

@@ -57,12 +57,12 @@ impl Default for SchemaNameKey<'_> {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SchemaNameValue {
     #[serde(default)]
-    pub ttl: TimeToLive,
+    pub ttl: Option<TimeToLive>,
 }
 
 impl Display for SchemaNameValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(ttl) = self.ttl.as_repr_opt() {
+        if let Some(ttl) = self.ttl.and_then(|i| i.as_repr_opt()) {
             write!(f, "ttl='{}'", ttl)?;
         }
 
@@ -86,8 +86,7 @@ impl TryFrom<&HashMap<String, String>> for SchemaNameValue {
                 })
             })
             .transpose()?
-            .map(|ttl| ttl.into())
-            .unwrap_or_default();
+            .map(|ttl| ttl.into());
         Ok(Self { ttl })
     }
 }
@@ -95,7 +94,7 @@ impl TryFrom<&HashMap<String, String>> for SchemaNameValue {
 impl From<SchemaNameValue> for HashMap<String, String> {
     fn from(value: SchemaNameValue) -> Self {
         let mut opts = HashMap::new();
-        if let Some(ttl) = value.ttl.as_repr_opt() {
+        if let Some(ttl) = value.ttl.and_then(|ttl| ttl.as_repr_opt()) {
             opts.insert(OPT_KEY_TTL.to_string(), ttl);
         }
         opts
@@ -316,23 +315,21 @@ mod tests {
 
     #[test]
     fn test_display_schema_value() {
-        let schema_value = SchemaNameValue {
-            ttl: TimeToLive::default(),
-        };
+        let schema_value = SchemaNameValue { ttl: None };
         assert_eq!("", schema_value.to_string());
 
         let schema_value = SchemaNameValue {
-            ttl: Duration::from_secs(9).into(),
+            ttl: Some(Duration::from_secs(9).into()),
         };
         assert_eq!("ttl='9s'", schema_value.to_string());
 
         let schema_value = SchemaNameValue {
-            ttl: Duration::from_secs(0).into(),
+            ttl: Some(Duration::from_secs(0).into()),
         };
-        assert_eq!("", schema_value.to_string());
+        assert_eq!("ttl='forever'", schema_value.to_string());
 
         let schema_value = SchemaNameValue {
-            ttl: TimeToLive::Immediate,
+            ttl: Some(TimeToLive::Immediate),
         };
         assert_eq!("ttl='immediate'", schema_value.to_string());
     }
@@ -347,7 +344,7 @@ mod tests {
         assert_eq!(key, parsed);
 
         let value = SchemaNameValue {
-            ttl: Duration::from_secs(10).into(),
+            ttl: Some(Duration::from_secs(10).into()),
         };
         let mut opts: HashMap<String, String> = HashMap::new();
         opts.insert("ttl".to_string(), "10s".to_string());
@@ -361,7 +358,7 @@ mod tests {
         assert_eq!(Some(value), parsed);
 
         let imme = SchemaNameValue {
-            ttl: TimeToLive::Immediate,
+            ttl: Some(TimeToLive::Immediate),
         };
         let parsed = SchemaNameValue::try_from_raw_value(
             serde_json::json!({"ttl": "immediate"})
@@ -372,7 +369,7 @@ mod tests {
         assert_eq!(Some(imme), parsed);
 
         let forever = SchemaNameValue {
-            ttl: TimeToLive::default(),
+            ttl: Some(TimeToLive::default()),
         };
         let parsed = SchemaNameValue::try_from_raw_value(
             serde_json::json!({"ttl": "forever"}).to_string().as_bytes(),
@@ -408,7 +405,7 @@ mod tests {
 
         let current_schema_value = manager.get(schema_key).await.unwrap().unwrap();
         let new_schema_value = SchemaNameValue {
-            ttl: Duration::from_secs(10).into(),
+            ttl: Some(Duration::from_secs(10).into()),
         };
         manager
             .update(schema_key, &current_schema_value, &new_schema_value)
@@ -422,10 +419,10 @@ mod tests {
             .unwrap();
 
         let new_schema_value = SchemaNameValue {
-            ttl: Duration::from_secs(40).into(),
+            ttl: Some(Duration::from_secs(40).into()),
         };
         let incorrect_schema_value = SchemaNameValue {
-            ttl: Duration::from_secs(20).into(),
+            ttl: Some(Duration::from_secs(20).into()),
         }
         .try_as_raw_value()
         .unwrap();

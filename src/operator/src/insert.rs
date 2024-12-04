@@ -271,7 +271,7 @@ impl Inserter {
 pub(crate) fn check_ttl_zero_table(ctx: &QueryContextRef, table_info: &TableInfo) {
     let ttl = table_info.meta.options.ttl;
 
-    if ttl.is_immediate() {
+    if ttl.map(|t| t.is_immediate()).unwrap_or(false) {
         ctx.add_ttl_zero_regions(table_info.region_ids().into_iter().map(|i| i.as_u64()));
     }
 }

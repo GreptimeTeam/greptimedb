@@ -64,7 +64,7 @@ pub struct CompactionRegion {
     pub(crate) manifest_ctx: Arc<ManifestContext>,
     pub(crate) current_version: VersionRef,
     pub(crate) file_purger: Option<Arc<LocalFilePurger>>,
-    pub(crate) ttl: TimeToLive,
+    pub(crate) ttl: Option<TimeToLive>,
 }
 
 /// OpenCompactionRegionRequest represents the request to open a compaction region.
@@ -194,7 +194,7 @@ pub async fn open_compaction_region(
         manifest_ctx,
         current_version,
         file_purger: Some(file_purger),
-        ttl,
+        ttl: Some(ttl),
     })
 }
 
