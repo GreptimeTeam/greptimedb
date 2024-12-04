@@ -32,7 +32,7 @@ use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 use servers::Mode;
 
-pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::gb(1);
+pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::gb(5);
 
 /// Default data home in file storage
 const DEFAULT_DATA_HOME: &str = "/tmp/greptimedb";
@@ -58,6 +58,14 @@ impl ObjectStoreConfig {
             Self::Azblob(_) => "Azblob",
             Self::Gcs(_) => "Gcs",
         }
+    }
+
+    /// Returns true when it's a object storage such as AWS s3 etc.
+    pub fn is_object_storage(&self) -> bool {
+        matches!(
+            self,
+            Self::S3(_) | Self::Oss(_) | Self::Azblob(_) | Self::Gcs(_)
+        )
     }
 
     /// Returns the object storage configuration name, return the provider name if it's empty.
@@ -89,6 +97,13 @@ pub struct StorageConfig {
     pub store: ObjectStoreConfig,
     /// Object storage providers
     pub providers: Vec<ObjectStoreConfig>,
+}
+
+impl StorageConfig {
+    /// Returns true when the default storage config is the object storage.
+    pub fn is_object_storage(&self) -> bool {
+        self.store.is_object_storage()
+    }
 }
 
 impl Default for StorageConfig {
@@ -450,6 +465,20 @@ mod tests {
         });
         assert_eq!("test", s3_config.config_name());
         assert_eq!("S3", s3_config.provider_name());
+    }
+
+    #[test]
+    fn test_is_object_storage() {
+        let store = ObjectStoreConfig::default();
+        assert!(!store.is_object_storage());
+        let s3_config = ObjectStoreConfig::S3(S3Config::default());
+        assert!(s3_config.is_object_storage());
+        let oss_config = ObjectStoreConfig::Oss(OssConfig::default());
+        assert!(oss_config.is_object_storage());
+        let gcs_config = ObjectStoreConfig::Gcs(GcsConfig::default());
+        assert!(gcs_config.is_object_storage());
+        let azblob_config = ObjectStoreConfig::Azblob(AzblobConfig::default());
+        assert!(azblob_config.is_object_storage());
     }
 
     #[test]
