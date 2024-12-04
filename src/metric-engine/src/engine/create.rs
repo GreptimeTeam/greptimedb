@@ -540,7 +540,7 @@ pub(crate) fn region_options_for_metadata_region(
     mut original: HashMap<String, String>,
 ) -> HashMap<String, String> {
     original.remove(APPEND_MODE_KEY);
-    original.insert(TTL_KEY.to_string(), "10000 years".to_string());
+    original.insert(TTL_KEY.to_string(), "forever".to_string());
     original
 }
 
@@ -731,7 +731,7 @@ mod test {
         );
         assert_eq!(
             metadata_region_request.options.get("ttl").unwrap(),
-            "10000 years"
+            "forever"
         );
     }
 }

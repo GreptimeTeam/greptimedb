@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 /// Time To Live
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Default)]
 pub enum TimeToLive {
-    /// immediately throw away on insert
+    /// Immediately throw away on insert
     Immediate,
     /// Duration to keep the data, this duration should be non-zero
     Duration(Duration),
@@ -56,6 +56,7 @@ impl<'de> Deserialize<'de> for TimeToLive {
                 formatter.write_str("a string of time, 'immediate', 'forever' or null")
             }
 
+            /// Correctly deserialize null in json
             fn visit_unit<E>(self) -> Result<Self::Value, E> {
                 Ok(TimeToLive::Forever)
             }
@@ -84,7 +85,9 @@ impl Display for TimeToLive {
 }
 
 impl TimeToLive {
-    /// Parse a string into TimeToLive
+    /// Parse a string that is either `immediate`, `forever`, or a duration to `TimeToLive`
+    ///
+    /// note that a empty string is treat as `forever` too
     pub fn from_humantime_or_str(s: &str) -> Result<Self, String> {
         match s {
             "immediate" => Ok(TimeToLive::Immediate),
