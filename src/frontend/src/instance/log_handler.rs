@@ -32,7 +32,7 @@ use crate::instance::Instance;
 
 #[async_trait]
 impl PipelineHandler for Instance {
-    async fn insert_logs(
+    async fn transform(
         &self,
         log: RowInsertRequests,
         ctx: QueryContextRef,

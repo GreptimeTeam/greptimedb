@@ -502,7 +502,7 @@ pub async fn loki_ingest(
     };
 
     let handler = log_state.log_handler;
-    let output = handler.insert_logs(ins_reqs, ctx).await;
+    let output = handler.transform(ins_reqs, ctx).await;
 
     if let Ok(Output {
         data: OutputData::AffectedRows(rows),
@@ -664,7 +664,7 @@ async fn ingest_logs_inner(
     let insert_requests = RowInsertRequests {
         inserts: vec![insert_request],
     };
-    let output = state.insert_logs(insert_requests, query_ctx).await;
+    let output = state.transform(insert_requests, query_ctx).await;
 
     if let Ok(Output {
         data: OutputData::AffectedRows(rows),
