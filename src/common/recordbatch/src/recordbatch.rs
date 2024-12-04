@@ -194,6 +194,12 @@ impl RecordBatch {
             .map(|t| t.to_string())
             .unwrap_or("failed to pretty display a record batch".to_string())
     }
+
+    /// Return a slice record batch starts from offset to len
+    pub fn slice(&self, offset: usize, len: usize) -> Result<RecordBatch> {
+        let columns = self.columns.iter().map(|vector| vector.slice(offset, len));
+        RecordBatch::new(self.schema.clone(), columns)
+    }
 }
 
 impl Serialize for RecordBatch {
@@ -254,6 +260,36 @@ impl Iterator for RecordBatchRowIterator<'_> {
             Some(row)
         }
     }
+}
+
+/// merge multiple recordbatch into a single
+pub fn merge_record_batches(schema: SchemaRef, batches: &[RecordBatch]) -> Result<RecordBatch> {
+    let batches_len = batches.len();
+    if batches_len == 0 {
+        return Ok(RecordBatch::new_empty(schema));
+    }
+
+    let n_rows = batches.iter().map(|b| b.num_rows()).sum();
+    let n_columns = schema.num_columns();
+    // Collect arrays from each batch
+    let mut merged_columns = Vec::with_capacity(n_columns);
+
+    for col_idx in 0..n_columns {
+        let mut acc = schema.column_schemas()[col_idx]
+            .data_type
+            .create_mutable_vector(n_rows);
+
+        for batch in batches {
+            let column = batch.column(col_idx);
+            acc.extend_slice_of(column.as_ref(), 0, column.len())
+                .context(error::DataTypesSnafu)?;
+        }
+
+        merged_columns.push(acc.to_vector());
+    }
+
+    // Create a new RecordBatch with merged columns
+    RecordBatch::new(schema, merged_columns)
 }
 
 #[cfg(test)]
