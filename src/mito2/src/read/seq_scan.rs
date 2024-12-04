@@ -39,7 +39,7 @@ use crate::read::merge::MergeReaderBuilder;
 use crate::read::range::RangeBuilderList;
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{scan_file_ranges, scan_mem_ranges, PartitionMetrics};
-use crate::read::{ScannerMetrics, Source};
+use crate::read::{BatchReader, BoxedBatchReader, ScannerMetrics, Source};
 use crate::region::options::MergeMode;
 
 /// Scans a region and returns rows in a sorted sequence.
@@ -85,8 +85,8 @@ impl SeqScan {
         Ok(Box::pin(aggr_stream))
     }
 
-    /// Builds a [Source] from sequential scan for compaction.
-    pub async fn build_source_for_compaction(&self) -> Result<Source> {
+    /// Builds a [BoxedBatchReader] from sequential scan for compaction.
+    pub async fn build_reader(&self) -> Result<BoxedBatchReader> {
         let part_metrics = PartitionMetrics::new(
             self.stream_ctx.input.mapper.metadata().region_id,
             0,
@@ -100,22 +100,23 @@ impl SeqScan {
         debug_assert_eq!(1, self.properties.partitions.len());
         let partition_ranges = &self.properties.partitions[0];
 
-        Self::build_source_merge_all(
+        let reader = Self::build_all_merge_reader(
             &self.stream_ctx,
             partition_ranges,
             self.compaction,
             &part_metrics,
         )
-        .await
+        .await?;
+        Ok(Box::new(reader))
     }
 
-    /// Builds a source to merge all data.
-    async fn build_source_merge_all(
+    /// Builds a merge reader that reads all data.
+    async fn build_all_merge_reader(
         stream_ctx: &Arc<StreamContext>,
         partition_ranges: &[PartitionRange],
         compaction: bool,
         part_metrics: &PartitionMetrics,
-    ) -> Result<Source> {
+    ) -> Result<BoxedBatchReader> {
         let mut sources = Vec::new();
         let range_builder_list = Arc::new(RangeBuilderList::new(
             stream_ctx.input.num_memtables(),
@@ -131,57 +132,51 @@ impl SeqScan {
                 &mut sources,
             );
         }
-        Self::merge_sources(stream_ctx, sources, None).await
+        Self::build_reader_from_sources(stream_ctx, sources, None).await
     }
 
-    /// Builds a source to merge and read input sources. If `semaphore` is provided, reads sources in parallel
+    /// Builds a reader to read sources. If `semaphore` is provided, reads sources in parallel
     /// if possible.
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
-    async fn merge_sources(
+    async fn build_reader_from_sources(
         stream_ctx: &StreamContext,
         mut sources: Vec<Source>,
         semaphore: Option<Arc<Semaphore>>,
-    ) -> Result<Source> {
-        let output_source = if sources.len() > 1 {
-            if let Some(semaphore) = semaphore.as_ref() {
-                // Read sources in parallel.
+    ) -> Result<BoxedBatchReader> {
+        if let Some(semaphore) = semaphore.as_ref() {
+            // Read sources in parallel.
+            if sources.len() > 1 {
                 sources = stream_ctx
                     .input
                     .create_parallel_sources(sources, semaphore.clone())?;
             }
+        }
 
-            let mut builder = MergeReaderBuilder::from_sources(sources);
-            let reader = builder.build().await?;
+        let mut builder = MergeReaderBuilder::from_sources(sources);
+        let reader = builder.build().await?;
 
-            let dedup = !stream_ctx.input.append_mode;
-            let reader = if dedup {
-                match stream_ctx.input.merge_mode {
-                    MergeMode::LastRow => Box::new(DedupReader::new(
-                        reader,
-                        LastRow::new(stream_ctx.input.filter_deleted),
-                    )) as _,
-                    MergeMode::LastNonNull => Box::new(DedupReader::new(
-                        reader,
-                        LastNonNull::new(stream_ctx.input.filter_deleted),
-                    )) as _,
-                }
-            } else {
-                Box::new(reader) as _
-            };
-
-            Source::Reader(reader)
+        let dedup = !stream_ctx.input.append_mode;
+        let reader = if dedup {
+            match stream_ctx.input.merge_mode {
+                MergeMode::LastRow => Box::new(DedupReader::new(
+                    reader,
+                    LastRow::new(stream_ctx.input.filter_deleted),
+                )) as _,
+                MergeMode::LastNonNull => Box::new(DedupReader::new(
+                    reader,
+                    LastNonNull::new(stream_ctx.input.filter_deleted),
+                )) as _,
+            }
         } else {
-            // There is only one source. We can skip merge and dedup.
-            sources.pop().unwrap()
+            Box::new(reader) as _
         };
 
-        match &stream_ctx.input.series_row_selector {
-            Some(TimeSeriesRowSelector::LastRow) => {
-                let reader = Box::new(LastRowReader::new(output_source)) as _;
-                Ok(Source::Reader(reader))
-            }
-            None => Ok(output_source),
-        }
+        let reader = match &stream_ctx.input.series_row_selector {
+            Some(TimeSeriesRowSelector::LastRow) => Box::new(LastRowReader::new(reader)) as _,
+            None => reader,
+        };
+
+        Ok(reader)
     }
 
     /// Scans the given partition when the part list is set properly.
@@ -247,7 +242,7 @@ impl SeqScan {
                 );
 
                 let mut reader =
-                    Self::merge_sources(&stream_ctx, sources, semaphore.clone())
+                    Self::build_reader_from_sources(&stream_ctx, sources, semaphore.clone())
                         .await
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?;

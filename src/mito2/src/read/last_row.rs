@@ -24,7 +24,7 @@ use crate::cache::{
     SelectorResultValue,
 };
 use crate::error::Result;
-use crate::read::{Batch, BatchReader, Source};
+use crate::read::{Batch, BatchReader, BoxedBatchReader};
 use crate::sst::file::FileId;
 use crate::sst::parquet::reader::RowGroupReader;
 
@@ -38,14 +38,14 @@ use crate::sst::parquet::reader::RowGroupReader;
 /// it focus on time series (the same key).
 pub(crate) struct LastRowReader {
     /// Inner reader.
-    reader: Source,
+    reader: BoxedBatchReader,
     /// The last batch pending to return.
     selector: LastRowSelector,
 }
 
 impl LastRowReader {
     /// Creates a new `LastRowReader`.
-    pub(crate) fn new(reader: Source) -> Self {
+    pub(crate) fn new(reader: BoxedBatchReader) -> Self {
         Self {
             reader,
             selector: LastRowSelector::default(),
@@ -284,7 +284,7 @@ mod tests {
             &[21, 22],
         )];
         let reader = VecBatchReader::new(&input);
-        let mut reader = LastRowReader::new(Source::Reader(Box::new(reader)));
+        let mut reader = LastRowReader::new(Box::new(reader));
         check_reader_result(
             &mut reader,
             &[new_batch(b"k1", &[2], &[11], &[OpType::Put], &[22])],
@@ -294,7 +294,7 @@ mod tests {
         // Only one row.
         let input = [new_batch(b"k1", &[1], &[11], &[OpType::Put], &[21])];
         let reader = VecBatchReader::new(&input);
-        let mut reader = LastRowReader::new(Source::Reader(Box::new(reader)));
+        let mut reader = LastRowReader::new(Box::new(reader));
         check_reader_result(
             &mut reader,
             &[new_batch(b"k1", &[1], &[11], &[OpType::Put], &[21])],
@@ -328,7 +328,7 @@ mod tests {
             ),
         ];
         let reader = VecBatchReader::new(&input);
-        let mut reader = LastRowReader::new(Source::Reader(Box::new(reader)));
+        let mut reader = LastRowReader::new(Box::new(reader));
         check_reader_result(
             &mut reader,
             &[
