@@ -32,6 +32,7 @@ use crate::error::{
     ColumnNotFoundSnafu, InvalidSqlSnafu, MissingInsertBodySnafu, ParseSqlSnafu, Result,
     SchemaReadOnlySnafu, TableNotFoundSnafu,
 };
+use crate::insert::check_ttl_zero_table;
 use crate::req_convert::common::partitioner::Partitioner;
 use crate::req_convert::insert::semantic_type;
 
@@ -65,6 +66,7 @@ impl<'a> StatementToRegion<'a> {
         let table = self.get_table(&catalog, &schema, &table_name).await?;
         let table_schema = table.schema();
         let table_info = table.table_info();
+        check_ttl_zero_table(query_ctx, &table_info);
 
         ensure!(
             !common_catalog::consts::is_readonly_schema(&schema),

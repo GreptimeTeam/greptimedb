@@ -244,6 +244,7 @@ impl Inserter {
             table_name: common_catalog::format_full_table_name(catalog, schema, table_name),
         })?;
         let table_info = table.table_info();
+        check_ttl_zero_table(&ctx, &table_info);
 
         let inserts = TableToRegion::new(&table_info, &self.partition_manager)
             .convert(request)
@@ -263,6 +264,15 @@ impl Inserter {
                 .await?;
 
         self.do_request(inserts, ctx).await
+    }
+}
+
+/// Check and add regions with ttl=0 to context
+pub(crate) fn check_ttl_zero_table(ctx: &QueryContextRef, table_info: &TableInfo) {
+    let ttl = table_info.meta.options.ttl;
+
+    if ttl.is_immediate() {
+        ctx.add_ttl_zero_regions(table_info.region_ids().into_iter().map(|i| i.as_u64()));
     }
 }
 
@@ -469,13 +479,6 @@ impl Inserter {
         auto_create_table_type: AutoCreateTableType,
         statement_executor: &StatementExecutor,
     ) -> Result<HashMap<String, TableId>> {
-        fn add_ttl_zero_table(ctx: &QueryContextRef, table_info: &TableInfo) {
-            let ttl = table_info.meta.options.ttl;
-
-            if ttl.is_immediate() {
-                ctx.add_ttl_zero_regions(table_info.region_ids().into_iter().map(|i| i.as_u64()));
-            }
-        }
         let _timer = crate::metrics::CREATE_ALTER_ON_DEMAND
             .with_label_values(&[auto_create_table_type.as_str()])
             .start_timer();
@@ -507,7 +510,7 @@ impl Inserter {
                         ),
                     })?;
                 let table_info = table.table_info();
-                add_ttl_zero_table(ctx, &table_info);
+                check_ttl_zero_table(ctx, &table_info);
                 table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
             }
             return Ok(table_name_to_ids);
@@ -572,6 +575,7 @@ impl Inserter {
             }
         }
 
+        // add ttl zero regions to context
         for table_name in table_name_to_ids.keys() {
             let table = if let Some(table) = self.get_table(catalog, &schema, table_name).await? {
                 table
@@ -579,7 +583,7 @@ impl Inserter {
                 continue;
             };
             let table_info = table.table_info();
-            add_ttl_zero_table(ctx, &table_info);
+            check_ttl_zero_table(ctx, &table_info);
         }
 
         Ok(table_name_to_ids)

@@ -80,7 +80,7 @@ impl Display for TimeToLive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TimeToLive::Immediate => write!(f, "immediate"),
-            TimeToLive::Duration(d) => write!(f, "Duration({})", d.as_secs()),
+            TimeToLive::Duration(d) => write!(f, "{}", humantime::Duration::from(*d)),
             TimeToLive::Forever => write!(f, "forever"),
         }
     }
@@ -94,14 +94,14 @@ impl TimeToLive {
             "forever" | "" => Ok(TimeToLive::Forever),
             _ => {
                 let d = humantime::parse_duration(s).map_err(|e| e.to_string())?;
-                Ok(TimeToLive::Duration(d))
+                Ok(TimeToLive::from(d))
             }
         }
     }
 
     /// Print TimeToLive as string
     ///
-    /// omit forever variant
+    /// omit `Forever`` variant
     pub fn as_repr_opt(&self) -> Option<String> {
         match self {
             TimeToLive::Immediate => Some("immediate".to_string()),
@@ -114,6 +114,7 @@ impl TimeToLive {
         matches!(self, TimeToLive::Immediate)
     }
 
+    /// Is the default value, which is `Forever`
     pub fn is_forever(&self) -> bool {
         matches!(self, TimeToLive::Forever)
     }
