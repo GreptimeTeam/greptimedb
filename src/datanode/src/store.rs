@@ -19,21 +19,20 @@ mod fs;
 mod gcs;
 mod oss;
 mod s3;
-
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{env, path};
 
-use common_base::readable_size::ReadableSize;
 use common_telemetry::{info, warn};
 use object_store::layers::{LruCacheLayer, RetryInterceptor, RetryLayer};
 use object_store::services::Fs;
 use object_store::util::{join_dir, normalize_dir, with_instrument_layers};
-use object_store::{Access, Error, HttpClient, ObjectStore, ObjectStoreBuilder};
+use object_store::{Access, Error, HttpClient, ObjectStore, ObjectStoreBuilder, OBJECT_CACHE_DIR};
 use snafu::prelude::*;
 
 use crate::config::{HttpClientConfig, ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
-use crate::error::{self, Result};
+use crate::error::{self, CreateDirSnafu, Result};
 
 pub(crate) async fn new_raw_object_store(
     store: &ObjectStoreConfig,
@@ -68,7 +67,7 @@ pub(crate) async fn new_object_store_without_cache(
 ) -> Result<ObjectStore> {
     let object_store = new_raw_object_store(store, data_home).await?;
     // Enable retry layer and cache layer for non-fs object storages
-    let object_store = if !matches!(store, ObjectStoreConfig::File(..)) {
+    let object_store = if store.is_object_storage() {
         // Adds retry layer
         with_retry_layers(object_store)
     } else {
@@ -85,8 +84,8 @@ pub(crate) async fn new_object_store(
 ) -> Result<ObjectStore> {
     let object_store = new_raw_object_store(&store, data_home).await?;
     // Enable retry layer and cache layer for non-fs object storages
-    let object_store = if !matches!(store, ObjectStoreConfig::File(..)) {
-        let object_store = if let Some(cache_layer) = build_cache_layer(&store).await? {
+    let object_store = if store.is_object_storage() {
+        let object_store = if let Some(cache_layer) = build_cache_layer(&store, data_home).await? {
             // Adds cache layer
             object_store.layer(cache_layer)
         } else {
@@ -105,10 +104,11 @@ pub(crate) async fn new_object_store(
 
 async fn build_cache_layer(
     store_config: &ObjectStoreConfig,
+    data_home: &str,
 ) -> Result<Option<LruCacheLayer<impl Access>>> {
-    let (cache_path, cache_capacity) = match store_config {
+    let (mut cache_path, cache_capacity) = match store_config {
         ObjectStoreConfig::S3(s3_config) => {
-            let path = s3_config.cache.cache_path.as_ref();
+            let path = s3_config.cache.cache_path.clone();
             let capacity = s3_config
                 .cache
                 .cache_capacity
@@ -116,7 +116,7 @@ async fn build_cache_layer(
             (path, capacity)
         }
         ObjectStoreConfig::Oss(oss_config) => {
-            let path = oss_config.cache.cache_path.as_ref();
+            let path = oss_config.cache.cache_path.clone();
             let capacity = oss_config
                 .cache
                 .cache_capacity
@@ -124,7 +124,7 @@ async fn build_cache_layer(
             (path, capacity)
         }
         ObjectStoreConfig::Azblob(azblob_config) => {
-            let path = azblob_config.cache.cache_path.as_ref();
+            let path = azblob_config.cache.cache_path.clone();
             let capacity = azblob_config
                 .cache
                 .cache_capacity
@@ -132,17 +132,39 @@ async fn build_cache_layer(
             (path, capacity)
         }
         ObjectStoreConfig::Gcs(gcs_config) => {
-            let path = gcs_config.cache.cache_path.as_ref();
+            let path = gcs_config.cache.cache_path.clone();
             let capacity = gcs_config
                 .cache
                 .cache_capacity
                 .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
             (path, capacity)
         }
-        _ => (None, ReadableSize(0)),
+        _ => unreachable!("Already checked above"),
     };
 
-    if let Some(path) = cache_path {
+    // Enable object cache by default
+    // Set the cache_path to be `${data_home}/object_cache/read` by default
+    // if it's not present
+    if cache_path.is_none() {
+        let object_cache_path = join_dir(data_home, OBJECT_CACHE_DIR);
+        let read_cache_path = join_dir(&object_cache_path, "read");
+        tokio::fs::create_dir_all(Path::new(&read_cache_path))
+            .await
+            .context(CreateDirSnafu {
+                dir: &read_cache_path,
+            })?;
+
+        info!(
+            "The object storage cache path is not set, using the default path: {}",
+            &read_cache_path
+        );
+
+        cache_path = Some(read_cache_path);
+    }
+
+    if let Some(path) = cache_path.as_ref()
+        && !path.trim().is_empty()
+    {
         let atomic_temp_dir = join_dir(path, ".tmp/");
         clean_temp_dir(&atomic_temp_dir)?;
 

@@ -676,6 +676,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to create directory {}", dir))]
+    CreateDir {
+        dir: String,
+        #[snafu(source)]
+        error: std::io::Error,
+    },
+
     #[snafu(display("Failed to filter record batch"))]
     FilterRecordBatch {
         source: common_recordbatch::error::Error,
@@ -946,6 +953,7 @@ impl ErrorExt for Error {
             | ComputeVector { .. }
             | SerializeField { .. }
             | EncodeMemtable { .. }
+            | CreateDir { .. }
             | ReadDataPart { .. }
             | CorruptedEntry { .. }
             | BuildEntry { .. } => StatusCode::Internal,

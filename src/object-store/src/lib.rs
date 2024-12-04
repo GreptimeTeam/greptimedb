@@ -24,3 +24,5 @@ pub mod manager;
 mod metrics;
 pub mod test_util;
 pub mod util;
+/// The default object cache directory name.
+pub const OBJECT_CACHE_DIR: &str = "object_cache";
