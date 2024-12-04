@@ -195,7 +195,7 @@ impl RecordBatch {
             .unwrap_or("failed to pretty display a record batch".to_string())
     }
 
-    /// Return a slice record batch starts from offset to len
+    /// Return a slice record batch starts from offset, with len rows
     pub fn slice(&self, offset: usize, len: usize) -> Result<RecordBatch> {
         ensure!(
             offset + len <= self.num_rows(),
