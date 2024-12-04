@@ -36,6 +36,8 @@ ALTER TABLE test_ttl UNSET 'ttl';
 
 SHOW CREATE TABLE test_ttl;
 
+SHOW CREATE DATABASE test_ttl_db;
+
 ALTER DATABASE test_ttl_db SET 'ttl' = 'forever';
 
 SHOW CREATE TABLE test_ttl;
@@ -55,6 +57,12 @@ SHOW CREATE TABLE test_ttl;
 SHOW CREATE DATABASE test_ttl_db;
 
 ALTER DATABASE test_ttl_db UNSET 'ttl';
+
+SHOW CREATE TABLE test_ttl;
+
+SHOW CREATE DATABASE test_ttl_db;
+
+ALTER TABLE test_ttl UNSET 'ttl';
 
 SHOW CREATE TABLE test_ttl;
 

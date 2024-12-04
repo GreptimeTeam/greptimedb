@@ -129,7 +129,7 @@ SHOW CREATE TABLE test_ttl;
 |          |                                         |
 |          | ENGINE=mito                             |
 |          | WITH(                                   |
-|          |   ttl = '1day'                          |
+|          |   ttl = 'forever'                       |
 |          | )                                       |
 +----------+-----------------------------------------+
 
@@ -150,7 +150,7 @@ SHOW CREATE TABLE test_ttl;
 |          |                                         |
 |          | ENGINE=mito                             |
 |          | WITH(                                   |
-|          |   ttl = '1day'                          |
+|          |   ttl = 'forever'                       |
 |          | )                                       |
 +----------+-----------------------------------------+
 
@@ -186,6 +186,17 @@ SHOW CREATE TABLE test_ttl;
 |          | )                                       |
 +----------+-----------------------------------------+
 
+SHOW CREATE DATABASE test_ttl_db;
+
++-------------+-------------------------------------------+
+| Database    | Create Database                           |
++-------------+-------------------------------------------+
+| test_ttl_db | CREATE DATABASE IF NOT EXISTS test_ttl_db |
+|             | WITH(                                     |
+|             |   ttl = '1day'                            |
+|             | )                                         |
++-------------+-------------------------------------------+
+
 ALTER DATABASE test_ttl_db SET 'ttl' = 'forever';
 
 Affected Rows: 0
@@ -202,7 +213,9 @@ SHOW CREATE TABLE test_ttl;
 |          | )                                       |
 |          |                                         |
 |          | ENGINE=mito                             |
-|          |                                         |
+|          | WITH(                                   |
+|          |   ttl = 'forever'                       |
+|          | )                                       |
 +----------+-----------------------------------------+
 
 SHOW CREATE DATABASE test_ttl_db;
@@ -211,6 +224,9 @@ SHOW CREATE DATABASE test_ttl_db;
 | Database    | Create Database                           |
 +-------------+-------------------------------------------+
 | test_ttl_db | CREATE DATABASE IF NOT EXISTS test_ttl_db |
+|             | WITH(                                     |
+|             |   ttl = 'forever'                         |
+|             | )                                         |
 +-------------+-------------------------------------------+
 
 ALTER DATABASE test_ttl_db SET 'ttl' = '0s';
@@ -229,7 +245,9 @@ SHOW CREATE TABLE test_ttl;
 |          | )                                       |
 |          |                                         |
 |          | ENGINE=mito                             |
-|          |                                         |
+|          | WITH(                                   |
+|          |   ttl = 'forever'                       |
+|          | )                                       |
 +----------+-----------------------------------------+
 
 SHOW CREATE DATABASE test_ttl_db;
@@ -238,6 +256,9 @@ SHOW CREATE DATABASE test_ttl_db;
 | Database    | Create Database                           |
 +-------------+-------------------------------------------+
 | test_ttl_db | CREATE DATABASE IF NOT EXISTS test_ttl_db |
+|             | WITH(                                     |
+|             |   ttl = 'forever'                         |
+|             | )                                         |
 +-------------+-------------------------------------------+
 
 ALTER DATABASE test_ttl_db SET 'ttl' = 'immediate';
@@ -273,6 +294,33 @@ SHOW CREATE DATABASE test_ttl_db;
 +-------------+-------------------------------------------+
 
 ALTER DATABASE test_ttl_db UNSET 'ttl';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test_ttl;
+
++----------+-----------------------------------------+
+| Table    | Create Table                            |
++----------+-----------------------------------------+
+| test_ttl | CREATE TABLE IF NOT EXISTS "test_ttl" ( |
+|          |   "ts" TIMESTAMP(3) NOT NULL,           |
+|          |   "val" INT NULL,                       |
+|          |   TIME INDEX ("ts")                     |
+|          | )                                       |
+|          |                                         |
+|          | ENGINE=mito                             |
+|          |                                         |
++----------+-----------------------------------------+
+
+SHOW CREATE DATABASE test_ttl_db;
+
++-------------+-------------------------------------------+
+| Database    | Create Database                           |
++-------------+-------------------------------------------+
+| test_ttl_db | CREATE DATABASE IF NOT EXISTS test_ttl_db |
++-------------+-------------------------------------------+
+
+ALTER TABLE test_ttl UNSET 'ttl';
 
 Affected Rows: 0
 
