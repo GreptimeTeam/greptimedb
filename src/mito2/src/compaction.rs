@@ -56,7 +56,7 @@ use crate::metrics::COMPACTION_STAGE_ELAPSED;
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::ScanInput;
 use crate::read::seq_scan::SeqScan;
-use crate::read::BoxedBatchReader;
+use crate::read::Source;
 use crate::region::options::MergeMode;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::region::ManifestContextRef;
@@ -558,8 +558,8 @@ pub struct SerializedCompactionOutput {
     output_time_range: Option<TimestampRange>,
 }
 
-/// Builders to create [BoxedBatchReader] for compaction.
-struct CompactionSstReaderBuilder<'a> {
+/// Builders to create [Source] for compaction.
+struct CompactionSstSourceBuilder<'a> {
     metadata: RegionMetadataRef,
     sst_layer: AccessLayerRef,
     cache: CacheManagerRef,
@@ -570,9 +570,9 @@ struct CompactionSstReaderBuilder<'a> {
     merge_mode: MergeMode,
 }
 
-impl<'a> CompactionSstReaderBuilder<'a> {
-    /// Builds [BoxedBatchReader] that reads all SST files and yields batches in primary key order.
-    async fn build_sst_reader(self) -> Result<BoxedBatchReader> {
+impl<'a> CompactionSstSourceBuilder<'a> {
+    /// Builds [Source] that reads all SST files and yields batches in primary key order.
+    async fn build_sst_source(self) -> Result<Source> {
         let mut scan_input = ScanInput::new(self.sst_layer, ProjectionMapper::all(&self.metadata)?)
             .with_files(self.inputs.to_vec())
             .with_append_mode(self.append_mode)
@@ -589,7 +589,9 @@ impl<'a> CompactionSstReaderBuilder<'a> {
                 scan_input.with_predicate(time_range_to_predicate(time_range, &self.metadata)?);
         }
 
-        SeqScan::new(scan_input, true).build_reader().await
+        SeqScan::new(scan_input, true)
+            .build_source_for_compaction()
+            .await
     }
 }
 

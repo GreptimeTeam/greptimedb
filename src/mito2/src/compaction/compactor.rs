@@ -28,7 +28,7 @@ use store_api::storage::RegionId;
 use crate::access_layer::{AccessLayer, AccessLayerRef, OperationType, SstWriteRequest};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::{new_picker, PickerOutput};
-use crate::compaction::{find_ttl, CompactionSstReaderBuilder};
+use crate::compaction::{find_ttl, CompactionSstSourceBuilder};
 use crate::config::MitoConfig;
 use crate::error::{EmptyRegionDirSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
@@ -36,7 +36,6 @@ use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::MemtableBuilderProvider;
-use crate::read::Source;
 use crate::region::opener::new_manifest_dir;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionRef};
@@ -292,7 +291,7 @@ impl Compactor for DefaultCompactor {
             let inverted_index_config = compaction_region.engine_config.inverted_index.clone();
             let fulltext_index_config = compaction_region.engine_config.fulltext_index.clone();
             futs.push(async move {
-                let reader = CompactionSstReaderBuilder {
+                let source = CompactionSstSourceBuilder {
                     metadata: region_metadata.clone(),
                     sst_layer: sst_layer.clone(),
                     cache: cache_manager.clone(),
@@ -302,7 +301,7 @@ impl Compactor for DefaultCompactor {
                     time_range: output.output_time_range,
                     merge_mode,
                 }
-                .build_sst_reader()
+                .build_sst_source()
                 .await?;
                 let file_meta_opt = sst_layer
                     .write_sst(
@@ -310,7 +309,7 @@ impl Compactor for DefaultCompactor {
                             op_type: OperationType::Compact,
                             file_id,
                             metadata: region_metadata,
-                            source: Source::Reader(reader),
+                            source,
                             cache_manager,
                             storage,
                             index_options,
