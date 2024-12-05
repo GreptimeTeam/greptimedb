@@ -379,7 +379,7 @@ fn build_sources(
     let range_meta = &stream_ctx.ranges[part_range.identifier];
     #[cfg(debug_assertions)]
     if compaction {
-        // Compaction expects input sources are not been splitted.
+        // Compaction expects input sources are not been split.
         debug_assert_eq!(range_meta.indices.len(), range_meta.row_group_indices.len());
         for (i, row_group_idx) in range_meta.row_group_indices.iter().enumerate() {
             // It should scan all row groups.
