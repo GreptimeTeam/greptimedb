@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use sqlparser::keywords::Keyword;
+use sqlparser::tokenizer::Token;
 
 use crate::error::{self, Result};
 use crate::parser::ParserContext;
@@ -30,6 +31,19 @@ impl ParserContext<'_> {
         let _ = self
             .parser
             .expect_keywords(&[Keyword::CURSOR, Keyword::FOR]);
+
+        let mut is_select = false;
+        if let Token::Word(w) = self.parser.peek_token().token {
+            if w.keyword == Keyword::SELECT {
+                is_select = true;
+            }
+        };
+        ensure!(
+            is_select,
+            error::InvalidSqlSnafu {
+                msg: "Expect select query in cursor statement".to_string(),
+            }
+        );
 
         let query_stmt = self.parse_query()?;
         match query_stmt {
@@ -94,6 +108,11 @@ mod tests {
         } else {
             panic!("Unexpected statement");
         }
+
+        let sql = "DECLARE c1 CURSOR FOR\nINSERT INTO numbers VALUES (1);";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
     }
 
     #[test]
