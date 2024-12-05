@@ -705,22 +705,12 @@ impl HttpServer {
                 "/debug",
                 Router::new()
                     // handler for changing log level dynamically
-                    .route(
-                        "/log_level",
-                        routing::get(dyn_log::dyn_log_handler).post(dyn_log::dyn_log_handler),
-                    )
+                    .route("/log_level", routing::post(dyn_log::dyn_log_handler))
                     .nest(
                         "/prof",
                         Router::new()
-                            .route(
-                                "/cpu",
-                                routing::get(pprof::pprof_handler).post(pprof::pprof_handler),
-                            )
-                            .route(
-                                "/mem",
-                                routing::get(mem_prof::mem_prof_handler)
-                                    .post(mem_prof::mem_prof_handler),
-                            ),
+                            .route("/cpu", routing::post(pprof::pprof_handler))
+                            .route("/mem", routing::post(mem_prof::mem_prof_handler)),
                     ),
             )
     }
