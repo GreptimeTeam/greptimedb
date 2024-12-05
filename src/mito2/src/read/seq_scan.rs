@@ -68,7 +68,7 @@ impl SeqScan {
         Self {
             properties,
             stream_ctx,
-            compaction: false,
+            compaction,
         }
     }
 
