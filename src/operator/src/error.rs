@@ -789,6 +789,9 @@ pub enum Error {
 
     #[snafu(display("Cursor {name} is not found"))]
     CursorNotFound { name: String },
+
+    #[snafu(display("A cursor named {name} already exists"))]
+    CursorExists { name: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -829,7 +832,8 @@ impl ErrorExt for Error {
             | Error::InvalidPartition { .. }
             | Error::PhysicalExpr { .. }
             | Error::InvalidJsonFormat { .. }
-            | Error::CursorNotFound { .. } => StatusCode::InvalidArguments,
+            | Error::CursorNotFound { .. }
+            | Error::CursorExists { .. } => StatusCode::InvalidArguments,
 
             Error::TableAlreadyExists { .. } | Error::ViewAlreadyExists { .. } => {
                 StatusCode::TableAlreadyExists

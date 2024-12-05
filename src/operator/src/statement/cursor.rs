@@ -31,6 +31,14 @@ impl StatementExecutor {
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         let cursor_name = declare_cursor.cursor_name.to_string();
+
+        if query_ctx.get_cursor(&cursor_name).is_some() {
+            error::CursorExistsSnafu {
+                name: cursor_name.to_string(),
+            }
+            .fail()?;
+        }
+
         let query_stmt = Statement::Query(declare_cursor.query);
 
         let output = self

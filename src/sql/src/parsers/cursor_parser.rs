@@ -34,8 +34,11 @@ impl ParserContext<'_> {
 
         let mut is_select = false;
         if let Token::Word(w) = self.parser.peek_token().token {
-            if w.keyword == Keyword::SELECT {
-                is_select = true;
+            match w.keyword {
+                Keyword::SELECT | Keyword::WITH => {
+                    is_select = true;
+                }
+                _ => {}
             }
         };
         ensure!(

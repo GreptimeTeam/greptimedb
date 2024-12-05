@@ -1221,6 +1221,12 @@ pub async fn test_declare_fetch_close_cursor(store_type: StorageType) {
         .await
         .expect("declare cursor");
 
+    // duplicated cursor
+    assert!(client
+        .execute("DECLARE c1 CURSOR FOR SELECT 1", &[],)
+        .await
+        .is_err());
+
     let rows = client.query("FETCH 5 FROM c1", &[]).await.unwrap();
     assert_eq!(5, rows.len());
 
