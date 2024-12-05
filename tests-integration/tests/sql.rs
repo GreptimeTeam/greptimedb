@@ -1242,6 +1242,19 @@ pub async fn test_declare_fetch_close_cursor(store_type: StorageType) {
     let result = client.query("FETCH 100 FROM c1", &[]).await;
     assert!(result.is_err());
 
+    client
+        .execute(
+            "DECLARE c2 CURSOR FOR SELECT * FROM numbers WHERE number < 0",
+            &[],
+        )
+        .await
+        .expect("declare cursor");
+
+    let rows = client.query("FETCH 5 FROM c2", &[]).await.unwrap();
+    assert_eq!(0, rows.len());
+
+    client.execute("CLOSE c2", &[]).await.expect("close cursor");
+
     // Shutdown the client.
     drop(client);
     rx.await.unwrap();
