@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use clap::Parser;
+use common_error::ext::BoxedError;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::peer::Peer;
@@ -32,7 +33,6 @@ use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableType
 use table::table_name::TableName;
 
 use self::metadata::TableMetadataBencher;
-use crate::error::Result;
 use crate::Tool;
 
 mod metadata;
@@ -61,7 +61,7 @@ pub struct BenchTableMetadataCommand {
 }
 
 impl BenchTableMetadataCommand {
-    pub async fn build(&self) -> Result<Box<dyn Tool>> {
+    pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
         let etcd_store = EtcdStore::with_endpoints([&self.etcd_addr], 128)
             .await
             .unwrap();
@@ -83,7 +83,7 @@ struct BenchTableMetadata {
 
 #[async_trait]
 impl Tool for BenchTableMetadata {
-    async fn do_work(&self) -> Result<()> {
+    async fn do_work(&self) -> std::result::Result<(), BoxedError> {
         let bencher = TableMetadataBencher::new(self.table_metadata_manager.clone(), self.count);
         bencher.bench_create().await;
         bencher.bench_get().await;

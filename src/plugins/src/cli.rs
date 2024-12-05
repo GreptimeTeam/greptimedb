@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use clap::Parser;
-use cli::error::Result;
 use cli::{BenchTableMetadataCommand, ExportCommand, ImportCommand, Tool};
+use common_error::ext::BoxedError;
 
 #[derive(Parser)]
 pub enum SubCommand {
@@ -25,7 +25,7 @@ pub enum SubCommand {
 }
 
 impl SubCommand {
-    pub async fn build(&self) -> Result<Box<dyn Tool>> {
+    pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
         match self {
             // SubCommand::Attach(cmd) => cmd.build().await,
             SubCommand::Bench(cmd) => cmd.build().await,

@@ -12,6 +12,7 @@ auth.workspace = true
 clap.workspace = true
 cli.workspace = true
 common-base.workspace = true
+common-error.workspace = true
 datanode.workspace = true
 frontend.workspace = true
 meta-srv.workspace = true

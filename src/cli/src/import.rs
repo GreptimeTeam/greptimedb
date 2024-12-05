@@ -19,6 +19,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_error::ext::BoxedError;
 use common_telemetry::{error, info, warn};
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::Semaphore;
@@ -78,8 +79,9 @@ pub struct ImportCommand {
 }
 
 impl ImportCommand {
-    pub async fn build(&self) -> Result<Box<dyn Tool>> {
-        let (catalog, schema) = database::split_database(&self.database)?;
+    pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
+        let (catalog, schema) =
+            database::split_database(&self.database).map_err(BoxedError::new)?;
         let database_client = DatabaseClient::new(
             self.addr.clone(),
             catalog.clone(),
@@ -214,13 +216,13 @@ impl Import {
 
 #[async_trait]
 impl Tool for Import {
-    async fn do_work(&self) -> Result<()> {
+    async fn do_work(&self) -> std::result::Result<(), BoxedError> {
         match self.target {
-            ImportTarget::Schema => self.import_create_table().await,
-            ImportTarget::Data => self.import_database_data().await,
+            ImportTarget::Schema => self.import_create_table().await.map_err(BoxedError::new),
+            ImportTarget::Data => self.import_database_data().await.map_err(BoxedError::new),
             ImportTarget::All => {
-                self.import_create_table().await?;
-                self.import_database_data().await
+                self.import_create_table().await.map_err(BoxedError::new)?;
+                self.import_database_data().await.map_err(BoxedError::new)
             }
         }
     }

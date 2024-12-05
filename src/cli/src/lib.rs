@@ -28,6 +28,7 @@ mod repl;
 
 use async_trait::async_trait;
 use clap::Parser;
+use common_error::ext::BoxedError;
 use error::Result;
 pub use repl::Repl;
 
@@ -37,7 +38,7 @@ pub use crate::import::ImportCommand;
 
 #[async_trait]
 pub trait Tool: Send + Sync {
-    async fn do_work(&self) -> Result<()>;
+    async fn do_work(&self) -> std::result::Result<(), BoxedError>;
 }
 
 #[derive(Debug, Parser)]

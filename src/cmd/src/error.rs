@@ -118,14 +118,14 @@ pub enum Error {
     BuildCli {
         #[snafu(implicit)]
         location: Location,
-        source: cli::error::Error,
+        source: BoxedError,
     },
 
     #[snafu(display("Failed to start cli"))]
     StartCli {
         #[snafu(implicit)]
         location: Location,
-        source: cli::error::Error,
+        source: BoxedError,
     },
 
     #[snafu(display("Failed to build meta server"))]

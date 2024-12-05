@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
+use common_error::ext::BoxedError;
 use common_telemetry::{debug, error, info};
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
@@ -93,8 +94,9 @@ pub struct ExportCommand {
 }
 
 impl ExportCommand {
-    pub async fn build(&self) -> Result<Box<dyn Tool>> {
-        let (catalog, schema) = database::split_database(&self.database)?;
+    pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
+        let (catalog, schema) =
+            database::split_database(&self.database).map_err(BoxedError::new)?;
 
         let database_client = DatabaseClient::new(
             self.addr.clone(),
@@ -461,17 +463,21 @@ impl Export {
 
 #[async_trait]
 impl Tool for Export {
-    async fn do_work(&self) -> Result<()> {
+    async fn do_work(&self) -> std::result::Result<(), BoxedError> {
         match self.target {
             ExportTarget::Schema => {
-                self.export_create_database().await?;
-                self.export_create_table().await
+                self.export_create_database()
+                    .await
+                    .map_err(BoxedError::new)?;
+                self.export_create_table().await.map_err(BoxedError::new)
             }
-            ExportTarget::Data => self.export_database_data().await,
+            ExportTarget::Data => self.export_database_data().await.map_err(BoxedError::new),
             ExportTarget::All => {
-                self.export_create_database().await?;
-                self.export_create_table().await?;
-                self.export_database_data().await
+                self.export_create_database()
+                    .await
+                    .map_err(BoxedError::new)?;
+                self.export_create_table().await.map_err(BoxedError::new)?;
+                self.export_database_data().await.map_err(BoxedError::new)
             }
         }
     }
