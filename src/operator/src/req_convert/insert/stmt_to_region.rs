@@ -139,12 +139,12 @@ impl<'a> StatementToRegion<'a> {
         Ok(if is_ttl_imme_table(&table_info) {
             ImmeInsertRequests {
                 normal_requests: Default::default(),
-                imme_requests: requests,
+                instant_requests: requests,
             }
         } else {
             ImmeInsertRequests {
                 normal_requests: requests,
-                imme_requests: Default::default(),
+                instant_requests: Default::default(),
             }
         })
     }

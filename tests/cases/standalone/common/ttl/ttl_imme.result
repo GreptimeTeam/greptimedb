@@ -1,4 +1,4 @@
-CREATE TABLE test_ttl(ts TIMESTAMP TIME INDEX, val INT) WITH (ttl = 'immediate');
+CREATE TABLE test_ttl(ts TIMESTAMP TIME INDEX, val INT) WITH (ttl = 'instant');
 
 Affected Rows: 0
 
@@ -15,7 +15,7 @@ SHOW CREATE TABLE test_ttl;
 |          |                                         |
 |          | ENGINE=mito                             |
 |          | WITH(                                   |
-|          |   ttl = 'immediate'                     |
+|          |   ttl = 'instant'                       |
 |          | )                                       |
 +----------+-----------------------------------------+
 

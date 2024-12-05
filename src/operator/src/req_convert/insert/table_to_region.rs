@@ -50,12 +50,12 @@ impl<'a> TableToRegion<'a> {
         if is_ttl_imme_table(self.table_info) {
             Ok(ImmeInsertRequests {
                 normal_requests: Default::default(),
-                imme_requests: requests,
+                instant_requests: requests,
             })
         } else {
             Ok(ImmeInsertRequests {
                 normal_requests: requests,
-                imme_requests: Default::default(),
+                instant_requests: Default::default(),
             })
         }
     }

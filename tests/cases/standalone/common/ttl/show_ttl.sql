@@ -18,7 +18,7 @@ ALTER TABLE test_ttl SET 'ttl' = '6 hours';
 
 SHOW CREATE TABLE test_ttl;
 
-ALTER TABLE test_ttl SET 'ttl' = 'immediate';
+ALTER TABLE test_ttl SET 'ttl' = 'instant';
 
 SHOW CREATE TABLE test_ttl;
 
@@ -50,7 +50,7 @@ SHOW CREATE TABLE test_ttl;
 
 SHOW CREATE DATABASE test_ttl_db;
 
-ALTER DATABASE test_ttl_db SET 'ttl' = 'immediate';
+ALTER DATABASE test_ttl_db SET 'ttl' = 'instant';
 
 SHOW CREATE TABLE test_ttl;
 

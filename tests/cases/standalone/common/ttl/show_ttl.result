@@ -91,7 +91,7 @@ SHOW CREATE TABLE test_ttl;
 |          | )                                       |
 +----------+-----------------------------------------+
 
-ALTER TABLE test_ttl SET 'ttl' = 'immediate';
+ALTER TABLE test_ttl SET 'ttl' = 'instant';
 
 Affected Rows: 0
 
@@ -108,7 +108,7 @@ SHOW CREATE TABLE test_ttl;
 |          |                                         |
 |          | ENGINE=mito                             |
 |          | WITH(                                   |
-|          |   ttl = 'immediate'                     |
+|          |   ttl = 'instant'                       |
 |          | )                                       |
 +----------+-----------------------------------------+
 
@@ -261,7 +261,7 @@ SHOW CREATE DATABASE test_ttl_db;
 |             | )                                         |
 +-------------+-------------------------------------------+
 
-ALTER DATABASE test_ttl_db SET 'ttl' = 'immediate';
+ALTER DATABASE test_ttl_db SET 'ttl' = 'instant';
 
 Affected Rows: 0
 
@@ -278,7 +278,7 @@ SHOW CREATE TABLE test_ttl;
 |          |                                         |
 |          | ENGINE=mito                             |
 |          | WITH(                                   |
-|          |   ttl = 'immediate'                     |
+|          |   ttl = 'instant'                       |
 |          | )                                       |
 +----------+-----------------------------------------+
 
@@ -289,7 +289,7 @@ SHOW CREATE DATABASE test_ttl_db;
 +-------------+-------------------------------------------+
 | test_ttl_db | CREATE DATABASE IF NOT EXISTS test_ttl_db |
 |             | WITH(                                     |
-|             |   ttl = 'immediate'                       |
+|             |   ttl = 'instant'                         |
 |             | )                                         |
 +-------------+-------------------------------------------+
 

@@ -329,9 +329,9 @@ mod tests {
         assert_eq!("ttl='forever'", schema_value.to_string());
 
         let schema_value = SchemaNameValue {
-            ttl: Some(TimeToLive::Immediate),
+            ttl: Some(TimeToLive::Instant),
         };
-        assert_eq!("ttl='immediate'", schema_value.to_string());
+        assert_eq!("ttl='instant'", schema_value.to_string());
     }
 
     #[test]
@@ -358,12 +358,10 @@ mod tests {
         assert_eq!(Some(value), parsed);
 
         let imme = SchemaNameValue {
-            ttl: Some(TimeToLive::Immediate),
+            ttl: Some(TimeToLive::Instant),
         };
         let parsed = SchemaNameValue::try_from_raw_value(
-            serde_json::json!({"ttl": "immediate"})
-                .to_string()
-                .as_bytes(),
+            serde_json::json!({"ttl": "instant"}).to_string().as_bytes(),
         )
         .unwrap();
         assert_eq!(Some(imme), parsed);

@@ -61,7 +61,7 @@ impl<'a> RowToRegion<'a> {
             normal_requests: RegionInsertRequests {
                 requests: region_request,
             },
-            imme_requests: RegionInsertRequests {
+            instant_requests: RegionInsertRequests {
                 requests: imme_request,
             },
         })

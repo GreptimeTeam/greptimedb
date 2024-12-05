@@ -1,4 +1,4 @@
-CREATE TABLE test_ttl(ts TIMESTAMP TIME INDEX, val INT) WITH (ttl = 'immediate');
+CREATE TABLE test_ttl(ts TIMESTAMP TIME INDEX, val INT) WITH (ttl = 'instant');
 
 SHOW CREATE TABLE test_ttl;
 

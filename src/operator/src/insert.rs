@@ -99,8 +99,8 @@ impl AutoCreateTableType {
 pub struct ImmeInsertRequests {
     /// Requests with normal ttl.
     pub normal_requests: RegionInsertRequests,
-    /// Requests with ttl=immediate.
-    pub imme_requests: RegionInsertRequests,
+    /// Requests with ttl=instant.
+    pub instant_requests: RegionInsertRequests,
 }
 
 impl Inserter {
@@ -306,7 +306,7 @@ impl Inserter {
 
         let ImmeInsertRequests {
             normal_requests,
-            imme_requests,
+            instant_requests: imme_requests,
         } = requests;
 
         // Mirror requests for source table to flownode

@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum TimeToLive {
     /// Immediately throw away on insert
-    Immediate,
+    Instant,
     /// Keep the data forever
     #[default]
     Forever,
@@ -34,7 +34,7 @@ pub enum TimeToLive {
 impl Display for TimeToLive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TimeToLive::Immediate => write!(f, "immediate"),
+            TimeToLive::Instant => write!(f, "instant"),
             TimeToLive::Duration(d) => write!(f, "{}", humantime::Duration::from(*d)),
             TimeToLive::Forever => write!(f, "forever"),
         }
@@ -47,7 +47,7 @@ impl TimeToLive {
     /// note that a empty string is treat as `forever` too
     pub fn from_humantime_or_str(s: &str) -> Result<Self, String> {
         match s {
-            "immediate" => Ok(TimeToLive::Immediate),
+            "instant" => Ok(TimeToLive::Instant),
             "forever" | "" => Ok(TimeToLive::Forever),
             _ => {
                 let d = humantime::parse_duration(s).map_err(|e| e.to_string())?;
@@ -59,14 +59,14 @@ impl TimeToLive {
     /// Print TimeToLive as string
     pub fn as_repr_opt(&self) -> Option<String> {
         match self {
-            TimeToLive::Immediate => Some("immediate".to_string()),
+            TimeToLive::Instant => Some("instant".to_string()),
             TimeToLive::Duration(d) => Some(humantime::format_duration(*d).to_string()),
             TimeToLive::Forever => Some("forever".to_string()),
         }
     }
 
     pub fn is_immediate(&self) -> bool {
-        matches!(self, TimeToLive::Immediate)
+        matches!(self, TimeToLive::Instant)
     }
 
     /// Is the default value, which is `Forever`
@@ -106,7 +106,7 @@ mod test {
     #[test]
     fn test_serde() {
         let cases = vec![
-            ("\"immediate\"", TimeToLive::Immediate),
+            ("\"instant\"", TimeToLive::Instant),
             ("\"forever\"", TimeToLive::Forever),
             ("\"10d\"", Duration::from_secs(86400 * 10).into()),
             (
