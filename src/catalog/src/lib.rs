@@ -30,6 +30,7 @@ use table::TableRef;
 use crate::error::Result;
 
 pub mod error;
+pub mod information_extension;
 pub mod kvbackend;
 pub mod memory;
 mod metrics;

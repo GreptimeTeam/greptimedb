@@ -20,6 +20,7 @@ use cache::{
     build_fundamental_cache_registry, with_default_composite_cache_registry, TABLE_CACHE_NAME,
     TABLE_ROUTE_CACHE_NAME,
 };
+use catalog::information_extension::DistributedInformationExtension;
 use catalog::kvbackend::{
     CachedKvBackend, CachedKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend,
 };
@@ -44,15 +45,14 @@ use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
-use crate::cli::cmd::ReplCommand;
-use crate::cli::helper::RustylineHelper;
-use crate::cli::AttachCommand;
+use crate::cmd::ReplCommand;
 use crate::error::{
     CollectRecordBatchesSnafu, ParseSqlSnafu, PlanStatementSnafu, PrettyPrintRecordBatchesSnafu,
     ReadlineSnafu, ReplCreationSnafu, RequestDatabaseSnafu, Result, StartMetaClientSnafu,
     SubstraitEncodeLogicalPlanSnafu,
 };
-use crate::{error, DistributedInformationExtension};
+use crate::helper::RustylineHelper;
+use crate::{error, AttachCommand};
 
 /// Captures the state of the repl, gathers commands and executes them one by one
 pub struct Repl {

@@ -136,6 +136,13 @@ pub struct Txn {
     c_else: bool,
 }
 
+#[cfg(any(test, feature = "testing"))]
+impl Txn {
+    pub fn req(&self) -> &TxnRequest {
+        &self.req
+    }
+}
+
 impl Txn {
     pub fn merge_all<T: IntoIterator<Item = Txn>>(values: T) -> Self {
         values
