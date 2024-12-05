@@ -1215,7 +1215,7 @@ pub async fn test_declare_fetch_close_cursor(store_type: StorageType) {
 
     client
         .execute(
-            "DECLARE c1 CURSOR FOR SELECT * FROM numbers WHERE number > 2",
+            "DECLARE c1 CURSOR FOR SELECT * FROM numbers WHERE number > 2 LIMIT 50::bigint",
             &[],
         )
         .await
@@ -1225,7 +1225,7 @@ pub async fn test_declare_fetch_close_cursor(store_type: StorageType) {
     assert_eq!(5, rows.len());
 
     let rows = client.query("FETCH 100 FROM c1", &[]).await.unwrap();
-    assert_eq!(92, rows.len());
+    assert_eq!(45, rows.len());
 
     client.execute("CLOSE c1", &[]).await.expect("close cursor");
 

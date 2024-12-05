@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -94,6 +95,13 @@ pub(crate) fn process<'a>(query: &str, _query_ctx: QueryContextRef) -> Option<Ve
     }
 }
 
+static LIMIT_CAST_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new("(?i)(LIMIT\\s+\\d+)::bigint").unwrap());
+pub(crate) fn rewrite_sql<'a>(query: &'a str) -> Cow<'a, str> {
+    //TODO(sunng87): remove this when we upgraded datafusion to 43 or newer
+    LIMIT_CAST_PATTERN.replace_all(query, "$1")
+}
+
 #[cfg(test)]
 mod test {
     use session::context::{QueryContext, QueryContextRef};
@@ -163,5 +171,14 @@ mod test {
         assert!(process("SELECT 1", query_context.clone()).is_none());
         assert!(process("SHOW TABLES ", query_context.clone()).is_none());
         assert!(process("SET TIME_ZONE=utc ", query_context.clone()).is_none());
+    }
+
+    #[test]
+    fn test_rewrite() {
+        let sql = "SELECT * FROM number LIMIT 1::bigint";
+        let sql2 = "SELECT * FROM number limit      1::BIGINT";
+
+        assert_eq!("SELECT * FROM number LIMIT 1", rewrite_sql(sql));
+        assert_eq!("SELECT * FROM number limit      1", rewrite_sql(sql2));
     }
 }
