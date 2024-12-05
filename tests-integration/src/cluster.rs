@@ -23,10 +23,10 @@ use cache::{
     build_datanode_cache_registry, build_fundamental_cache_registry,
     with_default_composite_cache_registry,
 };
+use catalog::information_extension::DistributedInformationExtension;
 use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use client::client_manager::NodeClients;
 use client::Client;
-use cmd::DistributedInformationExtension;
 use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};

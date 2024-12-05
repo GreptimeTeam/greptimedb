@@ -19,7 +19,7 @@ use rustyline::highlight::{Highlighter, MatchingBracketHighlighter};
 use rustyline::hint::{Hinter, HistoryHinter};
 use rustyline::validate::{ValidationContext, ValidationResult, Validator};
 
-use crate::cli::cmd::ReplCommand;
+use crate::cmd::ReplCommand;
 
 pub(crate) struct RustylineHelper {
     hinter: HistoryHinter,

@@ -23,11 +23,10 @@ use common_telemetry::{error, info, warn};
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
-use tracing_appender::non_blocking::WorkerGuard;
 
-use crate::cli::database::DatabaseClient;
-use crate::cli::{database, Instance, Tool};
+use crate::database::DatabaseClient;
 use crate::error::{Error, FileIoSnafu, Result, SchemaNotFoundSnafu};
+use crate::{database, Tool};
 
 #[derive(Debug, Default, Clone, ValueEnum)]
 enum ImportTarget {
@@ -79,7 +78,7 @@ pub struct ImportCommand {
 }
 
 impl ImportCommand {
-    pub async fn build(&self, guard: Vec<WorkerGuard>) -> Result<Instance> {
+    pub async fn build(&self) -> Result<Box<dyn Tool>> {
         let (catalog, schema) = database::split_database(&self.database)?;
         let database_client = DatabaseClient::new(
             self.addr.clone(),
@@ -89,17 +88,14 @@ impl ImportCommand {
             self.timeout.unwrap_or_default(),
         );
 
-        Ok(Instance::new(
-            Box::new(Import {
-                catalog,
-                schema,
-                database_client,
-                input_dir: self.input_dir.clone(),
-                parallelism: self.import_jobs,
-                target: self.target.clone(),
-            }),
-            guard,
-        ))
+        Ok(Box::new(Import {
+            catalog,
+            schema,
+            database_client,
+            input_dir: self.input_dir.clone(),
+            parallelism: self.import_jobs,
+            target: self.target.clone(),
+        }))
     }
 }
 

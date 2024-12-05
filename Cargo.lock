@@ -1713,6 +1713,60 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1462739cb27611015575c0c11df5df7601141071f07518d56fcc1be504cbec97"
 
 [[package]]
+name = "cli"
+version = "0.11.0"
+dependencies = [
+ "async-trait",
+ "auth",
+ "base64 0.21.7",
+ "cache",
+ "catalog",
+ "chrono",
+ "clap 4.5.19",
+ "client",
+ "common-base",
+ "common-catalog",
+ "common-config",
+ "common-error",
+ "common-grpc",
+ "common-macro",
+ "common-meta",
+ "common-options",
+ "common-procedure",
+ "common-query",
+ "common-recordbatch",
+ "common-runtime",
+ "common-telemetry",
+ "common-test-util",
+ "common-time",
+ "common-version",
+ "common-wal",
+ "datatypes",
+ "either",
+ "etcd-client",
+ "futures",
+ "humantime",
+ "meta-client",
+ "nu-ansi-term",
+ "query",
+ "rand",
+ "reqwest",
+ "rustyline 10.1.1",
+ "serde",
+ "serde_json",
+ "servers",
+ "session",
+ "snafu 0.8.5",
+ "store-api",
+ "substrait 0.11.0",
+ "table",
+ "temp-env",
+ "tempfile",
+ "tokio",
+ "tracing-appender",
+]
+
+[[package]]
 name = "client"
 version = "0.11.0"
 dependencies = [
@@ -1793,6 +1847,7 @@ dependencies = [
  "catalog",
  "chrono",
  "clap 4.5.19",
+ "cli",
  "client",
  "common-base",
  "common-catalog",
@@ -8348,6 +8403,8 @@ name = "plugins"
 version = "0.11.0"
 dependencies = [
  "auth",
+ "clap 4.5.19",
+ "cli",
  "common-base",
  "datanode",
  "frontend",

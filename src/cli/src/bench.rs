@@ -30,11 +30,10 @@ use rand::Rng;
 use store_api::storage::RegionNumber;
 use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableType};
 use table::table_name::TableName;
-use tracing_appender::non_blocking::WorkerGuard;
 
 use self::metadata::TableMetadataBencher;
-use crate::cli::{Instance, Tool};
 use crate::error::Result;
+use crate::Tool;
 
 mod metadata;
 
@@ -62,7 +61,7 @@ pub struct BenchTableMetadataCommand {
 }
 
 impl BenchTableMetadataCommand {
-    pub async fn build(&self, guard: Vec<WorkerGuard>) -> Result<Instance> {
+    pub async fn build(&self) -> Result<Box<dyn Tool>> {
         let etcd_store = EtcdStore::with_endpoints([&self.etcd_addr], 128)
             .await
             .unwrap();
@@ -73,7 +72,7 @@ impl BenchTableMetadataCommand {
             table_metadata_manager,
             count: self.count,
         };
-        Ok(Instance::new(Box::new(tool), guard))
+        Ok(Box::new(tool))
     }
 }
 

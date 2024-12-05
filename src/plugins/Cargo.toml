@@ -9,6 +9,8 @@ workspace = true
 
 [dependencies]
 auth.workspace = true
+clap.workspace = true
+cli.workspace = true
 common-base.workspace = true
 datanode.workspace = true
 frontend.workspace = true

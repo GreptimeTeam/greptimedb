@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
+use catalog::information_extension::DistributedInformationExtension;
 use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use clap::Parser;
 use client::client_manager::NodeClients;
@@ -41,7 +42,7 @@ use crate::error::{
     MissingConfigSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{log_versions, App, DistributedInformationExtension};
+use crate::{log_versions, App};
 
 pub const APP_NAME: &str = "greptime-flownode";
 
