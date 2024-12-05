@@ -1,0 +1,80 @@
+CREATE TABLE test_ttl(ts TIMESTAMP TIME INDEX, val INT) WITH (ttl = 'instant');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test_ttl;
+
++----------+-----------------------------------------+
+| Table    | Create Table                            |
++----------+-----------------------------------------+
+| test_ttl | CREATE TABLE IF NOT EXISTS "test_ttl" ( |
+|          |   "ts" TIMESTAMP(3) NOT NULL,           |
+|          |   "val" INT NULL,                       |
+|          |   TIME INDEX ("ts")                     |
+|          | )                                       |
+|          |                                         |
+|          | ENGINE=mito                             |
+|          | WITH(                                   |
+|          |   ttl = 'instant'                       |
+|          | )                                       |
++----------+-----------------------------------------+
+
+INSERT INTO
+       test_ttl
+VALUES
+       (now(), 1),
+       (now(), 2),
+       (now(), 3),
+       (now() + INTERVAL '1 SECOND', 4),
+       (now() - INTERVAL '1 SECOND', 5);
+
+Affected Rows: 0
+
+SELECT
+       val
+from
+       test_ttl;
+
+++
+++
+
+INSERT INTO
+       test_ttl
+VALUES
+       (now(), 1),
+       (now(), 2),
+       (now(), 3),
+       (now() + INTERVAL '1 SECOND', 4),
+       (now() - INTERVAL '1 SECOND', 5);
+
+Affected Rows: 0
+
+-- SQLNESS SLEEP 2s
+ADMIN flush_table('test_ttl');
+
++-------------------------------+
+| ADMIN flush_table('test_ttl') |
++-------------------------------+
+| 0                             |
++-------------------------------+
+
+ADMIN compact_table('test_ttl');
+
++---------------------------------+
+| ADMIN compact_table('test_ttl') |
++---------------------------------+
+| 0                               |
++---------------------------------+
+
+SELECT
+       val
+from
+       test_ttl;
+
+++
+++
+
+DROP TABLE test_ttl;
+
+Affected Rows: 0
+
