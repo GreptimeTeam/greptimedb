@@ -20,49 +20,49 @@ use snafu::OptionExt;
 use table::metadata::TableId;
 
 use crate::error::{Result, TableNotFoundSnafu};
-use crate::insert::ImmeInsertRequests;
+use crate::insert::InstantInsertRequests;
 use crate::req_convert::common::partitioner::Partitioner;
 
 pub struct RowToRegion<'a> {
     table_name_to_ids: HashMap<String, TableId>,
-    imme_table_ids: HashSet<TableId>,
+    instant_table_ids: HashSet<TableId>,
     partition_manager: &'a PartitionRuleManager,
 }
 
 impl<'a> RowToRegion<'a> {
     pub fn new(
         table_name_to_ids: HashMap<String, TableId>,
-        imme_table_ids: HashSet<TableId>,
+        instant_table_ids: HashSet<TableId>,
         partition_manager: &'a PartitionRuleManager,
     ) -> Self {
         Self {
             table_name_to_ids,
-            imme_table_ids,
+            instant_table_ids,
             partition_manager,
         }
     }
 
-    pub async fn convert(&self, requests: RowInsertRequests) -> Result<ImmeInsertRequests> {
+    pub async fn convert(&self, requests: RowInsertRequests) -> Result<InstantInsertRequests> {
         let mut region_request = Vec::with_capacity(requests.inserts.len());
-        let mut imme_request = Vec::with_capacity(requests.inserts.len());
+        let mut instant_request = Vec::with_capacity(requests.inserts.len());
         for request in requests.inserts {
             let table_id = self.get_table_id(&request.table_name)?;
             let requests = Partitioner::new(self.partition_manager)
                 .partition_insert_requests(table_id, request.rows.unwrap_or_default())
                 .await?;
-            if self.imme_table_ids.contains(&table_id) {
-                imme_request.extend(requests);
+            if self.instant_table_ids.contains(&table_id) {
+                instant_request.extend(requests);
             } else {
                 region_request.extend(requests);
             }
         }
 
-        Ok(ImmeInsertRequests {
+        Ok(InstantInsertRequests {
             normal_requests: RegionInsertRequests {
                 requests: region_request,
             },
             instant_requests: RegionInsertRequests {
-                requests: imme_request,
+                requests: instant_request,
             },
         })
     }

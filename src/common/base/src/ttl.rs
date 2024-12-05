@@ -17,11 +17,14 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+pub const INSTANT: &str = "instant";
+pub const FOREVER: &str = "forever";
+
 /// Time To Live
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TimeToLive {
-    /// Immediately throw away on insert
+    /// Instantly discard upon insert
     Instant,
     /// Keep the data forever
     #[default]
@@ -34,21 +37,21 @@ pub enum TimeToLive {
 impl Display for TimeToLive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TimeToLive::Instant => write!(f, "instant"),
+            TimeToLive::Instant => write!(f, "{}", INSTANT),
             TimeToLive::Duration(d) => write!(f, "{}", humantime::Duration::from(*d)),
-            TimeToLive::Forever => write!(f, "forever"),
+            TimeToLive::Forever => write!(f, "{}", FOREVER),
         }
     }
 }
 
 impl TimeToLive {
-    /// Parse a string that is either `immediate`, `forever`, or a duration to `TimeToLive`
+    /// Parse a string that is either `instant`, `forever`, or a duration to `TimeToLive`
     ///
-    /// note that a empty string is treat as `forever` too
+    /// note that an empty string or a zero duration(a duration that spans no time) is treat as `forever` too
     pub fn from_humantime_or_str(s: &str) -> Result<Self, String> {
-        match s {
-            "instant" => Ok(TimeToLive::Instant),
-            "forever" | "" => Ok(TimeToLive::Forever),
+        match s.to_lowercase().as_ref() {
+            INSTANT => Ok(TimeToLive::Instant),
+            FOREVER | "" => Ok(TimeToLive::Forever),
             _ => {
                 let d = humantime::parse_duration(s).map_err(|e| e.to_string())?;
                 Ok(TimeToLive::from(d))
@@ -57,15 +60,16 @@ impl TimeToLive {
     }
 
     /// Print TimeToLive as string
-    pub fn as_repr_opt(&self) -> Option<String> {
+    pub fn to_string_opt(&self) -> Option<String> {
         match self {
-            TimeToLive::Instant => Some("instant".to_string()),
+            TimeToLive::Instant => Some(INSTANT.to_string()),
             TimeToLive::Duration(d) => Some(humantime::format_duration(*d).to_string()),
-            TimeToLive::Forever => Some("forever".to_string()),
+            TimeToLive::Forever => Some(FOREVER.to_string()),
         }
     }
 
-    pub fn is_immediate(&self) -> bool {
+    /// is instant variant
+    pub fn is_instant(&self) -> bool {
         matches!(self, TimeToLive::Instant)
     }
 
@@ -74,6 +78,7 @@ impl TimeToLive {
         matches!(self, TimeToLive::Forever)
     }
 
+    /// Get duration if it is a duration variant, otherwise return None
     pub fn get_duration(&self) -> Option<Duration> {
         match self {
             TimeToLive::Duration(d) => Some(*d),

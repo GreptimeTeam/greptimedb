@@ -15,6 +15,7 @@
 use std::collections::{HashMap, HashSet};
 
 use api::v1::SemanticType;
+use common_base::FOREVER;
 use common_error::ext::BoxedError;
 use common_telemetry::{info, warn};
 use common_time::Timestamp;
@@ -540,7 +541,7 @@ pub(crate) fn region_options_for_metadata_region(
     mut original: HashMap<String, String>,
 ) -> HashMap<String, String> {
     original.remove(APPEND_MODE_KEY);
-    original.insert(TTL_KEY.to_string(), "forever".to_string());
+    original.insert(TTL_KEY.to_string(), FOREVER.to_string());
     original
 }
 

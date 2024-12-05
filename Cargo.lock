@@ -6529,6 +6529,7 @@ dependencies = [
  "aquamarine",
  "async-trait",
  "base64 0.21.7",
+ "common-base",
  "common-error",
  "common-macro",
  "common-query",

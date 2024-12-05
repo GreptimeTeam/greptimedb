@@ -822,6 +822,15 @@ impl TableInfo {
             .extra_options
             .contains_key(PHYSICAL_TABLE_METADATA_KEY)
     }
+
+    /// Return true if the table's TTL is `instant`.
+    pub fn is_ttl_instant_table(&self) -> bool {
+        self.meta
+            .options
+            .ttl
+            .map(|t| t.is_instant())
+            .unwrap_or(false)
+    }
 }
 
 impl TableInfoBuilder {

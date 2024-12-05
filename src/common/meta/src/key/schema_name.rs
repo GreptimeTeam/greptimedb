@@ -62,7 +62,7 @@ pub struct SchemaNameValue {
 
 impl Display for SchemaNameValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(ttl) = self.ttl.and_then(|i| i.as_repr_opt()) {
+        if let Some(ttl) = self.ttl.and_then(|i| i.to_string_opt()) {
             write!(f, "ttl='{}'", ttl)?;
         }
 
@@ -94,7 +94,7 @@ impl TryFrom<&HashMap<String, String>> for SchemaNameValue {
 impl From<SchemaNameValue> for HashMap<String, String> {
     fn from(value: SchemaNameValue) -> Self {
         let mut opts = HashMap::new();
-        if let Some(ttl) = value.ttl.and_then(|ttl| ttl.as_repr_opt()) {
+        if let Some(ttl) = value.ttl.and_then(|ttl| ttl.to_string_opt()) {
             opts.insert(OPT_KEY_TTL.to_string(), ttl);
         }
         opts
@@ -310,6 +310,8 @@ impl<'a> From<&'a SchemaName> for SchemaNameKey<'a> {
 mod tests {
     use std::time::Duration;
 
+    use common_base::INSTANT;
+
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
 
@@ -357,14 +359,14 @@ mod tests {
         .unwrap();
         assert_eq!(Some(value), parsed);
 
-        let imme = SchemaNameValue {
+        let instant = SchemaNameValue {
             ttl: Some(TimeToLive::Instant),
         };
         let parsed = SchemaNameValue::try_from_raw_value(
-            serde_json::json!({"ttl": "instant"}).to_string().as_bytes(),
+            serde_json::json!({"ttl": INSTANT}).to_string().as_bytes(),
         )
         .unwrap();
-        assert_eq!(Some(imme), parsed);
+        assert_eq!(Some(instant), parsed);
 
         let forever = SchemaNameValue {
             ttl: Some(TimeToLive::default()),
