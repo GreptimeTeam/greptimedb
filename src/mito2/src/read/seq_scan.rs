@@ -206,7 +206,7 @@ impl SeqScan {
                 self.properties.target_partitions() - self.properties.num_partitions() + 1,
             )))
         } else {
-            Some(Arc::new(Semaphore::new(1)))
+            None
         };
         let partition_ranges = self.properties.partitions[partition].clone();
         let compaction = self.compaction;
