@@ -227,6 +227,23 @@ ADMIN FLUSH_FLOW('test_distinct_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+SHOW CREATE TABLE out_distinct_basic;
+
++--------------------+---------------------------------------------------+
+| Table              | Create Table                                      |
++--------------------+---------------------------------------------------+
+| out_distinct_basic | CREATE TABLE IF NOT EXISTS "out_distinct_basic" ( |
+|                    |   "dis" INT NULL,                                 |
+|                    |   "update_at" TIMESTAMP(3) NULL,                  |
+|                    |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,       |
+|                    |   TIME INDEX ("__ts_placeholder"),                |
+|                    |   PRIMARY KEY ("dis")                             |
+|                    | )                                                 |
+|                    |                                                   |
+|                    | ENGINE=mito                                       |
+|                    |                                                   |
++--------------------+---------------------------------------------------+
+
 SELECT
     dis
 FROM
@@ -320,16 +337,6 @@ where
     number > 10;
 
 Affected Rows: 0
-
-SHOW CREATE FLOW filter_numbers_basic;
-
-+----------------------+----------------------------------------------------------------------------------------------------------------------------------------------+
-| Flow                 | Create Flow                                                                                                                                  |
-+----------------------+----------------------------------------------------------------------------------------------------------------------------------------------+
-| filter_numbers_basic | CREATE FLOW IF NOT EXISTS filter_numbers_basic                                                                                               |
-|                      | SINK TO out_num_cnt_basic                                                                                                                    |
-|                      | AS SELECT INTERVAL '1 day 1 second', INTERVAL '1 month 1 day 1 second', INTERVAL '1 year 1 month' FROM numbers_input_basic WHERE number > 10 |
-+----------------------+----------------------------------------------------------------------------------------------------------------------------------------------+
 
 drop flow filter_numbers_basic;
 
@@ -478,6 +485,23 @@ ADMIN FLUSH_FLOW('calc_ngx_country');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
+SHOW CREATE TABLE ngx_country;
+
++-------------+---------------------------------------------+
+| Table       | Create Table                                |
++-------------+---------------------------------------------+
+| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" (  |
+|             |   "ngx_access_log.country" STRING NULL,     |
+|             |   "update_at" TIMESTAMP(3) NULL,            |
+|             |   "__ts_placeholder" TIMESTAMP(3) NOT NULL, |
+|             |   TIME INDEX ("__ts_placeholder"),          |
+|             |   PRIMARY KEY ("ngx_access_log.country")    |
+|             | )                                           |
+|             |                                             |
+|             | ENGINE=mito                                 |
+|             |                                             |
++-------------+---------------------------------------------+
+
 SELECT
     "ngx_access_log.country"
 FROM
@@ -593,6 +617,24 @@ ADMIN FLUSH_FLOW('calc_ngx_country');
 +--------------------------------------+
 |  FLOW_FLUSHED  |
 +--------------------------------------+
+
+SHOW CREATE TABLE ngx_country;
+
++-------------+---------------------------------------------------------+
+| Table       | Create Table                                            |
++-------------+---------------------------------------------------------+
+| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" (              |
+|             |   "ngx_access_log.country" STRING NULL,                 |
+|             |   "time_window" TIMESTAMP(3) NULL,                      |
+|             |   "update_at" TIMESTAMP(3) NULL,                        |
+|             |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,             |
+|             |   TIME INDEX ("__ts_placeholder"),                      |
+|             |   PRIMARY KEY ("ngx_access_log.country", "time_window") |
+|             | )                                                       |
+|             |                                                         |
+|             | ENGINE=mito                                             |
+|             |                                                         |
++-------------+---------------------------------------------------------+
 
 SELECT
     "ngx_access_log.country",
