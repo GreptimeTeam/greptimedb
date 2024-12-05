@@ -29,6 +29,7 @@ mod repl;
 use async_trait::async_trait;
 use clap::Parser;
 use common_error::ext::BoxedError;
+pub use database::DatabaseClient;
 use error::Result;
 pub use repl::Repl;
 
