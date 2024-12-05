@@ -126,6 +126,12 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<
         Kind::UnsetColumnFulltext(c) => AlterKind::UnsetColumnFulltext {
             column_name: c.column_name,
         },
+        Kind::SetColumnInvertedIndex(c) => AlterKind::SetColumnInvertedIndex {
+            column_name: c.column_name,
+        },
+        Kind::UnsetColumnInvertedIndex(c) => AlterKind::UnsetColumnInvertedIndex {
+            column_name: c.column_name,
+        },
     };
 
     let request = AlterTableRequest {

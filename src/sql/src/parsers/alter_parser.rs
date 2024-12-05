@@ -144,6 +144,34 @@ impl ParserContext<'_> {
                             AlterTableOperation::RenameTable { new_table_name }
                         }
                         Keyword::SET => {
+                            match self.parser.next_token() {
+                                TokenWithLocation {
+                                    token: Token::Word(w),
+                                    ..
+                                } if w.keyword == INVERTED => {
+                                    self.parser
+                                        .expect_keyword(Keyword::INDEX)
+                                        .context(error::SyntaxSnafu)?;
+
+                                },
+                                TokenWithLocation {
+                                    token: Token::Word(w),
+                                    ..
+                                } if w.keyword == Keyword::FULLTEXT => {
+                                    let _ = self.parser.next_token();
+                                    let options = self
+                                        .parser
+                                        .parse_comma_separated(parse_string_options)
+                                        .context(error::SyntaxSnafu)?
+                                        .into_iter()
+                                        .map(|(key, value)| KeyValueOption { key, value })
+                                        .collect();
+                                    AlterTableOperation::SetTableOptions { options }
+                                },
+                                _ => {
+
+                                }
+                            }
                             let _ = self.parser.next_token();
                             let options = self
                                 .parser

@@ -85,24 +85,39 @@ pub enum AlterTableOperation {
     RenameTable {
         new_table_name: String,
     },
+    SetIndex {
+        options: SetIndexOperation
+    },
+    UnsetIndex {
+        options: UnsetIndexOperation
+    }
+    
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub enum SetIndexOperation {
     /// `MODIFY COLUMN <column_name> SET FULLTEXT [WITH <options>]`
     SetColumnFulltext {
         column_name: Ident,
         options: FulltextOptions,
     },
-    /// `MODIFY COLUMN <column_name> UNSET FULLTEXT`
-    UnsetColumnFulltext {
-        column_name: Ident,
-    },
     /// `MODIFY COLUMN <column_name> SET INVERTED INDEX`
     SetColumnInvertedIndex {
         column_name: Ident,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub enum UnsetIndexOperation {
+    /// `MODIFY COLUMN <column_name> UNSET FULLTEXT`
+    UnsetColumnFulltext {
+        column_name: Ident,
+    },
+
     /// `MODIFY COLUMN <column_name> UNSET INVERTED INDEX`
     UnsetColumnInvertedIndex {
         column_name: Ident,
     },
-    
 }
 
 impl Display for AlterTableOperation {
