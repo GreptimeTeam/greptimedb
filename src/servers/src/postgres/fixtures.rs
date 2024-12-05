@@ -51,30 +51,36 @@ static VAR_VALUES: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
 static SHOW_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new("(?i)^SHOW (.*?);?$").unwrap());
 static SET_TRANSACTION_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^SET TRANSACTION (.*?);?$").unwrap());
-static TRANSACTION_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^(BEGIN|ROLLBACK|COMMIT);?").unwrap());
 static START_TRANSACTION_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^START TRANSACTION .*").unwrap());
+    Lazy::new(|| Regex::new("(?i)^(START TRANSACTION.*|BEGIN);?").unwrap());
 static COMMIT_TRANSACTION_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^COMMIT TRANSACTION;?").unwrap());
+    Lazy::new(|| Regex::new("(?i)^(COMMIT TRANSACTION|COMMIT);?").unwrap());
 static ABORT_TRANSACTION_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^ABORT TRANSACTION;?").unwrap());
+    Lazy::new(|| Regex::new("(?i)^(ABORT TRANSACTION|ROLLBACK);?").unwrap());
 
 /// Test if given query statement matches the patterns
 pub(crate) fn matches(query: &str) -> bool {
-    TRANSACTION_PATTERN.captures(query).is_some()
+    START_TRANSACTION_PATTERN.is_match(query)
+        || COMMIT_TRANSACTION_PATTERN.is_match(query)
+        || ABORT_TRANSACTION_PATTERN.is_match(query)
         || SHOW_PATTERN.captures(query).is_some()
         || SET_TRANSACTION_PATTERN.is_match(query)
 }
 
+fn set_transaction_warning(query_ctx: QueryContextRef) {
+    query_ctx.set_warning("Please note there is no transaction in GreptimeDB.".to_string());
+}
+
 /// Process unsupported SQL and return fixed result as a compatibility solution
-pub(crate) fn process<'a>(query: &str, _query_ctx: QueryContextRef) -> Option<Vec<Response<'a>>> {
+pub(crate) fn process<'a>(query: &str, query_ctx: QueryContextRef) -> Option<Vec<Response<'a>>> {
     // Transaction directives:
-    if let Some(tx) = TRANSACTION_PATTERN.captures(query) {
-        let tx_tag = &tx[1];
-        Some(vec![Response::Execution(Tag::new(&tx_tag.to_uppercase()))])
-    } else if START_TRANSACTION_PATTERN.is_match(query) {
-        Some(vec![Response::Execution(Tag::new("START TRANSACTION"))])
+    if START_TRANSACTION_PATTERN.is_match(query) {
+        set_transaction_warning(query_ctx);
+        if query.to_lowercase().starts_with("begin") {
+            Some(vec![Response::Execution(Tag::new("BEGIN"))])
+        } else {
+            Some(vec![Response::Execution(Tag::new("START TRANSACTION"))])
+        }
     } else if ABORT_TRANSACTION_PATTERN.is_match(query) {
         Some(vec![Response::Execution(Tag::new("ROLLBACK"))])
     } else if COMMIT_TRANSACTION_PATTERN.is_match(query) {
