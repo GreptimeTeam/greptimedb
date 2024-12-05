@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use common_base::TimeToLive;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_time::TimeToLive;
 use futures::stream::BoxStream;
 use humantime_serde::re::humantime;
 use serde::{Deserialize, Serialize};
@@ -310,7 +310,7 @@ impl<'a> From<&'a SchemaName> for SchemaNameKey<'a> {
 mod tests {
     use std::time::Duration;
 
-    use common_base::INSTANT;
+    use common_time::INSTANT;
 
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;

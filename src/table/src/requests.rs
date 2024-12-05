@@ -19,10 +19,10 @@ use std::fmt;
 use std::str::FromStr;
 
 use common_base::readable_size::ReadableSize;
-use common_base::TimeToLive;
 use common_datasource::object_store::s3::is_supported_in_s3;
 use common_query::AddColumnLocation;
 use common_time::range::TimestampRange;
+use common_time::TimeToLive;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, FulltextOptions};

@@ -16,9 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::region::compact_request;
-use common_base::TimeToLive;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{info, warn};
+use common_time::TimeToLive;
 use object_store::manager::ObjectStoreManagerRef;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;

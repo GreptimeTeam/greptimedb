@@ -27,12 +27,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use api::v1::region::compact_request;
-use common_base::{Plugins, TimeToLive};
+use common_base::Plugins;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{debug, error, info, warn};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
-use common_time::Timestamp;
+use common_time::{TimeToLive, Timestamp};
 use datafusion_common::ScalarValue;
 use datafusion_expr::Expr;
 use serde::{Deserialize, Serialize};
@@ -661,21 +661,13 @@ fn get_expired_ssts(
     ttl: Option<TimeToLive>,
     now: Timestamp,
 ) -> Vec<FileHandle> {
-    let Some(ttl) = ttl.and_then(|t| t.get_duration()) else {
+    let Some(ttl) = ttl else {
         return vec![];
-    };
-
-    let expire_time = match now.sub_duration(ttl) {
-        Ok(expire_time) => expire_time,
-        Err(e) => {
-            error!(e; "Failed to calculate region TTL expire time");
-            return vec![];
-        }
     };
 
     levels
         .iter()
-        .flat_map(|l| l.get_expired_files(&expire_time).into_iter())
+        .flat_map(|l| l.get_expired_files(&now, &ttl).into_iter())
         .collect()
 }
 

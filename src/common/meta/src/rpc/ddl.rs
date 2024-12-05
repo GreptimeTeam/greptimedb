@@ -35,7 +35,7 @@ use api::v1::{
 };
 use base64::engine::general_purpose;
 use base64::Engine as _;
-use common_base::TimeToLive;
+use common_time::TimeToLive;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DefaultOnNull};

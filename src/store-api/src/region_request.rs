@@ -25,7 +25,7 @@ use api::v1::region::{
 };
 use api::v1::{self, Analyzer, Option as PbOption, Rows, SemanticType};
 pub use common_base::AffectedRows;
-use common_base::TimeToLive;
+use common_time::TimeToLive;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::FulltextOptions;
 use serde::{Deserialize, Serialize};

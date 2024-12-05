@@ -17,6 +17,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::Timestamp;
+
 pub const INSTANT: &str = "instant";
 pub const FOREVER: &str = "forever";
 
@@ -57,6 +59,20 @@ impl TimeToLive {
                 Ok(TimeToLive::from(d))
             }
         }
+    }
+
+    /// Check if the TimeToLive is expired
+    /// with the given `created_at` and `now` timestamp
+    pub fn is_expired(
+        &self,
+        created_at: &Timestamp,
+        now: &Timestamp,
+    ) -> crate::error::Result<bool> {
+        Ok(match self {
+            TimeToLive::Instant => true,
+            TimeToLive::Forever => false,
+            TimeToLive::Duration(d) => now.sub_duration(*d)? > *created_at,
+        })
     }
 
     /// Print TimeToLive as string

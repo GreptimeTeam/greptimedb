@@ -22,6 +22,7 @@ pub mod time;
 pub mod timestamp;
 pub mod timestamp_millis;
 pub mod timezone;
+pub mod ttl;
 pub mod util;
 
 pub use date::Date;
@@ -32,3 +33,4 @@ pub use range::RangeMillis;
 pub use timestamp::Timestamp;
 pub use timestamp_millis::TimestampMillis;
 pub use timezone::Timezone;
+pub use ttl::{TimeToLive, FOREVER, INSTANT};

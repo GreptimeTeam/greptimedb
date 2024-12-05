@@ -15,10 +15,9 @@
 use std::collections::{HashMap, HashSet};
 
 use api::v1::SemanticType;
-use common_base::FOREVER;
 use common_error::ext::BoxedError;
 use common_telemetry::{info, warn};
-use common_time::Timestamp;
+use common_time::{Timestamp, FOREVER};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use datatypes::value::Value;
