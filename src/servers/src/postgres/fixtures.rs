@@ -68,7 +68,7 @@ pub(crate) fn matches(query: &str) -> bool {
 }
 
 fn set_transaction_warning(query_ctx: QueryContextRef) {
-    query_ctx.set_warning("Please note there is no transaction in GreptimeDB.".to_string());
+    query_ctx.set_warning("Please note transaction is not supported in GreptimeDB.".to_string());
 }
 
 /// Process unsupported SQL and return fixed result as a compatibility solution
