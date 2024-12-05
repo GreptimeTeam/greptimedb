@@ -131,6 +131,8 @@ impl AlterTableOption {
             let (key, value) = pair.split_once('=').unwrap();
             let key = key.trim();
             let value = value.trim().replace('\'', "");
+            // Currently we have only one compaction type, so we ignore it
+            // Cautious: COMPACTION_TYPE may be kept even if there are no compaction options enabled
             if key == COMPACTION_TYPE || key == APPEND_MODE_KEY {
                 continue;
             } else {
