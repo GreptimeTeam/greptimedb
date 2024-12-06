@@ -50,8 +50,8 @@ impl Default for RaftEngineConfig {
         Self {
             dir: None,
             file_size: ReadableSize::mb(256),
-            purge_threshold: ReadableSize::gb(4),
-            purge_interval: Duration::from_secs(600),
+            purge_threshold: ReadableSize::gb(1),
+            purge_interval: Duration::from_secs(60),
             read_batch_size: 128,
             sync_write: false,
             enable_log_recycle: true,

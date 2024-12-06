@@ -1,9 +1,6 @@
 ## The running mode of the datanode. It can be `standalone` or `distributed`.
 mode = "standalone"
 
-## Enable telemetry to collect anonymous usage data.
-enable_telemetry = true
-
 ## The default timezone of the server.
 ## @toml2docs:none-default
 default_timezone = "UTC"
@@ -24,6 +21,9 @@ max_concurrent_queries = 0
 #+ global_rt_size = 8
 ## The number of threads to execute the runtime for global write operations.
 #+ compact_rt_size = 4
+
+## Enable telemetry to collect anonymous usage data. Enabled by default.
+#+ enable_telemetry = true
 
 ## The HTTP server options.
 [http]
@@ -151,11 +151,11 @@ file_size = "256MB"
 
 ## The threshold of the WAL size to trigger a flush.
 ## **It's only used when the provider is `raft_engine`**.
-purge_threshold = "4GB"
+purge_threshold = "1GB"
 
 ## The interval to trigger a flush.
 ## **It's only used when the provider is `raft_engine`**.
-purge_interval = "10m"
+purge_interval = "1m"
 
 ## The read batch size.
 ## **It's only used when the provider is `raft_engine`**.
