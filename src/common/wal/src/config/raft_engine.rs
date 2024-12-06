@@ -49,7 +49,7 @@ impl Default for RaftEngineConfig {
     fn default() -> Self {
         Self {
             dir: None,
-            file_size: ReadableSize::mb(256),
+            file_size: ReadableSize::mb(128),
             purge_threshold: ReadableSize::gb(1),
             purge_interval: Duration::from_secs(60),
             read_batch_size: 128,

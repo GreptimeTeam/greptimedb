@@ -142,7 +142,7 @@ dir = "/tmp/greptimedb/wal"
 
 ## The size of the WAL segment file.
 ## **It's only used when the provider is `raft_engine`**.
-file_size = "256MB"
+file_size = "128MB"
 
 ## The threshold of the WAL size to trigger a flush.
 ## **It's only used when the provider is `raft_engine`**.

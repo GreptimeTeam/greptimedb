@@ -881,7 +881,7 @@ with_metric_engine = true
 
 [wal]
 provider = "raft_engine"
-file_size = "256MiB"
+file_size = "128MiB"
 purge_threshold = "1GiB"
 purge_interval = "1m"
 read_batch_size = 128
