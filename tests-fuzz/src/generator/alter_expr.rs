@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::marker::PhantomData;
-use std::str::FromStr;
 
 use common_base::readable_size::ReadableSize;
 use common_query::AddColumnLocation;
@@ -229,11 +228,7 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprSetTableOptionsGenerator<
                 }
                 AlterTableOption::TwcsMaxOutputFileSize(_) => {
                     let max_output_file_size: u64 = rng.gen();
-                    // Use B as the unit by default
-                    let max_output_file_size_str = max_output_file_size.to_string() + "B";
-                    AlterTableOption::TwcsMaxOutputFileSize(
-                        ReadableSize::from_str(&max_output_file_size_str).unwrap(),
-                    )
+                    AlterTableOption::TwcsMaxOutputFileSize(ReadableSize(max_output_file_size))
                 }
                 AlterTableOption::TwcsMaxInactiveWindowRuns(_) => {
                     let max_inactive_window_runs: u64 = rng.gen();

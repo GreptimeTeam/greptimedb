@@ -144,17 +144,12 @@ impl TableContext {
             }
             AlterTableOperation::SetTableOptions { options } => {
                 for option in options {
-                    if self
+                    if let Some(idx) = self
                         .table_options
                         .iter()
-                        .any(|opt| opt.key() == option.key())
+                        .position(|opt| opt.key() == option.key())
                     {
-                        let position = self
-                            .table_options
-                            .iter()
-                            .position(|opt| opt.key() == option.key())
-                            .unwrap();
-                        self.table_options[position] = option;
+                        self.table_options[idx] = option;
                     } else {
                         self.table_options.push(option);
                     }
