@@ -136,9 +136,9 @@ macro_rules! impl_data_type_for_interval {
     }
 }
 
-impl_data_type_for_interval!(YearMonth, i32);
-impl_data_type_for_interval!(DayTime, i64);
-impl_data_type_for_interval!(MonthDayNano, i128);
+impl_data_type_for_interval!(YearMonth, IntervalYearMonth);
+impl_data_type_for_interval!(DayTime, IntervalDayTime);
+impl_data_type_for_interval!(MonthDayNano, IntervalMonthDayNano);
 
 #[cfg(test)]
 mod tests {

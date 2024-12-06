@@ -140,7 +140,7 @@ impl Date {
         let naive_date = self.to_chrono_date()?;
 
         naive_date
-            .checked_add_months(Months::new(interval.months as u32))
+            .checked_add_months(Months::new(interval as u32))
             .map(Into::into)
     }
 
@@ -170,7 +170,7 @@ impl Date {
         let naive_date = self.to_chrono_date()?;
 
         naive_date
-            .checked_sub_months(Months::new(interval.months as u32))
+            .checked_sub_months(Months::new(interval as u32))
             .map(Into::into)
     }
 
@@ -281,7 +281,7 @@ mod tests {
     fn test_add_sub_interval() {
         let date = Date::new(1000);
 
-        let interval = IntervalYearMonth::new(3);
+        let interval = 3;
 
         let new_date = date.add_year_month(interval).unwrap();
         assert_eq!(new_date.val(), 1091);

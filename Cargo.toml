@@ -91,11 +91,11 @@ rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 # See for more detaiils: https://github.com/rust-lang/cargo/issues/11329
 ahash = { version = "0.8", features = ["compile-time-rng"] }
 aquamarine = "0.3"
-arrow = { version = "51.0.0", features = ["prettyprint"] }
-arrow-array = { version = "51.0.0", default-features = false, features = ["chrono-tz"] }
-arrow-flight = "51.0"
-arrow-ipc = { version = "51.0.0", default-features = false, features = ["lz4", "zstd"] }
-arrow-schema = { version = "51.0", features = ["serde"] }
+arrow = { version = "53.0.0", features = ["prettyprint"] }
+arrow-array = { version = "53.0.0", default-features = false, features = ["chrono-tz"] }
+arrow-flight = "53.0"
+arrow-ipc = { version = "53.0.0", default-features = false, features = ["lz4", "zstd"] }
+arrow-schema = { version = "53.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 axum = { version = "0.6", features = ["headers"] }
@@ -109,15 +109,15 @@ clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
 crossbeam-utils = "0.8"
 dashmap = "5.4"
-datafusion = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
-datafusion-common = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
-datafusion-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
-datafusion-functions = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
-datafusion-optimizer = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
-datafusion-physical-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
-datafusion-physical-plan = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
-datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
-datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
+datafusion = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-common = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-expr = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-functions = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-optimizer = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-physical-expr = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-physical-plan = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-sql = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-substrait = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
 derive_builder = "0.12"
 dotenv = "0.15"
 etcd-client = "0.13"
@@ -145,7 +145,7 @@ opentelemetry-proto = { version = "0.5", features = [
     "logs",
 ] }
 parking_lot = "0.12"
-parquet = { version = "51.0.0", default-features = false, features = ["arrow", "async", "object_store"] }
+parquet = { version = "53.0.0", default-features = false, features = ["arrow", "async", "object_store"] }
 paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }

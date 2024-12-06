@@ -169,7 +169,7 @@ impl DateTime {
         let naive_datetime = self.to_chrono_datetime()?;
 
         naive_datetime
-            .checked_add_months(Months::new(interval.months as u32))
+            .checked_add_months(Months::new(interval as u32))
             .map(Into::into)
     }
 
@@ -199,7 +199,7 @@ impl DateTime {
         let naive_datetime = self.to_chrono_datetime()?;
 
         naive_datetime
-            .checked_sub_months(Months::new(interval.months as u32))
+            .checked_sub_months(Months::new(interval as u32))
             .map(Into::into)
     }
 

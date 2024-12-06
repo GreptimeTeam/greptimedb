@@ -56,7 +56,7 @@ paste = { workspace = true, optional = true }
 prometheus.workspace = true
 query.workspace = true
 # TODO(discord9): This is a forked and tweaked version of RustPython, please update it to newest original RustPython After RustPython support GC
-pyo3 = { version = "0.20", optional = true, features = ["abi3", "abi3-py37"] }
+pyo3 = { version = "0.22", optional = true, features = ["abi3", "abi3-py37"] }
 rustpython-codegen = { git = "https://github.com/discord9/RustPython", optional = true, rev = "9ed5137412" }
 rustpython-compiler = { git = "https://github.com/discord9/RustPython", optional = true, rev = "9ed5137412" }
 rustpython-compiler-core = { git = "https://github.com/discord9/RustPython", optional = true, rev = "9ed5137412" }
