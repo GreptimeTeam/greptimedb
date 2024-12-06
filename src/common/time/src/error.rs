@@ -94,9 +94,10 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse duration: {raw:?}"))]
+    #[snafu(display("Failed to parse duration"))]
     ParseDuration {
-        raw: humantime::DurationError,
+        #[snafu(source)]
+        error: humantime::DurationError,
         #[snafu(implicit)]
         location: Location,
     },

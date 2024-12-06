@@ -16,6 +16,7 @@ use std::fmt::Display;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 
 use crate::error::{Error, ParseDurationSnafu};
 use crate::Timestamp;
@@ -56,8 +57,7 @@ impl TimeToLive {
             INSTANT => Ok(TimeToLive::Instant),
             FOREVER | "" => Ok(TimeToLive::Forever),
             _ => {
-                let d = humantime::parse_duration(s)
-                    .map_err(|e| ParseDurationSnafu { raw: e }.build())?;
+                let d = humantime::parse_duration(s).context(ParseDurationSnafu)?;
                 Ok(TimeToLive::from(d))
             }
         }

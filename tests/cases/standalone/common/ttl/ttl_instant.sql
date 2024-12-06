@@ -131,7 +131,7 @@ from
 ORDER BY
        val;
 
--- to makesure alter back and forth from duration to/from instant wouldn't break anything
+-- to make sure alter back and forth from duration to/from instant wouldn't break anything
 ALTER TABLE
        test_ttl
 SET

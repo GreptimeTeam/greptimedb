@@ -20,7 +20,7 @@ use snafu::OptionExt;
 use table::metadata::TableId;
 
 use crate::error::{Result, TableNotFoundSnafu};
-use crate::insert::InstantOrNormalInsertRequests;
+use crate::insert::InstantAndNormalInsertRequests;
 use crate::req_convert::common::partitioner::Partitioner;
 
 pub struct RowToRegion<'a> {
@@ -45,7 +45,7 @@ impl<'a> RowToRegion<'a> {
     pub async fn convert(
         &self,
         requests: RowInsertRequests,
-    ) -> Result<InstantOrNormalInsertRequests> {
+    ) -> Result<InstantAndNormalInsertRequests> {
         let mut region_request = Vec::with_capacity(requests.inserts.len());
         let mut instant_request = Vec::with_capacity(requests.inserts.len());
         for request in requests.inserts {
@@ -60,7 +60,7 @@ impl<'a> RowToRegion<'a> {
             }
         }
 
-        Ok(InstantOrNormalInsertRequests {
+        Ok(InstantAndNormalInsertRequests {
             normal_requests: RegionInsertRequests {
                 requests: region_request,
             },

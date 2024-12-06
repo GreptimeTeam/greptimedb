@@ -32,7 +32,7 @@ use crate::error::{
     ColumnNotFoundSnafu, InvalidSqlSnafu, MissingInsertBodySnafu, ParseSqlSnafu, Result,
     SchemaReadOnlySnafu, TableNotFoundSnafu,
 };
-use crate::insert::InstantOrNormalInsertRequests;
+use crate::insert::InstantAndNormalInsertRequests;
 use crate::req_convert::common::partitioner::Partitioner;
 use crate::req_convert::insert::semantic_type;
 
@@ -61,7 +61,7 @@ impl<'a> StatementToRegion<'a> {
         &self,
         stmt: &Insert,
         query_ctx: &QueryContextRef,
-    ) -> Result<InstantOrNormalInsertRequests> {
+    ) -> Result<InstantAndNormalInsertRequests> {
         let (catalog, schema, table_name) = self.get_full_name(stmt.table_name())?;
         let table = self.get_table(&catalog, &schema, &table_name).await?;
         let table_schema = table.schema();
@@ -137,12 +137,12 @@ impl<'a> StatementToRegion<'a> {
             .await?;
         let requests = RegionInsertRequests { requests };
         if table_info.is_ttl_instant_table() {
-            Ok(InstantOrNormalInsertRequests {
+            Ok(InstantAndNormalInsertRequests {
                 normal_requests: Default::default(),
                 instant_requests: requests,
             })
         } else {
-            Ok(InstantOrNormalInsertRequests {
+            Ok(InstantAndNormalInsertRequests {
                 normal_requests: requests,
                 instant_requests: Default::default(),
             })
