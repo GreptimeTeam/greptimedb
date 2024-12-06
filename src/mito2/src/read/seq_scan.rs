@@ -105,14 +105,18 @@ impl SeqScan {
         debug_assert_eq!(1, self.properties.partitions.len());
         let partition_ranges = &self.properties.partitions[0];
 
-        let reader =
-            Self::build_all_merge_reader(&self.stream_ctx, partition_ranges, &part_metrics).await?;
+        let reader = Self::merge_all_ranges_for_compaction(
+            &self.stream_ctx,
+            partition_ranges,
+            &part_metrics,
+        )
+        .await?;
         Ok(Box::new(reader))
     }
 
-    /// Builds a merge reader that reads all data.
+    /// Builds a merge reader that reads all ranges.
     /// Callers MUST not split ranges before calling this method.
-    async fn build_all_merge_reader(
+    async fn merge_all_ranges_for_compaction(
         stream_ctx: &Arc<StreamContext>,
         partition_ranges: &[PartitionRange],
         part_metrics: &PartitionMetrics,

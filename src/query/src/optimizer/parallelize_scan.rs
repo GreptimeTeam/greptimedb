@@ -124,6 +124,10 @@ impl ParallelizeScan {
             return vec![vec![]];
         }
 
+        if ranges.len() == 1 {
+            return vec![ranges];
+        }
+
         // Sort ranges by number of rows in descending order.
         ranges.sort_by(|a, b| b.num_rows.cmp(&a.num_rows));
         // Get the max row number of the ranges. Note that the number of rows may be 0 if statistics are not available.
