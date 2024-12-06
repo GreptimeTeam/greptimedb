@@ -168,10 +168,12 @@ pub enum Error {
         #[snafu(source)]
         error: tokio::time::error::Elapsed,
     },
-    #[snafu(display("RecordBatch slice index overflow"))]
+    #[snafu(display("RecordBatch slice index overflow: {visit_index} > {size}"))]
     RecordBatchSliceIndexOverflow {
         #[snafu(implicit)]
         location: Location,
+        size: usize,
+        visit_index: usize,
     },
 }
 

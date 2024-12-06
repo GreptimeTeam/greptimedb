@@ -199,7 +199,10 @@ impl RecordBatch {
     pub fn slice(&self, offset: usize, len: usize) -> Result<RecordBatch> {
         ensure!(
             offset + len <= self.num_rows(),
-            error::RecordBatchSliceIndexOverflowSnafu
+            error::RecordBatchSliceIndexOverflowSnafu {
+                size: self.num_rows(),
+                visit_index: offset + len
+            }
         );
         let columns = self.columns.iter().map(|vector| vector.slice(offset, len));
         RecordBatch::new(self.schema.clone(), columns)

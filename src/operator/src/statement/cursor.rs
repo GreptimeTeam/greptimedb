@@ -15,6 +15,7 @@
 use common_query::{Output, OutputData};
 use common_recordbatch::cursor::RecordBatchStreamCursor;
 use common_recordbatch::RecordBatches;
+use common_telemetry::tracing;
 use query::parser::QueryStatement;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -25,6 +26,7 @@ use crate::error::{self, Result};
 use crate::statement::StatementExecutor;
 
 impl StatementExecutor {
+    #[tracing::instrument(skip_all)]
     pub(super) async fn declare_cursor(
         &self,
         declare_cursor: DeclareCursor,
@@ -52,6 +54,7 @@ impl StatementExecutor {
             OutputData::Stream(rbs) => {
                 query_ctx.insert_cursor(cursor_name, RecordBatchStreamCursor::new(rbs));
             }
+            // Should not happen because we have query type ensured from parser.
             OutputData::AffectedRows(_) => error::NotSupportedSnafu {
                 feat: "Non-query statement on cursor",
             }
@@ -61,6 +64,7 @@ impl StatementExecutor {
         Ok(Output::new_with_affected_rows(0))
     }
 
+    #[tracing::instrument(skip_all)]
     pub(super) async fn fetch_cursor(
         &self,
         fetch_cursor: FetchCursor,
@@ -82,6 +86,7 @@ impl StatementExecutor {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub(super) async fn close_cursor(
         &self,
         close_cursor: CloseCursor,

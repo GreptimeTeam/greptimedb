@@ -51,7 +51,7 @@ impl ParserContext<'_> {
         let query_stmt = self.parse_query()?;
         match query_stmt {
             Statement::Query(query) => Ok(Statement::DeclareCursor(DeclareCursor {
-                cursor_name,
+                cursor_name: ParserContext::canonicalize_object_name(cursor_name),
                 query,
             })),
             _ => error::InvalidSqlSnafu {
@@ -76,7 +76,7 @@ impl ParserContext<'_> {
             .context(error::SyntaxSnafu)?;
 
         Ok(Statement::FetchCursor(FetchCursor {
-            cursor_name,
+            cursor_name: ParserContext::canonicalize_object_name(cursor_name),
             fetch_size,
         }))
     }
@@ -88,7 +88,9 @@ impl ParserContext<'_> {
             .parse_object_name(false)
             .context(error::SyntaxSnafu)?;
 
-        Ok(Statement::CloseCursor(CloseCursor { cursor_name }))
+        Ok(Statement::CloseCursor(CloseCursor {
+            cursor_name: ParserContext::canonicalize_object_name(cursor_name),
+        }))
     }
 }
 
@@ -108,6 +110,10 @@ mod tests {
 
         if let Statement::DeclareCursor(dc) = &result[0] {
             assert_eq!("c1", dc.cursor_name.to_string());
+            assert_eq!(
+                "DECLARE c1 CURSOR FOR SELECT * FROM numbers",
+                dc.to_string()
+            );
         } else {
             panic!("Unexpected statement");
         }
@@ -128,6 +134,7 @@ mod tests {
         if let Statement::FetchCursor(fc) = &result[0] {
             assert_eq!("c1", fc.cursor_name.to_string());
             assert_eq!("1000", fc.fetch_size.to_string());
+            assert_eq!(sql, fc.to_string());
         } else {
             panic!("Unexpected statement")
         }
@@ -142,6 +149,7 @@ mod tests {
 
         if let Statement::CloseCursor(cc) = &result[0] {
             assert_eq!("c1", cc.cursor_name.to_string());
+            assert_eq!(sql, cc.to_string());
         } else {
             panic!("Unexpected statement")
         }
