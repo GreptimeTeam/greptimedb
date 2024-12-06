@@ -19,9 +19,10 @@ use datatypes::data_type::ConcreteDataType;
 use sql::statements::concrete_data_type_to_sql_data_type;
 
 use crate::error::{Error, Result};
-use crate::ir::alter_expr::{AlterTableOperation, AlterTableOption};
+use crate::ir::alter_expr::AlterTableOperation;
 use crate::ir::create_expr::ColumnOption;
 use crate::ir::{AlterTableExpr, Column};
+use crate::translator::common::CommonAlterTableTranslator;
 use crate::translator::DslTranslator;
 
 pub struct AlterTableExprTranslator;
@@ -34,28 +35,18 @@ impl DslTranslator<AlterTableExpr, String> for AlterTableExprTranslator {
             AlterTableOperation::AddColumn { column, location } => {
                 Self::format_add_column(&input.table_name, column, location)
             }
-            AlterTableOperation::DropColumn { name } => Self::format_drop(&input.table_name, name),
             AlterTableOperation::RenameTable { new_table_name } => {
                 Self::format_rename(&input.table_name, new_table_name)
             }
             AlterTableOperation::ModifyDataType { column } => {
                 Self::format_modify_data_type(&input.table_name, column)
             }
-            AlterTableOperation::SetTableOptions { options } => {
-                Self::format_set_table_options(&input.table_name, options)
-            }
-            AlterTableOperation::UnsetTableOptions { keys } => {
-                Self::format_unset_table_options(&input.table_name, keys)
-            }
+            _ => CommonAlterTableTranslator.translate(input)?,
         })
     }
 }
 
 impl AlterTableExprTranslator {
-    fn format_drop(name: impl Display, column: impl Display) -> String {
-        format!("ALTER TABLE {name} DROP COLUMN {column};")
-    }
-
     fn format_rename(name: impl Display, new_name: impl Display) -> String {
         format!("ALTER TABLE {name} RENAME {new_name};")
     }
@@ -120,27 +111,6 @@ impl AlterTableExprTranslator {
             .map(|option| option.to_string())
             .collect::<Vec<_>>()
             .join(" ")
-    }
-
-    fn format_set_table_options(name: impl Display, options: &[AlterTableOption]) -> String {
-        format!(
-            "ALTER TABLE {name} SET {};",
-            options
-                .iter()
-                .map(|option| option.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    }
-
-    fn format_unset_table_options(name: impl Display, keys: &[String]) -> String {
-        format!(
-            "ALTER TABLE {name} UNSET {};",
-            keys.iter()
-                .map(|key| format!("'{}'", key))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
     }
 }
 

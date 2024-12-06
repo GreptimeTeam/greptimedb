@@ -16,7 +16,7 @@ use snafu::{ensure, ResultExt};
 use sqlx::database::HasArguments;
 use sqlx::{ColumnIndex, Database, Decode, Encode, Executor, IntoArguments, Row, Type};
 
-use crate::error::{self, Result};
+use crate::error::{self, Result, UnexpectedSnafu};
 use crate::ir::alter_expr::AlterTableOption;
 
 /// Parses table options from the result of `SHOW CREATE TABLE`
@@ -27,20 +27,22 @@ use crate::ir::alter_expr::AlterTableOption;
 /// | json  | CREATE TABLE IF NOT EXISTS `json` (`ts` TIMESTAMP(3) NOT NULL, `j` JSON NULL, TIME INDEX (`ts`)) ENGINE=mito WITH(compaction.twcs.max_output_file_size = '1M', compaction.type = 'twcs', ttl = '1day') |
 /// +-------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 fn parse_show_create(show_create: &str) -> Result<Vec<AlterTableOption>> {
-    let option_start = show_create.find("WITH(");
-    if option_start.is_none() {
-        Ok(vec![])
-    } else {
-        let option_start = option_start.unwrap() + 5;
+    if let Some(option_start) = show_create.find("WITH(") {
         let option_end = {
-            let mut i = 1;
-            while show_create.chars().nth(option_start + i).unwrap() != ')' {
-                i += 1;
+            let remain_str = &show_create[option_start..];
+            if let Some(end) = remain_str.find(')') {
+                end + option_start
+            } else {
+                return UnexpectedSnafu {
+                    violated: format!("Cannot find the end of the options in: {}", show_create),
+                }
+                .fail();
             }
-            i + option_start
         };
-        let options = &show_create[option_start..option_end];
+        let options = &show_create[option_start + 5..option_end];
         Ok(AlterTableOption::parse_kv_pairs(options)?)
+    } else {
+        Ok(vec![])
     }
 }
 
