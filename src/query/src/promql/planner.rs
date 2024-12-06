@@ -57,6 +57,9 @@ use promql_parser::parser::{
     VectorMatchCardinality, VectorSelector,
 };
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::promql::error::{
@@ -1128,6 +1131,10 @@ impl PromPlanner {
             .table_info()
             .meta
             .row_key_column_names()
+            .filter(|col| {
+                // remove metric engine's internal columns
+                col != &DATA_SCHEMA_TABLE_ID_COLUMN_NAME && col != &DATA_SCHEMA_TSID_COLUMN_NAME
+            })
             .cloned()
             .collect();
         self.ctx.tag_columns = tags;
