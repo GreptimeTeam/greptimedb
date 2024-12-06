@@ -47,15 +47,14 @@ use tokio::sync::{broadcast, watch, Mutex, RwLock};
 pub(crate) use crate::adapter::node_context::FlownodeContext;
 use crate::adapter::table_source::TableSource;
 use crate::adapter::util::{
-    column_schemas_to_proto, relation_desc_to_column_schemas_with_fallback,
-    table_info_value_to_relation_desc,
+    relation_desc_to_column_schemas_with_fallback, table_info_value_to_relation_desc,
 };
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
 use crate::df_optimizer::sql_to_flow_plan;
 use crate::error::{
     EvalSnafu, ExternalSnafu, FlowAlreadyExistSnafu, InternalSnafu, InvalidQuerySnafu,
-    TableNotFoundSnafu, UnexpectedSnafu,
+    UnexpectedSnafu,
 };
 use crate::expr::{Batch, GlobalId};
 use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_ROWS, METRIC_FLOW_RUN_INTERVAL_MS};
@@ -428,7 +427,7 @@ impl FlowWorkerManager {
         }
     }
 
-    /// return primary keys, schema and if the table have a placeholder timestamp column
+    /// return (primary keys, schema and if the table have a placeholder timestamp column)
     /// schema of the table comes from flow's output plan
     ///
     /// adjust to add `update_at` column and ts placeholder if needed
@@ -479,50 +478,6 @@ impl FlowWorkerManager {
         }
 
         Ok((primary_keys, with_auto_added_col, no_time_index))
-    }
-
-    /// Fetch table info or create table('s schema) from flow's schema if not exist
-    async fn try_fetch_or_create_table(
-        &self,
-        table_name: &TableName,
-    ) -> Result<(bool, Vec<api::v1::ColumnSchema>), Error> {
-        // TODO(discord9): instead of auto build table from request schema, actually build table
-        // before `create flow` to be able to assign pk and ts etc.
-        let (primary_keys, schema, is_ts_placeholder) =
-            if let Some((primary_keys, time_index, schema)) =
-                self.fetch_table_pk_schema(table_name).await?
-            {
-                // check if the last column is the auto created timestamp column, hence the table is auto created from
-                // flow's plan type
-                let is_auto_create = {
-                    let correct_name = schema
-                        .last()
-                        .map(|s| s.name == AUTO_CREATED_PLACEHOLDER_TS_COL)
-                        .unwrap_or(false);
-                    let correct_time_index = time_index == Some(schema.len() - 1);
-                    correct_name && correct_time_index
-                };
-                (primary_keys, schema, is_auto_create)
-            } else {
-                let schema = {
-                    let node_ctx = self.node_context.read().await;
-                    let gid: GlobalId = node_ctx
-                        .table_repr
-                        .get_by_name(table_name)
-                        .map(|x| x.1)
-                        .unwrap();
-                    node_ctx
-                        .schema
-                        .get(&gid)
-                        .with_context(|| TableNotFoundSnafu {
-                            name: format!("Table name = {:?}", table_name),
-                        })?
-                        .clone()
-                };
-                self.adjust_auto_created_table_schema(&schema).await?
-            };
-        let proto_schema = column_schemas_to_proto(schema, &primary_keys)?;
-        Ok((is_ts_placeholder, proto_schema))
     }
 }
 
