@@ -26,7 +26,7 @@ use crate::context::TableContextRef;
 use crate::error::{self, Error, Result};
 use crate::fake::WordGenerator;
 use crate::generator::{ColumnOptionGenerator, ConcreteDataTypeGenerator, Generator, Random};
-use crate::ir::alter_expr::{AlterTableExpr, AlterTableOperation, AlterTableOption};
+use crate::ir::alter_expr::{AlterTableExpr, AlterTableOperation, AlterTableOption, Ttl};
 use crate::ir::create_expr::ColumnOption;
 use crate::ir::{
     droppable_columns, generate_columns, generate_random_value, modifiable_columns, Column,
@@ -219,8 +219,16 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprSetTableOptionsGenerator<
             .iter()
             .map(|idx| match all_options[*idx] {
                 AlterTableOption::Ttl(_) => {
-                    let ttl: u32 = rng.gen();
-                    AlterTableOption::Ttl((ttl as i64).into())
+                    let ttl_type = rng.gen_range(0..3);
+                    match ttl_type {
+                        0 => {
+                            let duration: u32 = rng.gen();
+                            AlterTableOption::Ttl(Ttl::Duration((duration as i64).into()))
+                        }
+                        1 => AlterTableOption::Ttl(Ttl::Instant),
+                        2 => AlterTableOption::Ttl(Ttl::Forever),
+                        _ => unreachable!(),
+                    }
                 }
                 AlterTableOption::TwcsTimeWindow(_) => {
                     let time_window: u32 = rng.gen();
