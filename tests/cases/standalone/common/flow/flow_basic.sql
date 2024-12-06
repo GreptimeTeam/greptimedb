@@ -128,6 +128,8 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_distinct_basic');
 
+SHOW CREATE TABLE out_distinct_basic;
+
 SELECT
     dis
 FROM
@@ -270,6 +272,8 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_ngx_country');
 
+SHOW CREATE TABLE ngx_country;
+
 SELECT
     "ngx_access_log.country"
 FROM
@@ -332,6 +336,8 @@ VALUES
 
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_ngx_country');
+
+SHOW CREATE TABLE ngx_country;
 
 SELECT
     "ngx_access_log.country",

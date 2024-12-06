@@ -11,6 +11,7 @@ testing = []
 workspace = true
 
 [dependencies]
+ahash.workspace = true
 api.workspace = true
 async-stream.workspace = true
 async-trait = "0.1"

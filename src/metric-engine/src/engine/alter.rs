@@ -207,7 +207,7 @@ mod test {
         let alter_region_option_request = RegionAlterRequest {
             schema_version: 0,
             kind: AlterKind::SetRegionOptions {
-                options: vec![SetRegionOption::TTL(Duration::from_secs(500))],
+                options: vec![SetRegionOption::Ttl(Some(Duration::from_secs(500).into()))],
             },
         };
         let result = engine_inner

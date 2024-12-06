@@ -224,12 +224,8 @@ impl TableMeta {
 
         for request in requests {
             match request {
-                SetRegionOption::TTL(new_ttl) => {
-                    if new_ttl.is_zero() {
-                        new_options.ttl = None;
-                    } else {
-                        new_options.ttl = Some(*new_ttl);
-                    }
+                SetRegionOption::Ttl(new_ttl) => {
+                    new_options.ttl = *new_ttl;
                 }
                 SetRegionOption::Twsc(key, value) => {
                     if !value.is_empty() {
@@ -825,6 +821,15 @@ impl TableInfo {
             .options
             .extra_options
             .contains_key(PHYSICAL_TABLE_METADATA_KEY)
+    }
+
+    /// Return true if the table's TTL is `instant`.
+    pub fn is_ttl_instant_table(&self) -> bool {
+        self.meta
+            .options
+            .ttl
+            .map(|t| t.is_instant())
+            .unwrap_or(false)
     }
 }
 

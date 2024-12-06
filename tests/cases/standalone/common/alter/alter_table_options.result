@@ -103,7 +103,9 @@ SHOW CREATE TABLE ato;
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=mito                        |
-|       |                                    |
+|       | WITH(                              |
+|       |   ttl = 'forever'                  |
+|       | )                                  |
 +-------+------------------------------------+
 
 ALTER TABLE ato SET 'ttl'='1s';

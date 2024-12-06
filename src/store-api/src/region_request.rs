@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 use std::fmt::{self, Display};
-use std::time::Duration;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
@@ -26,6 +25,7 @@ use api::v1::region::{
 };
 use api::v1::{self, Analyzer, Option as PbOption, Rows, SemanticType};
 pub use common_base::AffectedRows;
+use common_time::TimeToLive;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::FulltextOptions;
 use serde::{Deserialize, Serialize};
@@ -746,7 +746,7 @@ impl From<v1::ModifyColumnType> for ModifyColumnType {
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub enum SetRegionOption {
-    TTL(Duration),
+    Ttl(Option<TimeToLive>),
     // Modifying TwscOptions with values as (option name, new value).
     Twsc(String, String),
 }
@@ -758,13 +758,10 @@ impl TryFrom<&PbOption> for SetRegionOption {
         let PbOption { key, value } = value;
         match key.as_str() {
             TTL_KEY => {
-                let ttl = if value.is_empty() {
-                    Duration::from_secs(0)
-                } else {
-                    humantime::parse_duration(value)
-                        .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?
-                };
-                Ok(Self::TTL(ttl))
+                let ttl = TimeToLive::from_humantime_or_str(value)
+                    .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+
+                Ok(Self::Ttl(Some(ttl)))
             }
             TWCS_MAX_ACTIVE_WINDOW_RUNS
             | TWCS_MAX_ACTIVE_WINDOW_FILES
@@ -798,7 +795,7 @@ impl From<&UnsetRegionOption> for SetRegionOption {
             UnsetRegionOption::TwcsTimeWindow => {
                 SetRegionOption::Twsc(unset_option.to_string(), String::new())
             }
-            UnsetRegionOption::Ttl => SetRegionOption::TTL(Duration::default()),
+            UnsetRegionOption::Ttl => SetRegionOption::Ttl(Default::default()),
         }
     }
 }
