@@ -70,6 +70,9 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
             return Ok(vec![Response::EmptyQuery]);
         }
 
+        let query = fixtures::rewrite_sql(query);
+        let query = query.as_ref();
+
         if let Some(resps) = fixtures::process(query, query_ctx.clone()) {
             send_warning_opt(client, query_ctx).await?;
             Ok(resps)
@@ -228,6 +231,9 @@ impl QueryParser for DefaultQueryParser {
                 schema: None,
             });
         }
+
+        let sql = fixtures::rewrite_sql(sql);
+        let sql = sql.as_ref();
 
         let mut stmts =
             ParserContext::create_with_dialect(sql, &PostgreSqlDialect {}, ParseOptions::default())

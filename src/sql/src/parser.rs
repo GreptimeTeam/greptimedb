@@ -167,6 +167,12 @@ impl ParserContext<'_> {
                         self.parse_tql()
                     }
 
+                    Keyword::DECLARE => self.parse_declare_cursor(),
+
+                    Keyword::FETCH => self.parse_fetch_cursor(),
+
+                    Keyword::CLOSE => self.parse_close_cursor(),
+
                     Keyword::USE => {
                         let _ = self.parser.next_token();
 

@@ -24,6 +24,7 @@ use crate::statements::alter::{AlterDatabase, AlterTable};
 use crate::statements::create::{
     CreateDatabase, CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView,
 };
+use crate::statements::cursor::{CloseCursor, DeclareCursor, FetchCursor};
 use crate::statements::delete::Delete;
 use crate::statements::describe::DescribeTable;
 use crate::statements::drop::{DropDatabase, DropFlow, DropTable, DropView};
@@ -118,6 +119,12 @@ pub enum Statement {
     Use(String),
     // Admin statement(extension)
     Admin(Admin),
+    // DECLARE ... CURSOR FOR ...
+    DeclareCursor(DeclareCursor),
+    // FETCH ... FROM ...
+    FetchCursor(FetchCursor),
+    // CLOSE
+    CloseCursor(CloseCursor),
 }
 
 impl Display for Statement {
@@ -165,6 +172,9 @@ impl Display for Statement {
             Statement::CreateView(s) => s.fmt(f),
             Statement::Use(s) => s.fmt(f),
             Statement::Admin(admin) => admin.fmt(f),
+            Statement::DeclareCursor(s) => s.fmt(f),
+            Statement::FetchCursor(s) => s.fmt(f),
+            Statement::CloseCursor(s) => s.fmt(f),
         }
     }
 }
