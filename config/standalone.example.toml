@@ -15,15 +15,15 @@ init_regions_parallelism = 16
 ## The maximum current queries allowed to be executed. Zero means unlimited.
 max_concurrent_queries = 0
 
+## Enable telemetry to collect anonymous usage data. Enabled by default.
+#+ enable_telemetry = true
+
 ## The runtime options.
 #+ [runtime]
 ## The number of threads to execute the runtime for global read operations.
 #+ global_rt_size = 8
 ## The number of threads to execute the runtime for global write operations.
 #+ compact_rt_size = 4
-
-## Enable telemetry to collect anonymous usage data. Enabled by default.
-#+ enable_telemetry = true
 
 ## The HTTP server options.
 [http]

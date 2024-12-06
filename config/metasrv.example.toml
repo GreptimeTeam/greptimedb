@@ -10,6 +10,12 @@ server_addr = "127.0.0.1:3002"
 ## Store server address default to etcd store.
 store_addrs = ["127.0.0.1:2379"]
 
+## If it's not empty, the metasrv will store all data with this key prefix.
+store_key_prefix = ""
+
+## The datastore for meta server.
+backend = "EtcdStore"
+
 ## Datanode selector type.
 ## - `round_robin` (default value)
 ## - `lease_based`
@@ -20,17 +26,14 @@ selector = "round_robin"
 ## Store data in memory.
 use_memory_store = false
 
-## If it's not empty, the metasrv will store all data with this key prefix.
-store_key_prefix = ""
-
 ## Whether to enable region failover.
 ## This feature is only available on GreptimeDB running on cluster mode and
 ## - Using Remote WAL
 ## - Using shared storage (e.g., s3).
 enable_region_failover = false
 
-## The datastore for meta server.
-backend = "EtcdStore"
+## Whether to enable greptimedb telemetry. Enabled by default.
+#+ enable_telemetry = true
 
 ## The runtime options.
 #+ [runtime]
@@ -38,9 +41,6 @@ backend = "EtcdStore"
 #+ global_rt_size = 8
 ## The number of threads to execute the runtime for global write operations.
 #+ compact_rt_size = 4
-
-## Whether to enable greptimedb telemetry. Enabled by default.
-#+ enable_telemetry = true
 
 ## Procedure storage options.
 [procedure]
