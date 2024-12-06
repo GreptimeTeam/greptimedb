@@ -263,7 +263,7 @@ SHOW CREATE DATABASE test_ttl_db;
 
 ALTER DATABASE test_ttl_db SET 'ttl' = 'instant';
 
-Affected Rows: 0
+Error: 1004(InvalidArguments), Invalid set database option, key: ttl, value: instant
 
 SHOW CREATE TABLE test_ttl;
 
@@ -278,7 +278,7 @@ SHOW CREATE TABLE test_ttl;
 |          |                                         |
 |          | ENGINE=mito                             |
 |          | WITH(                                   |
-|          |   ttl = 'instant'                       |
+|          |   ttl = 'forever'                       |
 |          | )                                       |
 +----------+-----------------------------------------+
 
@@ -289,7 +289,7 @@ SHOW CREATE DATABASE test_ttl_db;
 +-------------+-------------------------------------------+
 | test_ttl_db | CREATE DATABASE IF NOT EXISTS test_ttl_db |
 |             | WITH(                                     |
-|             |   ttl = 'instant'                         |
+|             |   ttl = 'forever'                         |
 |             | )                                         |
 +-------------+-------------------------------------------+
 
@@ -358,4 +358,17 @@ Affected Rows: 0
 DROP DATABASE test_ttl_db;
 
 Affected Rows: 0
+
+-- test both set database to instant and alter ttl to instant for a database is forbidden
+CREATE DATABASE test_ttl_db WITH (ttl = 'instant');
+
+Error: 1002(Unexpected), Failed to parse value instant into key ttl
+
+CREATE DATABASE test_ttl_db_2 WITH (ttl = '1s');
+
+Affected Rows: 1
+
+ALTER DATABASE test_ttl_db_2 SET 'ttl' = 'instant';
+
+Error: 1004(InvalidArguments), Invalid set database option, key: ttl, value: instant
 

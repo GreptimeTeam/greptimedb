@@ -18,11 +18,87 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
-use crate::error::{Error, ParseDurationSnafu};
+use crate::error::{Error, InvalidDatabaseTtlSnafu, ParseDurationSnafu};
 use crate::Timestamp;
 
 pub const INSTANT: &str = "instant";
 pub const FOREVER: &str = "forever";
+
+/// Time To Live for database, which can be `Forever`, or a `Duration`, but can't be `Instant`.
+///
+/// unlike `TimeToLive` which can be `Instant`, `Forever`, or a `Duration`
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatabaseTimeToLive {
+    /// Keep the data forever
+    #[default]
+    Forever,
+    /// Duration to keep the data, this duration should be non-zero
+    #[serde(untagged, with = "humantime_serde")]
+    Duration(Duration),
+}
+
+impl Display for DatabaseTimeToLive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DatabaseTimeToLive::Forever => write!(f, "{}", FOREVER),
+            DatabaseTimeToLive::Duration(d) => write!(f, "{}", humantime::Duration::from(*d)),
+        }
+    }
+}
+
+impl DatabaseTimeToLive {
+    /// Parse a string that is either `forever`, or a duration to `TimeToLive`
+    ///
+    /// note that an empty string or a zero duration(a duration that spans no time) is treat as `forever` too
+    pub fn from_humantime_or_str(s: &str) -> Result<Self, Error> {
+        let ttl = match s.to_lowercase().as_ref() {
+            INSTANT => InvalidDatabaseTtlSnafu.fail()?,
+            FOREVER | "" => Self::Forever,
+            _ => {
+                let d = humantime::parse_duration(s).context(ParseDurationSnafu)?;
+                Self::from(d)
+            }
+        };
+        Ok(ttl)
+    }
+}
+
+impl TryFrom<TimeToLive> for DatabaseTimeToLive {
+    type Error = Error;
+    fn try_from(value: TimeToLive) -> Result<Self, Self::Error> {
+        match value {
+            TimeToLive::Instant => InvalidDatabaseTtlSnafu.fail()?,
+            TimeToLive::Forever => Ok(Self::Forever),
+            TimeToLive::Duration(d) => Ok(Self::from(d)),
+        }
+    }
+}
+
+impl From<DatabaseTimeToLive> for TimeToLive {
+    fn from(value: DatabaseTimeToLive) -> Self {
+        match value {
+            DatabaseTimeToLive::Forever => TimeToLive::Forever,
+            DatabaseTimeToLive::Duration(d) => TimeToLive::from(d),
+        }
+    }
+}
+
+impl From<Duration> for DatabaseTimeToLive {
+    fn from(duration: Duration) -> Self {
+        if duration.is_zero() {
+            Self::Forever
+        } else {
+            Self::Duration(duration)
+        }
+    }
+}
+
+impl From<humantime::Duration> for DatabaseTimeToLive {
+    fn from(duration: humantime::Duration) -> Self {
+        Self::from(*duration)
+    }
+}
 
 /// Time To Live
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Default, Serialize, Deserialize)]
@@ -110,6 +186,33 @@ mod test {
     use super::*;
 
     #[test]
+    fn test_db_ttl_table_ttl() {
+        let ttl = TimeToLive::from(Duration::from_secs(10));
+        let db_ttl: DatabaseTimeToLive = ttl.try_into().unwrap();
+        assert_eq!(db_ttl, DatabaseTimeToLive::from(Duration::from_secs(10)));
+
+        // test 0 duration
+        let ttl = Duration::from_secs(0);
+        let db_ttl: DatabaseTimeToLive = ttl.into();
+        assert_eq!(db_ttl, DatabaseTimeToLive::Forever);
+
+        let ttl = DatabaseTimeToLive::from_humantime_or_str("10s").unwrap();
+        let ttl: TimeToLive = ttl.into();
+        assert_eq!(ttl, TimeToLive::from(Duration::from_secs(10)));
+
+        let ttl = DatabaseTimeToLive::from_humantime_or_str("forever").unwrap();
+        let ttl: TimeToLive = ttl.into();
+        assert_eq!(ttl, TimeToLive::Forever);
+
+        assert!(DatabaseTimeToLive::from_humantime_or_str("instant").is_err());
+
+        // test 0s
+        let ttl = DatabaseTimeToLive::from_humantime_or_str("0s").unwrap();
+        let ttl: TimeToLive = ttl.into();
+        assert_eq!(ttl, TimeToLive::Forever);
+    }
+
+    #[test]
     fn test_serde() {
         let cases = vec![
             ("\"instant\"", TimeToLive::Instant),
@@ -130,6 +233,16 @@ mod test {
                 panic!("Actual serialized: {}, s=`{s}`, err: {:?}", serialized, err)
             });
             assert_eq!(deserialized, expected);
+
+            // test db ttl too
+            if s == "\"instant\"" {
+                assert!(serde_json::from_str::<DatabaseTimeToLive>(s).is_err());
+                continue;
+            }
+
+            let db_ttl: DatabaseTimeToLive = serde_json::from_str(s).unwrap();
+            let re_serialized = serde_json::to_string(&db_ttl).unwrap();
+            assert_eq!(re_serialized, serialized);
         }
     }
 }

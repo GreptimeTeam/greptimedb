@@ -17,7 +17,7 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_time::TimeToLive;
+use common_time::DatabaseTimeToLive;
 use futures::stream::BoxStream;
 use humantime_serde::re::humantime;
 use serde::{Deserialize, Serialize};
@@ -57,7 +57,7 @@ impl Default for SchemaNameKey<'_> {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SchemaNameValue {
     #[serde(default)]
-    pub ttl: Option<TimeToLive>,
+    pub ttl: Option<DatabaseTimeToLive>,
 }
 
 impl Display for SchemaNameValue {
@@ -310,8 +310,6 @@ impl<'a> From<&'a SchemaName> for SchemaNameKey<'a> {
 mod tests {
     use std::time::Duration;
 
-    use common_time::INSTANT;
-
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
 
@@ -329,11 +327,6 @@ mod tests {
             ttl: Some(Duration::from_secs(0).into()),
         };
         assert_eq!("ttl='forever'", schema_value.to_string());
-
-        let schema_value = SchemaNameValue {
-            ttl: Some(TimeToLive::Instant),
-        };
-        assert_eq!("ttl='instant'", schema_value.to_string());
     }
 
     #[test]
@@ -359,23 +352,19 @@ mod tests {
         .unwrap();
         assert_eq!(Some(value), parsed);
 
-        let instant = SchemaNameValue {
-            ttl: Some(TimeToLive::Instant),
-        };
-        let parsed = SchemaNameValue::try_from_raw_value(
-            serde_json::json!({"ttl": INSTANT}).to_string().as_bytes(),
-        )
-        .unwrap();
-        assert_eq!(Some(instant), parsed);
-
         let forever = SchemaNameValue {
-            ttl: Some(TimeToLive::default()),
+            ttl: Some(Default::default()),
         };
         let parsed = SchemaNameValue::try_from_raw_value(
             serde_json::json!({"ttl": "forever"}).to_string().as_bytes(),
         )
         .unwrap();
         assert_eq!(Some(forever), parsed);
+
+        let instant_err = SchemaNameValue::try_from_raw_value(
+            serde_json::json!({"ttl": "instant"}).to_string().as_bytes(),
+        );
+        assert!(instant_err.is_err());
 
         let none = SchemaNameValue::try_from_raw_value("null".as_bytes()).unwrap();
         assert!(none.is_none());

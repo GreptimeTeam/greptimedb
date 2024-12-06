@@ -101,6 +101,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Database's TTL can't be `instant`"))]
+    InvalidDatabaseTtl {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -108,6 +114,7 @@ impl ErrorExt for Error {
         match self {
             Error::ParseDateStr { .. }
             | Error::ParseDuration { .. }
+            | Error::InvalidDatabaseTtl { .. }
             | Error::ParseTimestamp { .. }
             | Error::InvalidTimezoneOffset { .. }
             | Error::Format { .. }

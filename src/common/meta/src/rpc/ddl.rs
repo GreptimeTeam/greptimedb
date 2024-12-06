@@ -35,7 +35,7 @@ use api::v1::{
 };
 use base64::engine::general_purpose;
 use base64::Engine as _;
-use common_time::TimeToLive;
+use common_time::DatabaseTimeToLive;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DefaultOnNull};
@@ -1008,7 +1008,7 @@ impl TryFrom<PbOption> for SetDatabaseOption {
     fn try_from(PbOption { key, value }: PbOption) -> Result<Self> {
         match key.to_ascii_lowercase().as_str() {
             TTL_KEY => {
-                let ttl = TimeToLive::from_humantime_or_str(&value)
+                let ttl = DatabaseTimeToLive::from_humantime_or_str(&value)
                     .map_err(|_| InvalidSetDatabaseOptionSnafu { key, value }.build())?;
 
                 Ok(SetDatabaseOption::Ttl(ttl))
@@ -1020,7 +1020,7 @@ impl TryFrom<PbOption> for SetDatabaseOption {
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum SetDatabaseOption {
-    Ttl(TimeToLive),
+    Ttl(DatabaseTimeToLive),
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]

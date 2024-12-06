@@ -73,3 +73,10 @@ DROP TABLE test_ttl;
 USE public;
 
 DROP DATABASE test_ttl_db;
+
+-- test both set database to instant and alter ttl to instant for a database is forbidden
+CREATE DATABASE test_ttl_db WITH (ttl = 'instant');
+
+CREATE DATABASE test_ttl_db_2 WITH (ttl = '1s');
+
+ALTER DATABASE test_ttl_db_2 SET 'ttl' = 'instant';

@@ -450,7 +450,8 @@ async fn find_ttl(
         .await
         .context(GetSchemaMetadataSnafu)?
         .and_then(|options| options.ttl)
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into();
     Ok(ttl)
 }
 
