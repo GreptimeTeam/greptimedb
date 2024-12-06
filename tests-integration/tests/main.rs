@@ -22,8 +22,9 @@ mod sql;
 mod region_migration;
 
 grpc_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);
+
 http_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);
-// region_failover_tests!(File, S3, S3WithCache, Oss, Azblob);
+
 sql_tests!(File);
 
 region_migration_tests!(File);
