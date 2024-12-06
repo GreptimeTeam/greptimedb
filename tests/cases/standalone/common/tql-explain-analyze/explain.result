@@ -182,9 +182,9 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 |_|_|
 | physical_plan after LimitAggregation_| SAME TEXT AS ABOVE_|
 | physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
-| physical_plan after PipelineChecker_| SAME TEXT AS ABOVE_|
 | physical_plan after WindowedSortRule_| SAME TEXT AS ABOVE_|
 | physical_plan after RemoveDuplicateRule_| SAME TEXT AS ABOVE_|
+| physical_plan after PipelineChecker_| SAME TEXT AS ABOVE_|
 | physical_plan_| PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
 |_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false]_|
 |_|_PromSeriesDivideExec: tags=["k"]_|
