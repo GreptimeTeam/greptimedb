@@ -19,7 +19,7 @@ use table::metadata::TableInfo;
 use table::requests::InsertRequest as TableInsertRequest;
 
 use crate::error::Result;
-use crate::insert::InstantInsertRequests;
+use crate::insert::InstantOrNormalInsertRequests;
 use crate::req_convert::common::partitioner::Partitioner;
 use crate::req_convert::common::{column_schema, row_count};
 
@@ -36,7 +36,10 @@ impl<'a> TableToRegion<'a> {
         }
     }
 
-    pub async fn convert(&self, request: TableInsertRequest) -> Result<InstantInsertRequests> {
+    pub async fn convert(
+        &self,
+        request: TableInsertRequest,
+    ) -> Result<InstantOrNormalInsertRequests> {
         let row_count = row_count(&request.columns_values)?;
         let schema = column_schema(self.table_info, &request.columns_values)?;
         let rows = api::helper::vectors_to_rows(request.columns_values.values(), row_count);
@@ -48,12 +51,12 @@ impl<'a> TableToRegion<'a> {
 
         let requests = RegionInsertRequests { requests };
         if self.table_info.is_ttl_instant_table() {
-            Ok(InstantInsertRequests {
+            Ok(InstantOrNormalInsertRequests {
                 normal_requests: Default::default(),
                 instant_requests: requests,
             })
         } else {
-            Ok(InstantInsertRequests {
+            Ok(InstantOrNormalInsertRequests {
                 normal_requests: requests,
                 instant_requests: Default::default(),
             })

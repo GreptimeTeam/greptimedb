@@ -93,12 +93,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to parse duration: {raw:?}"))]
+    ParseDuration {
+        raw: humantime::DurationError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::ParseDateStr { .. }
+            | Error::ParseDuration { .. }
             | Error::ParseTimestamp { .. }
             | Error::InvalidTimezoneOffset { .. }
             | Error::Format { .. }

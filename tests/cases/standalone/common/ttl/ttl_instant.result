@@ -36,7 +36,9 @@ Affected Rows: 0
 SELECT
        val
 from
-       test_ttl;
+       test_ttl
+ORDER BY
+       val;
 
 ++
 ++
@@ -61,12 +63,15 @@ ADMIN compact_table('test_ttl');
 SELECT
        val
 from
-       test_ttl;
+       test_ttl
+ORDER BY
+       val;
 
 ++
 ++
 
-ALTER TABLE test_ttl UNSET 'ttl';
+ALTER TABLE
+       test_ttl UNSET 'ttl';
 
 Affected Rows: 0
 
@@ -82,7 +87,9 @@ Affected Rows: 3
 SELECT
        val
 from
-       test_ttl;
+       test_ttl
+ORDER BY
+       val;
 
 +-----+
 | val |
@@ -134,7 +141,9 @@ Affected Rows: 3
 SELECT
        val
 from
-       test_ttl;
+       test_ttl
+ORDER BY
+       val;
 
 +-----+
 | val |
@@ -163,7 +172,9 @@ ADMIN compact_table('test_ttl');
 SELECT
        val
 from
-       test_ttl;
+       test_ttl
+ORDER BY
+       val;
 
 +-----+
 | val |
@@ -193,7 +204,9 @@ ADMIN compact_table('test_ttl');
 SELECT
        val
 from
-       test_ttl;
+       test_ttl
+ORDER BY
+       val;
 
 ++
 ++
@@ -217,7 +230,9 @@ Affected Rows: 3
 SELECT
        val
 from
-       test_ttl;
+       test_ttl
+ORDER BY
+       val;
 
 +-----+
 | val |
@@ -253,11 +268,14 @@ ADMIN compact_table('test_ttl');
 SELECT
        val
 from
-       test_ttl;
+       test_ttl
+ORDER BY
+       val;
 
 ++
 ++
 
+-- to makesure alter back and forth from duration to/from instant wouldn't break anything
 ALTER TABLE
        test_ttl
 SET
@@ -277,7 +295,9 @@ Affected Rows: 3
 SELECT
        val
 from
-       test_ttl;
+       test_ttl
+ORDER BY
+       val;
 
 +-----+
 | val |
@@ -307,7 +327,9 @@ ADMIN compact_table('test_ttl');
 SELECT
        val
 from
-       test_ttl;
+       test_ttl
+ORDER BY
+       val;
 
 ++
 ++

@@ -134,7 +134,7 @@ impl fmt::Display for TableOptions {
             key_vals.push(format!("{}={}", WRITE_BUFFER_SIZE_KEY, size));
         }
 
-        if let Some(ttl) = self.ttl.and_then(|ttl| ttl.to_string_opt()) {
+        if let Some(ttl) = self.ttl.map(|ttl| ttl.to_string()) {
             key_vals.push(format!("{}={}", TTL_KEY, ttl));
         }
 
@@ -155,7 +155,7 @@ impl From<&TableOptions> for HashMap<String, String> {
                 write_buffer_size.to_string(),
             );
         }
-        if let Some(ttl_str) = opts.ttl.and_then(|ttl| ttl.to_string_opt()) {
+        if let Some(ttl_str) = opts.ttl.map(|ttl| ttl.to_string()) {
             let _ = res.insert(TTL_KEY.to_string(), ttl_str);
         }
         res.extend(

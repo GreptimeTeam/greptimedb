@@ -101,7 +101,7 @@ impl AutoCreateTableType {
 ///
 /// This is used to split requests for different processing.
 #[derive(Clone)]
-pub struct InstantInsertRequests {
+pub struct InstantOrNormalInsertRequests {
     /// Requests with normal ttl.
     pub normal_requests: RegionInsertRequests,
     /// Requests with ttl=instant.
@@ -293,7 +293,7 @@ impl Inserter {
 impl Inserter {
     async fn do_request(
         &self,
-        requests: InstantInsertRequests,
+        requests: InstantOrNormalInsertRequests,
         ctx: &QueryContextRef,
     ) -> Result<Output> {
         let write_cost = write_meter!(
@@ -308,7 +308,7 @@ impl Inserter {
             ..Default::default()
         });
 
-        let InstantInsertRequests {
+        let InstantOrNormalInsertRequests {
             normal_requests,
             instant_requests,
         } = requests;
@@ -589,6 +589,8 @@ impl Inserter {
             AutoCreateTableType::Physical
             | AutoCreateTableType::Log
             | AutoCreateTableType::LastNonNull => {
+                // note that auto create table shouldn't be ttl instant table
+                // for it's a very unexpected behavior and should be set by user explicitly
                 for create_table in create_tables {
                     let table = self
                         .create_physical_table(create_table, ctx, statement_executor)

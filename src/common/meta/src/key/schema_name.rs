@@ -62,7 +62,7 @@ pub struct SchemaNameValue {
 
 impl Display for SchemaNameValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(ttl) = self.ttl.and_then(|i| i.to_string_opt()) {
+        if let Some(ttl) = self.ttl.map(|i| i.to_string()) {
             write!(f, "ttl='{}'", ttl)?;
         }
 
@@ -94,7 +94,7 @@ impl TryFrom<&HashMap<String, String>> for SchemaNameValue {
 impl From<SchemaNameValue> for HashMap<String, String> {
     fn from(value: SchemaNameValue) -> Self {
         let mut opts = HashMap::new();
-        if let Some(ttl) = value.ttl.and_then(|ttl| ttl.to_string_opt()) {
+        if let Some(ttl) = value.ttl.map(|ttl| ttl.to_string()) {
             opts.insert(OPT_KEY_TTL.to_string(), ttl);
         }
         opts

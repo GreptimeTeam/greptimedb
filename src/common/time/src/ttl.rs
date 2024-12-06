@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::{Error, ParseDurationSnafu};
 use crate::Timestamp;
 
 pub const INSTANT: &str = "instant";
@@ -50,12 +51,13 @@ impl TimeToLive {
     /// Parse a string that is either `instant`, `forever`, or a duration to `TimeToLive`
     ///
     /// note that an empty string or a zero duration(a duration that spans no time) is treat as `forever` too
-    pub fn from_humantime_or_str(s: &str) -> Result<Self, String> {
+    pub fn from_humantime_or_str(s: &str) -> Result<Self, Error> {
         match s.to_lowercase().as_ref() {
             INSTANT => Ok(TimeToLive::Instant),
             FOREVER | "" => Ok(TimeToLive::Forever),
             _ => {
-                let d = humantime::parse_duration(s).map_err(|e| e.to_string())?;
+                let d = humantime::parse_duration(s)
+                    .map_err(|e| ParseDurationSnafu { raw: e }.build())?;
                 Ok(TimeToLive::from(d))
             }
         }
@@ -75,15 +77,6 @@ impl TimeToLive {
         })
     }
 
-    /// Print TimeToLive as string
-    pub fn to_string_opt(&self) -> Option<String> {
-        match self {
-            TimeToLive::Instant => Some(INSTANT.to_string()),
-            TimeToLive::Duration(d) => Some(humantime::format_duration(*d).to_string()),
-            TimeToLive::Forever => Some(FOREVER.to_string()),
-        }
-    }
-
     /// is instant variant
     pub fn is_instant(&self) -> bool {
         matches!(self, TimeToLive::Instant)
@@ -92,14 +85,6 @@ impl TimeToLive {
     /// Is the default value, which is `Forever`
     pub fn is_forever(&self) -> bool {
         matches!(self, TimeToLive::Forever)
-    }
-
-    /// Get duration if it is a duration variant, otherwise return None
-    pub fn get_duration(&self) -> Option<Duration> {
-        match self {
-            TimeToLive::Duration(d) => Some(*d),
-            _ => None,
-        }
     }
 }
 

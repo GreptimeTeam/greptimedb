@@ -1899,12 +1899,9 @@ dependencies = [
  "common-macro",
  "common-test-util",
  "futures",
- "humantime",
- "humantime-serde",
  "paste",
  "pin-project",
  "serde",
- "serde_json",
  "snafu 0.8.5",
  "tokio",
  "toml 0.8.19",
@@ -10915,7 +10912,6 @@ dependencies = [
 name = "session"
 version = "0.11.0"
 dependencies = [
- "ahash 0.8.11",
  "api",
  "arc-swap",
  "auth",
