@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["as_vector","binary_as_vector","parse_f32_vector_from_string","parse_if_constant_string"],"macro":["define_distance_function"],"mod":["cos","dot","l2sq"],"struct":["CosDistanceFunction","DotProductFunction","L2SqDistanceFunction"]};

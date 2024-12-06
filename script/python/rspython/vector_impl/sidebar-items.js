@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["get_concrete_type","pyobj_try_to_typed_val","to_type_error"],"type":["PyVectorRef"]};

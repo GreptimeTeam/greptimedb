@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["region_options_for_metadata_region"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["register_functions"],"mod":["context","default_serializer","options","state"],"struct":["DefaultPlanDecoder","DefaultSerializer","DescribeResult","QueryEngineContext","QueryEngineFactory","QueryEngineState"],"trait":["QueryEngine"],"type":["QueryEngineRef"]};

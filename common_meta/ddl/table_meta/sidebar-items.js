@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["NoopPeerAllocator","TableMetadataAllocator"],"trait":["PeerAllocator"],"type":["PeerAllocatorRef","TableMetadataAllocatorRef"]};

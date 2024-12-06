@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["mysql","postgres"],"trait":["DslTranslator"]};

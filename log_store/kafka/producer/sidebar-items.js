@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PRODUCER_CHANNEL_SIZE","REQUEST_BATCH_SIZE"],"struct":["OrderedBatchProducer"],"trait":["ProducerClient"],"type":["OrderedBatchProducerRef"]};
