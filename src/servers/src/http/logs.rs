@@ -15,9 +15,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::response::{IntoResponse, Response};
-use axum::Extension;
+use axum::{Extension, Json};
 use common_telemetry::tracing;
 use log_query::LogQuery;
 use session::context::{Channel, QueryContext};
@@ -30,7 +30,7 @@ use crate::query_handler::LogQueryHandlerRef;
 pub async fn logs(
     State(handler): State<LogQueryHandlerRef>,
     Extension(mut query_ctx): Extension<QueryContext>,
-    Query(params): Query<LogQuery>,
+    Json(params): Json<LogQuery>,
 ) -> Response {
     let exec_start = Instant::now();
     let db = query_ctx.get_db_string();

@@ -25,7 +25,7 @@ use crate::error::{
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LogQuery {
     /// A fully qualified table name to query logs from.
-    pub table_name: TableName,
+    pub table: TableName,
     /// Specifies the time range for the log query. See [`TimeFilter`] for more details.
     pub time_filter: TimeFilter,
     /// Columns with filters to query.
@@ -39,7 +39,7 @@ pub struct LogQuery {
 impl Default for LogQuery {
     fn default() -> Self {
         Self {
-            table_name: TableName::new("", "", ""),
+            table: TableName::new("", "", ""),
             time_filter: Default::default(),
             columns: vec![],
             limit: None,
@@ -83,8 +83,7 @@ impl TimeFilter {
     /// Validate and canonicalize the time filter.
     ///
     /// This function will try to fill the missing fields and convert all dates to timestamps
-    // false positive
-    #[allow(unused_assignments)]
+    #[allow(unused_assignments)] // false positive
     pub fn canonicalize(&mut self) -> Result<()> {
         let mut start_dt = None;
         let mut end_dt = None;
