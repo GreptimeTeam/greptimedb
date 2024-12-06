@@ -146,7 +146,8 @@ impl Timestamp {
     pub fn add_year_month(&self, interval: IntervalYearMonth) -> Option<Timestamp> {
         let naive_datetime = self.to_chrono_datetime()?;
 
-        let naive_datetime = naive_datetime.checked_add_months(Months::new(interval as u32))?;
+        let naive_datetime =
+            naive_datetime.checked_add_months(Months::new(interval.months as u32))?;
 
         // Have to convert the new timestamp by the current unit.
         Timestamp::from_chrono_datetime(naive_datetime).and_then(|ts| ts.convert_to(self.unit))
@@ -181,7 +182,8 @@ impl Timestamp {
     pub fn sub_year_month(&self, interval: IntervalYearMonth) -> Option<Timestamp> {
         let naive_datetime = self.to_chrono_datetime()?;
 
-        let naive_datetime = naive_datetime.checked_sub_months(Months::new(interval as u32))?;
+        let naive_datetime =
+            naive_datetime.checked_sub_months(Months::new(interval.months as u32))?;
 
         // Have to convert the new timestamp by the current unit.
         Timestamp::from_chrono_datetime(naive_datetime).and_then(|ts| ts.convert_to(self.unit))
