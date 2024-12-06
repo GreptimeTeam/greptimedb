@@ -8,7 +8,7 @@ bind_addr = "127.0.0.1:3002"
 server_addr = "127.0.0.1:3002"
 
 ## Store server address default to etcd store.
-store_addrs = "127.0.0.1:2379"
+store_addrs = ["127.0.0.1:2379"]
 
 ## Datanode selector type.
 ## - `round_robin` (default value)
