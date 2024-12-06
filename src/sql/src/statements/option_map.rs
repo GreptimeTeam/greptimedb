@@ -79,10 +79,18 @@ impl OptionMap {
     pub fn kv_pairs(&self) -> Vec<String> {
         let mut result = Vec::with_capacity(self.options.len() + self.secrets.len());
         for (k, v) in self.options.iter() {
-            result.push(format!("{k} = '{}'", v.escape_default()));
+            if k.contains(".") {
+                result.push(format!("'{k}' = '{}'", v.escape_default()));
+            } else {
+                result.push(format!("{k} = '{}'", v.escape_default()));
+            }
         }
         for (k, _) in self.secrets.iter() {
-            result.push(format!("{k} = '******'"));
+            if k.contains(".") {
+                result.push(format!("'{k}' = '******'"));
+            } else {
+                result.push(format!("{k} = '******'"));
+            }
         }
         result
     }

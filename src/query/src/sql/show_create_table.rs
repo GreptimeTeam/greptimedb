@@ -215,6 +215,7 @@ pub fn create_table_stmt(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use common_time::timestamp::TimeUnit;
     use datatypes::prelude::ConcreteDataType;
@@ -258,13 +259,22 @@ mod tests {
         let catalog_name = "greptime".to_string();
         let regions = vec![0, 1, 2];
 
+        let mut options = table::requests::TableOptions {
+            ttl: Some(Duration::from_secs(30)),
+            ..Default::default()
+        };
+
+        let _ = options
+            .extra_options
+            .insert("compaction.type".to_string(), "twcs".to_string());
+
         let meta = TableMetaBuilder::default()
             .schema(table_schema)
             .primary_key_indices(vec![0, 1])
             .value_indices(vec![2, 3])
             .engine("mito".to_string())
             .next_column_id(0)
-            .options(Default::default())
+            .options(options)
             .created_on(Default::default())
             .region_numbers(regions)
             .build()
@@ -301,7 +311,10 @@ CREATE TABLE IF NOT EXISTS "system_metrics" (
   INVERTED INDEX ("host")
 )
 ENGINE=mito
-"#,
+WITH(
+  'compaction.type' = 'twcs',
+  ttl = '30s'
+)"#,
             sql
         );
     }

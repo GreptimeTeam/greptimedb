@@ -173,28 +173,28 @@ Affected Rows: 0
 
 SHOW CREATE TABLE ato;
 
-+-------+----------------------------------------------------+
-| Table | Create Table                                       |
-+-------+----------------------------------------------------+
-| ato   | CREATE TABLE IF NOT EXISTS "ato" (                 |
-|       |   "i" INT NULL,                                    |
-|       |   "j" TIMESTAMP(3) NOT NULL,                       |
-|       |   TIME INDEX ("j"),                                |
-|       |   PRIMARY KEY ("i")                                |
-|       | )                                                  |
-|       |                                                    |
-|       | ENGINE=mito                                        |
-|       | WITH(                                              |
-|       |   compaction.twcs.max_active_window_files = '2',   |
-|       |   compaction.twcs.max_active_window_runs = '6',    |
-|       |   compaction.twcs.max_inactive_window_files = '2', |
-|       |   compaction.twcs.max_inactive_window_runs = '6',  |
-|       |   compaction.twcs.max_output_file_size = '500MB',  |
-|       |   compaction.twcs.time_window = '2h',              |
-|       |   compaction.type = 'twcs',                        |
-|       |   ttl = '1s'                                       |
-|       | )                                                  |
-+-------+----------------------------------------------------+
++-------+------------------------------------------------------+
+| Table | Create Table                                         |
++-------+------------------------------------------------------+
+| ato   | CREATE TABLE IF NOT EXISTS "ato" (                   |
+|       |   "i" INT NULL,                                      |
+|       |   "j" TIMESTAMP(3) NOT NULL,                         |
+|       |   TIME INDEX ("j"),                                  |
+|       |   PRIMARY KEY ("i")                                  |
+|       | )                                                    |
+|       |                                                      |
+|       | ENGINE=mito                                          |
+|       | WITH(                                                |
+|       |   'compaction.twcs.max_active_window_files' = '2',   |
+|       |   'compaction.twcs.max_active_window_runs' = '6',    |
+|       |   'compaction.twcs.max_inactive_window_files' = '2', |
+|       |   'compaction.twcs.max_inactive_window_runs' = '6',  |
+|       |   'compaction.twcs.max_output_file_size' = '500MB',  |
+|       |   'compaction.twcs.time_window' = '2h',              |
+|       |   'compaction.type' = 'twcs',                        |
+|       |   ttl = '1s'                                         |
+|       | )                                                    |
++-------+------------------------------------------------------+
 
 ALTER TABLE ato UNSET 'compaction.twcs.time_window';
 
@@ -206,27 +206,27 @@ Error: 1004(InvalidArguments), Invalid unset table option request: Invalid set r
 
 SHOW CREATE TABLE ato;
 
-+-------+----------------------------------------------------+
-| Table | Create Table                                       |
-+-------+----------------------------------------------------+
-| ato   | CREATE TABLE IF NOT EXISTS "ato" (                 |
-|       |   "i" INT NULL,                                    |
-|       |   "j" TIMESTAMP(3) NOT NULL,                       |
-|       |   TIME INDEX ("j"),                                |
-|       |   PRIMARY KEY ("i")                                |
-|       | )                                                  |
-|       |                                                    |
-|       | ENGINE=mito                                        |
-|       | WITH(                                              |
-|       |   compaction.twcs.max_active_window_files = '2',   |
-|       |   compaction.twcs.max_active_window_runs = '6',    |
-|       |   compaction.twcs.max_inactive_window_files = '2', |
-|       |   compaction.twcs.max_inactive_window_runs = '6',  |
-|       |   compaction.twcs.max_output_file_size = '500MB',  |
-|       |   compaction.type = 'twcs',                        |
-|       |   ttl = '1s'                                       |
-|       | )                                                  |
-+-------+----------------------------------------------------+
++-------+------------------------------------------------------+
+| Table | Create Table                                         |
++-------+------------------------------------------------------+
+| ato   | CREATE TABLE IF NOT EXISTS "ato" (                   |
+|       |   "i" INT NULL,                                      |
+|       |   "j" TIMESTAMP(3) NOT NULL,                         |
+|       |   TIME INDEX ("j"),                                  |
+|       |   PRIMARY KEY ("i")                                  |
+|       | )                                                    |
+|       |                                                      |
+|       | ENGINE=mito                                          |
+|       | WITH(                                                |
+|       |   'compaction.twcs.max_active_window_files' = '2',   |
+|       |   'compaction.twcs.max_active_window_runs' = '6',    |
+|       |   'compaction.twcs.max_inactive_window_files' = '2', |
+|       |   'compaction.twcs.max_inactive_window_runs' = '6',  |
+|       |   'compaction.twcs.max_output_file_size' = '500MB',  |
+|       |   'compaction.type' = 'twcs',                        |
+|       |   ttl = '1s'                                         |
+|       | )                                                    |
++-------+------------------------------------------------------+
 
 ALTER TABLE ato SET 'compaction.twcs.max_inactive_window_runs'='';
 
@@ -234,50 +234,50 @@ Affected Rows: 0
 
 SHOW CREATE TABLE ato;
 
-+-------+----------------------------------------------------+
-| Table | Create Table                                       |
-+-------+----------------------------------------------------+
-| ato   | CREATE TABLE IF NOT EXISTS "ato" (                 |
-|       |   "i" INT NULL,                                    |
-|       |   "j" TIMESTAMP(3) NOT NULL,                       |
-|       |   TIME INDEX ("j"),                                |
-|       |   PRIMARY KEY ("i")                                |
-|       | )                                                  |
-|       |                                                    |
-|       | ENGINE=mito                                        |
-|       | WITH(                                              |
-|       |   compaction.twcs.max_active_window_files = '2',   |
-|       |   compaction.twcs.max_active_window_runs = '6',    |
-|       |   compaction.twcs.max_inactive_window_files = '2', |
-|       |   compaction.twcs.max_output_file_size = '500MB',  |
-|       |   compaction.type = 'twcs',                        |
-|       |   ttl = '1s'                                       |
-|       | )                                                  |
-+-------+----------------------------------------------------+
++-------+------------------------------------------------------+
+| Table | Create Table                                         |
++-------+------------------------------------------------------+
+| ato   | CREATE TABLE IF NOT EXISTS "ato" (                   |
+|       |   "i" INT NULL,                                      |
+|       |   "j" TIMESTAMP(3) NOT NULL,                         |
+|       |   TIME INDEX ("j"),                                  |
+|       |   PRIMARY KEY ("i")                                  |
+|       | )                                                    |
+|       |                                                      |
+|       | ENGINE=mito                                          |
+|       | WITH(                                                |
+|       |   'compaction.twcs.max_active_window_files' = '2',   |
+|       |   'compaction.twcs.max_active_window_runs' = '6',    |
+|       |   'compaction.twcs.max_inactive_window_files' = '2', |
+|       |   'compaction.twcs.max_output_file_size' = '500MB',  |
+|       |   'compaction.type' = 'twcs',                        |
+|       |   ttl = '1s'                                         |
+|       | )                                                    |
++-------+------------------------------------------------------+
 
 -- SQLNESS ARG restart=true
 SHOW CREATE TABLE ato;
 
-+-------+----------------------------------------------------+
-| Table | Create Table                                       |
-+-------+----------------------------------------------------+
-| ato   | CREATE TABLE IF NOT EXISTS "ato" (                 |
-|       |   "i" INT NULL,                                    |
-|       |   "j" TIMESTAMP(3) NOT NULL,                       |
-|       |   TIME INDEX ("j"),                                |
-|       |   PRIMARY KEY ("i")                                |
-|       | )                                                  |
-|       |                                                    |
-|       | ENGINE=mito                                        |
-|       | WITH(                                              |
-|       |   compaction.twcs.max_active_window_files = '2',   |
-|       |   compaction.twcs.max_active_window_runs = '6',    |
-|       |   compaction.twcs.max_inactive_window_files = '2', |
-|       |   compaction.twcs.max_output_file_size = '500MB',  |
-|       |   compaction.type = 'twcs',                        |
-|       |   ttl = '1s'                                       |
-|       | )                                                  |
-+-------+----------------------------------------------------+
++-------+------------------------------------------------------+
+| Table | Create Table                                         |
++-------+------------------------------------------------------+
+| ato   | CREATE TABLE IF NOT EXISTS "ato" (                   |
+|       |   "i" INT NULL,                                      |
+|       |   "j" TIMESTAMP(3) NOT NULL,                         |
+|       |   TIME INDEX ("j"),                                  |
+|       |   PRIMARY KEY ("i")                                  |
+|       | )                                                    |
+|       |                                                      |
+|       | ENGINE=mito                                          |
+|       | WITH(                                                |
+|       |   'compaction.twcs.max_active_window_files' = '2',   |
+|       |   'compaction.twcs.max_active_window_runs' = '6',    |
+|       |   'compaction.twcs.max_inactive_window_files' = '2', |
+|       |   'compaction.twcs.max_output_file_size' = '500MB',  |
+|       |   'compaction.type' = 'twcs',                        |
+|       |   ttl = '1s'                                         |
+|       | )                                                    |
++-------+------------------------------------------------------+
 
 DROP TABLE ato;
 
