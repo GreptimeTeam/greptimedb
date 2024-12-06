@@ -67,6 +67,7 @@ json5 = "0.4"
 jsonb.workspace = true
 lazy_static.workspace = true
 loki-api = "0.1"
+log-query.workspace = true
 mime_guess = "2.0"
 notify.workspace = true
 object-pool = "0.5"

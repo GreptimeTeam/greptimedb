@@ -6098,6 +6098,7 @@ dependencies = [
  "chrono",
  "common-error",
  "common-macro",
+ "serde",
  "snafu 0.8.5",
  "table",
 ]
@@ -10861,6 +10862,7 @@ dependencies = [
  "json5",
  "jsonb",
  "lazy_static",
+ "log-query",
  "loki-api",
  "mime_guess",
  "mysql_async",

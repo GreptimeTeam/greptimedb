@@ -34,6 +34,7 @@ use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use common_query::Output;
 use headers::HeaderValue;
+use log_query::LogQuery;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
@@ -52,6 +53,7 @@ pub type PromStoreProtocolHandlerRef = Arc<dyn PromStoreProtocolHandler + Send +
 pub type OpenTelemetryProtocolHandlerRef = Arc<dyn OpenTelemetryProtocolHandler + Send + Sync>;
 pub type ScriptHandlerRef = Arc<dyn ScriptHandler + Send + Sync>;
 pub type PipelineHandlerRef = Arc<dyn PipelineHandler + Send + Sync>;
+pub type LogQueryHandlerRef = Arc<dyn LogQueryHandler + Send + Sync>;
 
 #[async_trait]
 pub trait ScriptHandler {
@@ -164,4 +166,10 @@ pub trait PipelineHandler {
         version: PipelineVersion,
         query_ctx: QueryContextRef,
     ) -> Result<Option<()>>;
+}
+
+/// Handle log query requests.
+#[async_trait]
+pub trait LogQueryHandler {
+    async fn query(&self, query: LogQuery, ctx: QueryContextRef) -> Result<Output>;
 }
