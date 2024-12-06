@@ -187,14 +187,32 @@ mod test {
 
     #[test]
     fn test_db_ttl_table_ttl() {
+        // test from ttl to db ttl
         let ttl = TimeToLive::from(Duration::from_secs(10));
         let db_ttl: DatabaseTimeToLive = ttl.try_into().unwrap();
         assert_eq!(db_ttl, DatabaseTimeToLive::from(Duration::from_secs(10)));
+        assert_eq!(TimeToLive::from(db_ttl), ttl);
+
+        let ttl = TimeToLive::from(Duration::from_secs(0));
+        let db_ttl: DatabaseTimeToLive = ttl.try_into().unwrap();
+        assert_eq!(db_ttl, DatabaseTimeToLive::Forever);
+        assert_eq!(TimeToLive::from(db_ttl), ttl);
+
+        let ttl = TimeToLive::Instant;
+        let err_instant = DatabaseTimeToLive::try_from(ttl);
+        assert!(err_instant.is_err());
 
         // test 0 duration
         let ttl = Duration::from_secs(0);
         let db_ttl: DatabaseTimeToLive = ttl.into();
         assert_eq!(db_ttl, DatabaseTimeToLive::Forever);
+
+        let ttl = Duration::from_secs(10);
+        let db_ttl: DatabaseTimeToLive = ttl.into();
+        assert_eq!(
+            db_ttl,
+            DatabaseTimeToLive::Duration(Duration::from_secs(10))
+        );
 
         let ttl = DatabaseTimeToLive::from_humantime_or_str("10s").unwrap();
         let ttl: TimeToLive = ttl.into();
