@@ -20,10 +20,76 @@ use datatypes::prelude::ConcreteDataType;
 use common_meta::key::table_info::TableInfoValue;
 use datatypes::schema::ColumnSchema;
 use itertools::Itertools;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
-use crate::error::{Error, ExternalSnafu};
+use crate::adapter::{TableName, AUTO_CREATED_PLACEHOLDER_TS_COL};
+use crate::error::{Error, ExternalSnafu, TableNotFoundSnafu};
+use crate::expr::GlobalId;
 use crate::repr::{ColumnType, RelationDesc, RelationType};
+use crate::FlowWorkerManager;
+
+impl FlowWorkerManager {
+    /// Fetch table info or create table('s schema) from flow's schema if not exist
+    ///
+    /// will create sink table automatically if not exist
+    /// TODO(discord9): impl that
+    pub(crate) async fn try_fetch_or_create_table(
+        &self,
+        table_name: &TableName,
+    ) -> Result<(bool, Vec<api::v1::ColumnSchema>), Error> {
+        // TODO(discord9): instead of auto build table from request schema, actually build table
+        // before `create flow` to be able to assign pk and ts etc.
+        let (primary_keys, schema, is_ts_placeholder) =
+            if let Some((primary_keys, time_index, schema)) =
+                self.fetch_table_pk_schema(table_name).await?
+            {
+                // check if the last column is the auto created timestamp column, hence the table is auto created from
+                // flow's plan type
+                let is_auto_create = {
+                    let correct_name = schema
+                        .last()
+                        .map(|s| s.name == AUTO_CREATED_PLACEHOLDER_TS_COL)
+                        .unwrap_or(false);
+                    let correct_time_index = time_index == Some(schema.len() - 1);
+                    correct_name && correct_time_index
+                };
+                (primary_keys, schema, is_auto_create)
+            } else {
+                let schema = {
+                    let node_ctx = self.node_context.read().await;
+                    let gid: GlobalId = node_ctx
+                        .table_repr
+                        .get_by_name(table_name)
+                        .map(|x| x.1)
+                        .unwrap();
+                    node_ctx
+                        .schema
+                        .get(&gid)
+                        .with_context(|| TableNotFoundSnafu {
+                            name: format!("Table name = {:?}", table_name),
+                        })?
+                        .clone()
+                };
+                let (pks, tys, is_ts_auto) = self.adjust_auto_created_table_schema(&schema).await?;
+
+                // TODO(discord9): create sink table using pks, column types and is_ts_auto
+
+                (pks, tys, is_ts_auto)
+            };
+        let proto_schema = column_schemas_to_proto(schema, &primary_keys)?;
+        Ok((is_ts_placeholder, proto_schema))
+    }
+
+    /// Create sink table using primary keys and schema
+    pub(crate) async fn create_sink_table(
+        &self,
+        table_name: &TableName,
+        primary_keys: &[String],
+        schema: &[ColumnSchema],
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+}
 
 pub fn table_info_value_to_relation_desc(
     table_info_value: TableInfoValue,
