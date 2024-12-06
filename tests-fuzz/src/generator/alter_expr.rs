@@ -357,7 +357,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_kinds":{"SetTableOptions":{"options":[{"TwcsMaxActiveWindowRuns":14908016120444947142},{"TwcsMaxActiveWindowFiles":5840340123887173415},{"TwcsMaxOutputFileSize":"17324522916573342KiB"}]}}}"#;
+        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_kinds":{"SetTableOptions":{"options":[{"TwcsMaxActiveWindowRuns":14908016120444947142},{"TwcsMaxActiveWindowFiles":5840340123887173415},{"TwcsMaxOutputFileSize":17740311466571102265}]}}}"#;
         assert_eq!(expected, serialized);
 
         let expr = AlterExprUnsetTableOptionsGeneratorBuilder::default()
