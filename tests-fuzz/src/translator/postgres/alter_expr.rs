@@ -121,7 +121,7 @@ mod tests {
     use datatypes::data_type::ConcreteDataType;
 
     use super::AlterTableExprTranslator;
-    use crate::ir::alter_expr::{AlterTableOperation, AlterTableOption};
+    use crate::ir::alter_expr::{AlterTableOperation, AlterTableOption, Ttl};
     use crate::ir::create_expr::ColumnOption;
     use crate::ir::{AlterTableExpr, Column};
     use crate::translator::DslTranslator;
@@ -184,7 +184,7 @@ mod tests {
             table_name: "test".into(),
             alter_kinds: AlterTableOperation::SetTableOptions {
                 options: vec![
-                    AlterTableOption::Ttl(Duration::new_second(60)),
+                    AlterTableOption::Ttl(Ttl::Duration(Duration::new_second(60))),
                     AlterTableOption::TwcsTimeWindow(Duration::new_second(60)),
                     AlterTableOption::TwcsMaxOutputFileSize(ReadableSize::from_str("1GB").unwrap()),
                     AlterTableOption::TwcsMaxActiveWindowFiles(10),

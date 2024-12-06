@@ -196,7 +196,7 @@ mod tests {
     use datatypes::data_type::ConcreteDataType;
 
     use super::TableContext;
-    use crate::ir::alter_expr::{AlterTableOperation, AlterTableOption};
+    use crate::ir::alter_expr::{AlterTableOperation, AlterTableOption, Ttl};
     use crate::ir::create_expr::ColumnOption;
     use crate::ir::{AlterTableExpr, Column, Ident};
 
@@ -269,7 +269,7 @@ mod tests {
         assert_eq!(table_ctx.primary_keys, vec![0, 1]);
 
         // Set table options
-        let ttl_option = AlterTableOption::Ttl(Duration::new_second(10));
+        let ttl_option = AlterTableOption::Ttl(Ttl::Duration(Duration::new_second(60)));
         let expr = AlterTableExpr {
             table_name: "foo".into(),
             alter_kinds: AlterTableOperation::SetTableOptions {

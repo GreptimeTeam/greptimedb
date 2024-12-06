@@ -83,6 +83,7 @@ mod tests {
     use common_time::Duration;
 
     use super::*;
+    use crate::ir::alter_expr::Ttl;
     use crate::ir::AlterTableOption;
 
     #[test]
@@ -96,7 +97,7 @@ mod tests {
         );
         assert_eq!(
             options[1],
-            AlterTableOption::Ttl(Duration::new_second(24 * 60 * 60))
+            AlterTableOption::Ttl(Ttl::Duration(Duration::new_second(24 * 60 * 60)))
         );
     }
 }

@@ -17,7 +17,7 @@ use std::str::FromStr;
 
 use common_base::readable_size::ReadableSize;
 use common_query::AddColumnLocation;
-use common_time::Duration;
+use common_time::{Duration, FOREVER, INSTANT};
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use store_api::mito_engine_options::{
@@ -55,9 +55,27 @@ pub enum AlterTableOperation {
     UnsetTableOptions { keys: Vec<String> },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum Ttl {
+    Duration(Duration),
+    Instant,
+    #[default]
+    Forever,
+}
+
+impl Display for Ttl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Ttl::Duration(d) => write!(f, "{}", d),
+            Ttl::Instant => write!(f, "{}", INSTANT),
+            Ttl::Forever => write!(f, "{}", FOREVER),
+        }
+    }
+}
+
 #[derive(Debug, EnumIter, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AlterTableOption {
-    Ttl(Duration),
+    Ttl(Ttl),
     TwcsTimeWindow(Duration),
     TwcsMaxOutputFileSize(ReadableSize),
     TwcsMaxInactiveWindowFiles(u64),
@@ -83,8 +101,15 @@ impl AlterTableOption {
     fn parse_kv(key: &str, value: &str) -> Result<Self> {
         match key {
             TTL_KEY => {
-                let ttl = humantime::parse_duration(value).unwrap();
-                Ok(AlterTableOption::Ttl(ttl.into()))
+                let ttl = if value.to_lowercase() == INSTANT {
+                    Ttl::Instant
+                } else if value.to_lowercase() == FOREVER {
+                    Ttl::Forever
+                } else {
+                    let duration = humantime::parse_duration(value).unwrap();
+                    Ttl::Duration(duration.into())
+                };
+                Ok(AlterTableOption::Ttl(ttl))
             }
             TWCS_MAX_ACTIVE_WINDOW_RUNS => {
                 let runs = value.parse().unwrap();
@@ -175,14 +200,14 @@ mod tests {
     #[test]
     fn test_parse_kv_pairs() {
         let option_string =
-            "compaction.twcs.max_output_file_size = '1M', compaction.type = 'twcs', ttl = '1day'";
+            "compaction.twcs.max_output_file_size = '1M', compaction.type = 'twcs', ttl = 'forever'";
         let options = AlterTableOption::parse_kv_pairs(option_string).unwrap();
         assert_eq!(options.len(), 2);
         assert_eq!(
             options,
             vec![
                 AlterTableOption::TwcsMaxOutputFileSize(ReadableSize::from_str("1MB").unwrap()),
-                AlterTableOption::Ttl(Duration::new_second(24 * 60 * 60)),
+                AlterTableOption::Ttl(Ttl::Forever),
             ]
         );
 
@@ -203,7 +228,7 @@ mod tests {
             AlterTableOption::TwcsMaxInactiveWindowRuns(10622283085591494074),
             AlterTableOption::TwcsMaxOutputFileSize(ReadableSize::from_str("15686.4PiB").unwrap()),
             AlterTableOption::TwcsTimeWindow(Duration::new_nanosecond(2_061_999_256_000_000)),
-            AlterTableOption::Ttl(Duration::new_millisecond(
+            AlterTableOption::Ttl(Ttl::Duration(Duration::new_millisecond(
                 // A month is 2_630_016 seconds
                 2_630_016 * 1000
                     + 3 * 24 * 60 * 60 * 1000
@@ -211,7 +236,7 @@ mod tests {
                     + 49 * 60 * 1000
                     + 8 * 1000
                     + 279,
-            )),
+            ))),
         ];
         assert_eq!(options, expected);
     }
