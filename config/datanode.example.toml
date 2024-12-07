@@ -13,9 +13,6 @@ require_lease_before_startup = false
 ## By default, it provides services after all regions have been initialized.
 init_regions_in_background = false
 
-## Enable telemetry to collect anonymous usage data.
-enable_telemetry = true
-
 ## Parallelism of initializing regions.
 init_regions_parallelism = 16
 
@@ -42,6 +39,8 @@ rpc_max_recv_message_size = "512MB"
 ## @toml2docs:none-default
 rpc_max_send_message_size = "512MB"
 
+## Enable telemetry to collect anonymous usage data. Enabled by default.
+#+ enable_telemetry = true
 
 ## The HTTP server options.
 [http]
@@ -143,15 +142,15 @@ dir = "/tmp/greptimedb/wal"
 
 ## The size of the WAL segment file.
 ## **It's only used when the provider is `raft_engine`**.
-file_size = "256MB"
+file_size = "128MB"
 
 ## The threshold of the WAL size to trigger a flush.
 ## **It's only used when the provider is `raft_engine`**.
-purge_threshold = "4GB"
+purge_threshold = "1GB"
 
 ## The interval to trigger a flush.
 ## **It's only used when the provider is `raft_engine`**.
-purge_interval = "10m"
+purge_interval = "1m"
 
 ## The read batch size.
 ## **It's only used when the provider is `raft_engine`**.
