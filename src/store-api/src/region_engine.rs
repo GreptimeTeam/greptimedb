@@ -206,16 +206,13 @@ pub struct ScannerProperties {
 
     /// Whether to yield an empty batch to distinguish partition ranges.
     pub distinguish_partition_range: bool,
+
+    /// The target partitions of the scanner. 0 indicates using the number of partitions as target partitions.
+    target_partitions: usize,
 }
 
 impl ScannerProperties {
-    /// Initialize partitions with given parallelism for scanner.
-    pub fn with_parallelism(mut self, parallelism: usize) -> Self {
-        self.partitions = vec![vec![]; parallelism];
-        self
-    }
-
-    /// Set append mode for scanner.
+    /// Sets append mode for scanner.
     pub fn with_append_mode(mut self, append_mode: bool) -> Self {
         self.append_mode = append_mode;
         self
@@ -234,9 +231,24 @@ impl ScannerProperties {
             append_mode,
             total_rows,
             distinguish_partition_range: false,
+            target_partitions: 0,
         }
     }
 
+    /// Updates the properties with the given [PrepareRequest].
+    pub fn prepare(&mut self, request: PrepareRequest) {
+        if let Some(ranges) = request.ranges {
+            self.partitions = ranges;
+        }
+        if let Some(distinguish_partition_range) = request.distinguish_partition_range {
+            self.distinguish_partition_range = distinguish_partition_range;
+        }
+        if let Some(target_partitions) = request.target_partitions {
+            self.target_partitions = target_partitions;
+        }
+    }
+
+    /// Returns the number of actual partitions.
     pub fn num_partitions(&self) -> usize {
         self.partitions.len()
     }
@@ -249,8 +261,44 @@ impl ScannerProperties {
         self.total_rows
     }
 
-    pub fn distinguish_partition_range(&self) -> bool {
-        self.distinguish_partition_range
+    /// Returns the target partitions of the scanner. If it is not set, returns the number of partitions.
+    pub fn target_partitions(&self) -> usize {
+        if self.target_partitions == 0 {
+            self.num_partitions()
+        } else {
+            self.target_partitions
+        }
+    }
+}
+
+/// Request to override the scanner properties.
+#[derive(Default)]
+pub struct PrepareRequest {
+    /// Assigned partition ranges.
+    pub ranges: Option<Vec<Vec<PartitionRange>>>,
+    /// Distringuishes partition range by empty batches.
+    pub distinguish_partition_range: Option<bool>,
+    /// The expected number of target partitions.
+    pub target_partitions: Option<usize>,
+}
+
+impl PrepareRequest {
+    /// Sets the ranges.
+    pub fn with_ranges(mut self, ranges: Vec<Vec<PartitionRange>>) -> Self {
+        self.ranges = Some(ranges);
+        self
+    }
+
+    /// Sets the distinguish partition range flag.
+    pub fn with_distinguish_partition_range(mut self, distinguish_partition_range: bool) -> Self {
+        self.distinguish_partition_range = Some(distinguish_partition_range);
+        self
+    }
+
+    /// Sets the target partitions.
+    pub fn with_target_partitions(mut self, target_partitions: usize) -> Self {
+        self.target_partitions = Some(target_partitions);
+        self
     }
 }
 
@@ -271,11 +319,7 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     /// Prepares the scanner with the given partition ranges.
     ///
     /// This method is for the planner to adjust the scanner's behavior based on the partition ranges.
-    fn prepare(
-        &mut self,
-        ranges: Vec<Vec<PartitionRange>>,
-        distinguish_partition_range: bool,
-    ) -> Result<(), BoxedError>;
+    fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError>;
 
     /// Scans the partition and returns a stream of record batches.
     ///
@@ -431,9 +475,7 @@ impl SinglePartitionScanner {
         Self {
             stream: Mutex::new(Some(stream)),
             schema,
-            properties: ScannerProperties::default()
-                .with_parallelism(1)
-                .with_append_mode(append_mode),
+            properties: ScannerProperties::default().with_append_mode(append_mode),
             metadata,
         }
     }
@@ -454,13 +496,8 @@ impl RegionScanner for SinglePartitionScanner {
         self.schema.clone()
     }
 
-    fn prepare(
-        &mut self,
-        ranges: Vec<Vec<PartitionRange>>,
-        distinguish_partition_range: bool,
-    ) -> Result<(), BoxedError> {
-        self.properties.partitions = ranges;
-        self.properties.distinguish_partition_range = distinguish_partition_range;
+    fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
+        self.properties.prepare(request);
         Ok(())
     }
 

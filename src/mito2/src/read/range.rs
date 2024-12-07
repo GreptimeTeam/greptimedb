@@ -34,6 +34,16 @@ use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 
 const ALL_ROW_GROUPS: i64 = -1;
 
+/// Index and metadata for a memtable or file.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SourceIndex {
+    /// Index of the memtable and file.
+    pub(crate) index: usize,
+    /// Total number of row groups in this source. 0 if the metadata
+    /// is unavailable. We use this to split files.
+    pub(crate) num_row_groups: u64,
+}
+
 /// Index to access a row group.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct RowGroupIndex {
@@ -52,7 +62,7 @@ pub(crate) struct RangeMeta {
     /// The time range of the range.
     pub(crate) time_range: FileTimeRange,
     /// Indices to memtables or files.
-    indices: SmallVec<[usize; 2]>,
+    pub(crate) indices: SmallVec<[SourceIndex; 2]>,
     /// Indices to memtable/file row groups that this range scans.
     pub(crate) row_group_indices: SmallVec<[RowGroupIndex; 2]>,
     /// Estimated number of rows in the range. This can be 0 if the statistics are not available.
@@ -81,12 +91,17 @@ impl RangeMeta {
     }
 
     /// Creates a list of ranges from the `input` for seq scan.
-    pub(crate) fn seq_scan_ranges(input: &ScanInput) -> Vec<RangeMeta> {
+    /// If `compaction` is true, it doesn't split the ranges.
+    pub(crate) fn seq_scan_ranges(input: &ScanInput, compaction: bool) -> Vec<RangeMeta> {
         let mut ranges = Vec::with_capacity(input.memtables.len() + input.files.len());
         Self::push_seq_mem_ranges(&input.memtables, &mut ranges);
         Self::push_seq_file_ranges(input.memtables.len(), &input.files, &mut ranges);
 
         let ranges = group_ranges_for_seq_scan(ranges);
+        if compaction {
+            // We don't split ranges in compaction.
+            return ranges;
+        }
         maybe_split_ranges_for_seq_scan(ranges)
     }
 
@@ -105,13 +120,13 @@ impl RangeMeta {
     }
 
     /// Returns true if the time range of given `meta` overlaps with the time range of this meta.
-    pub(crate) fn overlaps(&self, meta: &RangeMeta) -> bool {
+    fn overlaps(&self, meta: &RangeMeta) -> bool {
         overlaps(&self.time_range, &meta.time_range)
     }
 
     /// Merges given `meta` to this meta.
     /// It assumes that the time ranges overlap and they don't have the same file or memtable index.
-    pub(crate) fn merge(&mut self, mut other: RangeMeta) {
+    fn merge(&mut self, mut other: RangeMeta) {
         debug_assert!(self.overlaps(&other));
         debug_assert!(self.indices.iter().all(|idx| !other.indices.contains(idx)));
         debug_assert!(self
@@ -130,22 +145,28 @@ impl RangeMeta {
 
     /// Returns true if we can split the range into multiple smaller ranges and
     /// still preserve the order for [SeqScan].
-    pub(crate) fn can_split_preserve_order(&self) -> bool {
-        // Only one source and multiple row groups.
-        self.indices.len() == 1 && self.row_group_indices.len() > 1
+    fn can_split_preserve_order(&self) -> bool {
+        self.indices.len() == 1 && self.indices[0].num_row_groups > 1
     }
 
     /// Splits the range if it can preserve the order.
-    pub(crate) fn maybe_split(self, output: &mut Vec<RangeMeta>) {
+    fn maybe_split(self, output: &mut Vec<RangeMeta>) {
         if self.can_split_preserve_order() {
+            let num_row_groups = self.indices[0].num_row_groups;
+            debug_assert_eq!(1, self.row_group_indices.len());
+            debug_assert_eq!(ALL_ROW_GROUPS, self.row_group_indices[0].row_group_index);
+
             output.reserve(self.row_group_indices.len());
-            let num_rows = self.num_rows / self.row_group_indices.len();
+            let num_rows = self.num_rows / num_row_groups as usize;
             // Splits by row group.
-            for index in self.row_group_indices {
+            for row_group_index in 0..num_row_groups {
                 output.push(RangeMeta {
                     time_range: self.time_range,
                     indices: self.indices.clone(),
-                    row_group_indices: smallvec![index],
+                    row_group_indices: smallvec![RowGroupIndex {
+                        index: self.indices[0].index,
+                        row_group_index: row_group_index as i64,
+                    }],
                     num_rows,
                 });
             }
@@ -165,7 +186,10 @@ impl RangeMeta {
                 let num_rows = stats.num_rows() / stats.num_ranges();
                 ranges.push(RangeMeta {
                     time_range,
-                    indices: smallvec![memtable_index],
+                    indices: smallvec![SourceIndex {
+                        index: memtable_index,
+                        num_row_groups: stats.num_ranges() as u64,
+                    }],
                     row_group_indices: smallvec![RowGroupIndex {
                         index: memtable_index,
                         row_group_index: row_group_index as i64,
@@ -199,7 +223,10 @@ impl RangeMeta {
                     let num_rows = parquet_meta.row_group(row_group_index as usize).num_rows();
                     ranges.push(RangeMeta {
                         time_range: time_range.unwrap_or_else(|| file.time_range()),
-                        indices: smallvec![file_index],
+                        indices: smallvec![SourceIndex {
+                            index: file_index,
+                            num_row_groups: file.meta_ref().num_row_groups,
+                        }],
                         row_group_indices: smallvec![RowGroupIndex {
                             index: file_index,
                             row_group_index: row_group_index as i64,
@@ -212,7 +239,10 @@ impl RangeMeta {
                 for row_group_index in 0..file.meta_ref().num_row_groups {
                     ranges.push(RangeMeta {
                         time_range: file.time_range(),
-                        indices: smallvec![file_index],
+                        indices: smallvec![SourceIndex {
+                            index: file_index,
+                            num_row_groups: file.meta_ref().num_row_groups,
+                        }],
                         row_group_indices: smallvec![RowGroupIndex {
                             index: file_index,
                             row_group_index: row_group_index as i64,
@@ -224,7 +254,10 @@ impl RangeMeta {
                 // If we don't known the number of row groups in advance, scan all row groups.
                 ranges.push(RangeMeta {
                     time_range: file.time_range(),
-                    indices: smallvec![file_index],
+                    indices: smallvec![SourceIndex {
+                        index: file_index,
+                        num_row_groups: 0,
+                    }],
                     row_group_indices: smallvec![RowGroupIndex {
                         index: file_index,
                         row_group_index: ALL_ROW_GROUPS,
@@ -245,7 +278,10 @@ impl RangeMeta {
             };
             ranges.push(RangeMeta {
                 time_range,
-                indices: smallvec![i],
+                indices: smallvec![SourceIndex {
+                    index: i,
+                    num_row_groups: stats.num_ranges() as u64,
+                }],
                 row_group_indices: smallvec![RowGroupIndex {
                     index: i,
                     row_group_index: ALL_ROW_GROUPS,
@@ -263,31 +299,18 @@ impl RangeMeta {
         // For non append-only mode, each range only contains one file.
         for (i, file) in files.iter().enumerate() {
             let file_index = num_memtables + i;
-            if file.meta_ref().num_row_groups > 0 {
-                // All row groups share the same time range.
-                let row_group_indices = (0..file.meta_ref().num_row_groups)
-                    .map(|row_group_index| RowGroupIndex {
-                        index: file_index,
-                        row_group_index: row_group_index as i64,
-                    })
-                    .collect();
-                ranges.push(RangeMeta {
-                    time_range: file.time_range(),
-                    indices: smallvec![file_index],
-                    row_group_indices,
-                    num_rows: file.meta_ref().num_rows as usize,
-                });
-            } else {
-                ranges.push(RangeMeta {
-                    time_range: file.time_range(),
-                    indices: smallvec![file_index],
-                    row_group_indices: smallvec![RowGroupIndex {
-                        index: file_index,
-                        row_group_index: ALL_ROW_GROUPS,
-                    }],
-                    num_rows: file.meta_ref().num_rows as usize,
-                });
-            }
+            ranges.push(RangeMeta {
+                time_range: file.time_range(),
+                indices: smallvec![SourceIndex {
+                    index: file_index,
+                    num_row_groups: file.meta_ref().num_row_groups,
+                }],
+                row_group_indices: smallvec![RowGroupIndex {
+                    index: file_index,
+                    row_group_index: ALL_ROW_GROUPS,
+                }],
+                num_rows: file.meta_ref().num_rows as usize,
+            });
         }
     }
 }
@@ -514,7 +537,10 @@ mod tests {
                 );
                 RangeMeta {
                     time_range,
-                    indices: smallvec![*idx],
+                    indices: smallvec![SourceIndex {
+                        index: *idx,
+                        num_row_groups: 0,
+                    }],
                     row_group_indices: smallvec![RowGroupIndex {
                         index: *idx,
                         row_group_index: 0
@@ -527,7 +553,7 @@ mod tests {
         let actual: Vec<_> = output
             .iter()
             .map(|range| {
-                let indices = range.indices.to_vec();
+                let indices = range.indices.iter().map(|index| index.index).collect();
                 let group_indices: Vec<_> = range
                     .row_group_indices
                     .iter()
@@ -578,7 +604,10 @@ mod tests {
     fn test_merge_range() {
         let mut left = RangeMeta {
             time_range: (Timestamp::new_second(1000), Timestamp::new_second(2000)),
-            indices: smallvec![1],
+            indices: smallvec![SourceIndex {
+                index: 1,
+                num_row_groups: 2,
+            }],
             row_group_indices: smallvec![
                 RowGroupIndex {
                     index: 1,
@@ -593,7 +622,10 @@ mod tests {
         };
         let right = RangeMeta {
             time_range: (Timestamp::new_second(800), Timestamp::new_second(1200)),
-            indices: smallvec![2],
+            indices: smallvec![SourceIndex {
+                index: 2,
+                num_row_groups: 2,
+            }],
             row_group_indices: smallvec![
                 RowGroupIndex {
                     index: 2,
@@ -612,7 +644,16 @@ mod tests {
             left,
             RangeMeta {
                 time_range: (Timestamp::new_second(800), Timestamp::new_second(2000)),
-                indices: smallvec![1, 2],
+                indices: smallvec![
+                    SourceIndex {
+                        index: 1,
+                        num_row_groups: 2
+                    },
+                    SourceIndex {
+                        index: 2,
+                        num_row_groups: 2
+                    }
+                ],
                 row_group_indices: smallvec![
                     RowGroupIndex {
                         index: 1,
@@ -640,17 +681,14 @@ mod tests {
     fn test_split_range() {
         let range = RangeMeta {
             time_range: (Timestamp::new_second(1000), Timestamp::new_second(2000)),
-            indices: smallvec![1],
-            row_group_indices: smallvec![
-                RowGroupIndex {
-                    index: 1,
-                    row_group_index: 1
-                },
-                RowGroupIndex {
-                    index: 1,
-                    row_group_index: 2
-                }
-            ],
+            indices: smallvec![SourceIndex {
+                index: 1,
+                num_row_groups: 2,
+            }],
+            row_group_indices: smallvec![RowGroupIndex {
+                index: 1,
+                row_group_index: ALL_ROW_GROUPS,
+            }],
             num_rows: 5,
         };
 
@@ -663,19 +701,25 @@ mod tests {
             &[
                 RangeMeta {
                     time_range: (Timestamp::new_second(1000), Timestamp::new_second(2000)),
-                    indices: smallvec![1],
+                    indices: smallvec![SourceIndex {
+                        index: 1,
+                        num_row_groups: 2,
+                    }],
                     row_group_indices: smallvec![RowGroupIndex {
                         index: 1,
-                        row_group_index: 1
+                        row_group_index: 0
                     },],
                     num_rows: 2,
                 },
                 RangeMeta {
                     time_range: (Timestamp::new_second(1000), Timestamp::new_second(2000)),
-                    indices: smallvec![1],
+                    indices: smallvec![SourceIndex {
+                        index: 1,
+                        num_row_groups: 2,
+                    }],
                     row_group_indices: smallvec![RowGroupIndex {
                         index: 1,
-                        row_group_index: 2
+                        row_group_index: 1
                     }],
                     num_rows: 2,
                 }
@@ -687,7 +731,16 @@ mod tests {
     fn test_not_split_range() {
         let range = RangeMeta {
             time_range: (Timestamp::new_second(1000), Timestamp::new_second(2000)),
-            indices: smallvec![1, 2],
+            indices: smallvec![
+                SourceIndex {
+                    index: 1,
+                    num_row_groups: 1,
+                },
+                SourceIndex {
+                    index: 2,
+                    num_row_groups: 1,
+                }
+            ],
             row_group_indices: smallvec![
                 RowGroupIndex {
                     index: 1,
@@ -711,31 +764,49 @@ mod tests {
     fn test_maybe_split_ranges() {
         let ranges = vec![
             RangeMeta {
+                time_range: (Timestamp::new_second(0), Timestamp::new_second(500)),
+                indices: smallvec![SourceIndex {
+                    index: 0,
+                    num_row_groups: 1,
+                }],
+                row_group_indices: smallvec![RowGroupIndex {
+                    index: 0,
+                    row_group_index: 0,
+                },],
+                num_rows: 4,
+            },
+            RangeMeta {
                 time_range: (Timestamp::new_second(1000), Timestamp::new_second(2000)),
-                indices: smallvec![1],
-                row_group_indices: smallvec![
-                    RowGroupIndex {
-                        index: 1,
-                        row_group_index: 0
-                    },
-                    RowGroupIndex {
-                        index: 1,
-                        row_group_index: 1
-                    }
-                ],
+                indices: smallvec![SourceIndex {
+                    index: 1,
+                    num_row_groups: 2,
+                }],
+                row_group_indices: smallvec![RowGroupIndex {
+                    index: 1,
+                    row_group_index: ALL_ROW_GROUPS,
+                },],
                 num_rows: 4,
             },
             RangeMeta {
                 time_range: (Timestamp::new_second(3000), Timestamp::new_second(4000)),
-                indices: smallvec![2, 3],
+                indices: smallvec![
+                    SourceIndex {
+                        index: 2,
+                        num_row_groups: 2,
+                    },
+                    SourceIndex {
+                        index: 3,
+                        num_row_groups: 0,
+                    }
+                ],
                 row_group_indices: smallvec![
                     RowGroupIndex {
                         index: 2,
-                        row_group_index: 0
+                        row_group_index: ALL_ROW_GROUPS,
                     },
                     RowGroupIndex {
                         index: 3,
-                        row_group_index: 0
+                        row_group_index: ALL_ROW_GROUPS,
                     }
                 ],
                 num_rows: 5,
@@ -746,8 +817,23 @@ mod tests {
             output,
             vec![
                 RangeMeta {
+                    time_range: (Timestamp::new_second(0), Timestamp::new_second(500)),
+                    indices: smallvec![SourceIndex {
+                        index: 0,
+                        num_row_groups: 1,
+                    }],
+                    row_group_indices: smallvec![RowGroupIndex {
+                        index: 0,
+                        row_group_index: 0
+                    },],
+                    num_rows: 4,
+                },
+                RangeMeta {
                     time_range: (Timestamp::new_second(1000), Timestamp::new_second(2000)),
-                    indices: smallvec![1],
+                    indices: smallvec![SourceIndex {
+                        index: 1,
+                        num_row_groups: 2,
+                    }],
                     row_group_indices: smallvec![RowGroupIndex {
                         index: 1,
                         row_group_index: 0
@@ -756,7 +842,10 @@ mod tests {
                 },
                 RangeMeta {
                     time_range: (Timestamp::new_second(1000), Timestamp::new_second(2000)),
-                    indices: smallvec![1],
+                    indices: smallvec![SourceIndex {
+                        index: 1,
+                        num_row_groups: 2,
+                    }],
                     row_group_indices: smallvec![RowGroupIndex {
                         index: 1,
                         row_group_index: 1
@@ -765,15 +854,24 @@ mod tests {
                 },
                 RangeMeta {
                     time_range: (Timestamp::new_second(3000), Timestamp::new_second(4000)),
-                    indices: smallvec![2, 3],
+                    indices: smallvec![
+                        SourceIndex {
+                            index: 2,
+                            num_row_groups: 2
+                        },
+                        SourceIndex {
+                            index: 3,
+                            num_row_groups: 0,
+                        }
+                    ],
                     row_group_indices: smallvec![
                         RowGroupIndex {
                             index: 2,
-                            row_group_index: 0
+                            row_group_index: ALL_ROW_GROUPS,
                         },
                         RowGroupIndex {
                             index: 3,
-                            row_group_index: 0
+                            row_group_index: ALL_ROW_GROUPS,
                         }
                     ],
                     num_rows: 5,

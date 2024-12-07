@@ -597,9 +597,8 @@ impl<'a> CompactionSstReaderBuilder<'a> {
                 scan_input.with_predicate(time_range_to_predicate(time_range, &self.metadata)?);
         }
 
-        SeqScan::new(scan_input)
-            .with_compaction()
-            .build_reader()
+        SeqScan::new(scan_input, true)
+            .build_reader_for_compaction()
             .await
     }
 }
