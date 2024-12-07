@@ -33,7 +33,7 @@ use ::auth::UserProviderRef;
 use derive_builder::Builder;
 use pgwire::api::auth::ServerParameterProvider;
 use pgwire::api::copy::NoopCopyHandler;
-use pgwire::api::{ClientInfo, PgWireHandlerFactory};
+use pgwire::api::{ClientInfo, PgWireServerHandlers};
 pub use server::PostgresServer;
 use session::context::Channel;
 use session::Session;
@@ -90,11 +90,12 @@ pub(crate) struct MakePostgresServerHandler {
 
 pub(crate) struct PostgresServerHandler(Arc<PostgresServerHandlerInner>);
 
-impl PgWireHandlerFactory for PostgresServerHandler {
+impl PgWireServerHandlers for PostgresServerHandler {
     type StartupHandler = PostgresServerHandlerInner;
     type SimpleQueryHandler = PostgresServerHandlerInner;
     type ExtendedQueryHandler = PostgresServerHandlerInner;
     type CopyHandler = NoopCopyHandler;
+    type ErrorHandler = PostgresServerHandlerInner;
 
     fn simple_query_handler(&self) -> Arc<Self::SimpleQueryHandler> {
         self.0.clone()
@@ -110,6 +111,10 @@ impl PgWireHandlerFactory for PostgresServerHandler {
 
     fn copy_handler(&self) -> Arc<Self::CopyHandler> {
         Arc::new(NoopCopyHandler)
+    }
+
+    fn error_handler(&self) -> Arc<Self::ErrorHandler> {
+        self.0.clone()
     }
 }
 
