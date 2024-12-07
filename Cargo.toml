@@ -4,6 +4,7 @@ members = [
     "src/auth",
     "src/cache",
     "src/catalog",
+    "src/cli",
     "src/client",
     "src/cmd",
     "src/common/base",
@@ -40,6 +41,7 @@ members = [
     "src/flow",
     "src/frontend",
     "src/index",
+    "src/log-query",
     "src/log-store",
     "src/meta-client",
     "src/meta-srv",
@@ -199,6 +201,7 @@ api = { path = "src/api" }
 auth = { path = "src/auth" }
 cache = { path = "src/cache" }
 catalog = { path = "src/catalog" }
+cli = { path = "src/cli" }
 client = { path = "src/client" }
 cmd = { path = "src/cmd", default-features = false }
 common-base = { path = "src/common/base" }

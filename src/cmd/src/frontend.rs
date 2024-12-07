@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
+use catalog::information_extension::DistributedInformationExtension;
 use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use clap::Parser;
 use client::client_manager::NodeClients;
@@ -46,7 +47,7 @@ use crate::error::{
     Result, StartFrontendSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{log_versions, App, DistributedInformationExtension};
+use crate::{log_versions, App};
 
 type FrontendOptions = GreptimeOptions<frontend::frontend::FrontendOptions>;
 

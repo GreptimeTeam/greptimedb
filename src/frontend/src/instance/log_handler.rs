@@ -24,19 +24,15 @@ use servers::error::{
     AuthSnafu, Error as ServerError, ExecuteGrpcRequestSnafu, PipelineSnafu, Result as ServerResult,
 };
 use servers::interceptor::{LogIngestInterceptor, LogIngestInterceptorRef};
-use servers::query_handler::LogHandler;
+use servers::query_handler::PipelineHandler;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
 use crate::instance::Instance;
 
 #[async_trait]
-impl LogHandler for Instance {
-    async fn insert_logs(
-        &self,
-        log: RowInsertRequests,
-        ctx: QueryContextRef,
-    ) -> ServerResult<Output> {
+impl PipelineHandler for Instance {
+    async fn insert(&self, log: RowInsertRequests, ctx: QueryContextRef) -> ServerResult<Output> {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()

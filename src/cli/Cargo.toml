@@ -1,18 +1,8 @@
 [package]
-name = "cmd"
+name = "cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-default-run = "greptime"
-
-[[bin]]
-name = "greptime"
-path = "src/bin/greptime.rs"
-
-[features]
-default = ["python", "servers/pprof", "servers/mem-prof"]
-tokio-console = ["common-telemetry/tokio-console"]
-python = ["frontend/python"]
 
 [lints]
 workspace = true
@@ -25,7 +15,6 @@ cache.workspace = true
 catalog.workspace = true
 chrono.workspace = true
 clap.workspace = true
-cli.workspace = true
 client.workspace = true
 common-base.workspace = true
 common-catalog.workspace = true
@@ -45,46 +34,27 @@ common-telemetry = { workspace = true, features = [
 common-time.workspace = true
 common-version.workspace = true
 common-wal.workspace = true
-datanode.workspace = true
 datatypes.workspace = true
 either = "1.8"
 etcd-client.workspace = true
-file-engine.workspace = true
-flow.workspace = true
-frontend = { workspace = true, default-features = false }
 futures.workspace = true
-human-panic = "2.0"
 humantime.workspace = true
-lazy_static.workspace = true
 meta-client.workspace = true
-meta-srv.workspace = true
-mito2.workspace = true
-moka.workspace = true
 nu-ansi-term = "0.46"
-plugins.workspace = true
-prometheus.workspace = true
-prost.workspace = true
 query.workspace = true
 rand.workspace = true
-regex.workspace = true
 reqwest.workspace = true
 rustyline = "10.1"
 serde.workspace = true
 serde_json.workspace = true
 servers.workspace = true
 session.workspace = true
-similar-asserts.workspace = true
 snafu.workspace = true
 store-api.workspace = true
 substrait.workspace = true
 table.workspace = true
 tokio.workspace = true
-toml.workspace = true
-tonic.workspace = true
 tracing-appender.workspace = true
-
-[target.'cfg(not(windows))'.dependencies]
-tikv-jemallocator = "0.6"
 
 [dev-dependencies]
 client = { workspace = true, features = ["testing"] }
@@ -93,6 +63,3 @@ common-version.workspace = true
 serde.workspace = true
 temp-env = "0.3"
 tempfile.workspace = true
-
-[target.'cfg(not(windows))'.dev-dependencies]
-rexpect = "0.5"

@@ -12,14 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod cli;
-mod datanode;
-mod frontend;
-mod meta_srv;
-mod options;
+pub mod error;
+mod log_query;
 
-pub use cli::SubCommand;
-pub use datanode::{setup_datanode_plugins, start_datanode_plugins};
-pub use frontend::{setup_frontend_plugins, start_frontend_plugins};
-pub use meta_srv::{setup_metasrv_plugins, start_metasrv_plugins};
-pub use options::PluginOptions;
+pub use log_query::*;

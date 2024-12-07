@@ -72,83 +72,6 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to start datanode"))]
-    StartDatanode {
-        #[snafu(implicit)]
-        location: Location,
-        source: datanode::error::Error,
-    },
-
-    #[snafu(display("Failed to shutdown datanode"))]
-    ShutdownDatanode {
-        #[snafu(implicit)]
-        location: Location,
-        source: datanode::error::Error,
-    },
-
-    #[snafu(display("Failed to start flownode"))]
-    StartFlownode {
-        #[snafu(implicit)]
-        location: Location,
-        source: flow::Error,
-    },
-
-    #[snafu(display("Failed to shutdown flownode"))]
-    ShutdownFlownode {
-        #[snafu(implicit)]
-        location: Location,
-        source: flow::Error,
-    },
-
-    #[snafu(display("Failed to start frontend"))]
-    StartFrontend {
-        #[snafu(implicit)]
-        location: Location,
-        source: frontend::error::Error,
-    },
-
-    #[snafu(display("Failed to shutdown frontend"))]
-    ShutdownFrontend {
-        #[snafu(implicit)]
-        location: Location,
-        source: frontend::error::Error,
-    },
-
-    #[snafu(display("Failed to build cli"))]
-    BuildCli {
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
-    },
-
-    #[snafu(display("Failed to start cli"))]
-    StartCli {
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
-    },
-
-    #[snafu(display("Failed to build meta server"))]
-    BuildMetaServer {
-        #[snafu(implicit)]
-        location: Location,
-        source: meta_srv::error::Error,
-    },
-
-    #[snafu(display("Failed to start meta server"))]
-    StartMetaServer {
-        #[snafu(implicit)]
-        location: Location,
-        source: meta_srv::error::Error,
-    },
-
-    #[snafu(display("Failed to shutdown meta server"))]
-    ShutdownMetaServer {
-        #[snafu(implicit)]
-        location: Location,
-        source: meta_srv::error::Error,
-    },
-
     #[snafu(display("Missing config, msg: {}", msg))]
     MissingConfig {
         msg: String,
@@ -161,14 +84,6 @@ pub enum Error {
         msg: String,
         #[snafu(implicit)]
         location: Location,
-    },
-
-    #[snafu(display("Unsupported selector type: {}", selector_type))]
-    UnsupportedSelectorType {
-        selector_type: String,
-        #[snafu(implicit)]
-        location: Location,
-        source: meta_srv::error::Error,
     },
 
     #[snafu(display("Invalid REPL command: {reason}"))]
@@ -352,17 +267,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::StartDatanode { source, .. } => source.status_code(),
-            Error::StartFrontend { source, .. } => source.status_code(),
-            Error::ShutdownDatanode { source, .. } => source.status_code(),
-            Error::ShutdownFrontend { source, .. } => source.status_code(),
-            Error::StartMetaServer { source, .. } => source.status_code(),
-            Error::ShutdownMetaServer { source, .. } => source.status_code(),
-            Error::BuildMetaServer { source, .. } => source.status_code(),
-            Error::UnsupportedSelectorType { source, .. } => source.status_code(),
-            Error::BuildCli { source, .. } => source.status_code(),
-            Error::StartCli { source, .. } => source.status_code(),
-
             Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {
                 source.status_code()
             }
@@ -401,9 +305,6 @@ impl ErrorExt for Error {
             Error::BuildRuntime { source, .. } => source.status_code(),
 
             Error::CacheRequired { .. } | Error::BuildCacheRegistry { .. } => StatusCode::Internal,
-            Self::StartFlownode { source, .. } | Self::ShutdownFlownode { source, .. } => {
-                source.status_code()
-            }
             Error::MetaClientInit { source, .. } => source.status_code(),
             Error::SchemaNotFound { .. } => StatusCode::DatabaseNotFound,
         }
