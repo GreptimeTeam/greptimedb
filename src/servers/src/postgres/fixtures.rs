@@ -78,14 +78,16 @@ pub(crate) fn process<'a>(query: &str, query_ctx: QueryContextRef) -> Option<Vec
     if START_TRANSACTION_PATTERN.is_match(query) {
         set_transaction_warning(query_ctx);
         if query.to_lowercase().starts_with("begin") {
-            Some(vec![Response::Execution(Tag::new("BEGIN"))])
+            Some(vec![Response::TransactionStart(Tag::new("BEGIN"))])
         } else {
-            Some(vec![Response::Execution(Tag::new("START TRANSACTION"))])
+            Some(vec![Response::TransactionStart(Tag::new(
+                "START TRANSACTION",
+            ))])
         }
     } else if ABORT_TRANSACTION_PATTERN.is_match(query) {
-        Some(vec![Response::Execution(Tag::new("ROLLBACK"))])
+        Some(vec![Response::TransactionEnd(Tag::new("ROLLBACK"))])
     } else if COMMIT_TRANSACTION_PATTERN.is_match(query) {
-        Some(vec![Response::Execution(Tag::new("COMMIT"))])
+        Some(vec![Response::TransactionEnd(Tag::new("COMMIT"))])
     } else if let Some(show_var) = SHOW_PATTERN.captures(query) {
         let show_var = show_var[1].to_lowercase();
         if let Some(value) = VAR_VALUES.get(&show_var.as_ref()) {
