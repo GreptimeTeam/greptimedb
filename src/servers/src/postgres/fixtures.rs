@@ -129,7 +129,9 @@ mod test {
     use super::*;
 
     fn assert_tag(q: &str, t: &str, query_context: QueryContextRef) {
-        if let Response::Execution(tag) = process(q, query_context.clone())
+        if let Response::Execution(tag)
+        | Response::TransactionStart(tag)
+        | Response::TransactionEnd(tag) = process(q, query_context.clone())
             .unwrap_or_else(|| panic!("fail to match {}", q))
             .remove(0)
         {
