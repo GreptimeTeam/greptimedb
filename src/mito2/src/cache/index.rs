@@ -172,12 +172,12 @@ impl IndexKey {
     }
 
     /// Ranges of last page.
-    /// For example, if offset is 1000 and size is 2000, then the last page is 0..904.
+    /// For example, if offset is 1000 and size is 5000 and PAGE_SIZE is 4096, then the last page is 0..904.
     fn offset_to_last_range(_offset: u64, size: u32) -> Range<usize> {
         0..(size % (PAGE_SIZE as u32)) as usize
     }
 
-    pub fn index(file_id: FileId, offset: u64, size: u32) -> Vec<Self> {
+    fn index(file_id: FileId, offset: u64, size: u32) -> Vec<Self> {
         let page_id = Self::offset_to_page_id(offset);
         let page_num = Self::size_to_page_num(size);
         (0..page_num)

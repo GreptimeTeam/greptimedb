@@ -55,7 +55,7 @@ const FILE_TYPE: &str = "file";
 const SELECTOR_RESULT_TYPE: &str = "selector_result";
 
 /// Page size for cache. Currently only used for inverted index cache.
-const PAGE_SIZE: usize = 8192 * 1024; // 4MB
+const PAGE_SIZE: usize = 8192 * 1024; // 8MB
 
 /// Manages cached data for the engine.
 ///
