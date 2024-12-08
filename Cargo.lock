@@ -2051,6 +2051,7 @@ dependencies = [
 name = "common-error"
 version = "0.11.0"
 dependencies = [
+ "http 0.2.12",
  "snafu 0.8.5",
  "strum 0.25.0",
  "tonic 0.11.0",
@@ -4107,6 +4108,7 @@ dependencies = [
  "enum_dispatch",
  "futures",
  "greptime-proto",
+ "http 0.2.12",
  "hydroflow",
  "itertools 0.10.5",
  "lazy_static",

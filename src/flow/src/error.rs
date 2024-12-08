@@ -16,12 +16,14 @@
 
 use std::any::Any;
 
-use common_error::define_into_tonic_status;
 use common_error::ext::BoxedError;
+use common_error::{define_into_tonic_status, from_err_code_msg_to_header};
 use common_macro::stack_trace_debug;
 use common_telemetry::common_error::ext::ErrorExt;
 use common_telemetry::common_error::status_code::StatusCode;
+use http::HeaderValue;
 use snafu::{Location, Snafu};
+use tonic::metadata::MetadataMap;
 
 use crate::adapter::FlowId;
 use crate::expr::EvalError;
@@ -186,6 +188,32 @@ pub enum Error {
     },
 }
 
+/// the outer message is the full error stack, and inner message in header is the last error message that can be show directly to user
+pub fn to_status_with_last_err(err: impl ErrorExt) -> tonic::Status {
+    let msg = err.to_string();
+    let last_err_msg = common_error::ext::StackError::last(&err).to_string();
+    let code = err.status_code() as u32;
+    let header = from_err_code_msg_to_header(
+        code,
+        HeaderValue::from_str(&last_err_msg).unwrap_or_else(|_| {
+            HeaderValue::from_bytes(
+                &last_err_msg
+                    .as_bytes()
+                    .iter()
+                    .flat_map(|b| std::ascii::escape_default(*b))
+                    .collect::<Vec<u8>>(),
+            )
+            .expect("Already escaped string should be valid ascii")
+        }),
+    );
+
+    tonic::Status::with_metadata(
+        tonic::Code::InvalidArgument,
+        msg,
+        MetadataMap::from_headers(header),
+    )
+}
+
 /// Result type for flow module
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -200,9 +228,8 @@ impl ErrorExt for Error {
             | Self::TableNotFoundMeta { .. }
             | Self::FlowNotFound { .. }
             | Self::ListFlows { .. } => StatusCode::TableNotFound,
-            Self::InvalidQuery { .. } | Self::Plan { .. } | Self::Datatypes { .. } => {
-                StatusCode::PlanQuery
-            }
+            Self::Plan { .. } | Self::Datatypes { .. } => StatusCode::PlanQuery,
+            Self::InvalidQuery { .. } => StatusCode::EngineExecuteQuery,
             Self::Unexpected { .. } => StatusCode::Unexpected,
             Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
                 StatusCode::Unsupported
