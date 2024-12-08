@@ -8,7 +8,7 @@ inputs:
     default: 2
     description: "Number of Datanode replicas"
   meta-replicas:
-    default: 3
+    default: 1
     description: "Number of Metasrv replicas"
   image-registry: 
     default: "docker.io"
@@ -58,7 +58,7 @@ runs:
         --set image.tag=${{ inputs.image-tag }} \
         --set base.podTemplate.main.resources.requests.cpu=50m \
         --set base.podTemplate.main.resources.requests.memory=256Mi \
-        --set base.podTemplate.main.resources.limits.cpu=1000m \
+        --set base.podTemplate.main.resources.limits.cpu=2000m \
         --set base.podTemplate.main.resources.limits.memory=2Gi \
         --set frontend.replicas=${{ inputs.frontend-replicas }} \
         --set datanode.replicas=${{ inputs.datanode-replicas }} \
