@@ -269,13 +269,6 @@ jobs:
       - name: Install cargo-gc-bin
         shell: bash
         run: cargo install cargo-gc-bin
-      - name: Check aws-lc-sys will not build
-        shell: bash
-        run: |
-             if cargo tree -i aws-lc-sys -e features | grep -q aws-lc-sys; then
-               echo "Found aws-lc-sys, which has compilation problems on older gcc versions. Please replace it with ring until its building experience improves."
-               exit 1
-             fi
       - name: Build greptime bianry
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
