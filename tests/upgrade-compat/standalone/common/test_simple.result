@@ -41,3 +41,7 @@ SHOW CREATE TABLE system_metrics;
 |                |                                                           |
 +----------------+-----------------------------------------------------------+
 
+DROP TABLE system_metrics;
+
+Affected Rows: 0
+
