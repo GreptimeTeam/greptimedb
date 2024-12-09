@@ -703,7 +703,6 @@ impl Database for GreptimeDB {
                 // use version in dir files
                 let root = get_workspace_root();
                 let new_path = PathBuf::from_iter([&root, version]);
-                println!("DEBUG: {:?}", new_path);
                 *self.env.bins_dir.lock().unwrap() = Some(new_path);
             }
 
