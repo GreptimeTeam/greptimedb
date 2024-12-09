@@ -17,7 +17,6 @@ use axum::response::{IntoResponse, Response};
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use mime_guess::mime;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -27,7 +26,7 @@ use crate::http::{handler, process_with_limit, GreptimeQueryOutput, HttpResponse
 
 /// The json format here is different from the default json output of `GreptimedbV1` result.
 /// `JsonResponse` is intended to make it easier for user to consume data.
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct JsonResponse {
     output: Vec<GreptimeQueryOutput>,
     execution_time_ms: u64,

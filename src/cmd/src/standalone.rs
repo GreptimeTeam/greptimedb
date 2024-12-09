@@ -497,6 +497,7 @@ impl StartCommand {
 
         let datanode = DatanodeBuilder::new(dn_opts, plugins.clone())
             .with_kv_backend(kv_backend.clone())
+            .with_cache_registry(layered_cache_registry.clone())
             .build()
             .await
             .context(StartDatanodeSnafu)?;

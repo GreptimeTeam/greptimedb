@@ -21,7 +21,9 @@ use opendal::raw::{
 };
 use opendal::Result;
 mod read_cache;
-use common_telemetry::info;
+use std::time::Instant;
+
+use common_telemetry::{error, info};
 use read_cache::ReadCache;
 
 /// An opendal layer with local LRU file cache supporting.
@@ -39,17 +41,30 @@ impl<C: Access> Clone for LruCacheLayer<C> {
 }
 
 impl<C: Access> LruCacheLayer<C> {
-    /// Create a `[LruCacheLayer]` with local file cache and capacity in bytes.
-    pub async fn new(file_cache: Arc<C>, capacity: usize) -> Result<Self> {
+    /// Create a [`LruCacheLayer`] with local file cache and capacity in bytes.
+    pub fn new(file_cache: Arc<C>, capacity: usize) -> Result<Self> {
         let read_cache = ReadCache::new(file_cache, capacity);
-        let (entries, bytes) = read_cache.recover_cache().await?;
-
-        info!(
-            "Recovered {} entries and total size {} in bytes for LruCacheLayer",
-            entries, bytes
-        );
-
         Ok(Self { read_cache })
+    }
+
+    /// Recovers cache
+    pub async fn recover_cache(&self, sync: bool) {
+        let now = Instant::now();
+        let moved_read_cache = self.read_cache.clone();
+        let handle = tokio::spawn(async move {
+            match moved_read_cache.recover_cache().await {
+                Ok((entries, bytes)) => info!(
+                    "Recovered {} entries and total size {} in bytes for LruCacheLayer, cost: {:?}",
+                    entries,
+                    bytes,
+                    now.elapsed()
+                ),
+                Err(err) => error!(err; "Failed to recover file cache."),
+            }
+        });
+        if sync {
+            let _ = handle.await;
+        }
     }
 
     /// Returns true when the local cache contains the specific file

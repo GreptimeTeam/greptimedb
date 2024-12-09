@@ -132,10 +132,6 @@ impl GsubProcessor {
                 v: val.clone(),
             }
             .fail(),
-            // Err(format!(
-            //     "{} processor: expect string or array string, but got {val:?}",
-            //     self.kind()
-            // )),
         }
     }
 }

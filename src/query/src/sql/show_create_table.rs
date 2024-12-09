@@ -21,7 +21,6 @@ use datatypes::schema::{
     ColumnDefaultConstraint, ColumnSchema, SchemaRef, COLUMN_FULLTEXT_OPT_KEY_ANALYZER,
     COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COMMENT_KEY,
 };
-use humantime::format_duration;
 use snafu::ResultExt;
 use sql::ast::{ColumnDef, ColumnOption, ColumnOptionDef, Expr, Ident, ObjectName};
 use sql::dialect::GreptimeDbDialect;
@@ -46,13 +45,13 @@ fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptio
             write_buffer_size.to_string(),
         );
     }
-    if let Some(ttl) = table_opts.ttl {
-        options.insert(TTL_KEY.to_string(), format_duration(ttl).to_string());
-    } else if let Some(database_ttl) = schema_options.and_then(|o| o.ttl) {
-        options.insert(
-            TTL_KEY.to_string(),
-            format_duration(database_ttl).to_string(),
-        );
+    if let Some(ttl) = table_opts.ttl.map(|t| t.to_string()) {
+        options.insert(TTL_KEY.to_string(), ttl);
+    } else if let Some(database_ttl) = schema_options
+        .and_then(|o| o.ttl)
+        .map(|ttl| ttl.to_string())
+    {
+        options.insert(TTL_KEY.to_string(), database_ttl);
     };
     for (k, v) in table_opts
         .extra_options

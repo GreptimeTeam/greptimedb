@@ -4,6 +4,7 @@ members = [
     "src/auth",
     "src/cache",
     "src/catalog",
+    "src/cli",
     "src/client",
     "src/cmd",
     "src/common/base",
@@ -40,6 +41,7 @@ members = [
     "src/flow",
     "src/frontend",
     "src/index",
+    "src/log-query",
     "src/log-store",
     "src/meta-client",
     "src/meta-srv",
@@ -167,7 +169,6 @@ rstest = "0.21"
 rstest_reuse = "0.7"
 rust_decimal = "1.33"
 rustc-hash = "2.0"
-schemars = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_with = "3"
@@ -200,6 +201,7 @@ api = { path = "src/api" }
 auth = { path = "src/auth" }
 cache = { path = "src/cache" }
 catalog = { path = "src/catalog" }
+cli = { path = "src/cli" }
 client = { path = "src/client" }
 cmd = { path = "src/cmd", default-features = false }
 common-base = { path = "src/common/base" }

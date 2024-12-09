@@ -165,8 +165,8 @@ async fn test_engine_create_with_options() {
     assert!(engine.is_region_exists(region_id));
     let region = engine.get_region(region_id).unwrap();
     assert_eq!(
-        Duration::from_secs(3600 * 24 * 10),
-        region.version().options.ttl.unwrap()
+        region.version().options.ttl,
+        Some(Duration::from_secs(3600 * 24 * 10).into())
     );
 }
 

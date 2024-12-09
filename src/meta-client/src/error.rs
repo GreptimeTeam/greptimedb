@@ -31,7 +31,11 @@ pub enum Error {
     },
 
     #[snafu(display("{}", msg))]
-    MetaServer { code: StatusCode, msg: String },
+    MetaServer {
+        code: StatusCode,
+        msg: String,
+        tonic_code: tonic::Code,
+    },
 
     #[snafu(display("No leader, should ask leader first"))]
     NoLeader {
@@ -127,6 +131,18 @@ impl ErrorExt for Error {
     }
 }
 
+impl Error {
+    pub fn is_exceeded_size_limit(&self) -> bool {
+        matches!(
+            self,
+            Error::MetaServer {
+                tonic_code: tonic::Code::OutOfRange,
+                ..
+            }
+        )
+    }
+}
+
 // FIXME(dennis): partial duplicated with src/client/src/error.rs
 impl From<Status> for Error {
     fn from(e: Status) -> Self {
@@ -149,6 +165,10 @@ impl From<Status> for Error {
         let msg = get_metadata_value(&e, GREPTIME_DB_HEADER_ERROR_MSG)
             .unwrap_or_else(|| e.message().to_string());
 
-        Self::MetaServer { code, msg }
+        Self::MetaServer {
+            code,
+            msg,
+            tonic_code: e.code(),
+        }
     }
 }

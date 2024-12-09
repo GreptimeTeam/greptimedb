@@ -65,6 +65,7 @@ toml.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]
+cache.workspace = true
 client.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
 common-query.workspace = true

@@ -543,24 +543,29 @@ impl MetaClient {
 #[cfg(test)]
 mod tests {
     use api::v1::meta::{HeartbeatRequest, Peer};
+    use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
+    use rand::Rng;
 
     use super::*;
-    use crate::{error, mocks};
+    use crate::error;
+    use crate::mocks::{self, MockMetaContext};
 
     const TEST_KEY_PREFIX: &str = "__unit_test__meta__";
 
     struct TestClient {
         ns: String,
         client: MetaClient,
+        meta_ctx: MockMetaContext,
     }
 
     impl TestClient {
         async fn new(ns: impl Into<String>) -> Self {
             // can also test with etcd: mocks::mock_client_with_etcdstore("127.0.0.1:2379").await;
-            let client = mocks::mock_client_with_memstore().await;
+            let (client, meta_ctx) = mocks::mock_client_with_memstore().await;
             Self {
                 ns: ns.into(),
                 client,
+                meta_ctx,
             }
         }
 
@@ -584,6 +589,15 @@ mod tests {
                 DeleteRangeRequest::new().with_prefix(format!("{}-{}", TEST_KEY_PREFIX, self.ns));
             let res = self.client.delete_range(req).await;
             let _ = res.unwrap();
+        }
+
+        #[allow(dead_code)]
+        fn kv_backend(&self) -> KvBackendRef {
+            self.meta_ctx.kv_backend.clone()
+        }
+
+        fn in_memory(&self) -> Option<ResettableKvBackendRef> {
+            self.meta_ctx.in_memory.clone()
         }
     }
 
@@ -939,5 +953,38 @@ mod tests {
                 kv.take_value()
             );
         }
+    }
+
+    fn mock_decoder(_kv: KeyValue) -> MetaResult<()> {
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_cluster_client_adaptive_range() {
+        let tx = new_client("test_cluster_client").await;
+        let in_memory = tx.in_memory().unwrap();
+        let cluster_client = tx.client.cluster_client().unwrap();
+        let mut rng = rand::thread_rng();
+
+        // Generates rough 10MB data, which is larger than the default grpc message size limit.
+        for i in 0..10 {
+            let data: Vec<u8> = (0..1024 * 1024).map(|_| rng.gen()).collect();
+            in_memory
+                .put(
+                    PutRequest::new()
+                        .with_key(format!("__prefix/{i}").as_bytes())
+                        .with_value(data.clone()),
+                )
+                .await
+                .unwrap();
+        }
+
+        let req = RangeRequest::new().with_prefix(b"__prefix/");
+        let stream =
+            PaginationStream::new(Arc::new(cluster_client), req, 10, Arc::new(mock_decoder))
+                .into_stream();
+
+        let res = stream.try_collect::<Vec<_>>().await.unwrap();
+        assert_eq!(10, res.len());
     }
 }

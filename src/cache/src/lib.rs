@@ -19,9 +19,9 @@ use std::time::Duration;
 
 use catalog::kvbackend::new_table_cache;
 use common_meta::cache::{
-    new_table_flownode_set_cache, new_table_info_cache, new_table_name_cache,
-    new_table_route_cache, new_view_info_cache, CacheRegistry, CacheRegistryBuilder,
-    LayeredCacheRegistryBuilder,
+    new_schema_cache, new_table_flownode_set_cache, new_table_info_cache, new_table_name_cache,
+    new_table_route_cache, new_table_schema_cache, new_view_info_cache, CacheRegistry,
+    CacheRegistryBuilder, LayeredCacheRegistryBuilder,
 };
 use common_meta::kv_backend::KvBackendRef;
 use moka::future::CacheBuilder;
@@ -37,9 +37,47 @@ pub const TABLE_INFO_CACHE_NAME: &str = "table_info_cache";
 pub const VIEW_INFO_CACHE_NAME: &str = "view_info_cache";
 pub const TABLE_NAME_CACHE_NAME: &str = "table_name_cache";
 pub const TABLE_CACHE_NAME: &str = "table_cache";
+pub const SCHEMA_CACHE_NAME: &str = "schema_cache";
+pub const TABLE_SCHEMA_NAME_CACHE_NAME: &str = "table_schema_name_cache";
 pub const TABLE_FLOWNODE_SET_CACHE_NAME: &str = "table_flownode_set_cache";
 pub const TABLE_ROUTE_CACHE_NAME: &str = "table_route_cache";
 
+/// Builds cache registry for datanode, including:
+/// - Schema cache.
+/// - Table id to schema name cache.
+pub fn build_datanode_cache_registry(kv_backend: KvBackendRef) -> CacheRegistry {
+    // Builds table id schema name cache that never expires.
+    let cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY).build();
+    let table_id_schema_cache = Arc::new(new_table_schema_cache(
+        TABLE_SCHEMA_NAME_CACHE_NAME.to_string(),
+        cache,
+        kv_backend.clone(),
+    ));
+
+    // Builds schema cache
+    let cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
+        .time_to_live(DEFAULT_CACHE_TTL)
+        .time_to_idle(DEFAULT_CACHE_TTI)
+        .build();
+    let schema_cache = Arc::new(new_schema_cache(
+        SCHEMA_CACHE_NAME.to_string(),
+        cache,
+        kv_backend.clone(),
+    ));
+
+    CacheRegistryBuilder::default()
+        .add_cache(table_id_schema_cache)
+        .add_cache(schema_cache)
+        .build()
+}
+
+/// Builds cache registry for frontend and datanode, including:
+/// - Table info cache
+/// - Table name cache
+/// - Table route cache
+/// - Table flow node cache
+/// - View cache
+/// - Schema cache
 pub fn build_fundamental_cache_registry(kv_backend: KvBackendRef) -> CacheRegistry {
     // Builds table info cache
     let cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
@@ -95,12 +133,30 @@ pub fn build_fundamental_cache_registry(kv_backend: KvBackendRef) -> CacheRegist
         kv_backend.clone(),
     ));
 
+    // Builds schema cache
+    let cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
+        .time_to_live(DEFAULT_CACHE_TTL)
+        .time_to_idle(DEFAULT_CACHE_TTI)
+        .build();
+    let schema_cache = Arc::new(new_schema_cache(
+        SCHEMA_CACHE_NAME.to_string(),
+        cache,
+        kv_backend.clone(),
+    ));
+
+    let table_id_schema_cache = Arc::new(new_table_schema_cache(
+        TABLE_SCHEMA_NAME_CACHE_NAME.to_string(),
+        CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY).build(),
+        kv_backend,
+    ));
     CacheRegistryBuilder::default()
         .add_cache(table_info_cache)
         .add_cache(table_name_cache)
         .add_cache(table_route_cache)
         .add_cache(view_info_cache)
         .add_cache(table_flownode_set_cache)
+        .add_cache(schema_cache)
+        .add_cache(table_id_schema_cache)
         .build()
 }
 

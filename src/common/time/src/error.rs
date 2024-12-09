@@ -93,12 +93,28 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to parse duration"))]
+    ParseDuration {
+        #[snafu(source)]
+        error: humantime::DurationError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Database's TTL can't be `instant`"))]
+    InvalidDatabaseTtl {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::ParseDateStr { .. }
+            | Error::ParseDuration { .. }
+            | Error::InvalidDatabaseTtl { .. }
             | Error::ParseTimestamp { .. }
             | Error::InvalidTimezoneOffset { .. }
             | Error::Format { .. }

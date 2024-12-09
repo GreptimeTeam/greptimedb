@@ -24,7 +24,8 @@ pub use registry::{
     LayeredCacheRegistryBuilder, LayeredCacheRegistryRef,
 };
 pub use table::{
-    new_table_info_cache, new_table_name_cache, new_table_route_cache, new_view_info_cache,
-    TableInfoCache, TableInfoCacheRef, TableNameCache, TableNameCacheRef, TableRoute,
-    TableRouteCache, TableRouteCacheRef, ViewInfoCache, ViewInfoCacheRef,
+    new_schema_cache, new_table_info_cache, new_table_name_cache, new_table_route_cache,
+    new_table_schema_cache, new_view_info_cache, SchemaCache, SchemaCacheRef, TableInfoCache,
+    TableInfoCacheRef, TableNameCache, TableNameCacheRef, TableRoute, TableRouteCache,
+    TableRouteCacheRef, TableSchemaCache, TableSchemaCacheRef, ViewInfoCache, ViewInfoCacheRef,
 };

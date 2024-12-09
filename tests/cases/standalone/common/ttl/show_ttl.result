@@ -1,0 +1,374 @@
+CREATE DATABASE test_ttl_db WITH (ttl = '1 second');
+
+Affected Rows: 1
+
+USE test_ttl_db;
+
+Affected Rows: 0
+
+CREATE TABLE test_ttl(ts TIMESTAMP TIME INDEX, val INT);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test_ttl;
+
++----------+-----------------------------------------+
+| Table    | Create Table                            |
++----------+-----------------------------------------+
+| test_ttl | CREATE TABLE IF NOT EXISTS "test_ttl" ( |
+|          |   "ts" TIMESTAMP(3) NOT NULL,           |
+|          |   "val" INT NULL,                       |
+|          |   TIME INDEX ("ts")                     |
+|          | )                                       |
+|          |                                         |
+|          | ENGINE=mito                             |
+|          | WITH(                                   |
+|          |   ttl = '1s'                            |
+|          | )                                       |
++----------+-----------------------------------------+
+
+SHOW CREATE DATABASE test_ttl_db;
+
++-------------+-------------------------------------------+
+| Database    | Create Database                           |
++-------------+-------------------------------------------+
+| test_ttl_db | CREATE DATABASE IF NOT EXISTS test_ttl_db |
+|             | WITH(                                     |
+|             |   ttl = '1s'                              |
+|             | )                                         |
++-------------+-------------------------------------------+
+
+ALTER DATABASE test_ttl_db SET ttl = '1 day';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test_ttl;
+
++----------+-----------------------------------------+
+| Table    | Create Table                            |
++----------+-----------------------------------------+
+| test_ttl | CREATE TABLE IF NOT EXISTS "test_ttl" ( |
+|          |   "ts" TIMESTAMP(3) NOT NULL,           |
+|          |   "val" INT NULL,                       |
+|          |   TIME INDEX ("ts")                     |
+|          | )                                       |
+|          |                                         |
+|          | ENGINE=mito                             |
+|          | WITH(                                   |
+|          |   ttl = '1day'                          |
+|          | )                                       |
++----------+-----------------------------------------+
+
+SHOW CREATE DATABASE test_ttl_db;
+
++-------------+-------------------------------------------+
+| Database    | Create Database                           |
++-------------+-------------------------------------------+
+| test_ttl_db | CREATE DATABASE IF NOT EXISTS test_ttl_db |
+|             | WITH(                                     |
+|             |   ttl = '1day'                            |
+|             | )                                         |
++-------------+-------------------------------------------+
+
+ALTER TABLE test_ttl SET 'ttl' = '6 hours';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test_ttl;
+
++----------+-----------------------------------------+
+| Table    | Create Table                            |
++----------+-----------------------------------------+
+| test_ttl | CREATE TABLE IF NOT EXISTS "test_ttl" ( |
+|          |   "ts" TIMESTAMP(3) NOT NULL,           |
+|          |   "val" INT NULL,                       |
+|          |   TIME INDEX ("ts")                     |
+|          | )                                       |
+|          |                                         |
+|          | ENGINE=mito                             |
+|          | WITH(                                   |
+|          |   ttl = '6h'                            |
+|          | )                                       |
++----------+-----------------------------------------+
+
+ALTER TABLE test_ttl SET 'ttl' = 'instant';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test_ttl;
+
++----------+-----------------------------------------+
+| Table    | Create Table                            |
++----------+-----------------------------------------+
+| test_ttl | CREATE TABLE IF NOT EXISTS "test_ttl" ( |
+|          |   "ts" TIMESTAMP(3) NOT NULL,           |
+|          |   "val" INT NULL,                       |
+|          |   TIME INDEX ("ts")                     |
+|          | )                                       |
+|          |                                         |
+|          | ENGINE=mito                             |
+|          | WITH(                                   |
+|          |   ttl = 'instant'                       |
+|          | )                                       |
++----------+-----------------------------------------+
+
+ALTER TABLE test_ttl SET 'ttl' = '0s';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test_ttl;
+
++----------+-----------------------------------------+
+| Table    | Create Table                            |
++----------+-----------------------------------------+
+| test_ttl | CREATE TABLE IF NOT EXISTS "test_ttl" ( |
+|          |   "ts" TIMESTAMP(3) NOT NULL,           |
+|          |   "val" INT NULL,                       |
+|          |   TIME INDEX ("ts")                     |
+|          | )                                       |
+|          |                                         |
+|          | ENGINE=mito                             |
+|          | WITH(                                   |
+|          |   ttl = 'forever'                       |
+|          | )                                       |
++----------+-----------------------------------------+
+
+ALTER TABLE test_ttl SET 'ttl' = 'forever';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test_ttl;
+
++----------+-----------------------------------------+
+| Table    | Create Table                            |
++----------+-----------------------------------------+
+| test_ttl | CREATE TABLE IF NOT EXISTS "test_ttl" ( |
+|          |   "ts" TIMESTAMP(3) NOT NULL,           |
+|          |   "val" INT NULL,                       |
+|          |   TIME INDEX ("ts")                     |
+|          | )                                       |
+|          |                                         |
+|          | ENGINE=mito                             |
+|          | WITH(                                   |
+|          |   ttl = 'forever'                       |
+|          | )                                       |
++----------+-----------------------------------------+
+
+SHOW CREATE DATABASE test_ttl_db;
+
++-------------+-------------------------------------------+
+| Database    | Create Database                           |
++-------------+-------------------------------------------+
+| test_ttl_db | CREATE DATABASE IF NOT EXISTS test_ttl_db |
+|             | WITH(                                     |
+|             |   ttl = '1day'                            |
+|             | )                                         |
++-------------+-------------------------------------------+
+
+ALTER TABLE test_ttl UNSET 'ttl';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test_ttl;
+
++----------+-----------------------------------------+
+| Table    | Create Table                            |
++----------+-----------------------------------------+
+| test_ttl | CREATE TABLE IF NOT EXISTS "test_ttl" ( |
+|          |   "ts" TIMESTAMP(3) NOT NULL,           |
+|          |   "val" INT NULL,                       |
+|          |   TIME INDEX ("ts")                     |
+|          | )                                       |
+|          |                                         |
+|          | ENGINE=mito                             |
+|          | WITH(                                   |
+|          |   ttl = '1day'                          |
+|          | )                                       |
++----------+-----------------------------------------+
+
+SHOW CREATE DATABASE test_ttl_db;
+
++-------------+-------------------------------------------+
+| Database    | Create Database                           |
++-------------+-------------------------------------------+
+| test_ttl_db | CREATE DATABASE IF NOT EXISTS test_ttl_db |
+|             | WITH(                                     |
+|             |   ttl = '1day'                            |
+|             | )                                         |
++-------------+-------------------------------------------+
+
+ALTER DATABASE test_ttl_db SET 'ttl' = 'forever';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test_ttl;
+
++----------+-----------------------------------------+
+| Table    | Create Table                            |
++----------+-----------------------------------------+
+| test_ttl | CREATE TABLE IF NOT EXISTS "test_ttl" ( |
+|          |   "ts" TIMESTAMP(3) NOT NULL,           |
+|          |   "val" INT NULL,                       |
+|          |   TIME INDEX ("ts")                     |
+|          | )                                       |
+|          |                                         |
+|          | ENGINE=mito                             |
+|          | WITH(                                   |
+|          |   ttl = 'forever'                       |
+|          | )                                       |
++----------+-----------------------------------------+
+
+SHOW CREATE DATABASE test_ttl_db;
+
++-------------+-------------------------------------------+
+| Database    | Create Database                           |
++-------------+-------------------------------------------+
+| test_ttl_db | CREATE DATABASE IF NOT EXISTS test_ttl_db |
+|             | WITH(                                     |
+|             |   ttl = 'forever'                         |
+|             | )                                         |
++-------------+-------------------------------------------+
+
+ALTER DATABASE test_ttl_db SET 'ttl' = '0s';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test_ttl;
+
++----------+-----------------------------------------+
+| Table    | Create Table                            |
++----------+-----------------------------------------+
+| test_ttl | CREATE TABLE IF NOT EXISTS "test_ttl" ( |
+|          |   "ts" TIMESTAMP(3) NOT NULL,           |
+|          |   "val" INT NULL,                       |
+|          |   TIME INDEX ("ts")                     |
+|          | )                                       |
+|          |                                         |
+|          | ENGINE=mito                             |
+|          | WITH(                                   |
+|          |   ttl = 'forever'                       |
+|          | )                                       |
++----------+-----------------------------------------+
+
+SHOW CREATE DATABASE test_ttl_db;
+
++-------------+-------------------------------------------+
+| Database    | Create Database                           |
++-------------+-------------------------------------------+
+| test_ttl_db | CREATE DATABASE IF NOT EXISTS test_ttl_db |
+|             | WITH(                                     |
+|             |   ttl = 'forever'                         |
+|             | )                                         |
++-------------+-------------------------------------------+
+
+ALTER DATABASE test_ttl_db SET 'ttl' = 'instant';
+
+Error: 1004(InvalidArguments), Invalid set database option, key: ttl, value: instant
+
+SHOW CREATE TABLE test_ttl;
+
++----------+-----------------------------------------+
+| Table    | Create Table                            |
++----------+-----------------------------------------+
+| test_ttl | CREATE TABLE IF NOT EXISTS "test_ttl" ( |
+|          |   "ts" TIMESTAMP(3) NOT NULL,           |
+|          |   "val" INT NULL,                       |
+|          |   TIME INDEX ("ts")                     |
+|          | )                                       |
+|          |                                         |
+|          | ENGINE=mito                             |
+|          | WITH(                                   |
+|          |   ttl = 'forever'                       |
+|          | )                                       |
++----------+-----------------------------------------+
+
+SHOW CREATE DATABASE test_ttl_db;
+
++-------------+-------------------------------------------+
+| Database    | Create Database                           |
++-------------+-------------------------------------------+
+| test_ttl_db | CREATE DATABASE IF NOT EXISTS test_ttl_db |
+|             | WITH(                                     |
+|             |   ttl = 'forever'                         |
+|             | )                                         |
++-------------+-------------------------------------------+
+
+ALTER DATABASE test_ttl_db UNSET 'ttl';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test_ttl;
+
++----------+-----------------------------------------+
+| Table    | Create Table                            |
++----------+-----------------------------------------+
+| test_ttl | CREATE TABLE IF NOT EXISTS "test_ttl" ( |
+|          |   "ts" TIMESTAMP(3) NOT NULL,           |
+|          |   "val" INT NULL,                       |
+|          |   TIME INDEX ("ts")                     |
+|          | )                                       |
+|          |                                         |
+|          | ENGINE=mito                             |
+|          |                                         |
++----------+-----------------------------------------+
+
+SHOW CREATE DATABASE test_ttl_db;
+
++-------------+-------------------------------------------+
+| Database    | Create Database                           |
++-------------+-------------------------------------------+
+| test_ttl_db | CREATE DATABASE IF NOT EXISTS test_ttl_db |
++-------------+-------------------------------------------+
+
+ALTER TABLE test_ttl UNSET 'ttl';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test_ttl;
+
++----------+-----------------------------------------+
+| Table    | Create Table                            |
++----------+-----------------------------------------+
+| test_ttl | CREATE TABLE IF NOT EXISTS "test_ttl" ( |
+|          |   "ts" TIMESTAMP(3) NOT NULL,           |
+|          |   "val" INT NULL,                       |
+|          |   TIME INDEX ("ts")                     |
+|          | )                                       |
+|          |                                         |
+|          | ENGINE=mito                             |
+|          |                                         |
++----------+-----------------------------------------+
+
+SHOW CREATE DATABASE test_ttl_db;
+
++-------------+-------------------------------------------+
+| Database    | Create Database                           |
++-------------+-------------------------------------------+
+| test_ttl_db | CREATE DATABASE IF NOT EXISTS test_ttl_db |
++-------------+-------------------------------------------+
+
+DROP TABLE test_ttl;
+
+Affected Rows: 0
+
+USE public;
+
+Affected Rows: 0
+
+DROP DATABASE test_ttl_db;
+
+Affected Rows: 0
+
+-- test both set database to instant and alter ttl to instant for a database is forbidden
+CREATE DATABASE test_ttl_db WITH (ttl = 'instant');
+
+Error: 1002(Unexpected), Failed to parse value instant into key ttl
+
+CREATE DATABASE test_ttl_db_2 WITH (ttl = '1s');
+
+Affected Rows: 1
+
+ALTER DATABASE test_ttl_db_2 SET 'ttl' = 'instant';
+
+Error: 1004(InvalidArguments), Invalid set database option, key: ttl, value: instant
+

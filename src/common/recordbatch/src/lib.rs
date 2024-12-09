@@ -15,6 +15,7 @@
 #![feature(never_type)]
 
 pub mod adapter;
+pub mod cursor;
 pub mod error;
 pub mod filter;
 mod recordbatch;

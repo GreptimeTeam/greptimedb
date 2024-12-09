@@ -644,7 +644,6 @@ impl DissectProcessor {
         let mut pos = 0;
 
         let mut appends: HashMap<usize, Vec<(String, u32)>> = HashMap::new();
-        // let mut maps: HashMap<usize, (String,String)> = HashMap::new();
 
         let mut process_name_value = |name: &Name, value: String| {
             let name_index = name.index;
@@ -658,22 +657,6 @@ impl DissectProcessor {
                         .or_default()
                         .push((value, order.unwrap_or_default()));
                 }
-                // Some(StartModifier::MapKey) => match maps.get(&name_index) {
-                //     Some(map_val) => {
-                //         map.insert(value, Value::String(map_val.to_string()));
-                //     }
-                //     None => {
-                //         maps.insert(name_index, value);
-                //     }
-                // },
-                // Some(StartModifier::MapVal) => match maps.get(&name_index) {
-                //     Some(map_key) => {
-                //         map.insert(map_key, Value::String(value));
-                //     }
-                //     None => {
-                //         maps.insert(name_index, value);
-                //     }
-                // },
                 Some(_) => {
                     // do nothing, ignore MapKey and MapVal
                     // because transform can know the key name

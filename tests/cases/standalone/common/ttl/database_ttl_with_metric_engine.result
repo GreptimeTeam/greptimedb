@@ -1,0 +1,123 @@
+CREATE DATABASE test_ttl_db WITH (ttl = '1 second');
+
+Affected Rows: 1
+
+USE test_ttl_db;
+
+Affected Rows: 0
+
+CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+-- It will use the database TTL setting --
+CREATE TABLE test_ttl (ts timestamp time index, val double, host string primary key) engine = metric with ("on_physical_table" = "phy");
+
+Affected Rows: 0
+
+INSERT INTO test_ttl(ts, val, host) VALUES
+       (now(), 1, 'host1'),
+       (now(), 2, 'host2'),
+       (now(), 3, 'host3');
+
+Affected Rows: 3
+
+SELECT val, host FROM test_ttl;
+
++-----+-------+
+| val | host  |
++-----+-------+
+| 2.0 | host2 |
+| 3.0 | host3 |
+| 1.0 | host1 |
++-----+-------+
+
+-- SQLNESS SLEEP 2s
+ADMIN flush_table('phy');
+
++--------------------------+
+| ADMIN flush_table('phy') |
++--------------------------+
+| 0                        |
++--------------------------+
+
+ADMIN compact_table('phy');
+
++----------------------------+
+| ADMIN compact_table('phy') |
++----------------------------+
+| 0                          |
++----------------------------+
+
+--- should be expired --
+SELECT val, host FROM test_ttl;
+
+++
+++
+
+ALTER DATABASE test_ttl_db SET ttl = '1 day';
+
+Affected Rows: 0
+
+INSERT INTO test_ttl(ts, val, host) VALUES
+       (now(), 1, 'host1'),
+       (now(), 2, 'host2'),
+       (now(), 3, 'host3');
+
+Affected Rows: 3
+
+ADMIN flush_table('phy');
+
++--------------------------+
+| ADMIN flush_table('phy') |
++--------------------------+
+| 0                        |
++--------------------------+
+
+ADMIN compact_table('phy');
+
++----------------------------+
+| ADMIN compact_table('phy') |
++----------------------------+
+| 0                          |
++----------------------------+
+
+--- should not be expired --
+SELECT val, host FROM test_ttl;
+
++-----+-------+
+| val | host  |
++-----+-------+
+| 2.0 | host2 |
+| 3.0 | host3 |
+| 1.0 | host1 |
++-----+-------+
+
+-- restart the db, ensure everything is ok
+-- SQLNESS ARG restart=true
+SELECT val, host FROM test_ttl;
+
++-----+-------+
+| val | host  |
++-----+-------+
+| 2.0 | host2 |
+| 3.0 | host3 |
+| 1.0 | host1 |
++-----+-------+
+
+DROP TABLE test_ttl;
+
+Affected Rows: 0
+
+DROP TABLE phy;
+
+Affected Rows: 0
+
+USE public;
+
+Affected Rows: 0
+
+DROP DATABASE test_ttl_db;
+
+Affected Rows: 0
+

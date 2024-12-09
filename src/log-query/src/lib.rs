@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod invalidate_table_cache;
+pub mod error;
+mod log_query;
 
-#[cfg(test)]
-pub(crate) mod tests;
+pub use log_query::*;

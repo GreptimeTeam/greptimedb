@@ -23,13 +23,13 @@ curl https://raw.githubusercontent.com/brendangregg/FlameGraph/master/flamegraph
 Start GreptimeDB instance with environment variables:
 
 ```bash
-MALLOC_CONF=prof:true,lg_prof_interval:28 ./target/debug/greptime standalone start
+MALLOC_CONF=prof:true ./target/debug/greptime standalone start
 ```
 
 Dump memory profiling data through HTTP API:
 
 ```bash
-curl localhost:4000/debug/prof/mem > greptime.hprof
+curl -X POST localhost:4000/debug/prof/mem > greptime.hprof
 ```
 
 You can periodically dump profiling data and compare them to find the delta memory usage.

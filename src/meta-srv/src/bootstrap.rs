@@ -41,6 +41,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 #[cfg(feature = "pg_kvbackend")]
 use tokio_postgres::NoTls;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::server::{Router, TcpIncoming};
 
 use crate::election::etcd::EtcdElection;
@@ -178,14 +179,26 @@ pub async fn bootstrap_metasrv_with_router(
     Ok(())
 }
 
+#[macro_export]
+macro_rules! add_compressed_service {
+    ($builder:expr, $server:expr) => {
+        $builder.add_service(
+            $server
+                .accept_compressed(CompressionEncoding::Gzip)
+                .accept_compressed(CompressionEncoding::Zstd)
+                .send_compressed(CompressionEncoding::Gzip)
+                .send_compressed(CompressionEncoding::Zstd),
+        )
+    };
+}
+
 pub fn router(metasrv: Arc<Metasrv>) -> Router {
-    tonic::transport::Server::builder()
-        .accept_http1(true) // for admin services
-        .add_service(HeartbeatServer::from_arc(metasrv.clone()))
-        .add_service(StoreServer::from_arc(metasrv.clone()))
-        .add_service(ClusterServer::from_arc(metasrv.clone()))
-        .add_service(ProcedureServiceServer::from_arc(metasrv.clone()))
-        .add_service(admin::make_admin_service(metasrv))
+    let mut router = tonic::transport::Server::builder().accept_http1(true); // for admin services
+    let router = add_compressed_service!(router, HeartbeatServer::from_arc(metasrv.clone()));
+    let router = add_compressed_service!(router, StoreServer::from_arc(metasrv.clone()));
+    let router = add_compressed_service!(router, ClusterServer::from_arc(metasrv.clone()));
+    let router = add_compressed_service!(router, ProcedureServiceServer::from_arc(metasrv.clone()));
+    router.add_service(admin::make_admin_service(metasrv))
 }
 
 pub async fn metasrv_builder(

@@ -18,11 +18,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use catalog::kvbackend::CachedKvBackendBuilder;
 use catalog::memory::MemoryCatalogManager;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
+use common_meta::cache::{LayeredCacheRegistry, SchemaCacheRef, TableSchemaCacheRef};
 use common_meta::key::datanode_table::{DatanodeTableManager, DatanodeTableValue};
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
@@ -57,9 +57,9 @@ use tokio::sync::Notify;
 
 use crate::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use crate::error::{
-    self, BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu, MissingKvBackendSnafu,
-    MissingNodeIdSnafu, OpenLogStoreSnafu, Result, ShutdownInstanceSnafu, ShutdownServerSnafu,
-    StartServerSnafu,
+    self, BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu, MissingCacheSnafu,
+    MissingKvBackendSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result, ShutdownInstanceSnafu,
+    ShutdownServerSnafu, StartServerSnafu,
 };
 use crate::event_listener::{
     new_region_server_event_channel, NoopRegionServerEventListener, RegionServerEventListenerRef,
@@ -160,6 +160,7 @@ pub struct DatanodeBuilder {
     plugins: Plugins,
     meta_client: Option<MetaClientRef>,
     kv_backend: Option<KvBackendRef>,
+    cache_registry: Option<Arc<LayeredCacheRegistry>>,
 }
 
 impl DatanodeBuilder {
@@ -171,12 +172,20 @@ impl DatanodeBuilder {
             plugins,
             meta_client: None,
             kv_backend: None,
+            cache_registry: None,
         }
     }
 
     pub fn with_meta_client(self, meta_client: MetaClientRef) -> Self {
         Self {
             meta_client: Some(meta_client),
+            ..self
+        }
+    }
+
+    pub fn with_cache_registry(self, cache_registry: Arc<LayeredCacheRegistry>) -> Self {
+        Self {
+            cache_registry: Some(cache_registry),
             ..self
         }
     }
@@ -209,10 +218,16 @@ impl DatanodeBuilder {
             (Box::new(NoopRegionServerEventListener) as _, None)
         };
 
-        let cached_kv_backend = Arc::new(CachedKvBackendBuilder::new(kv_backend.clone()).build());
+        let cache_registry = self.cache_registry.take().context(MissingCacheSnafu)?;
+        let schema_cache: SchemaCacheRef = cache_registry.get().context(MissingCacheSnafu)?;
+        let table_id_schema_cache: TableSchemaCacheRef =
+            cache_registry.get().context(MissingCacheSnafu)?;
 
-        let schema_metadata_manager =
-            Arc::new(SchemaMetadataManager::new(cached_kv_backend.clone()));
+        let schema_metadata_manager = Arc::new(SchemaMetadataManager::new(
+            kv_backend.clone(),
+            table_id_schema_cache,
+            schema_cache,
+        ));
         let region_server = self
             .new_region_server(schema_metadata_manager, region_event_listener)
             .await?;
@@ -248,7 +263,7 @@ impl DatanodeBuilder {
                     &self.opts,
                     region_server.clone(),
                     meta_client,
-                    cached_kv_backend,
+                    cache_registry,
                 )
                 .await?,
             )
@@ -591,7 +606,9 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
 
+    use cache::build_datanode_cache_registry;
     use common_base::Plugins;
+    use common_meta::cache::LayeredCacheRegistryBuilder;
     use common_meta::key::datanode_table::DatanodeTableManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::KvBackendRef;
@@ -628,13 +645,21 @@ mod tests {
 
         mock_region_server.register_engine(mock_region.clone());
 
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let layered_cache_registry = Arc::new(
+            LayeredCacheRegistryBuilder::default()
+                .add_cache_registry(build_datanode_cache_registry(kv_backend))
+                .build(),
+        );
+
         let builder = DatanodeBuilder::new(
             DatanodeOptions {
                 node_id: Some(0),
                 ..Default::default()
             },
             Plugins::default(),
-        );
+        )
+        .with_cache_registry(layered_cache_registry);
 
         let kv = Arc::new(MemoryKvBackend::default()) as _;
         setup_table_datanode(&kv).await;

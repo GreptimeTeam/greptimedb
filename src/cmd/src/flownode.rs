@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
+use catalog::information_extension::DistributedInformationExtension;
 use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use clap::Parser;
 use client::client_manager::NodeClients;
@@ -22,6 +23,7 @@ use common_base::Plugins;
 use common_config::Configurable;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
+use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::key::flow::FlowMetadataManager;
@@ -30,7 +32,6 @@ use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use common_version::{short_version, version};
 use flow::{FlownodeBuilder, FlownodeInstance, FrontendInvoker};
-use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use meta_client::{MetaClientOptions, MetaClientType};
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
@@ -41,7 +42,7 @@ use crate::error::{
     MissingConfigSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{log_versions, App, DistributedInformationExtension};
+use crate::{log_versions, App};
 
 pub const APP_NAME: &str = "greptime-flownode";
 
@@ -288,9 +289,7 @@ impl StartCommand {
 
         let executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
-            Arc::new(InvalidateTableCacheHandler::new(
-                layered_cache_registry.clone(),
-            )),
+            Arc::new(InvalidateCacheHandler::new(layered_cache_registry.clone())),
         ]);
 
         let heartbeat_task = flow::heartbeat::HeartbeatTask::new(

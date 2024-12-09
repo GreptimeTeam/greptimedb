@@ -51,7 +51,7 @@ pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + 
 pub type PromStoreProtocolHandlerRef = Arc<dyn PromStoreProtocolHandler + Send + Sync>;
 pub type OpenTelemetryProtocolHandlerRef = Arc<dyn OpenTelemetryProtocolHandler + Send + Sync>;
 pub type ScriptHandlerRef = Arc<dyn ScriptHandler + Send + Sync>;
-pub type LogHandlerRef = Arc<dyn LogHandler + Send + Sync>;
+pub type PipelineHandlerRef = Arc<dyn PipelineHandler + Send + Sync>;
 
 #[async_trait]
 pub trait ScriptHandler {
@@ -107,7 +107,7 @@ pub trait PromStoreProtocolHandler {
 }
 
 #[async_trait]
-pub trait OpenTelemetryProtocolHandler: LogHandler {
+pub trait OpenTelemetryProtocolHandler: PipelineHandler {
     /// Handling opentelemetry metrics request
     async fn metrics(
         &self,
@@ -132,14 +132,16 @@ pub trait OpenTelemetryProtocolHandler: LogHandler {
     ) -> Result<Output>;
 }
 
-/// LogHandler is responsible for handling log related requests.
+/// PipelineHandler is responsible for handling pipeline related requests.
 ///
-/// It should be able to insert logs and manage pipelines.
-/// The pipeline is a series of transformations that can be applied to logs.
-/// The pipeline is stored in the database and can be retrieved by name.
+/// The "Pipeline" is a series of transformations that can be applied to unstructured
+/// data like logs. This handler is responsible to manage pipelines and accept data for
+/// processing.
+///
+/// The pipeline is stored in the database and can be retrieved by its name.
 #[async_trait]
-pub trait LogHandler {
-    async fn insert_logs(&self, log: RowInsertRequests, ctx: QueryContextRef) -> Result<Output>;
+pub trait PipelineHandler {
+    async fn insert(&self, input: RowInsertRequests, ctx: QueryContextRef) -> Result<Output>;
 
     async fn get_pipeline(
         &self,

@@ -23,6 +23,7 @@ use common_error::ext::BoxedError;
 use common_telemetry::debug;
 use datafusion::config::ConfigOptions;
 use datafusion::error::DataFusionError;
+use datafusion::optimizer::analyzer::count_wildcard_rule::CountWildcardRule;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::optimizer::common_subexpr_eliminate::CommonSubexprEliminate;
 use datafusion::optimizer::optimize_projections::OptimizeProjections;
@@ -59,6 +60,7 @@ pub async fn apply_df_optimizer(
 ) -> Result<datafusion_expr::LogicalPlan, Error> {
     let cfg = ConfigOptions::new();
     let analyzer = Analyzer::with_rules(vec![
+        Arc::new(CountWildcardRule::new()),
         Arc::new(AvgExpandRule::new()),
         Arc::new(TumbleExpandRule::new()),
         Arc::new(CheckGroupByRule::new()),

@@ -259,9 +259,17 @@ impl<'a> ParserContext<'a> {
 
         let flow_name = self.intern_parse_table_name()?;
 
-        self.parser
-            .expect_token(&Token::make_keyword(SINK))
-            .context(SyntaxSnafu)?;
+        // make `SINK` case in-sensitive
+        if let Token::Word(word) = self.parser.peek_token().token
+            && word.value.eq_ignore_ascii_case(SINK)
+        {
+            self.parser.next_token();
+        } else {
+            Err(ParserError::ParserError(
+                "Expect `SINK` keyword".to_string(),
+            ))
+            .context(SyntaxSnafu)?
+        }
         self.parser
             .expect_keyword(Keyword::TO)
             .context(SyntaxSnafu)?;

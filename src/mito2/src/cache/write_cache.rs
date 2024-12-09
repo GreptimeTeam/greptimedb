@@ -67,11 +67,11 @@ impl WriteCache {
         puffin_manager_factory: PuffinManagerFactory,
         intermediate_manager: IntermediateManager,
     ) -> Result<Self> {
-        let file_cache = FileCache::new(local_store, cache_capacity, ttl);
-        file_cache.recover().await?;
+        let file_cache = Arc::new(FileCache::new(local_store, cache_capacity, ttl));
+        file_cache.recover(false).await;
 
         Ok(Self {
-            file_cache: Arc::new(file_cache),
+            file_cache,
             object_store_manager,
             puffin_manager_factory,
             intermediate_manager,

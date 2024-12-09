@@ -27,6 +27,7 @@ use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{info, warn};
 use snafu::{ensure, ResultExt};
 use tokio::sync::RwLock;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
 use tonic::Status;
 
@@ -141,7 +142,10 @@ impl Inner {
             .get(addr)
             .context(error::CreateChannelSnafu)?;
 
-        Ok(ProcedureServiceClient::new(channel))
+        Ok(ProcedureServiceClient::new(channel)
+            .accept_compressed(CompressionEncoding::Gzip)
+            .accept_compressed(CompressionEncoding::Zstd)
+            .send_compressed(CompressionEncoding::Zstd))
     }
 
     #[inline]

@@ -28,7 +28,6 @@ use hyper::{Body, HeaderMap};
 use lazy_static::lazy_static;
 use object_pool::Pool;
 use prost::Message;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
@@ -49,7 +48,7 @@ pub const DEFAULT_ENCODING: &str = "snappy";
 pub const VM_ENCODING: &str = "zstd";
 pub const VM_PROTO_VERSION: &str = "1";
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RemoteWriteQuery {
     pub db: Option<String>,
     /// Specify which physical table to use for storing metrics.

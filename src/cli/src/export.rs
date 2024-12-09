@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
+use common_error::ext::BoxedError;
 use common_telemetry::{debug, error, info};
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
@@ -26,11 +27,10 @@ use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
-use tracing_appender::non_blocking::WorkerGuard;
 
-use crate::cli::database::DatabaseClient;
-use crate::cli::{database, Instance, Tool};
+use crate::database::DatabaseClient;
 use crate::error::{EmptyResultSnafu, Error, FileIoSnafu, Result, SchemaNotFoundSnafu};
+use crate::{database, Tool};
 
 type TableReference = (String, String, String);
 
@@ -94,8 +94,9 @@ pub struct ExportCommand {
 }
 
 impl ExportCommand {
-    pub async fn build(&self, guard: Vec<WorkerGuard>) -> Result<Instance> {
-        let (catalog, schema) = database::split_database(&self.database)?;
+    pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
+        let (catalog, schema) =
+            database::split_database(&self.database).map_err(BoxedError::new)?;
 
         let database_client = DatabaseClient::new(
             self.addr.clone(),
@@ -105,19 +106,16 @@ impl ExportCommand {
             self.timeout.unwrap_or_default(),
         );
 
-        Ok(Instance::new(
-            Box::new(Export {
-                catalog,
-                schema,
-                database_client,
-                output_dir: self.output_dir.clone(),
-                parallelism: self.export_jobs,
-                target: self.target.clone(),
-                start_time: self.start_time.clone(),
-                end_time: self.end_time.clone(),
-            }),
-            guard,
-        ))
+        Ok(Box::new(Export {
+            catalog,
+            schema,
+            database_client,
+            output_dir: self.output_dir.clone(),
+            parallelism: self.export_jobs,
+            target: self.target.clone(),
+            start_time: self.start_time.clone(),
+            end_time: self.end_time.clone(),
+        }))
     }
 }
 
@@ -465,97 +463,22 @@ impl Export {
 
 #[async_trait]
 impl Tool for Export {
-    async fn do_work(&self) -> Result<()> {
+    async fn do_work(&self) -> std::result::Result<(), BoxedError> {
         match self.target {
             ExportTarget::Schema => {
-                self.export_create_database().await?;
-                self.export_create_table().await
+                self.export_create_database()
+                    .await
+                    .map_err(BoxedError::new)?;
+                self.export_create_table().await.map_err(BoxedError::new)
             }
-            ExportTarget::Data => self.export_database_data().await,
+            ExportTarget::Data => self.export_database_data().await.map_err(BoxedError::new),
             ExportTarget::All => {
-                self.export_create_database().await?;
-                self.export_create_table().await?;
-                self.export_database_data().await
+                self.export_create_database()
+                    .await
+                    .map_err(BoxedError::new)?;
+                self.export_create_table().await.map_err(BoxedError::new)?;
+                self.export_database_data().await.map_err(BoxedError::new)
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use clap::Parser;
-    use client::{Client, Database};
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_telemetry::logging::LoggingOptions;
-
-    use crate::error::Result as CmdResult;
-    use crate::options::GlobalOptions;
-    use crate::{cli, standalone, App};
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_export_create_table_with_quoted_names() -> CmdResult<()> {
-        let output_dir = tempfile::tempdir().unwrap();
-
-        let standalone = standalone::Command::parse_from([
-            "standalone",
-            "start",
-            "--data-home",
-            &*output_dir.path().to_string_lossy(),
-        ]);
-
-        let standalone_opts = standalone.load_options(&GlobalOptions::default()).unwrap();
-        let mut instance = standalone.build(standalone_opts).await?;
-        instance.start().await?;
-
-        let client = Client::with_urls(["127.0.0.1:4001"]);
-        let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
-        database
-            .sql(r#"CREATE DATABASE "cli.export.create_table";"#)
-            .await
-            .unwrap();
-        database
-            .sql(
-                r#"CREATE TABLE "cli.export.create_table"."a.b.c"(
-                        ts TIMESTAMP,
-                        TIME INDEX (ts)
-                    ) engine=mito;
-                "#,
-            )
-            .await
-            .unwrap();
-
-        let output_dir = tempfile::tempdir().unwrap();
-        let cli = cli::Command::parse_from([
-            "cli",
-            "export",
-            "--addr",
-            "127.0.0.1:4000",
-            "--output-dir",
-            &*output_dir.path().to_string_lossy(),
-            "--target",
-            "schema",
-        ]);
-        let mut cli_app = cli.build(LoggingOptions::default()).await?;
-        cli_app.start().await?;
-
-        instance.stop().await?;
-
-        let output_file = output_dir
-            .path()
-            .join("greptime")
-            .join("cli.export.create_table")
-            .join("create_tables.sql");
-        let res = std::fs::read_to_string(output_file).unwrap();
-        let expect = r#"CREATE TABLE IF NOT EXISTS "a.b.c" (
-  "ts" TIMESTAMP(3) NOT NULL,
-  TIME INDEX ("ts")
-)
-
-ENGINE=mito
-;
-"#;
-        assert_eq!(res.trim(), expect.trim());
-
-        Ok(())
     }
 }

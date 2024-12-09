@@ -49,10 +49,7 @@ impl Display for BuildInfo {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(
-    feature = "codec",
-    derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)
-)]
+#[cfg_attr(feature = "codec", derive(serde::Serialize, serde::Deserialize))]
 pub struct OwnedBuildInfo {
     pub branch: String,
     pub commit: String,

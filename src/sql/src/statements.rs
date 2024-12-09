@@ -16,6 +16,7 @@ pub mod admin;
 pub mod alter;
 pub mod copy;
 pub mod create;
+pub mod cursor;
 pub mod delete;
 pub mod describe;
 pub mod drop;
@@ -224,7 +225,7 @@ pub fn sql_number_to_value(data_type: &ConcreteDataType, n: &str) -> Result<Valu
     // TODO(hl): also Date/DateTime
 }
 
-fn parse_sql_number<R: FromStr + std::fmt::Debug>(n: &str) -> Result<R>
+pub(crate) fn parse_sql_number<R: FromStr + std::fmt::Debug>(n: &str) -> Result<R>
 where
     <R as FromStr>::Err: std::fmt::Debug,
 {

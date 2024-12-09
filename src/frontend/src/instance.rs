@@ -64,8 +64,8 @@ use servers::prometheus_handler::PrometheusHandler;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{
-    InfluxdbLineProtocolHandler, LogHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
-    PromStoreProtocolHandler, ScriptHandler,
+    InfluxdbLineProtocolHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
+    PipelineHandler, PromStoreProtocolHandler, ScriptHandler,
 };
 use servers::server::ServerHandlers;
 use session::context::QueryContextRef;
@@ -98,7 +98,7 @@ pub trait FrontendInstance:
     + OpenTelemetryProtocolHandler
     + ScriptHandler
     + PrometheusHandler
-    + LogHandler
+    + PipelineHandler
     + Send
     + Sync
     + 'static
@@ -487,7 +487,11 @@ pub fn check_permission(
         // TODO(dennis): add a hook for admin commands.
         Statement::Admin(_) => {}
         // These are executed by query engine, and will be checked there.
-        Statement::Query(_) | Statement::Explain(_) | Statement::Tql(_) | Statement::Delete(_) => {}
+        Statement::Query(_)
+        | Statement::Explain(_)
+        | Statement::Tql(_)
+        | Statement::Delete(_)
+        | Statement::DeclareCursor(_) => {}
         // database ops won't be checked
         Statement::CreateDatabase(_)
         | Statement::ShowDatabases(_)
@@ -580,6 +584,8 @@ pub fn check_permission(
         Statement::TruncateTable(stmt) => {
             validate_param(stmt.table_name(), query_ctx)?;
         }
+        // cursor operations are always allowed once it's created
+        Statement::FetchCursor(_) | Statement::CloseCursor(_) => {}
     }
     Ok(())
 }

@@ -109,20 +109,20 @@ pub fn parse_veclit_from_strlit(s: &str) -> Result<Vec<f32>> {
         })
 }
 
+
 /// Convert a vector literal to a binary literal.
 pub fn veclit_to_binlit(vec: &[f32]) -> Vec<u8> {
     if cfg!(target_endian = "little") {
         unsafe {
-            std::slice::from_raw_parts(
-                vec.as_ptr() as *const u8,
-                vec.len() * std::mem::size_of::<f32>(),
-            )
-            .to_vec()
+            std::slice::from_raw_parts(vec.as_ptr() as *const u8, std::mem::size_of_val(vec))
+                .to_vec()
         }
     } else {
-        vec.iter()
-            .flat_map(|e| e.to_le_bytes())
-            .collect::<Vec<u8>>()
+        let mut bytes = Vec::with_capacity(std::mem::size_of_val(vec));
+        for e in vec {
+            bytes.extend_from_slice(&e.to_le_bytes());
+        }
+        bytes
     }
 }
 
@@ -144,9 +144,10 @@ mod tests {
 
     #[test]
     fn test_binlit_as_veclit() {
-        let bytes = [0, 0, 128, 63];
+        let vec = &[1.0, 2.0, 3.0];
+        let bytes = veclit_to_binlit(vec);
         let result = binlit_as_veclit(&bytes).unwrap();
-        assert_eq!(result.as_ref(), &[1.0]);
+        assert_eq!(result.as_ref(), vec);
 
         let invalid_bytes = [0, 0, 128];
         let result = binlit_as_veclit(&invalid_bytes);

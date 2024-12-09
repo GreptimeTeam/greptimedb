@@ -40,7 +40,6 @@ use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
 use pipeline::PipelineVersion;
 use prost::Message;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Deserializer, Map, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -62,7 +61,7 @@ use crate::metrics::{
     METRIC_LOKI_LOGS_INGESTION_ELAPSED, METRIC_SUCCESS_VALUE,
 };
 use crate::prom_store;
-use crate::query_handler::LogHandlerRef;
+use crate::query_handler::PipelineHandlerRef;
 
 const GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX: &str = "greptime_";
 const GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME: &str = "greptime_identity";
@@ -89,7 +88,7 @@ lazy_static! {
     ];
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct LogIngesterQueryParams {
     pub table: Option<String>,
     pub db: Option<String>,
@@ -503,7 +502,7 @@ pub async fn loki_ingest(
     };
 
     let handler = log_state.log_handler;
-    let output = handler.insert_logs(ins_reqs, ctx).await;
+    let output = handler.insert(ins_reqs, ctx).await;
 
     if let Ok(Output {
         data: OutputData::AffectedRows(rows),
@@ -600,7 +599,7 @@ fn extract_pipeline_value_by_content_type(
 }
 
 async fn ingest_logs_inner(
-    state: LogHandlerRef,
+    state: PipelineHandlerRef,
     pipeline_name: String,
     version: PipelineVersion,
     table_name: String,
@@ -665,7 +664,7 @@ async fn ingest_logs_inner(
     let insert_requests = RowInsertRequests {
         inserts: vec![insert_request],
     };
-    let output = state.insert_logs(insert_requests, query_ctx).await;
+    let output = state.insert(insert_requests, query_ctx).await;
 
     if let Ok(Output {
         data: OutputData::AffectedRows(rows),
@@ -702,7 +701,7 @@ pub type LogValidatorRef = Arc<dyn LogValidator + 'static>;
 /// axum state struct to hold log handler and validator
 #[derive(Clone)]
 pub struct LogState {
-    pub log_handler: LogHandlerRef,
+    pub log_handler: PipelineHandlerRef,
     pub log_validator: Option<LogValidatorRef>,
     pub ingest_interceptor: Option<LogIngestInterceptorRef<Error>>,
 }

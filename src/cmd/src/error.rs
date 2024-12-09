@@ -114,6 +114,20 @@ pub enum Error {
         source: frontend::error::Error,
     },
 
+    #[snafu(display("Failed to build cli"))]
+    BuildCli {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to start cli"))]
+    StartCli {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to build meta server"))]
     BuildMetaServer {
         #[snafu(implicit)]
@@ -346,6 +360,8 @@ impl ErrorExt for Error {
             Error::ShutdownMetaServer { source, .. } => source.status_code(),
             Error::BuildMetaServer { source, .. } => source.status_code(),
             Error::UnsupportedSelectorType { source, .. } => source.status_code(),
+            Error::BuildCli { source, .. } => source.status_code(),
+            Error::StartCli { source, .. } => source.status_code(),
 
             Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {
                 source.status_code()

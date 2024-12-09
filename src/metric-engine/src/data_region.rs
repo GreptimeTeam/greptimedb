@@ -27,9 +27,10 @@ use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{ConcreteDataType, RegionId};
 
 use crate::error::{
-    ColumnTypeMismatchSnafu, MitoReadOperationSnafu, MitoWriteOperationSnafu, Result,
+    ColumnTypeMismatchSnafu, ForbiddenPhysicalAlterSnafu, MitoReadOperationSnafu,
+    MitoWriteOperationSnafu, Result,
 };
-use crate::metrics::MITO_DDL_DURATION;
+use crate::metrics::{FORBIDDEN_OPERATION_COUNT, MITO_DDL_DURATION};
 use crate::utils;
 
 const MAX_RETRIES: usize = 5;
@@ -185,6 +186,30 @@ impl DataRegion {
             .await
             .context(MitoReadOperationSnafu)?;
         Ok(metadata.column_metadatas.clone())
+    }
+
+    pub async fn alter_region_options(
+        &self,
+        region_id: RegionId,
+        request: RegionAlterRequest,
+    ) -> Result<AffectedRows> {
+        match request.kind {
+            AlterKind::SetRegionOptions { options: _ }
+            | AlterKind::UnsetRegionOptions { keys: _ } => {
+                let region_id = utils::to_data_region_id(region_id);
+                self.mito
+                    .handle_request(region_id, RegionRequest::Alter(request))
+                    .await
+                    .context(MitoWriteOperationSnafu)
+                    .map(|result| result.affected_rows)
+            }
+            _ => {
+                info!("Metric region received alter request {request:?} on physical region {region_id:?}");
+                FORBIDDEN_OPERATION_COUNT.inc();
+
+                ForbiddenPhysicalAlterSnafu.fail()
+            }
+        }
     }
 }
 
