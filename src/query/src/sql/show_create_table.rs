@@ -260,7 +260,7 @@ mod tests {
         let regions = vec![0, 1, 2];
 
         let mut options = table::requests::TableOptions {
-            ttl: Some(Duration::from_secs(30)),
+            ttl: Some(Duration::from_secs(30).into()),
             ..Default::default()
         };
 
