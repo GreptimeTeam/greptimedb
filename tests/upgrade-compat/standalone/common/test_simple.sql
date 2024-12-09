@@ -18,3 +18,5 @@ VALUES
 
 -- SQLNESS ARG version=latest
 SHOW CREATE TABLE system_metrics;
+
+DROP TABLE system_metrics;
