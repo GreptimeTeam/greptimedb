@@ -46,7 +46,7 @@ const PAGE_CACHE_SIZE_FACTOR: u64 = 8;
 const INDEX_CREATE_MEM_THRESHOLD_FACTOR: u64 = 16;
 
 /// Fetch option timeout
-pub(crate) const FETCH_OPTION_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const FETCH_OPTION_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
