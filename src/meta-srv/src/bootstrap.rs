@@ -212,6 +212,7 @@ pub async fn metasrv_builder(opts: &MetasrvOptions, plugins: Plugins) -> Result<
         #[cfg(feature = "pg_kvbackend")]
         BackendImpl::PostgresStore => {
             let kv_backend = create_postgres_backend(opts).await?;
+            // TODO(jeremy, weny): implement Election for postgres
             let election_client = create_etcd_election_client(opts).await?;
             (kv_backend, Some(election_client))
         }
