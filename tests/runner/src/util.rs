@@ -99,13 +99,13 @@ pub async fn pull_binary(version: &str) {
     };
     let triple = format!("greptime-{}-{}-{}", os, arch, version);
     let filename = format!("{triple}.tar.gz");
-    // TODO: make it cross platform and aware of proxy
+
     let url = format!(
         "https://github.com/GreptimeTeam/greptimedb/releases/download/{version}/{filename}"
     );
     println!("Downloading {version} binary from {}", url);
-    // mkdir {version}
 
+    // mkdir {version}
     std::fs::create_dir(version).unwrap();
 
     let archive = Path::new(version).join(filename);
@@ -138,7 +138,7 @@ pub async fn pull_binary(version: &str) {
 
     assert_eq!(
         checksum, expected_checksum,
-        "Downloaded file is corrupted, checksum mismatched"
+        "Checksum mismatched, downloaded file is corrupted"
     );
 
     decompress(&archive.to_string_lossy(), &folder_path.to_string_lossy());
