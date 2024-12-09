@@ -78,7 +78,7 @@ where
                 None => {
                     let page = self
                         .inner
-                        .seek_read(
+                        .range_read(
                             index.page_id * (self.cache.page_size as u64),
                             self.cache.page_size as u32,
                         )
@@ -106,19 +106,12 @@ where
 
 #[async_trait]
 impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobReader<R> {
-    async fn read_all(
-        &mut self,
-        dest: &mut Vec<u8>,
-    ) -> index::inverted_index::error::Result<usize> {
-        self.inner.read_all(dest).await
-    }
-
-    async fn seek_read(
+    async fn range_read(
         &mut self,
         offset: u64,
         size: u32,
     ) -> index::inverted_index::error::Result<Vec<u8>> {
-        self.inner.seek_read(offset, size).await
+        self.inner.range_read(offset, size).await
     }
 
     async fn metadata(&mut self) -> index::inverted_index::error::Result<Arc<InvertedIndexMetas>> {
