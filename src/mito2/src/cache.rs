@@ -342,7 +342,7 @@ impl CacheManagerBuilder {
                 .build()
         });
         let inverted_index_cache =
-            InvertedIndexCache::new(self.index_metadata_size, self.index_content_size);
+            InvertedIndexCache::new(self.index_metadata_size, self.index_content_size, PAGE_SIZE);
         let selector_result_cache = (self.selector_result_cache_size != 0).then(|| {
             Cache::builder()
                 .max_capacity(self.selector_result_cache_size)
