@@ -154,14 +154,14 @@ impl AlterTableOption {
         for pair in option_string.split(',') {
             let pair = pair.trim();
             let (key, value) = pair.split_once('=').unwrap();
-            let key = key.trim();
+            let key = key.trim().replace("\'", "");
             let value = value.trim().replace('\'', "");
             // Currently we have only one compaction type, so we ignore it
             // Cautious: COMPACTION_TYPE may be kept even if there are no compaction options enabled
             if key == COMPACTION_TYPE || key == APPEND_MODE_KEY {
                 continue;
             } else {
-                let option = AlterTableOption::parse_kv(key, &value)?;
+                let option = AlterTableOption::parse_kv(&key, &value)?;
                 options.push(option);
             }
         }
