@@ -48,6 +48,8 @@ pub mod tls;
 
 pub use common_config::Mode;
 
+pub const GREPTIME_DB_HEADER_HINT_PREFIX: &str = "x-greptime-hint-";
+
 /// Cached SQL and logical plan for database interfaces
 #[derive(Clone)]
 pub struct SqlPlan {

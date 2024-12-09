@@ -25,8 +25,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
 use crate::grpc::{cancellation, TonicResult};
-
-pub const GREPTIME_DB_HEADER_HINT_PREFIX: &str = "x-greptime-hint-";
+use crate::GREPTIME_DB_HEADER_HINT_PREFIX;
 
 pub(crate) struct DatabaseService {
     handler: GreptimeRequestHandler,
