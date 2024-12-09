@@ -14,6 +14,7 @@
 
 mod convert;
 mod distance;
+pub(crate) mod impl_conv;
 
 use std::sync::Arc;
 
