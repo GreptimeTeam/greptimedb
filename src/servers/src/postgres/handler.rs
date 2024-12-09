@@ -31,7 +31,7 @@ use pgwire::api::results::{
     DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, QueryResponse, Response, Tag,
 };
 use pgwire::api::stmt::{QueryParser, StoredStatement};
-use pgwire::api::{ClientInfo, Type};
+use pgwire::api::{ClientInfo, ErrorHandler, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::PgWireBackendMessage;
 use query::query_engine::DescribeResult;
@@ -412,5 +412,14 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
 
             Ok(DescribePortalResponse::new(vec![]))
         }
+    }
+}
+
+impl ErrorHandler for PostgresServerHandlerInner {
+    fn on_error<C>(&self, _client: &C, error: &mut PgWireError)
+    where
+        C: ClientInfo,
+    {
+        debug!("Postgres interface error {}", error)
     }
 }
