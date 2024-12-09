@@ -45,6 +45,7 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio_postgres::{Client as PgClient, SimpleQueryMessage as PgRow};
 
 use crate::protocol_interceptor::{MYSQL, PROTOCOL_KEY};
+use crate::util::get_workspace_root;
 use crate::{util, ServerAddr};
 
 const METASRV_ADDR: &str = "127.0.0.1:29302";
@@ -694,7 +695,21 @@ impl Database for GreptimeDB {
     async fn query(&self, ctx: QueryContext, query: String) -> Box<dyn Display> {
         if ctx.context.contains_key("restart") && self.env.server_addrs.server_addr.is_none() {
             self.env.restart_server(self).await;
+        } else if let Some(version) = ctx.context.get("version") {
+            if version == "latest" {
+                // use default latest by building db now
+                *self.env.bins_dir.lock().unwrap() = Some(util::get_binary_dir("debug"));
+            } else {
+                // use version in dir files
+                let root = get_workspace_root();
+                let new_path = PathBuf::from_iter([&root, version]);
+                println!("DEBUG: {:?}", new_path);
+                *self.env.bins_dir.lock().unwrap() = Some(new_path);
+            }
+
+            self.env.restart_server(self).await;
         }
+
         if let Some(protocol) = ctx.context.get(PROTOCOL_KEY) {
             // protocol is bound to be either "mysql" or "postgres"
             if protocol == MYSQL {

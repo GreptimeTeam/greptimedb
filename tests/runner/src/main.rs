@@ -141,6 +141,7 @@ async fn main() {
             args.bins_dir,
         ),
     );
+    println!("Working directory: {:?}", std::env::current_dir());
     runner.run().await.unwrap();
 
     // clean up and exit
