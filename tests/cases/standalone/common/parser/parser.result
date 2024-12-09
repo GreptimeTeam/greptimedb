@@ -30,6 +30,10 @@ SELECT min_i, min_j, max_i, max_j FROM (SELECT MIN(i) AS "min_i", MAX(i) AS "max
 | 13    | 14    | 42    | 84    |
 +-------+-------+-------+-------+
 
+DROP TABLE integers;
+
+Affected Rows: 0
+
 -- skipped, unsupported feature: digit separators
 -- SELECT 1_000_000;
 -- skipped, unsupported feature: division operator precedence

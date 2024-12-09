@@ -12,6 +12,8 @@ SELECT i, j FROM (SELECT * FROM integers);
 
 SELECT min_i, min_j, max_i, max_j FROM (SELECT MIN(i) AS "min_i", MAX(i) AS "max_i", MIN(j) AS "min_j", MAX(j) AS "max_j" FROM integers);
 
+DROP TABLE integers;
+
 -- skipped, unsupported feature: digit separators
 -- SELECT 1_000_000;
 
