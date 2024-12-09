@@ -21,7 +21,13 @@ serde.workspace = true
 serde_json.workspace = true
 tokio-postgres = { workspace = true }
 # sqlness 0.6.0 have a bug causing `cargo sqlness` to fail(see https://github.com/CeresDB/sqlness/issues/68) which is fixed in 0.6.1
+flate2 = "1.0"
+hex = "0.4.3"
+reqwest = "0.12.9"
+sha2 = "=0.10.8"
 sqlness = "0.6.1"
+tar = "0.4.43"
 tempfile.workspace = true
 tinytemplate = "1.2"
 tokio.workspace = true
+tokio-stream.workspace = true
