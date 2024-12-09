@@ -318,12 +318,14 @@ impl FlownodeContext {
         } else {
             let global_id = self.new_global_id();
 
+            // table id is Some meaning db must have created the table
             if let Some(table_id) = table_id {
                 let (known_table_name, schema) = srv_map.get_table_name_schema(&table_id).await?;
                 table_name = table_name.or(Some(known_table_name));
                 self.schema.insert(global_id, schema);
             } // if we don't have table id, it means database havn't assign one yet or we don't need it
 
+            // still update the mapping with new global id
             self.table_repr.insert(table_name, table_id, global_id);
             Ok(global_id)
         }
@@ -345,6 +347,7 @@ impl FlownodeContext {
             })?;
 
         self.schema.insert(gid, schema);
+
         Ok(())
     }
 

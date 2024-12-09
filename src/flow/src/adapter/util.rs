@@ -16,11 +16,49 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{ColumnDataType, ColumnDataTypeExtension, SemanticType};
 use common_error::ext::BoxedError;
+use common_meta::key::table_info::TableInfoValue;
 use datatypes::schema::ColumnSchema;
 use itertools::Itertools;
 use snafu::ResultExt;
 
 use crate::error::{Error, ExternalSnafu};
+use crate::repr::{ColumnType, RelationDesc, RelationType};
+
+pub fn table_info_value_to_relation_desc(
+    table_info_value: TableInfoValue,
+) -> Result<RelationDesc, Error> {
+    let raw_schema = table_info_value.table_info.meta.schema;
+    let (column_types, col_names): (Vec<_>, Vec<_>) = raw_schema
+        .column_schemas
+        .clone()
+        .into_iter()
+        .map(|col| {
+            (
+                ColumnType {
+                    nullable: col.is_nullable(),
+                    scalar_type: col.data_type,
+                },
+                Some(col.name),
+            )
+        })
+        .unzip();
+
+    let key = table_info_value.table_info.meta.primary_key_indices;
+    let keys = vec![crate::repr::Key::from(key)];
+
+    let time_index = raw_schema.timestamp_index;
+
+    Ok(RelationDesc {
+        typ: RelationType {
+            column_types,
+            keys,
+            time_index,
+            // by default table schema's column are all non-auto
+            auto_columns: vec![],
+        },
+        names: col_names,
+    })
+}
 
 /// convert `ColumnSchema` lists to it's corresponding proto type
 pub fn column_schemas_to_proto(
@@ -59,4 +97,30 @@ pub fn column_schemas_to_proto(
         })
         .collect();
     Ok(ret)
+}
+
+/// Convert `RelationDesc` to `ColumnSchema` list,
+/// if the column name is not present, use `col_{idx}` as the column name
+pub fn relation_desc_to_column_schemas_with_fallback(schema: &RelationDesc) -> Vec<ColumnSchema> {
+    schema
+        .typ()
+        .column_types
+        .clone()
+        .into_iter()
+        .enumerate()
+        .map(|(idx, typ)| {
+            let name = schema
+                .names
+                .get(idx)
+                .cloned()
+                .flatten()
+                .unwrap_or(format!("col_{}", idx));
+            let ret = ColumnSchema::new(name, typ.scalar_type, typ.nullable);
+            if schema.typ().time_index == Some(idx) {
+                ret.with_time_index(true)
+            } else {
+                ret
+            }
+        })
+        .collect_vec()
 }
