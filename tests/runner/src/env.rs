@@ -45,7 +45,7 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio_postgres::{Client as PgClient, SimpleQueryMessage as PgRow};
 
 use crate::protocol_interceptor::{MYSQL, PROTOCOL_KEY};
-use crate::util::get_workspace_root;
+use crate::util::{get_workspace_root, maybe_pull_binary};
 use crate::{util, ServerAddr};
 
 const METASRV_ADDR: &str = "127.0.0.1:29302";
@@ -75,6 +75,8 @@ pub struct Env {
     /// When running in CI, this is expected to be set.
     /// If not set, this runner will build the GreptimeDB binary itself when needed, and set this field by then.
     bins_dir: Arc<Mutex<Option<PathBuf>>>,
+    /// Pull different versions of GreptimeDB on need.
+    pull_version_on_need: bool,
 }
 
 #[async_trait]
@@ -101,12 +103,14 @@ impl Env {
         data_home: PathBuf,
         server_addrs: ServerAddr,
         wal: WalConfig,
+        pull_version_on_need: bool,
         bins_dir: Option<PathBuf>,
     ) -> Self {
         Self {
             sqlness_home: data_home,
             server_addrs,
             wal,
+            pull_version_on_need,
             bins_dir: Arc::new(Mutex::new(bins_dir)),
         }
     }
@@ -701,6 +705,7 @@ impl Database for GreptimeDB {
                 *self.env.bins_dir.lock().unwrap() = Some(util::get_binary_dir("debug"));
             } else {
                 // use version in dir files
+                maybe_pull_binary(version, self.env.pull_version_on_need).await;
                 let root = get_workspace_root();
                 let new_path = PathBuf::from_iter([&root, version]);
                 *self.env.bins_dir.lock().unwrap() = Some(new_path);
