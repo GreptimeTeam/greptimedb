@@ -272,14 +272,14 @@ jobs:
       - name: Check aws-lc-sys will not build
         shell: bash
         run: |
-             tempfile=$(mktemp)
-             cargo tree -i aws-lc-sys -e features --target all &> $tempfile
-             if grep -q "aws-lc-sys" "$tempfile" && ! grep -q "package ID specification \`aws-lc-sys\` did not match any packages" "$tempfile"; then
-               # found `aws-lc-sys` in tree but not in error msg
-               echo "Found aws-lc-sys, which has compilation problems on older gcc versions. Please replace it with ring until its building experience improves."
-               exit 1
-             fi
-             rm $tempfile
+          tempfile=$(mktemp)
+          cargo tree -i aws-lc-sys -e features --target all &> $tempfile
+          if grep -q "aws-lc-sys" "$tempfile" && ! grep -q "package ID specification \`aws-lc-sys\` did not match any packages" "$tempfile"; then
+            # found `aws-lc-sys` in tree but not in error msg
+            echo "Found aws-lc-sys, which has compilation problems on older gcc versions. Please replace it with ring until its building experience improves."
+            exit 1
+          fi
+          rm $tempfile
       - name: Build greptime bianry
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
