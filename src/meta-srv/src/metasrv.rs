@@ -91,8 +91,12 @@ pub struct MetasrvOptions {
     pub bind_addr: String,
     /// The address the server advertises to the clients.
     pub server_addr: String,
-    /// The address of the store, e.g., etcd.
+    /// The addresses of the metadata store, e.g., etcd.
     pub store_addrs: Vec<String>,
+    /// The addresses for the election service, which is used to elect the leader for Metasrvs.
+    /// If not specified, Metasrv will use the `store_addrs` as election service addresses.
+    /// For example, etcd can serve as both the metadata store and election service.
+    pub election_addrs: Vec<String>,
     /// The type of selector.
     pub selector: SelectorType,
     /// Whether to use the memory store.
@@ -147,6 +151,7 @@ impl Default for MetasrvOptions {
             bind_addr: "127.0.0.1:3002".to_string(),
             server_addr: "127.0.0.1:3002".to_string(),
             store_addrs: vec!["127.0.0.1:2379".to_string()],
+            election_addrs: vec!["127.0.0.1:2379".to_string()],
             selector: SelectorType::default(),
             use_memory_store: false,
             enable_region_failover: false,
@@ -470,6 +475,10 @@ impl Metasrv {
                 });
             }
         } else {
+            warn!(
+                "Ensure only one instance of metasrv is running, as there is no election service."
+            );
+
             if let Err(e) = self.wal_options_allocator.start().await {
                 error!(e; "Failed to start wal options allocator");
             }

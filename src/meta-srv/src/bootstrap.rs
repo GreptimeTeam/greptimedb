@@ -49,7 +49,7 @@ use crate::election::etcd::EtcdElection;
 use crate::error::InvalidArgumentsSnafu;
 use crate::error::{InitExportMetricsTaskSnafu, TomlFormatSnafu};
 use crate::metasrv::builder::MetasrvBuilder;
-use crate::metasrv::{BackendImpl, Metasrv, MetasrvOptions, SelectorRef};
+use crate::metasrv::{BackendImpl, ElectionRef, Metasrv, MetasrvOptions, SelectorRef};
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::load_based::LoadBasedSelector;
 use crate::selector::round_robin::RoundRobinSelector;
@@ -201,45 +201,19 @@ pub fn router(metasrv: Arc<Metasrv>) -> Router {
     router.add_service(admin::make_admin_service(metasrv))
 }
 
-pub async fn metasrv_builder(
-    opts: &MetasrvOptions,
-    plugins: Plugins,
-    kv_backend: Option<KvBackendRef>,
-) -> Result<MetasrvBuilder> {
-    let (kv_backend, election) = match (kv_backend, &opts.backend) {
-        (Some(kv_backend), _) => (kv_backend, None),
-        (None, BackendImpl::MemoryStore) => (Arc::new(MemoryKvBackend::new()) as _, None),
-        (None, BackendImpl::EtcdStore) => {
-            let etcd_client = create_etcd_client(opts).await?;
-            let kv_backend = {
-                let etcd_backend =
-                    EtcdStore::with_etcd_client(etcd_client.clone(), opts.max_txn_ops);
-                if !opts.store_key_prefix.is_empty() {
-                    Arc::new(ChrootKvBackend::new(
-                        opts.store_key_prefix.clone().into_bytes(),
-                        etcd_backend,
-                    ))
-                } else {
-                    etcd_backend
-                }
-            };
-            (
-                kv_backend,
-                Some(
-                    EtcdElection::with_etcd_client(
-                        &opts.server_addr,
-                        etcd_client.clone(),
-                        opts.store_key_prefix.clone(),
-                    )
-                    .await?,
-                ),
-            )
+pub async fn metasrv_builder(opts: &MetasrvOptions, plugins: Plugins) -> Result<MetasrvBuilder> {
+    let (kv_backend, election) = match &opts.backend {
+        BackendImpl::MemoryStore => (Arc::new(MemoryKvBackend::new()) as _, None), // Only for test
+        BackendImpl::EtcdStore => {
+            let kv_backend = create_etcd_backend(opts).await?;
+            let election_client = create_etcd_election_client(opts).await?;
+            (kv_backend, Some(election_client))
         }
         #[cfg(feature = "pg_kvbackend")]
-        (None, BackendImpl::PostgresStore) => {
-            let pg_client = create_postgres_client(opts).await?;
-            let kv_backend = PgStore::with_pg_client(pg_client).await.unwrap();
-            (kv_backend, None)
+        BackendImpl::PostgresStore => {
+            let kv_backend = create_postgres_backend(opts).await?;
+            let election_client = create_etcd_election_client(opts).await?;
+            (kv_backend, Some(election_client))
         }
     };
 
@@ -260,25 +234,60 @@ pub async fn metasrv_builder(
         .plugins(plugins))
 }
 
-async fn create_etcd_client(opts: &MetasrvOptions) -> Result<Client> {
+async fn create_etcd_election_client(opts: &MetasrvOptions) -> Result<ElectionRef> {
+    let election_endpoints = if !opts.election_addrs.is_empty() {
+        &opts.election_addrs
+    } else {
+        &opts.store_addrs
+    }
+    .iter()
+    .map(|x| x.trim())
+    .filter(|x| !x.is_empty())
+    .collect::<Vec<_>>();
+    let etcd_client = Client::connect(&election_endpoints, None)
+        .await
+        .context(error::ConnectEtcdSnafu)?;
+    EtcdElection::with_etcd_client(
+        &opts.server_addr,
+        etcd_client,
+        opts.store_key_prefix.clone(),
+    )
+    .await
+}
+
+async fn create_etcd_backend(opts: &MetasrvOptions) -> Result<KvBackendRef> {
     let etcd_endpoints = opts
         .store_addrs
         .iter()
         .map(|x| x.trim())
         .filter(|x| !x.is_empty())
         .collect::<Vec<_>>();
-    Client::connect(&etcd_endpoints, None)
+    let etcd_client = Client::connect(&etcd_endpoints, None)
         .await
-        .context(error::ConnectEtcdSnafu)
+        .context(error::ConnectEtcdSnafu)?;
+    let backend = EtcdStore::with_etcd_client(etcd_client, opts.max_txn_ops);
+    Ok(chroot_kv_backend(opts, backend))
 }
 
 #[cfg(feature = "pg_kvbackend")]
-async fn create_postgres_client(opts: &MetasrvOptions) -> Result<tokio_postgres::Client> {
+async fn create_postgres_backend(opts: &MetasrvOptions) -> Result<KvBackendRef> {
     let postgres_url = opts.store_addrs.first().context(InvalidArgumentsSnafu {
         err_msg: "empty store addrs",
     })?;
-    let (client, _) = tokio_postgres::connect(postgres_url, NoTls)
+    let (pg_client, _) = tokio_postgres::connect(postgres_url, NoTls)
         .await
         .context(error::ConnectPostgresSnafu)?;
-    Ok(client)
+    let backend = PgStore::with_pg_client(pg_client).await.unwrap();
+    Ok(chroot_kv_backend(opts, backend))
+}
+
+fn chroot_kv_backend(opts: &MetasrvOptions, backend: KvBackendRef) -> KvBackendRef {
+    if opts.store_key_prefix.is_empty() {
+        backend
+    } else {
+        Arc::new(ChrootKvBackend::new(
+            opts.store_key_prefix.clone().into_bytes(),
+            backend,
+        ))
+    }
 }
