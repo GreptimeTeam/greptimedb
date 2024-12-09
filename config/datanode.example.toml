@@ -492,12 +492,6 @@ experimental_write_cache_ttl = "8h"
 ## Buffer size for SST writing.
 sst_write_buffer_size = "8MB"
 
-## Parallelism to scan a region (default: 1/4 of cpu cores).
-## - `0`: using the default value (1/4 of cpu cores).
-## - `1`: scan in current thread.
-## - `n`: scan in parallelism n.
-scan_parallelism = 0
-
 ## Capacity of the channel to send data from parallel scan tasks to the main task.
 parallel_scan_channel_size = 32
 

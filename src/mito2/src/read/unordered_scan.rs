@@ -27,7 +27,7 @@ use datatypes::schema::SchemaRef;
 use futures::{Stream, StreamExt};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{PartitionRange, RegionScanner, ScannerProperties};
+use store_api::region_engine::{PrepareRequest, RegionScanner, ScannerProperties};
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::read::range::RangeBuilderList;
@@ -144,7 +144,7 @@ impl UnorderedScan {
         );
         let stream_ctx = self.stream_ctx.clone();
         let part_ranges = self.properties.partitions[partition].clone();
-        let distinguish_range = self.properties.distinguish_partition_range();
+        let distinguish_range = self.properties.distinguish_partition_range;
 
         let stream = try_stream! {
             part_metrics.on_first_poll();
@@ -231,13 +231,8 @@ impl RegionScanner for UnorderedScan {
         self.stream_ctx.input.mapper.output_schema()
     }
 
-    fn prepare(
-        &mut self,
-        ranges: Vec<Vec<PartitionRange>>,
-        distinguish_partition_range: bool,
-    ) -> Result<(), BoxedError> {
-        self.properties.partitions = ranges;
-        self.properties.distinguish_partition_range = distinguish_partition_range;
+    fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
+        self.properties.prepare(request);
         Ok(())
     }
 
