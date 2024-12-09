@@ -77,6 +77,8 @@ pub struct Env {
     bins_dir: Arc<Mutex<Option<PathBuf>>>,
     /// Pull different versions of GreptimeDB on need.
     pull_version_on_need: bool,
+    /// old bins dir, useful when switching versions
+    old_bins_dir: Arc<Mutex<Option<PathBuf>>>,
 }
 
 #[async_trait]
@@ -112,6 +114,7 @@ impl Env {
             wal,
             pull_version_on_need,
             bins_dir: Arc::new(Mutex::new(bins_dir)),
+            old_bins_dir: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -700,9 +703,13 @@ impl Database for GreptimeDB {
         if ctx.context.contains_key("restart") && self.env.server_addrs.server_addr.is_none() {
             self.env.restart_server(self).await;
         } else if let Some(version) = ctx.context.get("version") {
+            if self.env.old_bins_dir.lock().unwrap().is_none() {
+                // save old bins dir
+                *self.env.old_bins_dir.lock().unwrap() = self.env.bins_dir.lock().unwrap().clone();
+            }
             if version == "latest" {
                 // use default latest by building db now
-                *self.env.bins_dir.lock().unwrap() = Some(util::get_binary_dir("debug"));
+                *self.env.bins_dir.lock().unwrap() = self.env.old_bins_dir.lock().unwrap().clone();
             } else {
                 // use version in dir files
                 maybe_pull_binary(version, self.env.pull_version_on_need).await;
