@@ -14,8 +14,8 @@
 
 mod convert;
 mod distance;
-mod scalar_add;
 pub(crate) mod impl_conv;
+mod scalar_add;
 
 use std::sync::Arc;
 

@@ -109,7 +109,6 @@ pub fn parse_veclit_from_strlit(s: &str) -> Result<Vec<f32>> {
         })
 }
 
-
 /// Convert a vector literal to a binary literal.
 pub fn veclit_to_binlit(vec: &[f32]) -> Vec<u8> {
     if cfg!(target_endian = "little") {
