@@ -446,7 +446,7 @@ mod tests {
 
         move |expr| {
             let _d = &d;
-            let cache = Arc::new(InvertedIndexCache::new(10, 10));
+            let cache = Arc::new(InvertedIndexCache::new(10, 10, 100));
             let applier = InvertedIndexApplierBuilder::new(
                 region_dir.clone(),
                 object_store.clone(),
