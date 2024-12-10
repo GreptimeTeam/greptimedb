@@ -23,6 +23,7 @@ tokio-postgres = { workspace = true }
 # sqlness 0.6.0 have a bug causing `cargo sqlness` to fail(see https://github.com/CeresDB/sqlness/issues/68) which is fixed in 0.6.1
 flate2 = "1.0"
 hex = "0.4.3"
+local-ip-address = "0.6.3"
 reqwest = { version = "0.12.9", default-features = false, features = ["rustls-tls"] }
 sha2 = "=0.10.8"
 sqlness = "0.6.1"

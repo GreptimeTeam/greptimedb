@@ -368,8 +368,8 @@ impl Env {
                     "127.0.0.1:29302".to_string(),
                     "--server-addr".to_string(),
                     "127.0.0.1:29302".to_string(),
-                    "--backend".to_string(),
-                    "memory-store".to_string(),
+                    // "--backend".to_string(),
+                    //"memory-store".to_string(),
                     "--enable-region-failover".to_string(),
                     "false".to_string(),
                     "--http-addr=127.0.0.1:29502".to_string(),
@@ -510,6 +510,9 @@ impl Env {
                     .lock()
                     .expect("lock poisoned")
                     .replace(metasrv);
+
+                // wait for metasrv to start
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
 
             let mut processes = vec![];
@@ -792,6 +795,8 @@ impl Database for GreptimeDB {
             }
 
             self.env.restart_server(self, true).await;
+            // sleep for a while to wait for the server to fully boot up
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
 
         if let Some(protocol) = ctx.context.get(PROTOCOL_KEY) {

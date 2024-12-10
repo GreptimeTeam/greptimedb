@@ -202,11 +202,10 @@ pub fn setup_etcd(client_ports: Vec<u16>, peer_port: Option<u16>, etcd_version: 
     let etcd_version = etcd_version.unwrap_or("v3.5.17");
     let etcd_image = format!("quay.io/coreos/etcd:{etcd_version}");
     let peer_url = format!("http://0.0.0.0:{peer_port}");
+    let my_local_ip = local_ip_address::local_ip().unwrap();
 
-    let client_ports_fmt = client_ports
-        .iter()
-        .map(|p| format!("http://0.0.0.0:{p}"))
-        .collect::<Vec<_>>();
+    let my_local_ip_str = my_local_ip.to_string();
+
     let mut arg_list = vec![];
     arg_list.extend([
         "run",
@@ -222,11 +221,42 @@ pub fn setup_etcd(client_ports: Vec<u16>, peer_port: Option<u16>, etcd_version: 
         "etcd",
         "-name",
         "etcd0",
-        "-listen-client-urls",
+        "-advertise-client-urls",
     ]);
 
-    arg_list.extend(client_ports_fmt.iter().map(std::ops::Deref::deref));
-    arg_list.extend(["-listen-peer-urls", &peer_url, "-initial-cluster-state new"]);
+    let adv_client_urls = client_ports
+        .iter()
+        .map(|p| format!("http://{my_local_ip_str}:{p}"))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    arg_list.push(&adv_client_urls);
+
+    arg_list.extend(["-listen-client-urls"]);
+
+    let client_ports_fmt = client_ports
+        .iter()
+        .map(|p| format!("http://0.0.0.0:{p}"))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    arg_list.push(&client_ports_fmt);
+
+    arg_list.push("-initial-advertise-peer-urls");
+    let advertise_peer_url = format!("http://{my_local_ip_str}:{peer_port}");
+    arg_list.push(&advertise_peer_url);
+
+    arg_list.extend(["-listen-peer-urls", &peer_url]);
+
+    arg_list.extend(["-initial-cluster-token", "etcd-cluster-1"]);
+
+    arg_list.push("-initial-cluster");
+
+    let init_cluster_url = format!("etcd0=http://{my_local_ip_str}:{peer_port}");
+
+    arg_list.push(&init_cluster_url);
+
+    arg_list.extend(["-initial-cluster-state", "new"]);
 
     let mut cmd = std::process::Command::new("docker");
 
