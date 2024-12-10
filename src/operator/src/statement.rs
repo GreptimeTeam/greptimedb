@@ -59,6 +59,7 @@ use set::set_query_timeout;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::set_variables::SetVariables;
+use sql::statements::show::ShowCreateTableVariant;
 use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
 use sql::util::format_raw_object_name;
@@ -317,8 +318,16 @@ impl StatementExecutor {
                     .context(TableNotFoundSnafu { table_name: &table })?;
                 let table_name = TableName::new(catalog, schema, table);
 
-                self.show_create_table(table_name, table_ref, query_ctx)
-                    .await
+                match show.variant {
+                    ShowCreateTableVariant::Original => {
+                        self.show_create_table(table_name, table_ref, query_ctx)
+                            .await
+                    }
+                    ShowCreateTableVariant::PostgresForeignTable => {
+                        self.show_create_table_for_pg(table_name, table_ref, query_ctx)
+                            .await
+                    }
+                }
             }
             Statement::ShowCreateFlow(show) => self.show_create_flow(show, query_ctx).await,
             Statement::ShowCreateView(show) => self.show_create_view(show, query_ctx).await,

@@ -179,12 +179,26 @@ impl Display for ShowCreateDatabase {
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct ShowCreateTable {
     pub table_name: ObjectName,
+    pub variant: ShowCreateTableVariant,
+}
+
+/// Variant of a show create table
+#[derive(Default, Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+pub enum ShowCreateTableVariant {
+    #[default]
+    Original,
+    PostgresForeignTable,
 }
 
 impl Display for ShowCreateTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let table_name = &self.table_name;
-        write!(f, r#"SHOW CREATE TABLE {table_name}"#)
+        write!(f, r#"SHOW CREATE TABLE {table_name}"#)?;
+        if let ShowCreateTableVariant::PostgresForeignTable = self.variant {
+            write!(f, " FOR POSTGRES_FOREIGN_TABLE")?;
+        }
+
+        Ok(())
     }
 }
 
@@ -344,15 +358,45 @@ mod tests {
             Statement::ShowCreateTable(show) => {
                 let table_name = show.table_name.to_string();
                 assert_eq!(table_name, "test");
+                assert_eq!(show.variant, ShowCreateTableVariant::Original);
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = "SHOW CREATE TABLE test FOR POSTGRES_FOREIGN_TABLE";
+        let stmts: Vec<Statement> =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::ShowCreateTable { .. });
+        match &stmts[0] {
+            Statement::ShowCreateTable(show) => {
+                let table_name = show.table_name.to_string();
+                assert_eq!(table_name, "test");
+                assert_eq!(show.variant, ShowCreateTableVariant::PostgresForeignTable);
             }
             _ => {
                 unreachable!();
             }
         }
     }
+
     #[test]
     pub fn test_show_create_missing_table_name() {
         let sql = "SHOW CREATE TABLE";
+        assert!(ParserContext::create_with_dialect(
+            sql,
+            &GreptimeDbDialect {},
+            ParseOptions::default()
+        )
+        .is_err());
+    }
+
+    #[test]
+    pub fn test_show_create_unknown_for() {
+        let sql = "SHOW CREATE TABLE t FOR UNKNOWN";
         assert!(ParserContext::create_with_dialect(
             sql,
             &GreptimeDbDialect {},

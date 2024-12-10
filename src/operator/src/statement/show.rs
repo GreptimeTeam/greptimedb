@@ -145,6 +145,37 @@ impl StatementExecutor {
     }
 
     #[tracing::instrument(skip_all)]
+    pub async fn show_create_table_for_pg(
+        &self,
+        table_name: TableName,
+        table: TableRef,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let table_info = table.table_info();
+        if table_info.table_type != TableType::Base {
+            return error::ShowCreateTableBaseOnlySnafu {
+                table_name: table_name.to_string(),
+                table_type: table_info.table_type,
+            }
+            .fail();
+        }
+
+        let schema_options = self
+            .table_metadata_manager
+            .schema_manager()
+            .get(SchemaNameKey {
+                catalog: &table_name.catalog_name,
+                schema: &table_name.schema_name,
+            })
+            .await
+            .context(TableMetadataManagerSnafu)?
+            .map(|v| v.into_inner());
+
+        query::sql::show_create_table(table, schema_options, None, query_ctx)
+            .context(ExecuteStatementSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
     pub async fn show_create_view(
         &self,
         show: ShowCreateView,
