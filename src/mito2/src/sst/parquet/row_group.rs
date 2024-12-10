@@ -18,6 +18,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::{Buf, Bytes};
+use common_telemetry::{debug, tracing};
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{RowGroups, RowSelection};
 use parquet::arrow::ProjectionMask;
@@ -97,6 +98,7 @@ impl<'a> InMemoryRowGroup<'a> {
     }
 
     /// Fetches the necessary column data into memory
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     pub async fn fetch(
         &mut self,
         projection: &ProjectionMask,
@@ -165,9 +167,11 @@ impl<'a> InMemoryRowGroup<'a> {
             // Now we only use cache in dense chunk data.
             self.fetch_pages_from_cache(projection);
 
+            debug!("before yield_now");
             // Release the CPU to avoid blocking the runtime. Since `fetch_pages_from_cache`
             // is a synchronous, CPU-bound operation.
             yield_now().await;
+            debug!("after yield_now");
 
             let fetch_ranges = self
                 .column_chunks

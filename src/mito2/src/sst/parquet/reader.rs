@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use api::v1::SemanticType;
 use async_trait::async_trait;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_telemetry::{debug, warn};
+use common_telemetry::{debug, tracing, warn};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
@@ -461,6 +461,7 @@ impl ParquetReaderBuilder {
     /// TODO(zhongzc): Devise a mechanism to enforce the non-use of indices
     /// as an escape route in case of index issues, and it can be used to test
     /// the correctness of the index.
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     async fn prune_row_groups_by_inverted_index(
         &self,
         row_group_size: usize,
@@ -869,6 +870,7 @@ impl RowGroupReaderBuilder {
     }
 
     /// Builds a [ParquetRecordBatchReader] to read the row group at `row_group_idx`.
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     pub(crate) async fn build(
         &self,
         row_group_idx: usize,

@@ -20,6 +20,7 @@ use std::task::{Context, Poll};
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes};
 use common_base::range_read::{Metadata, RangeReader};
+use common_telemetry::tracing;
 use futures::{AsyncRead, AsyncSeek, AsyncWrite};
 use object_store::ObjectStore;
 use pin_project::pin_project;
@@ -266,6 +267,7 @@ pub(crate) struct InstrumentedRangeReader<'a> {
 
 #[async_trait]
 impl RangeReader for InstrumentedRangeReader<'_> {
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     async fn metadata(&mut self) -> io::Result<Metadata> {
         let stat = self.store.stat(&self.path).await?;
         Ok(Metadata {
@@ -273,6 +275,7 @@ impl RangeReader for InstrumentedRangeReader<'_> {
         })
     }
 
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     async fn read(&mut self, range: Range<u64>) -> io::Result<Bytes> {
         let buf = self.store.reader(&self.path).await?.read(range).await?;
         self.read_byte_count.inc_by(buf.len() as _);
@@ -280,6 +283,7 @@ impl RangeReader for InstrumentedRangeReader<'_> {
         Ok(buf.to_bytes())
     }
 
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     async fn read_into(
         &mut self,
         range: Range<u64>,
@@ -292,6 +296,7 @@ impl RangeReader for InstrumentedRangeReader<'_> {
         Ok(())
     }
 
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     async fn read_vec(&mut self, ranges: &[Range<u64>]) -> io::Result<Vec<Bytes>> {
         let bufs = self
             .store

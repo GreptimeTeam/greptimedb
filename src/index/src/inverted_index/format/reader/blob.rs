@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_base::range_read::RangeReader;
+use common_telemetry::tracing;
 use greptime_proto::v1::index::InvertedIndexMetas;
 use snafu::{ensure, ResultExt};
 
@@ -49,6 +50,7 @@ impl<R> InvertedIndexBlobReader<R> {
 
 #[async_trait]
 impl<R: RangeReader> InvertedIndexReader for InvertedIndexBlobReader<R> {
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     async fn range_read(&mut self, offset: u64, size: u32) -> Result<Vec<u8>> {
         let buf = self
             .source
@@ -58,6 +60,7 @@ impl<R: RangeReader> InvertedIndexReader for InvertedIndexBlobReader<R> {
         Ok(buf.into())
     }
 
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     async fn metadata(&mut self) -> Result<Arc<InvertedIndexMetas>> {
         let metadata = self.source.metadata().await.context(CommonIoSnafu)?;
         let blob_size = metadata.content_length;

@@ -18,6 +18,7 @@ use std::sync::Arc;
 use api::v1::index::InvertedIndexMetas;
 use async_trait::async_trait;
 use common_base::BitVec;
+use common_telemetry::tracing;
 use index::inverted_index::error::DecodeFstSnafu;
 use index::inverted_index::format::reader::InvertedIndexReader;
 use index::inverted_index::FstMap;
@@ -114,6 +115,7 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
         self.inner.range_read(offset, size).await
     }
 
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     async fn metadata(&mut self) -> index::inverted_index::error::Result<Arc<InvertedIndexMetas>> {
         if let Some(cached) = self.cache.get_index_metadata(self.file_id) {
             CACHE_HIT.with_label_values(&[INDEX_METADATA_TYPE]).inc();
@@ -126,6 +128,7 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
         }
     }
 
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     async fn fst(
         &mut self,
         offset: u64,
