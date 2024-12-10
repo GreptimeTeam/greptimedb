@@ -71,29 +71,20 @@ pub enum AlterTableOperation {
         target_type: DataType,
     },
     /// `SET <table attrs key> = <table attr value>`
-    SetTableOptions {
-        options: Vec<KeyValueOption>,
-    },
-    UnsetTableOptions {
-        keys: Vec<String>,
-    },
+    SetTableOptions { options: Vec<KeyValueOption> },
+    /// `UNSET <table attrs key>`
+    UnsetTableOptions { keys: Vec<String> },
     /// `DROP COLUMN <name>`
-    DropColumn {
-        name: Ident,
-    },
+    DropColumn { name: Ident },
     /// `RENAME <new_table_name>`
-    RenameTable {
-        new_table_name: String,
-    },
+    RenameTable { new_table_name: String },
     /// `MODIFY COLUMN <column_name> SET FULLTEXT [WITH <options>]`
     SetColumnFulltext {
         column_name: Ident,
         options: FulltextOptions,
     },
     /// `MODIFY COLUMN <column_name> UNSET FULLTEXT`
-    UnsetColumnFulltext {
-        column_name: Ident,
-    },
+    UnsetColumnFulltext { column_name: Ident },
 }
 
 impl Display for AlterTableOperation {
