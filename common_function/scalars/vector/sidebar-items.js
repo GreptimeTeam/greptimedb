@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["convert","distance","impl_conv"],"struct":["VectorFunction"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["merge_multiple_values","multiple_value_stream","parse_segments"],"struct":["CollectingState"],"type":["Upstream"]};

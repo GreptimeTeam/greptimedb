@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["fulltext_index","inverted_index"]};

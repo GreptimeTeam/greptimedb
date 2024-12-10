@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["clip","interp"],"struct":["NumpyFunction"]};

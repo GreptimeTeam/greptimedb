@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["aggregate","date","expression","geo","json","matches","math","numpy","timestamp","udf","vector"]};
