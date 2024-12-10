@@ -21,6 +21,7 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::warn;
 use object_store::util::join_dir;
+use object_store::OBJECT_CACHE_DIR;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
@@ -96,7 +97,7 @@ pub struct MitoConfig {
     pub selector_result_cache_size: ReadableSize,
     /// Whether to enable the experimental write cache.
     pub enable_experimental_write_cache: bool,
-    /// File system path for write cache, defaults to `{data_home}/write_cache`.
+    /// File system path for write cache, defaults to `{data_home}/object_cache/write`.
     pub experimental_write_cache_path: String,
     /// Capacity for write cache.
     pub experimental_write_cache_size: ReadableSize,
@@ -148,7 +149,7 @@ impl Default for MitoConfig {
             selector_result_cache_size: ReadableSize::mb(512),
             enable_experimental_write_cache: false,
             experimental_write_cache_path: String::new(),
-            experimental_write_cache_size: ReadableSize::gb(1),
+            experimental_write_cache_size: ReadableSize::gb(5),
             experimental_write_cache_ttl: None,
             sst_write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
@@ -232,8 +233,9 @@ impl MitoConfig {
         }
 
         // Sets write cache path if it is empty.
-        if self.experimental_write_cache_path.is_empty() {
-            self.experimental_write_cache_path = join_dir(data_home, "write_cache");
+        if self.experimental_write_cache_path.trim().is_empty() {
+            let object_cache_path = join_dir(data_home, OBJECT_CACHE_DIR);
+            self.experimental_write_cache_path = join_dir(&object_cache_path, "write");
         }
 
         self.index.sanitize(data_home, &self.inverted_index)?;

@@ -428,10 +428,16 @@ impl DatanodeBuilder {
     async fn build_mito_engine(
         opts: &DatanodeOptions,
         object_store_manager: ObjectStoreManagerRef,
-        config: MitoConfig,
+        mut config: MitoConfig,
         schema_metadata_manager: SchemaMetadataManagerRef,
         plugins: Plugins,
     ) -> Result<MitoEngine> {
+        if opts.storage.is_object_storage() {
+            // Enable the write cache when setting object storage
+            config.enable_experimental_write_cache = true;
+            info!("Configured 'enable_experimental_write_cache=true' for mito engine.");
+        }
+
         let mito_engine = match &opts.wal {
             DatanodeWalConfig::RaftEngine(raft_engine_config) => MitoEngine::new(
                 &opts.storage.data_home,
