@@ -176,7 +176,11 @@ pub(crate) struct RowGroupLastRowReader {
 }
 
 impl RowGroupLastRowReader {
-    fn new(key: SelectorResultKey, reader: RowGroupReader, cache_manager: Option<CacheManagerRef>) -> Self {
+    fn new(
+        key: SelectorResultKey,
+        reader: RowGroupReader,
+        cache_manager: Option<CacheManagerRef>,
+    ) -> Self {
         Self {
             key,
             reader,
@@ -216,7 +220,9 @@ impl RowGroupLastRowReader {
             // we always expect that row groups yields batches.
             return;
         }
-        let Some(cache) = &self.cache_manager else { return; };
+        let Some(cache) = &self.cache_manager else {
+            return;
+        };
         let value = Arc::new(SelectorResultValue {
             result: std::mem::take(&mut self.yielded_batches),
             projection: self

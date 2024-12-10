@@ -424,12 +424,16 @@ impl EngineInner {
         // Get cache.
         let cache_manager = self.workers.cache_manager();
 
-        let scan_region =
-            ScanRegion::new(version, region.access_layer.clone(), request, Some(cache_manager))
-                .with_parallel_scan_channel_size(self.config.parallel_scan_channel_size)
-                .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
-                .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
-                .with_start_time(query_start);
+        let scan_region = ScanRegion::new(
+            version,
+            region.access_layer.clone(),
+            request,
+            Some(cache_manager),
+        )
+        .with_parallel_scan_channel_size(self.config.parallel_scan_channel_size)
+        .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
+        .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
+        .with_start_time(query_start);
 
         Ok(scan_region)
     }
