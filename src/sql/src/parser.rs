@@ -215,6 +215,7 @@ impl ParserContext<'_> {
 
     // Report unexpected token
     pub(crate) fn expected<T>(&self, expected: &str, found: TokenWithLocation) -> Result<T> {
+        println!("verify  ++++ {:?}", found.token);
         Err(ParserError::ParserError(format!(
             "Expected {expected}, found: {found}",
         )))

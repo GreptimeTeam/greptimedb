@@ -32,7 +32,10 @@ use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId, RegionId};
 
 use crate::error::{self, Result};
-use crate::requests::{AddColumnRequest, AlterKind, ModifyColumnTypeRequest, TableOptions};
+use crate::requests::{
+    AddColumnRequest, AlterKind, ModifyColumnTypeRequest, SetIndexOptions, TableOptions,
+    UnsetIndexOptions,
+};
 
 pub type TableId = u32;
 pub type TableVersion = u64;
@@ -208,13 +211,26 @@ impl TableMeta {
             AlterKind::RenameTable { .. } => Ok(self.new_meta_builder()),
             AlterKind::SetTableOptions { options } => self.set_table_options(options),
             AlterKind::UnsetTableOptions { keys } => self.unset_table_options(keys),
-            AlterKind::SetColumnFulltext {
-                column_name,
-                options,
-            } => self.change_column_fulltext_options(table_name, column_name, true, Some(options)),
-            AlterKind::UnsetColumnFulltext { column_name } => {
-                self.change_column_fulltext_options(table_name, column_name, false, None)
-            }
+            AlterKind::SetIndex { options } => match options {
+                SetIndexOptions::Fulltext {
+                    column_name,
+                    options,
+                } => self.change_column_fulltext_options(
+                    table_name,
+                    column_name,
+                    true,
+                    Some(options),
+                ),
+                SetIndexOptions::Inverted { column_name: _ } => {
+                    todo!()
+                }
+            },
+            AlterKind::UnsetIndex { options } => match options {
+                UnsetIndexOptions::Fulltext { column_name } => {
+                    self.change_column_fulltext_options(table_name, column_name, false, None)
+                }
+                UnsetIndexOptions::Inverted { column_name: _ } => todo!(),
+            },
         }
     }
 
@@ -1521,9 +1537,11 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::SetColumnFulltext {
-            column_name: "col1".to_string(),
-            options: FulltextOptions::default(),
+        let alter_kind = AlterKind::SetIndex {
+            options: SetIndexOptions::Fulltext {
+                column_name: "col1".to_string(),
+                options: FulltextOptions::default(),
+            },
         };
         let err = meta
             .builder_with_alter_kind("my_table", &alter_kind, false)
@@ -1538,12 +1556,14 @@ mod tests {
         let new_meta = add_columns_to_meta_with_location(&meta);
         assert_eq!(meta.region_numbers, new_meta.region_numbers);
 
-        let alter_kind = AlterKind::SetColumnFulltext {
-            column_name: "my_tag_first".to_string(),
-            options: FulltextOptions {
-                enable: true,
-                analyzer: datatypes::schema::FulltextAnalyzer::Chinese,
-                case_sensitive: true,
+        let alter_kind = AlterKind::SetIndex {
+            options: SetIndexOptions::Fulltext {
+                column_name: "my_tag_first".to_string(),
+                options: FulltextOptions {
+                    enable: true,
+                    analyzer: datatypes::schema::FulltextAnalyzer::Chinese,
+                    case_sensitive: true,
+                },
             },
         };
         let new_meta = new_meta
@@ -1563,8 +1583,10 @@ mod tests {
         );
         assert!(fulltext_options.case_sensitive);
 
-        let alter_kind = AlterKind::UnsetColumnFulltext {
-            column_name: "my_tag_first".to_string(),
+        let alter_kind = AlterKind::UnsetIndex {
+            options: UnsetIndexOptions::Fulltext {
+                column_name: "my_tag_first".to_string(),
+            },
         };
         let new_meta = new_meta
             .builder_with_alter_kind("my_table", &alter_kind, false)

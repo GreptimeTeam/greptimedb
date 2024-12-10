@@ -86,38 +86,31 @@ pub enum AlterTableOperation {
         new_table_name: String,
     },
     SetIndex {
-        options: SetIndexOperation
+        options: SetIndexOperation,
     },
     UnsetIndex {
-        options: UnsetIndexOperation
-    }
-    
+        options: UnsetIndexOperation,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub enum SetIndexOperation {
     /// `MODIFY COLUMN <column_name> SET FULLTEXT [WITH <options>]`
-    SetColumnFulltext {
+    Fulltext {
         column_name: Ident,
         options: FulltextOptions,
     },
     /// `MODIFY COLUMN <column_name> SET INVERTED INDEX`
-    SetColumnInvertedIndex {
-        column_name: Ident,
-    },
+    Inverted { column_name: Ident },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub enum UnsetIndexOperation {
     /// `MODIFY COLUMN <column_name> UNSET FULLTEXT`
-    UnsetColumnFulltext {
-        column_name: Ident,
-    },
+    Fulltext { column_name: Ident },
 
     /// `MODIFY COLUMN <column_name> UNSET INVERTED INDEX`
-    UnsetColumnInvertedIndex {
-        column_name: Ident,
-    },
+    Inverted { column_name: Ident },
 }
 
 impl Display for AlterTableOperation {
@@ -162,23 +155,25 @@ impl Display for AlterTableOperation {
                 let keys = keys.iter().map(|k| format!("'{k}'")).join(",");
                 write!(f, "UNSET {keys}")
             }
-            AlterTableOperation::SetColumnFulltext {
-                column_name,
-                options,
-            } => {
-                write!(f, "MODIFY COLUMN {column_name} SET FULLTEXT WITH(analyzer={0}, case_sensitive={1})", options.analyzer, options.case_sensitive)
-            }
-            AlterTableOperation::UnsetColumnFulltext { column_name } => {
-                write!(f, "MODIFY COLUMN {column_name} UNSET FULLTEXT")
-            }
-            AlterTableOperation::SetColumnInvertedIndex {
-                column_name,
-            } => {
-                write!(f, "MODIFY COLUMN {column_name} SET INVERTED INDEX")
-            }
-            AlterTableOperation::UnsetColumnInvertedIndex { column_name } => {
-                write!(f, "MODIFY COLUMN {column_name} UNSET INVERTED INDEX")
-            }
+            AlterTableOperation::SetIndex { options } => match options {
+                SetIndexOperation::Fulltext {
+                    column_name,
+                    options,
+                } => {
+                    write!(f, "MODIFY COLUMN {column_name} SET FULLTEXT WITH(analyzer={0}, case_sensitive={1})", options.analyzer, options.case_sensitive)
+                }
+                SetIndexOperation::Inverted { column_name } => {
+                    write!(f, "MODIFY COLUMN {column_name} SET INVERTED INDEX")
+                }
+            },
+            AlterTableOperation::UnsetIndex { options } => match options {
+                UnsetIndexOperation::Fulltext { column_name } => {
+                    write!(f, "MODIFY COLUMN {column_name} UNSET FULLTEXT")
+                }
+                UnsetIndexOperation::Inverted { column_name } => {
+                    write!(f, "MODIFY COLUMN {column_name} UNSET INVERTED INDEX")
+                }
+            },
         }
     }
 }
@@ -433,6 +428,27 @@ ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT WITH(analyzer=English, case_sen
                 assert_eq!(
                     r#"
 ALTER TABLE monitor MODIFY COLUMN a UNSET FULLTEXT"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = "ALTER TABLE monitor MODIFY COLUMN a SET INVERTED INDEX";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::AlterTable { .. });
+
+        match &stmts[0] {
+            Statement::AlterTable(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+ALTER TABLE monitor MODIFY COLUMN a SET INVERTED INDEX"#,
                     &new_sql
                 );
             }
