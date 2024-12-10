@@ -50,3 +50,7 @@ venv/
 # Fuzz tests 
 tests-fuzz/artifacts/
 tests-fuzz/corpus/
+
+# Zed project directory
+.zed/
+
