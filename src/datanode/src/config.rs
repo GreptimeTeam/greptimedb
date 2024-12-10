@@ -62,10 +62,7 @@ impl ObjectStoreConfig {
 
     /// Returns true when it's a remote object storage such as AWS s3 etc.
     pub fn is_object_storage(&self) -> bool {
-        matches!(
-            self,
-            Self::S3(_) | Self::Oss(_) | Self::Azblob(_) | Self::Gcs(_)
-        )
+        !matches!(self, Self::File(_))
     }
 
     /// Returns the object storage configuration name, return the provider name if it's empty.
