@@ -233,7 +233,7 @@ impl MitoConfig {
         }
 
         // Sets write cache path if it is empty.
-        if self.experimental_write_cache_path.is_empty() {
+        if self.experimental_write_cache_path.trim().is_empty() {
             let object_cache_path = join_dir(data_home, OBJECT_CACHE_DIR);
             self.experimental_write_cache_path = join_dir(&object_cache_path, "write");
         }
