@@ -470,6 +470,10 @@ impl Metasrv {
                 });
             }
         } else {
+            warn!(
+                "Ensure only one instance of Metasrv is running, as there is no election service."
+            );
+
             if let Err(e) = self.wal_options_allocator.start().await {
                 error!(e; "Failed to start wal options allocator");
             }
