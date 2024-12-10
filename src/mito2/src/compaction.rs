@@ -570,7 +570,7 @@ pub struct SerializedCompactionOutput {
 struct CompactionSstReaderBuilder<'a> {
     metadata: RegionMetadataRef,
     sst_layer: AccessLayerRef,
-    cache: CacheManagerRef,
+    cache: Option<CacheManagerRef>,
     inputs: &'a [FileHandle],
     append_mode: bool,
     filter_deleted: bool,
