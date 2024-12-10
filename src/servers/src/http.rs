@@ -638,10 +638,15 @@ impl HttpServer {
             router.clone()
         };
 
-        router = router.route(
-            "/health",
-            routing::get(handler::health).post(handler::health),
-        );
+        router = router
+            .route(
+                "/health",
+                routing::get(handler::health).post(handler::health),
+            )
+            .route(
+                "/ready",
+                routing::get(handler::health).post(handler::health),
+            );
 
         router = router.route("/status", routing::get(handler::status));
 
