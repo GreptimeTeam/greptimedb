@@ -92,6 +92,10 @@ struct Args {
     /// This may affect future test runs.
     #[clap(long)]
     preserve_state: bool,
+
+    /// Pull Different versions of GreptimeDB on need.
+    #[clap(long, default_value = "true")]
+    pull_version_on_need: bool,
 }
 
 #[tokio::main]
@@ -138,6 +142,7 @@ async fn main() {
             sqlness_home.clone(),
             args.server_addr.clone(),
             wal,
+            args.pull_version_on_need,
             args.bins_dir,
         ),
     );
