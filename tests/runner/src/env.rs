@@ -160,12 +160,12 @@ impl Env {
 
             let mut greptimedb = self.connect_db(&Default::default()).await;
 
-            greptimedb.metasrv_process = Some(meta_server);
+            greptimedb.metasrv_process = Some(meta_server).into();
             greptimedb.server_processes = Some(Arc::new(Mutex::new(vec![
                 datanode_1, datanode_2, datanode_3,
             ])));
-            greptimedb.frontend_process = Some(frontend);
-            greptimedb.flownode_process = Some(flownode);
+            greptimedb.frontend_process = Some(frontend).into();
+            greptimedb.flownode_process = Some(flownode).into();
             greptimedb.is_standalone = false;
             greptimedb.ctx = db_ctx;
 
@@ -245,9 +245,9 @@ impl Env {
             pg_client: TokioMutex::new(pg_client),
             mysql_client: TokioMutex::new(mysql_client),
             server_processes: None,
-            metasrv_process: None,
-            frontend_process: None,
-            flownode_process: None,
+            metasrv_process: None.into(),
+            frontend_process: None.into(),
+            flownode_process: None.into(),
             ctx: GreptimeDBContext {
                 time: 0,
                 datanode_id: Default::default(),
@@ -460,12 +460,29 @@ impl Env {
     }
 
     /// stop and restart the server process
-    async fn restart_server(&self, db: &GreptimeDB) {
+    async fn restart_server(&self, db: &GreptimeDB, is_full_restart: bool) {
         {
             if let Some(server_process) = db.server_processes.clone() {
                 let mut server_processes = server_process.lock().unwrap();
                 for server_process in server_processes.iter_mut() {
                     Env::stop_server(server_process);
+                }
+            }
+            if is_full_restart {
+                if let Some(mut metasrv_process) =
+                    db.metasrv_process.lock().expect("poisoned lock").take()
+                {
+                    Env::stop_server(&mut metasrv_process);
+                }
+                if let Some(mut frontend_process) =
+                    db.frontend_process.lock().expect("poisoned lock").take()
+                {
+                    Env::stop_server(&mut frontend_process);
+                }
+                if let Some(mut flownode_process) =
+                    db.flownode_process.lock().expect("poisoned lock").take()
+                {
+                    Env::stop_server(&mut flownode_process);
                 }
             }
         }
@@ -476,11 +493,32 @@ impl Env {
             vec![new_server_process]
         } else {
             db.ctx.reset_datanode_id();
+            if is_full_restart {
+                let metasrv = self.start_server("metasrv", &db.ctx, false).await;
+                db.metasrv_process
+                    .lock()
+                    .expect("lock poisoned")
+                    .replace(metasrv);
+            }
 
             let mut processes = vec![];
             for _ in 0..3 {
                 let new_server_process = self.start_server("datanode", &db.ctx, false).await;
                 processes.push(new_server_process);
+            }
+
+            if is_full_restart {
+                let frontend = self.start_server("frontend", &db.ctx, false).await;
+                db.frontend_process
+                    .lock()
+                    .expect("lock poisoned")
+                    .replace(frontend);
+
+                let flownode = self.start_server("flownode", &db.ctx, false).await;
+                db.flownode_process
+                    .lock()
+                    .expect("lock poisoned")
+                    .replace(flownode);
             }
             processes
         };
@@ -588,9 +626,9 @@ impl Env {
 
 pub struct GreptimeDB {
     server_processes: Option<Arc<Mutex<Vec<Child>>>>,
-    metasrv_process: Option<Child>,
-    frontend_process: Option<Child>,
-    flownode_process: Option<Child>,
+    metasrv_process: Mutex<Option<Child>>,
+    frontend_process: Mutex<Option<Child>>,
+    flownode_process: Mutex<Option<Child>>,
     grpc_client: TokioMutex<DB>,
     pg_client: TokioMutex<PgClient>,
     mysql_client: TokioMutex<MySqlClient>,
@@ -701,7 +739,7 @@ impl GreptimeDB {
 impl Database for GreptimeDB {
     async fn query(&self, ctx: QueryContext, query: String) -> Box<dyn Display> {
         if ctx.context.contains_key("restart") && self.env.server_addrs.server_addr.is_none() {
-            self.env.restart_server(self).await;
+            self.env.restart_server(self, false).await;
         } else if let Some(version) = ctx.context.get("version") {
             if self.env.old_bins_dir.lock().unwrap().is_none() {
                 // save old bins dir
@@ -718,7 +756,7 @@ impl Database for GreptimeDB {
                 *self.env.bins_dir.lock().unwrap() = Some(new_path);
             }
 
-            self.env.restart_server(self).await;
+            self.env.restart_server(self, true).await;
         }
 
         if let Some(protocol) = ctx.context.get(PROTOCOL_KEY) {
@@ -746,15 +784,30 @@ impl GreptimeDB {
                 );
             }
         }
-        if let Some(mut metasrv) = self.metasrv_process.take() {
+        if let Some(mut metasrv) = self
+            .metasrv_process
+            .lock()
+            .expect("someone else panic when holding lock")
+            .take()
+        {
             Env::stop_server(&mut metasrv);
             println!("Metasrv (pid = {}) is stopped", metasrv.id());
         }
-        if let Some(mut frontend) = self.frontend_process.take() {
+        if let Some(mut frontend) = self
+            .frontend_process
+            .lock()
+            .expect("someone else panic when holding lock")
+            .take()
+        {
             Env::stop_server(&mut frontend);
             println!("Frontend (pid = {}) is stopped", frontend.id());
         }
-        if let Some(mut flownode) = self.flownode_process.take() {
+        if let Some(mut flownode) = self
+            .flownode_process
+            .lock()
+            .expect("someone else panic when holding lock")
+            .take()
+        {
             Env::stop_server(&mut flownode);
             println!("Flownode (pid = {}) is stopped", flownode.id());
         }
