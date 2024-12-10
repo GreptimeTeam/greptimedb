@@ -14,7 +14,7 @@
 
 #![no_main]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use arbitrary::{Arbitrary, Unstructured};
@@ -24,20 +24,17 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
 use snafu::ResultExt;
 use sqlx::{MySql, Pool};
-use strum::{EnumIter, IntoEnumIterator};
+use strum::EnumIter;
 use tests_fuzz::context::{TableContext, TableContextRef};
 use tests_fuzz::error::{self, Result};
 use tests_fuzz::fake::{
     merge_two_word_map_fn, random_capitalize_map, uppercase_and_keyword_backtick_map,
     MappedGenerator, WordGenerator,
 };
-use tests_fuzz::generator::alter_expr::{
-    AlterExprAddColumnGeneratorBuilder, AlterExprDropColumnGeneratorBuilder,
-    AlterExprModifyDataTypeGeneratorBuilder, AlterExprRenameGeneratorBuilder,
-};
+use tests_fuzz::generator::alter_expr::AlterExprAddColumnGeneratorBuilder;
 use tests_fuzz::generator::create_expr::CreateTableExprGeneratorBuilder;
 use tests_fuzz::generator::Generator;
-use tests_fuzz::ir::{droppable_columns, modifiable_columns, AlterTableExpr, CreateTableExpr};
+use tests_fuzz::ir::{AlterTableExpr, AlterTableOperation, CreateTableExpr};
 use tests_fuzz::translator::mysql::alter_expr::AlterTableExprTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::DslTranslator;
@@ -45,6 +42,7 @@ use tests_fuzz::utils::{
     get_gt_fuzz_input_max_columns, init_greptime_connections_via_env, Connections,
 };
 use tests_fuzz::validator;
+use tokio::task::JoinSet;
 struct FuzzContext {
     greptime: Pool<MySql>,
 }
@@ -89,45 +87,22 @@ fn generate_create_table_expr<R: Rng + 'static>(rng: &mut R) -> Result<CreateTab
     create_table_generator.generate(rng)
 }
 
-fn generate_alter_table_expr<R: Rng + 'static>(
+fn generate_alter_table_add_column_expr<R: Rng + 'static>(
     table_ctx: TableContextRef,
     rng: &mut R,
 ) -> Result<AlterTableExpr> {
-    let options = AlterTableOption::iter().collect::<Vec<_>>();
-    match options[rng.gen_range(0..options.len())] {
-        AlterTableOption::DropColumn if !droppable_columns(&table_ctx.columns).is_empty() => {
-            AlterExprDropColumnGeneratorBuilder::default()
-                .table_ctx(table_ctx)
-                .build()
-                .unwrap()
-                .generate(rng)
-        }
-        AlterTableOption::ModifyDataType if !modifiable_columns(&table_ctx.columns).is_empty() => {
-            AlterExprModifyDataTypeGeneratorBuilder::default()
-                .table_ctx(table_ctx)
-                .build()
-                .unwrap()
-                .generate(rng)
-        }
-        AlterTableOption::RenameTable => AlterExprRenameGeneratorBuilder::default()
-            .table_ctx(table_ctx)
-            .name_generator(Box::new(MappedGenerator::new(
-                WordGenerator,
-                merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
-            )))
-            .build()
-            .unwrap()
-            .generate(rng),
-        _ => {
-            let location = rng.gen_bool(0.5);
-            let expr_generator = AlterExprAddColumnGeneratorBuilder::default()
-                .table_ctx(table_ctx)
-                .location(location)
-                .build()
-                .unwrap();
-            expr_generator.generate(rng)
-        }
-    }
+    let location = rng.gen_bool(0.5);
+    let expr_generator = AlterExprAddColumnGeneratorBuilder::default()
+        // random capitalize column name
+        .name_generator(Box::new(MappedGenerator::new(
+            WordGenerator,
+            merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
+        )))
+        .table_ctx(table_ctx)
+        .location(location)
+        .build()
+        .unwrap();
+    expr_generator.generate(rng)
 }
 
 impl Arbitrary<'_> for FuzzInput {
@@ -140,7 +115,8 @@ impl Arbitrary<'_> for FuzzInput {
     }
 }
 
-async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
+/// Parallel alter table fuzz target
+async fn unstable_execute_parallel_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     info!("input: {input:?}");
     let mut rng = ChaChaRng::seed_from_u64(input.seed);
 
@@ -154,32 +130,70 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
     info!("Create table: {sql}, result: {result:?}");
 
-    // Alter table actions
-    let mut table_ctx = Arc::new(TableContext::from(&expr));
-    for _ in 0..input.actions {
-        let expr = generate_alter_table_expr(table_ctx.clone(), &mut rng).unwrap();
+    // Parallel add columns at once, and validate columns only after all columns are added
+    let table_ctx = Arc::new(TableContext::from(&expr));
+    let mut after_all_alter_table_ctx = table_ctx.clone();
+    let mut pool: JoinSet<Result<()>> = JoinSet::new();
+
+    let mut used_column_names = HashSet::new();
+    let mut action = 0;
+    while action < input.actions {
+        let expr = generate_alter_table_add_column_expr(table_ctx.clone(), &mut rng).unwrap();
+        if let AlterTableOperation::AddColumn { column, .. } = &expr.alter_options {
+            if used_column_names.contains(&column.name) {
+                info!("Column name already used: {}, retrying", column.name.value);
+                continue;
+            }
+            used_column_names.insert(column.name.clone());
+            action += 1;
+        }
         let translator = AlterTableExprTranslator;
         let sql = translator.translate(&expr)?;
-        let result = sqlx::query(&sql)
-            .execute(&ctx.greptime)
-            .await
-            .context(error::ExecuteQuerySnafu { sql: &sql })?;
-        info!("Alter table: {sql}, result: {result:?}");
-        // Applies changes
-        table_ctx = Arc::new(Arc::unwrap_or_clone(table_ctx).alter(expr).unwrap());
-
-        // Validates columns
-        let mut column_entries = validator::column::fetch_columns(
-            &ctx.greptime,
-            "public".into(),
-            table_ctx.name.clone(),
-        )
-        .await?;
-        column_entries.sort_by(|a, b| a.column_name.cmp(&b.column_name));
-        let mut columns = table_ctx.columns.clone();
-        columns.sort_by(|a, b| a.name.value.cmp(&b.name.value));
-        validator::column::assert_eq(&column_entries, &columns)?;
+        if let AlterTableOperation::AddColumn { .. } = expr.alter_options {
+            // Applies changes
+            after_all_alter_table_ctx = Arc::new(
+                Arc::unwrap_or_clone(after_all_alter_table_ctx)
+                    .alter(expr.clone())
+                    .unwrap(),
+            );
+            let conn = ctx.greptime.clone();
+            pool.spawn(async move {
+                let result = sqlx::query(&sql)
+                    .execute(&conn)
+                    .await
+                    .context(error::ExecuteQuerySnafu { sql: &sql })?;
+                info!("Alter table: {sql}, result: {result:?}");
+                Ok(())
+            });
+            continue;
+        }
     }
+
+    // run concurrently
+    let output = pool.join_all().await;
+    for (idx, err) in output.iter().enumerate().filter_map(|(i, u)| match u {
+        Ok(_) => None,
+        Err(e) => Some((i, e)),
+    }) {
+        // found first error and return
+        // but also print all errors for debugging
+        common_telemetry::error!("Error at parallel task {}: {err:?}", idx);
+    }
+
+    // return first error if exist
+    if let Some(err) = output.into_iter().filter_map(|u| u.err()).next() {
+        return Err(err);
+    }
+
+    let table_ctx = after_all_alter_table_ctx;
+    // Validates columns
+    let mut column_entries =
+        validator::column::fetch_columns(&ctx.greptime, "public".into(), table_ctx.name.clone())
+            .await?;
+    column_entries.sort_by(|a, b| a.column_name.cmp(&b.column_name));
+    let mut columns = table_ctx.columns.clone();
+    columns.sort_by(|a, b| a.name.value.cmp(&b.name.value));
+    validator::column::assert_eq(&column_entries, &columns)?;
 
     // Cleans up
     let table_name = table_ctx.name.clone();
@@ -201,7 +215,7 @@ fuzz_target!(|input: FuzzInput| {
         let ctx = FuzzContext {
             greptime: mysql.expect("mysql connection init must be succeed"),
         };
-        execute_alter_table(ctx, input)
+        unstable_execute_parallel_alter_table(ctx, input)
             .await
             .unwrap_or_else(|err| panic!("fuzz test must be succeed: {err:?}"));
     })
