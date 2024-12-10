@@ -22,6 +22,8 @@ use env::{Env, WalConfig};
 use sqlness::interceptor::Registry;
 use sqlness::{ConfigBuilder, Runner};
 
+use crate::env::StoreConfig;
+
 mod env;
 mod protocol_interceptor;
 mod util;
@@ -96,6 +98,14 @@ struct Args {
     /// Pull Different versions of GreptimeDB on need.
     #[clap(long, default_value = "true")]
     pull_version_on_need: bool,
+
+    /// The store addresses for the raft engine.
+    #[clap(long, default_value = "0.0.0.0:2379")]
+    store_addrs: Vec<String>,
+
+    /// Whether to setup etcd, by default it is true.
+    #[clap(long, default_value = "false")]
+    setup_etcd: bool,
 }
 
 #[tokio::main]
@@ -114,6 +124,11 @@ async fn main() {
         Arc::new(protocol_interceptor::ProtocolInterceptorFactory),
     );
 
+    if let Some(d) = &args.case_dir {
+        if !d.is_dir() {
+            panic!("{} is not a directory", d.display());
+        }
+    }
     let config = ConfigBuilder::default()
         .case_dir(util::get_case_dir(args.case_dir))
         .fail_fast(args.fail_fast)
@@ -136,6 +151,11 @@ async fn main() {
         },
     };
 
+    let store = StoreConfig {
+        store_addrs: args.store_addrs.clone(),
+        setup_etcd: args.setup_etcd,
+    };
+
     let runner = Runner::new(
         config,
         Env::new(
@@ -144,12 +164,15 @@ async fn main() {
             wal,
             args.pull_version_on_need,
             args.bins_dir,
+            store,
         ),
     );
     runner.run().await.unwrap();
 
     // clean up and exit
     if !args.preserve_state {
+        println!("Stopping etcd");
+        util::stop_etcd();
         println!("Removing state in {:?}", sqlness_home);
         tokio::fs::remove_dir_all(sqlness_home).await.unwrap();
     }

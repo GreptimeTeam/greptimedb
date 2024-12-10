@@ -66,6 +66,12 @@ pub enum WalConfig {
 }
 
 #[derive(Clone)]
+pub struct StoreConfig {
+    pub store_addrs: Vec<String>,
+    pub setup_etcd: bool,
+}
+
+#[derive(Clone)]
 pub struct Env {
     sqlness_home: PathBuf,
     server_addrs: ServerAddr,
@@ -79,6 +85,8 @@ pub struct Env {
     pull_version_on_need: bool,
     /// old bins dir, useful when switching versions
     old_bins_dir: Arc<Mutex<Option<PathBuf>>>,
+    /// Store address for metasrv metadata
+    store_config: StoreConfig,
 }
 
 #[async_trait]
@@ -107,6 +115,7 @@ impl Env {
         wal: WalConfig,
         pull_version_on_need: bool,
         bins_dir: Option<PathBuf>,
+        store_config: StoreConfig,
     ) -> Self {
         Self {
             sqlness_home: data_home,
@@ -115,6 +124,7 @@ impl Env {
             pull_version_on_need,
             bins_dir: Arc::new(Mutex::new(bins_dir)),
             old_bins_dir: Arc::new(Mutex::new(None)),
+            store_config,
         }
     }
 
@@ -144,6 +154,7 @@ impl Env {
         } else {
             self.build_db();
             self.setup_wal();
+            self.setup_etcd();
 
             let db_ctx = GreptimeDBContext::new(self.wal.clone());
 
@@ -539,6 +550,19 @@ impl Env {
         }
     }
 
+    /// Setup etcd if needed.
+    fn setup_etcd(&self) {
+        if self.store_config.setup_etcd {
+            let client_ports = self
+                .store_config
+                .store_addrs
+                .iter()
+                .map(|s| s.split(':').nth(1).unwrap().parse::<u16>().unwrap())
+                .collect::<Vec<_>>();
+            util::setup_etcd(client_ports, None, None);
+        }
+    }
+
     /// Generate config file to `/tmp/{subcommand}-{current_time}.toml`
     fn generate_config_file(&self, subcommand: &str, db_ctx: &GreptimeDBContext) -> String {
         let mut tt = TinyTemplate::new();
@@ -555,6 +579,8 @@ impl Env {
             procedure_dir: String,
             is_raft_engine: bool,
             kafka_wal_broker_endpoints: String,
+            setup_etcd: bool,
+            store_addrs: String,
         }
 
         let data_home = self.sqlness_home.join(format!("greptimedb-{subcommand}"));
@@ -568,6 +594,15 @@ impl Env {
             procedure_dir,
             is_raft_engine: db_ctx.is_raft_engine(),
             kafka_wal_broker_endpoints: db_ctx.kafka_wal_broker_endpoints(),
+            setup_etcd: self.store_config.setup_etcd,
+            store_addrs: self
+                .store_config
+                .store_addrs
+                .clone()
+                .iter()
+                .map(|p| format!("\"{p}\""))
+                .collect::<Vec<_>>()
+                .join(","),
         };
         let rendered = tt.render(subcommand, &ctx).unwrap();
 

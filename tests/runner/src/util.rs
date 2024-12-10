@@ -30,7 +30,7 @@ const PORT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 fn http_proxy() -> Option<String> {
     for proxy in ["http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"] {
         if let Ok(proxy_addr) = std::env::var(proxy) {
-            println!("Setting Proxy from env: {}={}", proxy, proxy_addr);
+            println!("Getting Proxy from env var: {}={}", proxy, proxy_addr);
             return Some(proxy_addr);
         }
     }
@@ -40,7 +40,7 @@ fn http_proxy() -> Option<String> {
 fn https_proxy() -> Option<String> {
     for proxy in ["https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"] {
         if let Ok(proxy_addr) = std::env::var(proxy) {
-            println!("Setting Proxy from env: {}={}", proxy, proxy_addr);
+            println!("Getting Proxy from env var: {}={}", proxy, proxy_addr);
             return Some(proxy_addr);
         }
     }
@@ -57,19 +57,37 @@ async fn download_files(url: &str, path: &str) {
     };
 
     let client = proxy
-        .map(|proxy| reqwest::Client::builder().proxy(proxy).build().unwrap())
+        .map(|proxy| {
+            reqwest::Client::builder()
+                .proxy(proxy)
+                .build()
+                .expect("Failed to build client")
+        })
         .unwrap_or(reqwest::Client::new());
 
-    let mut file = tokio::fs::File::create(path).await.unwrap();
+    let mut file = tokio::fs::File::create(path)
+        .await
+        .unwrap_or_else(|_| panic!("Failed to create file in {path}"));
     println!("Downloading {}...", url);
 
-    let mut stream = client.get(url).send().await.unwrap().bytes_stream();
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .expect("Failed to send download request");
+    let len = resp.content_length();
+    let mut stream = resp.bytes_stream();
     let mut size_downloaded = 0;
 
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result.unwrap();
         size_downloaded += chunk.len();
-        print!("\rDownloaded {} bytes", size_downloaded);
+        if let Some(len) = len {
+            print!("\rDownloading {}/{} bytes", size_downloaded, len);
+        } else {
+            print!("\rDownloaded {} bytes", size_downloaded);
+        }
+
         file.write_all(&chunk).await.unwrap();
     }
 
@@ -163,6 +181,92 @@ pub async fn maybe_pull_binary(version: &str, pull_version_on_need: bool) {
         (true, _) => println!("Binary {version} exists"),
         (false, false) => panic!("Binary {version} does not exist, please run with --pull-version-on-need or manually download it"),
         (false, true) => { pull_binary(version).await; },
+    }
+}
+
+/// Set up a standalone etcd in docker.
+pub fn setup_etcd(client_ports: Vec<u16>, peer_port: Option<u16>, etcd_version: Option<&str>) {
+    if std::process::Command::new("docker")
+        .args(["-v"])
+        .status()
+        .is_err()
+    {
+        panic!("Docker is not installed");
+    }
+    let peer_port = peer_port.unwrap_or(2380);
+    let exposed_port: Vec<_> = client_ports.iter().chain(Some(&peer_port)).collect();
+    let exposed_port_str = exposed_port
+        .iter()
+        .flat_map(|p| ["-p".to_string(), format!("{p}:{p}")])
+        .collect::<Vec<_>>();
+    let etcd_version = etcd_version.unwrap_or("v3.5.17");
+    let etcd_image = format!("quay.io/coreos/etcd:{etcd_version}");
+    let peer_url = format!("http://0.0.0.0:{peer_port}");
+
+    let client_ports_fmt = client_ports
+        .iter()
+        .map(|p| format!("http://0.0.0.0:{p}"))
+        .collect::<Vec<_>>();
+    let mut arg_list = vec![];
+    arg_list.extend([
+        "run",
+        "-d",
+        "-v",
+        "/usr/share/ca-certificates/:/etc/ssl/certs",
+    ]);
+    arg_list.extend(exposed_port_str.iter().map(std::ops::Deref::deref));
+    arg_list.extend([
+        "--name",
+        "etcd",
+        &etcd_image,
+        "etcd",
+        "-name",
+        "etcd0",
+        "-listen-client-urls",
+    ]);
+
+    arg_list.extend(client_ports_fmt.iter().map(std::ops::Deref::deref));
+    arg_list.extend(["-listen-peer-urls", &peer_url, "-initial-cluster-state new"]);
+
+    let mut cmd = std::process::Command::new("docker");
+
+    cmd.args(arg_list);
+
+    println!("Starting etcd with command: {:?}", cmd);
+
+    let status = cmd.status();
+    if status.is_err() {
+        panic!("Failed to start etcd: {:?}", status);
+    } else if let Ok(status) = status {
+        if status.success() {
+            println!(
+                "Started etcd with client ports {:?} and peer port {}, statues:{status:?}",
+                client_ports, peer_port
+            );
+        } else {
+            panic!("Failed to start etcd: {:?}", status);
+        }
+    }
+}
+
+/// Stop the etcd container
+pub fn stop_etcd() {
+    let status = std::process::Command::new("docker")
+        .args(["container", "stop", "etcd"])
+        .status();
+    if status.is_err() {
+        panic!("Failed to stop etcd: {:?}", status);
+    } else {
+        println!("Stopped etcd");
+    }
+    // rm the container
+    let status = std::process::Command::new("docker")
+        .args(["container", "rm", "etcd"])
+        .status();
+    if status.is_err() {
+        panic!("Failed to remove etcd container: {:?}", status);
+    } else {
+        println!("Removed etcd container");
     }
 }
 
