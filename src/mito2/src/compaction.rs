@@ -570,7 +570,6 @@ pub struct SerializedCompactionOutput {
 struct CompactionSstReaderBuilder<'a> {
     metadata: RegionMetadataRef,
     sst_layer: AccessLayerRef,
-    cache: Option<CacheManagerRef>,
     inputs: &'a [FileHandle],
     append_mode: bool,
     filter_deleted: bool,
@@ -584,7 +583,7 @@ impl<'a> CompactionSstReaderBuilder<'a> {
         let mut scan_input = ScanInput::new(self.sst_layer, ProjectionMapper::all(&self.metadata)?)
             .with_files(self.inputs.to_vec())
             .with_append_mode(self.append_mode)
-            .with_cache(self.cache)
+            .with_cache(None)
             .with_filter_deleted(self.filter_deleted)
             // We ignore file not found error during compaction.
             .with_ignore_file_not_found(true)

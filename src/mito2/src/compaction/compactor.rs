@@ -296,7 +296,6 @@ impl Compactor for DefaultCompactor {
                 let reader = CompactionSstReaderBuilder {
                     metadata: region_metadata.clone(),
                     sst_layer: sst_layer.clone(),
-                    cache: Some(cache_manager.clone()),
                     inputs: &output.inputs,
                     append_mode,
                     filter_deleted: output.filter_deleted,
