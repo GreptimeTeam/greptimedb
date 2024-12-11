@@ -139,11 +139,6 @@ tokio-test = "0.4"
 [target.'cfg(unix)'.dev-dependencies]
 pprof = { version = "0.13", features = ["criterion", "flamegraph"] }
 
-[target.'cfg(windows)'.dependencies]
-aws-lc-sys = { version = "0.21.0", features = [
-    "prebuilt-nasm",
-] } # use prebuilt nasm on windows per https://github.com/aws/aws-lc-rs/blob/main/aws-lc-sys/README.md#use-of-prebuilt-nasm-objects
-
 [build-dependencies]
 common-version.workspace = true
 
