@@ -1,9 +1,6 @@
 ## The running mode of the datanode. It can be `standalone` or `distributed`.
 mode = "standalone"
 
-## Enable telemetry to collect anonymous usage data.
-enable_telemetry = true
-
 ## The default timezone of the server.
 ## @toml2docs:none-default
 default_timezone = "UTC"
@@ -17,6 +14,9 @@ init_regions_parallelism = 16
 
 ## The maximum current queries allowed to be executed. Zero means unlimited.
 max_concurrent_queries = 0
+
+## Enable telemetry to collect anonymous usage data. Enabled by default.
+#+ enable_telemetry = true
 
 ## The runtime options.
 #+ [runtime]
@@ -147,15 +147,15 @@ dir = "/tmp/greptimedb/wal"
 
 ## The size of the WAL segment file.
 ## **It's only used when the provider is `raft_engine`**.
-file_size = "256MB"
+file_size = "128MB"
 
 ## The threshold of the WAL size to trigger a flush.
 ## **It's only used when the provider is `raft_engine`**.
-purge_threshold = "4GB"
+purge_threshold = "1GB"
 
 ## The interval to trigger a flush.
 ## **It's only used when the provider is `raft_engine`**.
-purge_interval = "10m"
+purge_interval = "1m"
 
 ## The read batch size.
 ## **It's only used when the provider is `raft_engine`**.
