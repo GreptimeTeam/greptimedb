@@ -20,8 +20,11 @@ use std::vec;
 use common_base::range_read::{FileReader, RangeReader};
 use futures::io::Cursor as AsyncCursor;
 
-use crate::file_format::reader::{AsyncReader, PuffinFileReader, SyncReader};
+use crate::file_format::reader::{
+    AsyncReader, PuffinFileFooterReader, PuffinFileReader, SyncReader,
+};
 use crate::file_format::writer::{AsyncWriter, Blob, PuffinFileWriter, SyncWriter};
+use crate::file_metadata::FileMetadata;
 
 #[test]
 fn test_read_empty_puffin_sync() {
@@ -43,6 +46,39 @@ async fn test_read_empty_puffin_async() {
     let metadata = reader.metadata().await.unwrap();
     assert_eq!(metadata.properties.len(), 0);
     assert_eq!(metadata.blobs.len(), 0);
+}
+
+async fn test_read_puffin_file_metadata(
+    path: &str,
+    file_size: u64,
+    expeccted_metadata: FileMetadata,
+) {
+    for prefetch_size in [0, file_size / 2, file_size, file_size + 10] {
+        let reader = FileReader::new(path).await.unwrap();
+        let mut footer_reader = PuffinFileFooterReader::new(reader, file_size);
+        if prefetch_size > 0 {
+            footer_reader = footer_reader.with_prefetch_size(prefetch_size);
+        }
+        let metadata = footer_reader.metadata().await.unwrap();
+        assert_eq!(metadata.properties, expeccted_metadata.properties,);
+        assert_eq!(metadata.blobs, expeccted_metadata.blobs);
+    }
+}
+
+#[tokio::test]
+async fn test_read_puffin_file_metadata_async() {
+    let paths = vec![
+        "src/tests/resources/empty-puffin-uncompressed.puffin",
+        "src/tests/resources/sample-metric-data-uncompressed.puffin",
+    ];
+    for path in paths {
+        let mut reader = FileReader::new(path).await.unwrap();
+        let file_size = reader.metadata().await.unwrap().content_length;
+        let mut reader = PuffinFileReader::new(reader);
+        let metadata = reader.metadata().await.unwrap();
+
+        test_read_puffin_file_metadata(path, file_size, metadata).await;
+    }
 }
 
 #[test]

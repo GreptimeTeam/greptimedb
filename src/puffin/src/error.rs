@@ -165,6 +165,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid puffin footer"))]
+    InvalidPuffinFooter {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Unexpected puffin file size, min: {}, actual: {}",
         min_file_size,
@@ -286,7 +292,8 @@ impl ErrorExt for Error {
             | BlobNotFound { .. }
             | BlobIndexOutOfBound { .. }
             | FileKeyNotMatch { .. }
-            | WalkDir { .. } => StatusCode::Unexpected,
+            | WalkDir { .. }
+            | InvalidPuffinFooter { .. } => StatusCode::Unexpected,
 
             UnsupportedCompression { .. } | UnsupportedDecompression { .. } => {
                 StatusCode::Unsupported

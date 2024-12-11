@@ -21,6 +21,7 @@ use common_base::range_read::RangeReader;
 use crate::blob_metadata::BlobMetadata;
 use crate::error::Result;
 pub use crate::file_format::reader::file::PuffinFileReader;
+pub use crate::file_format::reader::footer::PuffinFileFooterReader;
 use crate::file_metadata::FileMetadata;
 
 /// `SyncReader` defines a synchronous reader for puffin data.
