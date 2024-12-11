@@ -361,6 +361,14 @@ pub async fn test_sql_api(store_type: StorageType) {
     let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), ErrorCode::DatabaseNotFound as u32);
 
+    // test parse method
+    let res = client.get("/v1/sql/parse?sql=desc table t").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.text().await,
+        "[{\"DescribeTable\":{\"name\":[{\"value\":\"t\",\"quote_style\":null}]}}]"
+    );
+
     // test timezone header
     let res = client
         .get("/v1/sql?&sql=show variables system_time_zone")

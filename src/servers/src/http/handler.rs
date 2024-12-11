@@ -30,8 +30,13 @@ use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use session::context::{Channel, QueryContext, QueryContextRef};
+use snafu::ResultExt;
+use sql::dialect::GreptimeDbDialect;
+use sql::parser::{ParseOptions, ParserContext};
+use sql::statements::statement::Statement;
 
 use super::header::collect_plan_metrics;
+use crate::error::{FailedToParseQuerySnafu, InvalidQuerySnafu, Result};
 use crate::http::result::arrow_result::ArrowResponse;
 use crate::http::result::csv_result::CsvResponse;
 use crate::http::result::error_result::ErrorResponse;
@@ -146,10 +151,31 @@ pub async fn sql(
     resp.with_execution_time(start.elapsed().as_millis() as u64)
 }
 
+/// Handler to parse sql
+#[axum_macros::debug_handler]
+#[tracing::instrument(skip_all, fields(protocol = "http", request_type = "sql"))]
+pub async fn sql_parse(
+    Query(query_params): Query<SqlQuery>,
+    Form(form_params): Form<SqlQuery>,
+) -> Result<Json<Vec<Statement>>> {
+    let Some(sql) = query_params.sql.or(form_params.sql) else {
+        return InvalidQuerySnafu {
+            reason: "sql parameter is required.",
+        }
+        .fail();
+    };
+
+    let stmts =
+        ParserContext::create_with_dialect(&sql, &GreptimeDbDialect {}, ParseOptions::default())
+            .context(FailedToParseQuerySnafu)?;
+
+    Ok(stmts.into())
+}
+
 /// Create a response from query result
 pub async fn from_output(
     outputs: Vec<crate::error::Result<Output>>,
-) -> Result<(Vec<GreptimeQueryOutput>, HashMap<String, Value>), ErrorResponse> {
+) -> std::result::Result<(Vec<GreptimeQueryOutput>, HashMap<String, Value>), ErrorResponse> {
     // TODO(sunng87): this api response structure cannot represent error well.
     //  It hides successful execution results from error response
     let mut results = Vec::with_capacity(outputs.len());
