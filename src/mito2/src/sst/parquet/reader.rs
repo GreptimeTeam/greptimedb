@@ -475,8 +475,11 @@ impl ParquetReaderBuilder {
         if !self.file_handle.meta_ref().inverted_index_available() {
             return false;
         }
-
-        let apply_output = match index_applier.apply(self.file_handle.file_id()).await {
+        let file_size_hint = self.file_handle.meta_ref().inverted_index_size();
+        let apply_output = match index_applier
+            .apply(self.file_handle.file_id(), file_size_hint)
+            .await
+        {
             Ok(output) => output,
             Err(err) => {
                 if cfg!(any(test, feature = "test")) {

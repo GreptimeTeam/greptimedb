@@ -23,6 +23,10 @@ use crate::partial_reader::PartialReader;
 
 #[async_trait]
 impl<R: RangeReader> RangeReader for PartialReader<R> {
+    fn with_file_size_hint(&mut self, _file_size_hint: u64) {
+        // do nothing
+    }
+
     async fn metadata(&mut self) -> io::Result<Metadata> {
         Ok(Metadata {
             content_length: self.size,
