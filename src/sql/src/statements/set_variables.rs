@@ -14,11 +14,12 @@
 
 use std::fmt::Display;
 
+use serde::{Deserialize, Serialize};
 use sqlparser::ast::{Expr, ObjectName};
 use sqlparser_derive::{Visit, VisitMut};
 
 /// SET variables statement.
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize, Deserialize)]
 pub struct SetVariables {
     pub variable: ObjectName,
     pub value: Vec<Expr>,

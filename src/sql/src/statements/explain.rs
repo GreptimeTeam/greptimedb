@@ -14,13 +14,14 @@
 
 use std::fmt::{Display, Formatter};
 
+use serde::{Deserialize, Serialize};
 use sqlparser::ast::Statement as SpStatement;
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::error::Error;
 
 /// Explain statement.
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize, Deserialize)]
 pub struct Explain {
     pub inner: SpStatement,
 }

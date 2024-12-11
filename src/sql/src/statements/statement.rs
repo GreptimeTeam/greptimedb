@@ -15,12 +15,14 @@
 use std::fmt::Display;
 
 use datafusion_sql::parser::Statement as DfStatement;
+use serde::{Deserialize, Serialize};
 use sqlparser::ast::Statement as SpStatement;
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::error::{ConvertToDfStatementSnafu, Error};
 use crate::statements::admin::Admin;
 use crate::statements::alter::{AlterDatabase, AlterTable};
+use crate::statements::copy::Copy;
 use crate::statements::create::{
     CreateDatabase, CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView,
 };
@@ -42,7 +44,7 @@ use crate::statements::truncate::TruncateTable;
 
 /// Tokens parsed by `DFParser` are converted into these values.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize, Deserialize)]
 pub enum Statement {
     // Query
     Query(Box<Query>),
@@ -107,7 +109,8 @@ pub enum Statement {
     // EXPLAIN QUERY
     Explain(Explain),
     // COPY
-    Copy(crate::statements::copy::Copy),
+    Copy(Copy),
+    // Telemery Query Language
     Tql(Tql),
     // TRUNCATE TABLE
     TruncateTable(TruncateTable),

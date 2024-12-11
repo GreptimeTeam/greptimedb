@@ -180,6 +180,7 @@ sysinfo = "0.30"
 # on branch v0.44.x
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "54a267ac89c09b11c0c88934690530807185d3e7", features = [
     "visitor",
+    "serde",
 ] }
 strum = { version = "0.25", features = ["derive"] }
 tempfile = "3"

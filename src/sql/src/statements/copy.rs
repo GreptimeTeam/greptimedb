@@ -14,12 +14,13 @@
 
 use std::fmt::Display;
 
+use serde::{Deserialize, Serialize};
 use sqlparser::ast::ObjectName;
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::statements::OptionMap;
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize, Deserialize)]
 pub enum Copy {
     CopyTable(CopyTable),
     CopyDatabase(CopyDatabase),
@@ -34,7 +35,7 @@ impl Display for Copy {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize, Deserialize)]
 pub enum CopyTable {
     To(CopyTableArgument),
     From(CopyTableArgument),
@@ -65,7 +66,7 @@ impl Display for CopyTable {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize, Deserialize)]
 pub enum CopyDatabase {
     To(CopyDatabaseArgument),
     From(CopyDatabaseArgument),
@@ -96,7 +97,7 @@ impl Display for CopyDatabase {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize, Deserialize)]
 pub struct CopyDatabaseArgument {
     pub database_name: ObjectName,
     pub with: OptionMap,
@@ -104,7 +105,7 @@ pub struct CopyDatabaseArgument {
     pub location: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize, Deserialize)]
 pub struct CopyTableArgument {
     pub table_name: ObjectName,
     pub with: OptionMap,

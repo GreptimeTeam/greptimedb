@@ -18,6 +18,7 @@ use std::fmt::{Display, Formatter};
 use common_catalog::consts::FILE_ENGINE;
 use datatypes::schema::FulltextOptions;
 use itertools::Itertools;
+use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use sqlparser::ast::{ColumnOptionDef, DataType, Expr, Query};
 use sqlparser_derive::{Visit, VisitMut};
@@ -58,7 +59,7 @@ fn format_table_constraint(constraints: &[TableConstraint]) -> String {
 }
 
 /// Table constraint for create table statement.
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize, Deserialize)]
 pub enum TableConstraint {
     /// Primary key constraint.
     PrimaryKey { columns: Vec<Ident> },
@@ -84,7 +85,7 @@ impl Display for TableConstraint {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize, Deserialize)]
 pub struct CreateTable {
     /// Create if not exists
     pub if_not_exists: bool,
@@ -100,7 +101,7 @@ pub struct CreateTable {
 }
 
 /// Column definition in `CREATE TABLE` statement.
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize, Deserialize)]
 pub struct Column {
     /// `ColumnDef` from `sqlparser::ast`
     pub column_def: ColumnDef,
@@ -109,7 +110,7 @@ pub struct Column {
 }
 
 /// Column extensions for greptimedb dialect.
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Default)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Default, Serialize, Deserialize)]
 pub struct ColumnExtensions {
     /// Fulltext options.
     pub fulltext_options: Option<OptionMap>,
@@ -172,7 +173,7 @@ impl ColumnExtensions {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize, Deserialize)]
 pub struct Partitions {
     pub column_list: Vec<Ident>,
     pub exprs: Vec<Expr>,
@@ -244,7 +245,7 @@ impl Display for CreateTable {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize, Deserialize)]
 pub struct CreateDatabase {
     pub name: ObjectName,
     /// Create if not exists
@@ -278,7 +279,7 @@ impl Display for CreateDatabase {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize, Deserialize)]
 pub struct CreateExternalTable {
     /// Table name
     pub name: ObjectName,
@@ -309,7 +310,7 @@ impl Display for CreateExternalTable {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize, Deserialize)]
 pub struct CreateTableLike {
     /// Table name
     pub table_name: ObjectName,
@@ -325,7 +326,7 @@ impl Display for CreateTableLike {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize, Deserialize)]
 pub struct CreateFlow {
     /// Flow name
     pub flow_name: ObjectName,
@@ -367,7 +368,7 @@ impl Display for CreateFlow {
 }
 
 /// Create SQL view statement.
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize, Deserialize)]
 pub struct CreateView {
     /// View name
     pub name: ObjectName,
