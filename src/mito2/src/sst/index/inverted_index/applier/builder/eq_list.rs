@@ -142,6 +142,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         builder
@@ -180,6 +181,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         builder
@@ -209,6 +211,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         let res = builder.collect_eq(&nonexistent_column(), &string_lit("abc"));
@@ -229,6 +232,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         let res = builder.collect_eq(&tag_column(), &int64_lit(1));
@@ -249,6 +253,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         let eq_expr = DfExpr::BinaryExpr(BinaryExpr {
@@ -308,6 +313,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         let eq_expr = DfExpr::BinaryExpr(BinaryExpr {
@@ -346,6 +352,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         let eq_expr = DfExpr::BinaryExpr(BinaryExpr {

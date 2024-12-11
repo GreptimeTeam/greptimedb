@@ -14,6 +14,7 @@
 
 use std::io;
 use std::ops::Range;
+use std::sync::Arc;
 
 use async_compression::futures::bufread::ZstdDecoder;
 use async_trait::async_trait;
@@ -23,12 +24,14 @@ use futures::io::BufReader;
 use futures::{AsyncRead, AsyncWrite};
 use snafu::{ensure, OptionExt, ResultExt};
 
+use super::PuffinMetadataCacheRef;
 use crate::blob_metadata::{BlobMetadata, CompressionCodec};
 use crate::error::{
     BlobIndexOutOfBoundSnafu, BlobNotFoundSnafu, DeserializeJsonSnafu, FileKeyNotMatchSnafu,
     MetadataSnafu, ReadSnafu, Result, UnsupportedDecompressionSnafu, WriteSnafu,
 };
 use crate::file_format::reader::{AsyncReader, PuffinFileReader};
+use crate::file_metadata::FileMetadata;
 use crate::partial_reader::PartialReader;
 use crate::puffin_manager::file_accessor::PuffinFileAccessor;
 use crate::puffin_manager::fs_puffin_manager::dir_meta::DirMetadata;
@@ -45,14 +48,23 @@ pub struct FsPuffinReader<S, F> {
 
     /// The puffin file accessor.
     puffin_file_accessor: F,
+
+    /// The puffin file metadata cache.
+    puffin_file_metadata_cache: Option<PuffinMetadataCacheRef>,
 }
 
 impl<S, F> FsPuffinReader<S, F> {
-    pub(crate) fn new(puffin_file_name: String, stager: S, puffin_file_accessor: F) -> Self {
+    pub(crate) fn new(
+        puffin_file_name: String,
+        stager: S,
+        puffin_file_accessor: F,
+        puffin_file_metadata_cache: Option<PuffinMetadataCacheRef>,
+    ) -> Self {
         Self {
             puffin_file_name,
             stager,
             puffin_file_accessor,
+            puffin_file_metadata_cache,
         }
     }
 }
@@ -73,13 +85,13 @@ where
             .await?;
         let mut file = PuffinFileReader::new(reader);
 
-        // TODO(zhongzc): cache the metadata.
-        let metadata = file.metadata().await?;
+        let metadata = self.get_puffin_file_metadata(&mut file).await?;
         let blob_metadata = metadata
             .blobs
-            .into_iter()
+            .iter()
             .find(|m| m.blob_type == key)
-            .context(BlobNotFoundSnafu { blob: key })?;
+            .context(BlobNotFoundSnafu { blob: key })?
+            .clone();
 
         let blob = if blob_metadata.compression_codec.is_none() {
             // If the blob is not compressed, we can directly read it from the puffin file.
@@ -133,6 +145,23 @@ where
     S: Stager,
     F: PuffinFileAccessor + Clone,
 {
+    async fn get_puffin_file_metadata(
+        &self,
+        reader: &mut PuffinFileReader<F::Reader>,
+    ) -> Result<Arc<FileMetadata>> {
+        if let Some(cache) = self.puffin_file_metadata_cache.as_ref() {
+            if let Some(metadata) = cache.get_metadata(&self.puffin_file_name) {
+                return Ok(metadata);
+            }
+        }
+
+        let metadata = Arc::new(reader.metadata().await?);
+        if let Some(cache) = self.puffin_file_metadata_cache.as_ref() {
+            cache.put_metadata(self.puffin_file_name.to_string(), metadata.clone());
+        }
+        Ok(metadata)
+    }
+
     async fn init_blob_to_stager(
         reader: PuffinFileReader<F::Reader>,
         blob_metadata: BlobMetadata,

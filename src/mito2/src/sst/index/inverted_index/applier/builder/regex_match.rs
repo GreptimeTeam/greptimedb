@@ -67,6 +67,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         builder
@@ -96,6 +97,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         builder
@@ -125,6 +127,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         builder
@@ -147,6 +150,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         let res = builder.collect_regex_match(&nonexistent_column(), &string_lit("abc"));

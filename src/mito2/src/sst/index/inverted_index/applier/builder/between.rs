@@ -80,6 +80,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         let between = Between {
@@ -123,6 +124,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         let between = Between {
@@ -149,6 +151,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         let between = Between {
@@ -192,6 +195,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         let between = Between {
@@ -219,6 +223,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         let between = Between {

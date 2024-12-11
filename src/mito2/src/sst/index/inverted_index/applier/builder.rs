@@ -28,6 +28,7 @@ use datatypes::value::Value;
 use index::inverted_index::search::index_apply::PredicatesIndexApplier;
 use index::inverted_index::search::predicate::Predicate;
 use object_store::ObjectStore;
+use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
 use store_api::storage::ColumnId;
@@ -65,9 +66,14 @@ pub(crate) struct InvertedIndexApplierBuilder<'a> {
 
     /// Cache for inverted index.
     index_cache: Option<InvertedIndexCacheRef>,
+
+    /// Cache for puffin metadata.
+    puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
 }
 
 impl<'a> InvertedIndexApplierBuilder<'a> {
+    // TODO(weny): remove this after refactoring.
+    #[allow(clippy::too_many_arguments)]
     /// Creates a new [`InvertedIndexApplierBuilder`].
     pub fn new(
         region_dir: String,
@@ -77,6 +83,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
         metadata: &'a RegionMetadata,
         indexed_column_ids: HashSet<ColumnId>,
         puffin_manager_factory: PuffinManagerFactory,
+        puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
     ) -> Self {
         Self {
             region_dir,
@@ -87,6 +94,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
             output: HashMap::default(),
             index_cache,
             puffin_manager_factory,
+            puffin_metadata_cache,
         }
     }
 
@@ -114,6 +122,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
             self.object_store,
             self.file_cache,
             self.index_cache,
+            self.puffin_metadata_cache,
             Box::new(applier.context(BuildIndexApplierSnafu)?),
             self.puffin_manager_factory,
         )))
@@ -327,6 +336,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         let expr = Expr::BinaryExpr(BinaryExpr {

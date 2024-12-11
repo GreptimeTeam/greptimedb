@@ -22,6 +22,7 @@ use index::inverted_index::search::index_apply::{
     ApplyOutput, IndexApplier, IndexNotFoundStrategy, SearchContext,
 };
 use object_store::ObjectStore;
+use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{BlobGuard, PuffinManager, PuffinReader};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -60,11 +61,16 @@ pub(crate) struct InvertedIndexApplier {
 
     /// In-memory cache for inverted index.
     inverted_index_cache: Option<InvertedIndexCacheRef>,
+
+    /// Puffin metadata cache.
+    puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
 }
 
 pub(crate) type InvertedIndexApplierRef = Arc<InvertedIndexApplier>;
 
 impl InvertedIndexApplier {
+    // TODO(weny): remove this after refactoring.
+    #[allow(clippy::too_many_arguments)]
     /// Creates a new `InvertedIndexApplier`.
     pub fn new(
         region_dir: String,
@@ -72,6 +78,7 @@ impl InvertedIndexApplier {
         store: ObjectStore,
         file_cache: Option<FileCacheRef>,
         index_cache: Option<InvertedIndexCacheRef>,
+        puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
         index_applier: Box<dyn IndexApplier>,
         puffin_manager_factory: PuffinManagerFactory,
     ) -> Self {
@@ -85,6 +92,7 @@ impl InvertedIndexApplier {
             index_applier,
             puffin_manager_factory,
             inverted_index_cache: index_cache,
+            puffin_metadata_cache,
         }
     }
 
@@ -105,6 +113,7 @@ impl InvertedIndexApplier {
                 if let Err(err) = other {
                     warn!(err; "An unexpected error occurred while reading the cached index file. Fallback to remote index file.")
                 }
+
                 self.remote_blob_reader(file_id).await?
             }
         };
@@ -157,7 +166,10 @@ impl InvertedIndexApplier {
 
     /// Creates a blob reader from the remote index file.
     async fn remote_blob_reader(&self, file_id: FileId) -> Result<BlobReader> {
-        let puffin_manager = self.puffin_manager_factory.build(self.store.clone());
+        let puffin_manager = self
+            .puffin_manager_factory
+            .build(self.store.clone())
+            .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
         let file_path = location::index_file_path(&self.region_dir, file_id);
         puffin_manager
             .reader(&file_path)
@@ -221,6 +233,7 @@ mod tests {
             object_store,
             None,
             None,
+            None,
             Box::new(mock_index_applier),
             puffin_manager_factory,
         );
@@ -261,6 +274,7 @@ mod tests {
             region_dir.clone(),
             RegionId::new(0, 0),
             object_store,
+            None,
             None,
             None,
             Box::new(mock_index_applier),

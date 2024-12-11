@@ -73,6 +73,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         let in_list = InList {
@@ -106,6 +107,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         let in_list = InList {
@@ -131,6 +133,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         let in_list = InList {
@@ -164,6 +167,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         let in_list = InList {
@@ -191,6 +195,7 @@ mod tests {
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
+            None,
         );
 
         let in_list = InList {
