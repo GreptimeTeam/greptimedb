@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io::{self, Cursor, SeekFrom};
+use std::io::Cursor;
 
 use common_base::range_read::RangeReader;
 use snafu::{ensure, ResultExt};
@@ -20,7 +20,7 @@ use snafu::{ensure, ResultExt};
 use crate::error::{
     BytesToIntegerSnafu, DeserializeJsonSnafu, InvalidBlobAreaEndSnafu, InvalidBlobOffsetSnafu,
     InvalidPuffinFooterSnafu, Lz4DecompressionSnafu, MagicNotMatchedSnafu, ParseStageNotMatchSnafu,
-    ReadSnafu, Result, SeekSnafu, UnexpectedFooterPayloadSizeSnafu,
+    ReadSnafu, Result, UnexpectedFooterPayloadSizeSnafu,
 };
 use crate::file_format::{Flags, FLAGS_SIZE, MAGIC, MAGIC_SIZE, MIN_FILE_SIZE, PAYLOAD_SIZE_SIZE};
 use crate::file_metadata::FileMetadata;
@@ -45,30 +45,6 @@ pub struct FooterParser<R> {
 impl<R> FooterParser<R> {
     pub fn new(source: R, file_size: u64) -> Self {
         Self { source, file_size }
-    }
-}
-
-impl<R: io::Read + io::Seek> FooterParser<R> {
-    /// Parses the footer from the IO source in a synchronous manner.
-    pub fn parse_sync(&mut self) -> Result<FileMetadata> {
-        let mut parser = StageParser::new(self.file_size);
-
-        let mut buf = vec![];
-        while let Some(byte_to_read) = parser.next_to_read() {
-            self.source
-                .seek(SeekFrom::Start(byte_to_read.offset))
-                .context(SeekSnafu)?;
-            let size = byte_to_read.size as usize;
-
-            buf.resize(size, 0);
-            let buf = &mut buf[..size];
-
-            self.source.read_exact(buf).context(ReadSnafu)?;
-
-            parser.consume_bytes(buf)?;
-        }
-
-        parser.finish()
     }
 }
 
