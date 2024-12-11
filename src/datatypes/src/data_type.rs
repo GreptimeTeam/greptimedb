@@ -370,6 +370,51 @@ impl ConcreteDataType {
             _ => None,
         }
     }
+
+    /// Return the datatype name in postgres type system
+    pub fn postgres_datatype_name(&self) -> &'static str {
+        match self {
+            &ConcreteDataType::Null(_) => "UNKNOWN",
+            &ConcreteDataType::Boolean(_) => "BOOL",
+            &ConcreteDataType::Int8(_) | &ConcreteDataType::UInt8(_) => "CHAR",
+            &ConcreteDataType::Int16(_) | &ConcreteDataType::UInt16(_) => "INT2",
+            &ConcreteDataType::Int32(_) | &ConcreteDataType::UInt32(_) => "INT4",
+            &ConcreteDataType::Int64(_) | &ConcreteDataType::UInt64(_) => "INT8",
+            &ConcreteDataType::Float32(_) => "FLOAT4",
+            &ConcreteDataType::Float64(_) => "FLOAT8",
+            &ConcreteDataType::Binary(_) | &ConcreteDataType::Vector(_) => "BYTEA",
+            &ConcreteDataType::String(_) => "VARCHAR",
+            &ConcreteDataType::Date(_) => "DATE",
+            &ConcreteDataType::DateTime(_) | &ConcreteDataType::Timestamp(_) => "TIMESTAMP",
+            &ConcreteDataType::Time(_) => "TIME",
+            &ConcreteDataType::Interval(_) => "INTERVAL",
+            &ConcreteDataType::Decimal128(_) => "NUMERIC",
+            &ConcreteDataType::Json(_) => "JSON",
+            ConcreteDataType::List(list) => match list.item_type() {
+                &ConcreteDataType::Null(_) => "UNKNOWN",
+                &ConcreteDataType::Boolean(_) => "_BOOL",
+                &ConcreteDataType::Int8(_) | &ConcreteDataType::UInt8(_) => "_CHAR",
+                &ConcreteDataType::Int16(_) | &ConcreteDataType::UInt16(_) => "_INT2",
+                &ConcreteDataType::Int32(_) | &ConcreteDataType::UInt32(_) => "_INT4",
+                &ConcreteDataType::Int64(_) | &ConcreteDataType::UInt64(_) => "_INT8",
+                &ConcreteDataType::Float32(_) => "_FLOAT4",
+                &ConcreteDataType::Float64(_) => "_FLOAT8",
+                &ConcreteDataType::Binary(_) => "_BYTEA",
+                &ConcreteDataType::String(_) => "_VARCHAR",
+                &ConcreteDataType::Date(_) => "_DATE",
+                &ConcreteDataType::DateTime(_) | &ConcreteDataType::Timestamp(_) => "_TIMESTAMP",
+                &ConcreteDataType::Time(_) => "_TIME",
+                &ConcreteDataType::Interval(_) => "_INTERVAL",
+                &ConcreteDataType::Decimal128(_) => "_NUMERIC",
+                &ConcreteDataType::Json(_) => "_JSON",
+                &ConcreteDataType::Duration(_)
+                | &ConcreteDataType::Dictionary(_)
+                | &ConcreteDataType::Vector(_)
+                | &ConcreteDataType::List(_) => "UNKNOWN",
+            },
+            &ConcreteDataType::Duration(_) | &ConcreteDataType::Dictionary(_) => "UNKNOWN",
+        }
+    }
 }
 
 impl From<&ConcreteDataType> for ConcreteDataType {
