@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
 use common_error::ext::BoxedError;
+use pipeline::pipeline_operator::PipelineOperator;
 use pipeline::{GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion};
 use servers::error::{
     AuthSnafu, Error as ServerError, ExecuteGrpcRequestSnafu, PipelineSnafu, Result as ServerResult,
@@ -96,6 +97,10 @@ impl PipelineHandler for Instance {
         self.catalog_manager
             .table(catalog, &schema, table, None)
             .await
+    }
+
+    fn build_pipeline(&self, pipeline: &str) -> ServerResult<Pipeline<GreptimeTransformer>> {
+        PipelineOperator::build_pipeline(pipeline).context(PipelineSnafu)
     }
 }
 

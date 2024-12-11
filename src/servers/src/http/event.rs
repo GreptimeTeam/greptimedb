@@ -38,7 +38,7 @@ use lazy_static::lazy_static;
 use loki_api::prost_types::Timestamp;
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
-use pipeline::PipelineVersion;
+use pipeline::{GreptimeTransformer, PipelineVersion};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_json::{Deserializer, Map, Value};
@@ -276,39 +276,11 @@ fn transform_ndjson_array_factory(
         })
 }
 
-#[axum_macros::debug_handler]
-pub async fn pipeline_dryrun(
-    State(log_state): State<LogState>,
-    Query(query_params): Query<LogIngesterQueryParams>,
-    Extension(mut query_ctx): Extension<QueryContext>,
-    TypedHeader(content_type): TypedHeader<ContentType>,
-    payload: String,
+/// Dryrun pipeline with given data
+fn dryrun_pipeline(
+    value: Vec<Value>,
+    pipeline: &pipeline::Pipeline<GreptimeTransformer>,
 ) -> Result<Response> {
-    let handler = log_state.log_handler;
-    let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
-        reason: "pipeline_name is required",
-    })?;
-
-    let version = to_pipeline_version(query_params.version).context(PipelineSnafu)?;
-
-    let ignore_errors = query_params.ignore_errors.unwrap_or(false);
-
-    let value = extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
-
-    ensure!(
-        value.len() <= 10,
-        InvalidParameterSnafu {
-            reason: "too many rows for dryrun",
-        }
-    );
-
-    query_ctx.set_channel(Channel::Http);
-    let query_ctx = Arc::new(query_ctx);
-
-    let pipeline = handler
-        .get_pipeline(&pipeline_name, version, query_ctx.clone())
-        .await?;
-
     let mut intermediate_state = pipeline.init_intermediate_state();
 
     let mut results = Vec::with_capacity(value.len());
@@ -385,6 +357,109 @@ pub async fn pipeline_dryrun(
     result.insert("rows".to_string(), Value::Array(rows));
     let result = Value::Object(result);
     Ok(Json(result).into_response())
+}
+
+/// Pipeline info
+/// PipelineName: pipeline_name and pipeline_version stored in greptime_private.pipelines
+/// PipelineContent: pipeline raw content
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PipelineInfo {
+    PipelineName {
+        pipeline_name: String,
+        pipeline_version: Option<String>,
+    },
+    PipelineContent(String),
+}
+
+impl Default for PipelineInfo {
+    fn default() -> Self {
+        Self::PipelineName {
+            pipeline_name: GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME.to_string(),
+            pipeline_version: None,
+        }
+    }
+}
+
+/// Dryrun pipeline with given data
+/// pipeline_info to specify pipeline
+/// data to specify data
+/// data maght be list of string or list of object
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct PipelineDryrunParams {
+    pub pipeline_info: PipelineInfo,
+    pub data: Vec<Value>,
+}
+
+/// Dryrun pipeline with given data v1
+#[axum_macros::debug_handler]
+pub async fn pipeline_dryrun_v1(
+    State(log_state): State<LogState>,
+    Extension(query_ctx): Extension<QueryContext>,
+    Json(paylod): Json<PipelineDryrunParams>,
+) -> Result<Response> {
+    let pipeline_info = paylod.pipeline_info;
+    let data = paylod.data;
+    match pipeline_info {
+        PipelineInfo::PipelineName {
+            pipeline_name,
+            pipeline_version,
+        } => {
+            let version = to_pipeline_version(pipeline_version).context(PipelineSnafu)?;
+            let pipeline = log_state
+                .log_handler
+                .get_pipeline(&pipeline_name, version, Arc::new(query_ctx))
+                .await?;
+            dryrun_pipeline(data, &pipeline)
+        }
+        PipelineInfo::PipelineContent(pipeline) => {
+            let pipeline = log_state.log_handler.build_pipeline(&pipeline)?;
+            dryrun_pipeline(data, &pipeline)
+        }
+    }
+}
+
+/// Dryrun pipeline with given data
+/// deprecated
+/// TODO(paomian): should be removed in the future
+/// step to migrate:
+/// 1. add v1 url path for pipeline_dryrun_v1
+/// 2. set original path to pipeline_dryrun_v1
+/// 3. delete v1 path for pipeline_dryrun_v1, keep original path
+#[axum_macros::debug_handler]
+pub async fn pipeline_dryrun_v0(
+    State(log_state): State<LogState>,
+    Query(query_params): Query<LogIngesterQueryParams>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+    TypedHeader(content_type): TypedHeader<ContentType>,
+    payload: String,
+) -> Result<Response> {
+    let handler = log_state.log_handler;
+    let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
+        reason: "pipeline_name is required",
+    })?;
+
+    let version = to_pipeline_version(query_params.version).context(PipelineSnafu)?;
+
+    let ignore_errors = query_params.ignore_errors.unwrap_or(false);
+
+    let value = extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
+
+    ensure!(
+        value.len() <= 10,
+        InvalidParameterSnafu {
+            reason: "too many rows for dryrun",
+        }
+    );
+
+    query_ctx.set_channel(Channel::Http);
+    let query_ctx = Arc::new(query_ctx);
+
+    let pipeline = handler
+        .get_pipeline(&pipeline_name, version, query_ctx.clone())
+        .await?;
+
+    dryrun_pipeline(value, &pipeline)
 }
 
 #[axum_macros::debug_handler]
