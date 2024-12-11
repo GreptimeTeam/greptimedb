@@ -422,8 +422,6 @@ impl ScanRegion {
         InvertedIndexApplierBuilder::new(
             self.access_layer.region_dir().to_string(),
             self.access_layer.object_store().clone(),
-            file_cache,
-            index_cache,
             self.version.metadata.as_ref(),
             self.version.metadata.inverted_indexed_column_ids(
                 self.version
@@ -434,8 +432,10 @@ impl ScanRegion {
                     .iter(),
             ),
             self.access_layer.puffin_manager_factory().clone(),
-            puffin_metadata_cache,
         )
+        .with_file_cache(file_cache)
+        .with_index_cache(index_cache)
+        .with_puffin_metadata_cache(puffin_metadata_cache)
         .build(&self.request.filters)
         .inspect_err(|err| warn!(err; "Failed to build invereted index applier"))
         .ok()

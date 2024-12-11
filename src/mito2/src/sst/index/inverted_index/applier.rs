@@ -69,16 +69,11 @@ pub(crate) struct InvertedIndexApplier {
 pub(crate) type InvertedIndexApplierRef = Arc<InvertedIndexApplier>;
 
 impl InvertedIndexApplier {
-    // TODO(weny): remove this after refactoring.
-    #[allow(clippy::too_many_arguments)]
     /// Creates a new `InvertedIndexApplier`.
     pub fn new(
         region_dir: String,
         region_id: RegionId,
         store: ObjectStore,
-        file_cache: Option<FileCacheRef>,
-        index_cache: Option<InvertedIndexCacheRef>,
-        puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
         index_applier: Box<dyn IndexApplier>,
         puffin_manager_factory: PuffinManagerFactory,
     ) -> Self {
@@ -88,12 +83,33 @@ impl InvertedIndexApplier {
             region_dir,
             region_id,
             store,
-            file_cache,
+            file_cache: None,
             index_applier,
             puffin_manager_factory,
-            inverted_index_cache: index_cache,
-            puffin_metadata_cache,
+            inverted_index_cache: None,
+            puffin_metadata_cache: None,
         }
+    }
+
+    /// Sets the file cache.
+    pub fn with_file_cache(mut self, file_cache: Option<FileCacheRef>) -> Self {
+        self.file_cache = file_cache;
+        self
+    }
+
+    /// Sets the index cache.
+    pub fn with_index_cache(mut self, index_cache: Option<InvertedIndexCacheRef>) -> Self {
+        self.inverted_index_cache = index_cache;
+        self
+    }
+
+    /// Sets the puffin metadata cache.
+    pub fn with_puffin_metadata_cache(
+        mut self,
+        puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
+    ) -> Self {
+        self.puffin_metadata_cache = puffin_metadata_cache;
+        self
     }
 
     /// Applies predicates to the provided SST file id and returns the relevant row group ids
@@ -231,9 +247,6 @@ mod tests {
             region_dir.clone(),
             RegionId::new(0, 0),
             object_store,
-            None,
-            None,
-            None,
             Box::new(mock_index_applier),
             puffin_manager_factory,
         );
@@ -274,9 +287,6 @@ mod tests {
             region_dir.clone(),
             RegionId::new(0, 0),
             object_store,
-            None,
-            None,
-            None,
             Box::new(mock_index_applier),
             puffin_manager_factory,
         );

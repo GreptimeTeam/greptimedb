@@ -453,13 +453,12 @@ mod tests {
             let applier = InvertedIndexApplierBuilder::new(
                 region_dir.clone(),
                 object_store.clone(),
-                None,
-                Some(cache),
                 &region_metadata,
                 indexed_column_ids.clone(),
                 factory.clone(),
-                Some(puffin_metadata_cache),
             )
+            .with_index_cache(Some(cache))
+            .with_puffin_metadata_cache(Some(puffin_metadata_cache))
             .build(&[expr])
             .unwrap()
             .unwrap();

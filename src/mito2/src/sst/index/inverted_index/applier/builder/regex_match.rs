@@ -62,12 +62,9 @@ mod tests {
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
-            None,
-            None,
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
-            None,
         );
 
         builder
@@ -92,12 +89,9 @@ mod tests {
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
-            None,
-            None,
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
-            None,
         );
 
         builder
@@ -122,12 +116,9 @@ mod tests {
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
-            None,
-            None,
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
-            None,
         );
 
         builder
@@ -145,12 +136,9 @@ mod tests {
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
-            None,
-            None,
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
-            None,
         );
 
         let res = builder.collect_regex_match(&nonexistent_column(), &string_lit("abc"));

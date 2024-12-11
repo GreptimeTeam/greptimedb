@@ -231,12 +231,9 @@ mod tests {
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
-            None,
-            None,
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
-            None,
         );
 
         for ((left, op, right), _) in &cases {
@@ -261,12 +258,9 @@ mod tests {
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
-            None,
-            None,
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
-            None,
         );
 
         let res = builder.collect_comparison_expr(&tag_column(), &Operator::Lt, &int64_lit(10));
@@ -282,12 +276,9 @@ mod tests {
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
-            None,
-            None,
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
-            None,
         );
 
         builder
@@ -318,12 +309,9 @@ mod tests {
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
-            None,
-            None,
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
-            None,
         );
 
         let res = builder.collect_comparison_expr(

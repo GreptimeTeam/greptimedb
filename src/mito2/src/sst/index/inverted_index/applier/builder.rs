@@ -72,30 +72,46 @@ pub(crate) struct InvertedIndexApplierBuilder<'a> {
 }
 
 impl<'a> InvertedIndexApplierBuilder<'a> {
-    // TODO(weny): remove this after refactoring.
-    #[allow(clippy::too_many_arguments)]
     /// Creates a new [`InvertedIndexApplierBuilder`].
     pub fn new(
         region_dir: String,
         object_store: ObjectStore,
-        file_cache: Option<FileCacheRef>,
-        index_cache: Option<InvertedIndexCacheRef>,
         metadata: &'a RegionMetadata,
         indexed_column_ids: HashSet<ColumnId>,
         puffin_manager_factory: PuffinManagerFactory,
-        puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
     ) -> Self {
         Self {
             region_dir,
             object_store,
-            file_cache,
             metadata,
             indexed_column_ids,
             output: HashMap::default(),
-            index_cache,
             puffin_manager_factory,
-            puffin_metadata_cache,
+            file_cache: None,
+            index_cache: None,
+            puffin_metadata_cache: None,
         }
+    }
+
+    /// Sets the file cache.
+    pub fn with_file_cache(mut self, file_cache: Option<FileCacheRef>) -> Self {
+        self.file_cache = file_cache;
+        self
+    }
+
+    /// Sets the puffin metadata cache.
+    pub fn with_puffin_metadata_cache(
+        mut self,
+        puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
+    ) -> Self {
+        self.puffin_metadata_cache = puffin_metadata_cache;
+        self
+    }
+
+    /// Sets the index cache.
+    pub fn with_index_cache(mut self, index_cache: Option<InvertedIndexCacheRef>) -> Self {
+        self.index_cache = index_cache;
+        self
     }
 
     /// Consumes the builder to construct an [`InvertedIndexApplier`], optionally returned based on
@@ -116,16 +132,18 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
             .collect();
         let applier = PredicatesIndexApplier::try_from(predicates);
 
-        Ok(Some(InvertedIndexApplier::new(
-            self.region_dir,
-            self.metadata.region_id,
-            self.object_store,
-            self.file_cache,
-            self.index_cache,
-            self.puffin_metadata_cache,
-            Box::new(applier.context(BuildIndexApplierSnafu)?),
-            self.puffin_manager_factory,
-        )))
+        Ok(Some(
+            InvertedIndexApplier::new(
+                self.region_dir,
+                self.metadata.region_id,
+                self.object_store,
+                Box::new(applier.context(BuildIndexApplierSnafu)?),
+                self.puffin_manager_factory,
+            )
+            .with_file_cache(self.file_cache)
+            .with_puffin_metadata_cache(self.puffin_metadata_cache)
+            .with_index_cache(self.index_cache),
+        ))
     }
 
     /// Recursively traverses expressions to collect predicates.
@@ -331,12 +349,9 @@ mod tests {
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
-            None,
-            None,
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
-            None,
         );
 
         let expr = Expr::BinaryExpr(BinaryExpr {
