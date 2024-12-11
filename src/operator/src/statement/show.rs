@@ -160,18 +160,7 @@ impl StatementExecutor {
             .fail();
         }
 
-        let schema_options = self
-            .table_metadata_manager
-            .schema_manager()
-            .get(SchemaNameKey {
-                catalog: &table_name.catalog_name,
-                schema: &table_name.schema_name,
-            })
-            .await
-            .context(TableMetadataManagerSnafu)?
-            .map(|v| v.into_inner());
-
-        query::sql::show_create_table(table, schema_options, None, query_ctx)
+        query::sql::show_create_foreign_table_for_pg(table, query_ctx)
             .context(ExecuteStatementSnafu)
     }
 
