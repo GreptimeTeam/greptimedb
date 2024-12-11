@@ -12194,6 +12194,7 @@ dependencies = [
  "arbitrary",
  "async-trait",
  "chrono",
+ "common-base",
  "common-error",
  "common-macro",
  "common-query",
