@@ -14,7 +14,7 @@
 
 use std::fmt::Display;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sqlparser::ast::ObjectName;
 use sqlparser_derive::{Visit, VisitMut};
 
@@ -23,7 +23,7 @@ use super::query::Query;
 /// Represents a DECLARE CURSOR statement
 ///
 /// This statement will carry a SQL query
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct DeclareCursor {
     pub cursor_name: ObjectName,
     pub query: Box<Query>,
@@ -36,7 +36,7 @@ impl Display for DeclareCursor {
 }
 
 /// Represents a FETCH FROM cursor statement
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct FetchCursor {
     pub cursor_name: ObjectName,
     pub fetch_size: u64,
@@ -49,7 +49,7 @@ impl Display for FetchCursor {
 }
 
 /// Represents a CLOSE cursor statement
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct CloseCursor {
     pub cursor_name: ObjectName,
 }

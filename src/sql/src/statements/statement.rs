@@ -15,7 +15,7 @@
 use std::fmt::Display;
 
 use datafusion_sql::parser::Statement as DfStatement;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sqlparser::ast::Statement as SpStatement;
 use sqlparser_derive::{Visit, VisitMut};
 
@@ -44,7 +44,7 @@ use crate::statements::truncate::TruncateTable;
 
 /// Tokens parsed by `DFParser` are converted into these values.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum Statement {
     // Query
     Query(Box<Query>),

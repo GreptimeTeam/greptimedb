@@ -18,11 +18,11 @@ use api::v1;
 use common_query::AddColumnLocation;
 use datatypes::schema::FulltextOptions;
 use itertools::Itertools;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sqlparser::ast::{ColumnDef, DataType, Ident, ObjectName, TableConstraint};
 use sqlparser_derive::{Visit, VisitMut};
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct AlterTable {
     pub table_name: ObjectName,
     pub alter_operation: AlterTableOperation,
@@ -57,7 +57,7 @@ impl Display for AlterTable {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum AlterTableOperation {
     /// `ADD <table_constraint>`
     AddConstraint(TableConstraint),
@@ -152,7 +152,7 @@ impl Display for AlterTableOperation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct KeyValueOption {
     pub key: String,
     pub value: String,
@@ -167,7 +167,7 @@ impl From<KeyValueOption> for v1::Option {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct AlterDatabase {
     pub database_name: ObjectName,
     pub alter_operation: AlterDatabaseOperation,
@@ -198,7 +198,7 @@ impl Display for AlterDatabase {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum AlterDatabaseOperation {
     SetDatabaseOption { options: Vec<KeyValueOption> },
     UnsetDatabaseOption { keys: Vec<String> },

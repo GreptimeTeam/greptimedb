@@ -14,14 +14,14 @@
 
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sqlparser::ast::Query as SpQuery;
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::error::Error;
 
 /// Query statement instance.
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct Query {
     pub inner: SpQuery,
 }
