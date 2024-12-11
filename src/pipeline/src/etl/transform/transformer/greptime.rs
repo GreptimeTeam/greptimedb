@@ -15,6 +15,7 @@
 pub mod coerce;
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use ahash::HashMap;
 use api::helper::proto_value_type;
@@ -374,13 +375,16 @@ fn json_value_to_row(
 /// 3. The pipeline assumes that the json format is fixed
 /// 4. The pipeline will return an error if the same column datatype is mismatched
 /// 5. The pipeline will analyze the schema of each json record and merge them to get the final schema.
-pub fn identity_pipeline(array: Vec<serde_json::Value>) -> Result<Rows> {
+pub fn identity_pipeline(
+    array: Vec<serde_json::Value>,
+    table: Option<Arc<table::Table>>,
+) -> Result<Rows> {
     let mut rows = Vec::with_capacity(array.len());
 
-    let mut schema = SchemaInfo::default();
+    let mut schema_info = SchemaInfo::default();
     for value in array {
         if let serde_json::Value::Object(map) = value {
-            let row = json_value_to_row(&mut schema, map)?;
+            let row = json_value_to_row(&mut schema_info, map)?;
             rows.push(row);
         }
     }
@@ -395,7 +399,7 @@ pub fn identity_pipeline(array: Vec<serde_json::Value>) -> Result<Rows> {
     let ts = GreptimeValue {
         value_data: Some(ValueData::TimestampNanosecondValue(ns)),
     };
-    let column_count = schema.schema.len();
+    let column_count = schema_info.schema.len();
     for row in rows.iter_mut() {
         let diff = column_count - row.values.len();
         for _ in 0..diff {
@@ -403,9 +407,21 @@ pub fn identity_pipeline(array: Vec<serde_json::Value>) -> Result<Rows> {
         }
         row.values.push(ts.clone());
     }
-    schema.schema.push(greptime_timestamp_schema);
+    schema_info.schema.push(greptime_timestamp_schema);
+
+    // set the semantic type of the row key column to Tag
+    if let Some(table) = table {
+        let table_schema = &table.table_info().meta;
+        table_schema
+            .row_key_column_names()
+            .for_each(|tag_column_name| {
+                if let Some(index) = schema_info.index.get(tag_column_name) {
+                    schema_info.schema[*index].semantic_type = SemanticType::Tag as i32;
+                }
+            });
+    }
     Ok(Rows {
-        schema: schema.schema,
+        schema: schema_info.schema,
         rows,
     })
 }
@@ -437,7 +453,7 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let rows = identity_pipeline(array);
+            let rows = identity_pipeline(array, None);
             assert!(rows.is_err());
             assert_eq!(
                 rows.err().unwrap().to_string(),
@@ -465,7 +481,7 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let rows = identity_pipeline(array);
+            let rows = identity_pipeline(array, None);
             assert!(rows.is_err());
             assert_eq!(
                 rows.err().unwrap().to_string(),
@@ -493,7 +509,7 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let rows = identity_pipeline(array);
+            let rows = identity_pipeline(array, None);
             assert!(rows.is_ok());
             let rows = rows.unwrap();
             assert_eq!(rows.schema.len(), 8);
