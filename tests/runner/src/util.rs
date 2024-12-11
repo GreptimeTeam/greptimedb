@@ -279,8 +279,8 @@ pub fn setup_etcd(client_ports: Vec<u16>, peer_port: Option<u16>, etcd_version: 
     }
 }
 
-/// Stop the etcd container
-pub fn stop_etcd() {
+/// Stop and remove the etcd container
+pub fn stop_rm_etcd() {
     let status = std::process::Command::new("docker")
         .args(["container", "stop", "etcd"])
         .status();

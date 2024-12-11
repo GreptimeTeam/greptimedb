@@ -135,7 +135,7 @@ impl Env {
             self.build_db();
             self.setup_wal();
 
-            let db_ctx = GreptimeDBContext::new(self.wal.clone());
+            let db_ctx = GreptimeDBContext::new(self.wal.clone(), self.store_config.clone());
 
             let server_process = self.start_server("standalone", &db_ctx, true).await;
 
@@ -156,7 +156,7 @@ impl Env {
             self.setup_wal();
             self.setup_etcd();
 
-            let db_ctx = GreptimeDBContext::new(self.wal.clone());
+            let db_ctx = GreptimeDBContext::new(self.wal.clone(), self.store_config.clone());
 
             // start a distributed GreptimeDB
             let meta_server = self.start_server("metasrv", &db_ctx, true).await;
@@ -263,6 +263,7 @@ impl Env {
                 time: 0,
                 datanode_id: Default::default(),
                 wal: self.wal.clone(),
+                store_config: self.store_config.clone(),
             },
             is_standalone: false,
             env: self.clone(),
@@ -360,7 +361,7 @@ impl Env {
                 )
             }
             "metasrv" => {
-                let args = vec![
+                let mut args = vec![
                     DEFAULT_LOG_LEVEL.to_string(),
                     subcommand.to_string(),
                     "start".to_string(),
@@ -368,8 +369,6 @@ impl Env {
                     "127.0.0.1:29302".to_string(),
                     "--server-addr".to_string(),
                     "127.0.0.1:29302".to_string(),
-                    // "--backend".to_string(),
-                    //"memory-store".to_string(),
                     "--enable-region-failover".to_string(),
                     "false".to_string(),
                     "--http-addr=127.0.0.1:29502".to_string(),
@@ -380,6 +379,9 @@ impl Env {
                     "-c".to_string(),
                     self.generate_config_file(subcommand, db_ctx),
                 ];
+                if !db_ctx.store_config().setup_etcd {
+                    args.extend(vec!["--backend".to_string(), "memory-store".to_string()])
+                }
                 (args, vec![METASRV_ADDR.to_string()])
             }
             _ => panic!("Unexpected subcommand: {subcommand}"),
@@ -512,6 +514,7 @@ impl Env {
                     .replace(metasrv);
 
                 // wait for metasrv to start
+                // since it seems older version of db might take longer to complete election
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
 
@@ -871,14 +874,16 @@ struct GreptimeDBContext {
     time: i64,
     datanode_id: AtomicU32,
     wal: WalConfig,
+    store_config: StoreConfig,
 }
 
 impl GreptimeDBContext {
-    pub fn new(wal: WalConfig) -> Self {
+    pub fn new(wal: WalConfig, store_config: StoreConfig) -> Self {
         Self {
             time: common_time::util::current_time_millis(),
             datanode_id: AtomicU32::new(0),
             wal,
+            store_config,
         }
     }
 
@@ -905,6 +910,10 @@ impl GreptimeDBContext {
 
     fn reset_datanode_id(&self) {
         self.datanode_id.store(0, Ordering::Relaxed);
+    }
+
+    fn store_config(&self) -> StoreConfig {
+        self.store_config.clone()
     }
 }
 

@@ -171,8 +171,10 @@ async fn main() {
 
     // clean up and exit
     if !args.preserve_state {
-        println!("Stopping etcd");
-        util::stop_etcd();
+        if args.setup_etcd {
+            println!("Stopping etcd");
+            util::stop_rm_etcd();
+        }
         println!("Removing state in {:?}", sqlness_home);
         tokio::fs::remove_dir_all(sqlness_home).await.unwrap();
     }
