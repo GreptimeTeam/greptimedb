@@ -30,8 +30,8 @@ serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10.8"
 snafu.workspace = true
-tokio-util.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
