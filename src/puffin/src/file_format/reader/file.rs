@@ -17,10 +17,10 @@ use common_base::range_read::RangeReader;
 use snafu::{ensure, ResultExt};
 
 use crate::blob_metadata::BlobMetadata;
-use crate::error::{MagicNotMatchedSnafu, ReadSnafu, Result, UnexpectedPuffinFileSizeSnafu};
-use crate::file_format::reader::footer::FooterParser;
-use crate::file_format::reader::AsyncReader;
-use crate::file_format::{MAGIC, MAGIC_SIZE, MIN_FILE_SIZE};
+use crate::error::{ReadSnafu, Result, UnexpectedPuffinFileSizeSnafu};
+use crate::file_format::reader::footer::DEFAULT_PREFETCH_SIZE;
+use crate::file_format::reader::{AsyncReader, PuffinFileFooterReader};
+use crate::file_format::MIN_FILE_SIZE;
 use crate::file_metadata::FileMetadata;
 use crate::partial_reader::PartialReader;
 
@@ -75,17 +75,10 @@ impl<'a, R: RangeReader + 'a> AsyncReader<'a> for PuffinFileReader<R> {
         if let Some(metadata) = &self.metadata {
             return Ok(metadata.clone());
         }
-
-        // check the magic
-        let magic = self.source.read(0..MAGIC_SIZE).await.context(ReadSnafu)?;
-        ensure!(*magic == MAGIC, MagicNotMatchedSnafu);
-
         let file_size = self.get_file_size_async().await?;
-
-        // parse the footer
-        let metadata = FooterParser::new(&mut self.source, file_size)
-            .parse_async()
-            .await?;
+        let mut reader = PuffinFileFooterReader::new(&mut self.source, file_size)
+            .with_prefetch_size(DEFAULT_PREFETCH_SIZE);
+        let metadata = reader.metadata().await?;
         self.metadata = Some(metadata.clone());
         Ok(metadata)
     }
