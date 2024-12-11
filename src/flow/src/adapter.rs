@@ -247,8 +247,12 @@ impl FlowWorkerManager {
             let (catalog, schema) = (table_name[0].clone(), table_name[1].clone());
             let ctx = Arc::new(QueryContext::with(&catalog, &schema));
 
-            let (is_ts_placeholder, proto_schema) =
-                self.try_fetch_or_create_table(&table_name).await?;
+            let (is_ts_placeholder, proto_schema) = self
+                .try_fetch_existing_table(&table_name)
+                .await?
+                .context(UnexpectedSnafu {
+                    reason: format!("Table not found: {}", table_name.join(".")),
+                })?;
             let schema_len = proto_schema.len();
 
             let total_rows = reqs.iter().map(|r| r.len()).sum::<usize>();
@@ -781,7 +785,8 @@ impl FlowWorkerManager {
 
         debug!("Flow {:?}'s Plan is {:?}", flow_id, flow_plan);
 
-        // TODO(discord9): check schema against actual table schema if exists
+        // check schema against actual table schema if exists
+        // if not exist create sink table immediately
         if let Some((_, _, real_schema)) = self.fetch_table_pk_schema(&sink_table_name).await? {
             let auto_schema = relation_desc_to_column_schemas_with_fallback(&flow_plan.schema);
 
@@ -842,7 +847,21 @@ impl FlowWorkerManager {
             node_ctx.assign_table_schema(&sink_table_name, real_schema.clone())?;
         } else {
             // assign inferred schema to sink table
+            // create sink table
             node_ctx.assign_table_schema(&sink_table_name, flow_plan.schema.clone())?;
+            let did_create = self
+                .create_table_from_relation(
+                    &format!("flow-id={flow_id}"),
+                    &sink_table_name,
+                    &flow_plan.schema,
+                )
+                .await?;
+            if !did_create {
+                UnexpectedSnafu {
+                    reason: format!("Failed to create table {:?}", sink_table_name),
+                }
+                .fail()?;
+            }
         }
 
         let _ = comment;

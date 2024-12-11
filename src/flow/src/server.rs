@@ -538,4 +538,8 @@ impl FrontendInvoker {
             .map_err(BoxedError::new)
             .context(common_frontend::error::ExternalSnafu)
     }
+
+    pub fn statement_executor(&self) -> Arc<StatementExecutor> {
+        self.statement_executor.clone()
+    }
 }
