@@ -21,7 +21,7 @@ use snafu::{ensure, ResultExt};
 
 use super::footer::DEFAULT_PREFETCH_SIZE;
 use crate::inverted_index::error::{CommonIoSnafu, Result, UnexpectedBlobSizeSnafu};
-use crate::inverted_index::format::reader::footer::InvertedIndeFooterReader;
+use crate::inverted_index::format::reader::footer::InvertedIndexFooterReader;
 use crate::inverted_index::format::reader::InvertedIndexReader;
 use crate::inverted_index::format::MIN_BLOB_SIZE;
 
@@ -73,7 +73,7 @@ impl<R: RangeReader> InvertedIndexReader for InvertedIndexBlobReader<R> {
         let blob_size = metadata.content_length;
         Self::validate_blob_size(blob_size)?;
 
-        let mut footer_reader = InvertedIndeFooterReader::new(&mut self.source, blob_size)
+        let mut footer_reader = InvertedIndexFooterReader::new(&mut self.source, blob_size)
             .with_prefetch_size(DEFAULT_PREFETCH_SIZE);
         footer_reader.metadata().await.map(Arc::new)
     }

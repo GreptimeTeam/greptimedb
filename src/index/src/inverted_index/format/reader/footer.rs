@@ -26,14 +26,14 @@ use crate::inverted_index::format::FOOTER_PAYLOAD_SIZE_SIZE;
 
 pub const DEFAULT_PREFETCH_SIZE: u64 = 1024; // 1KiB
 
-/// InvertedIndeFooterReader is for reading the footer section of the blob.
-pub struct InvertedIndeFooterReader<R> {
+/// InvertedIndexFooterReader is for reading the footer section of the blob.
+pub struct InvertedIndexFooterReader<R> {
     source: R,
     blob_size: u64,
     prefetch_size: Option<u64>,
 }
 
-impl<R> InvertedIndeFooterReader<R> {
+impl<R> InvertedIndexFooterReader<R> {
     pub fn new(source: R, blob_size: u64) -> Self {
         Self {
             source,
@@ -53,7 +53,7 @@ impl<R> InvertedIndeFooterReader<R> {
     }
 }
 
-impl<R: RangeReader> InvertedIndeFooterReader<R> {
+impl<R: RangeReader> InvertedIndexFooterReader<R> {
     pub async fn metadata(&mut self) -> Result<InvertedIndexMetas> {
         let footer_start = self.blob_size.saturating_sub(self.prefetch_size());
         let suffix = self
@@ -176,7 +176,7 @@ mod tests {
         let blob_size = payload_buf.len() as u64;
 
         for prefetch in [0, blob_size / 2, blob_size, blob_size + 10] {
-            let mut reader = InvertedIndeFooterReader::new(&mut payload_buf, blob_size);
+            let mut reader = InvertedIndexFooterReader::new(&mut payload_buf, blob_size);
             if prefetch > 0 {
                 reader = reader.with_prefetch_size(prefetch);
             }
@@ -200,7 +200,7 @@ mod tests {
 
         for prefetch in [0, blob_size / 2, blob_size, blob_size + 10] {
             let blob_size = payload_buf.len() as u64;
-            let mut reader = InvertedIndeFooterReader::new(&mut payload_buf, blob_size);
+            let mut reader = InvertedIndexFooterReader::new(&mut payload_buf, blob_size);
             if prefetch > 0 {
                 reader = reader.with_prefetch_size(prefetch);
             }
@@ -223,7 +223,7 @@ mod tests {
         let blob_size = payload_buf.len() as u64;
 
         for prefetch in [0, blob_size / 2, blob_size, blob_size + 10] {
-            let mut reader = InvertedIndeFooterReader::new(&mut payload_buf, blob_size);
+            let mut reader = InvertedIndexFooterReader::new(&mut payload_buf, blob_size);
             if prefetch > 0 {
                 reader = reader.with_prefetch_size(prefetch);
             }
