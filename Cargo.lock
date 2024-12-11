@@ -11295,6 +11295,7 @@ dependencies = [
  "jsonb",
  "lazy_static",
  "regex",
+ "serde",
  "serde_json",
  "snafu 0.8.5",
  "sqlparser 0.45.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=54a267ac89c09b11c0c88934690530807185d3e7)",
@@ -11371,6 +11372,7 @@ dependencies = [
  "lazy_static",
  "log",
  "regex",
+ "serde",
  "sqlparser 0.45.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "sqlparser_derive 0.2.2 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=54a267ac89c09b11c0c88934690530807185d3e7)",
 ]

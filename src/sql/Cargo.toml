@@ -30,6 +30,7 @@ itertools.workspace = true
 jsonb.workspace = true
 lazy_static.workspace = true
 regex.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
 sqlparser.workspace = true

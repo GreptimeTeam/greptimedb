@@ -756,6 +756,10 @@ impl HttpServer {
         Router::new()
             .route("/sql", routing::get(handler::sql).post(handler::sql))
             .route(
+                "/sql/parse",
+                routing::get(handler::sql_parse).post(handler::sql_parse),
+            )
+            .route(
                 "/promql",
                 routing::get(handler::promql).post(handler::promql),
             )

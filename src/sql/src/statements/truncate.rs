@@ -14,11 +14,12 @@
 
 use std::fmt::Display;
 
+use serde::Serialize;
 use sqlparser::ast::ObjectName;
 use sqlparser_derive::{Visit, VisitMut};
 
 /// TRUNCATE TABLE statement.
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct TruncateTable {
     table_name: ObjectName,
 }
