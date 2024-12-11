@@ -206,42 +206,40 @@ pub async fn metasrv_builder(
     plugins: Plugins,
     kv_backend: Option<KvBackendRef>,
 ) -> Result<MetasrvBuilder> {
-    let (kv_backend, election) = match (kv_backend, &opts.backend) {
+    let (mut kv_backend, election) = match (kv_backend, &opts.backend) {
         (Some(kv_backend), _) => (kv_backend, None),
         (None, BackendImpl::MemoryStore) => (Arc::new(MemoryKvBackend::new()) as _, None),
         (None, BackendImpl::EtcdStore) => {
             let etcd_client = create_etcd_client(opts).await?;
-            let kv_backend = {
-                let etcd_backend =
-                    EtcdStore::with_etcd_client(etcd_client.clone(), opts.max_txn_ops);
-                if !opts.store_key_prefix.is_empty() {
-                    Arc::new(ChrootKvBackend::new(
-                        opts.store_key_prefix.clone().into_bytes(),
-                        etcd_backend,
-                    ))
-                } else {
-                    etcd_backend
-                }
-            };
-            (
-                kv_backend,
-                Some(
-                    EtcdElection::with_etcd_client(
-                        &opts.server_addr,
-                        etcd_client.clone(),
-                        opts.store_key_prefix.clone(),
-                    )
-                    .await?,
-                ),
+            let kv_backend = EtcdStore::with_etcd_client(etcd_client.clone(), opts.max_txn_ops);
+            let election = EtcdElection::with_etcd_client(
+                &opts.server_addr,
+                etcd_client,
+                opts.store_key_prefix.clone(),
             )
+            .await?;
+
+            (kv_backend, Some(election))
         }
         #[cfg(feature = "pg_kvbackend")]
         (None, BackendImpl::PostgresStore) => {
             let pg_client = create_postgres_client(opts).await?;
             let kv_backend = PgStore::with_pg_client(pg_client).await.unwrap();
+            // TODO(jeremy, weny): implement election for postgres
             (kv_backend, None)
         }
     };
+
+    if !opts.store_key_prefix.is_empty() {
+        info!(
+            "using chroot kv backend with prefix: {prefix}",
+            prefix = opts.store_key_prefix
+        );
+        kv_backend = Arc::new(ChrootKvBackend::new(
+            opts.store_key_prefix.clone().into_bytes(),
+            kv_backend,
+        ))
+    }
 
     let in_memory = Arc::new(MemoryKvBackend::new()) as ResettableKvBackendRef;
 
