@@ -12,81 +12,114 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::column_def::options_from_column_schema;
-use api::v1::{ColumnDataType, ColumnDataTypeExtension, SemanticType};
+use api::v1::{ColumnDataType, ColumnDataTypeExtension, CreateTableExpr, SemanticType};
 use common_error::ext::BoxedError;
 use datatypes::prelude::ConcreteDataType;
 use common_meta::key::table_info::TableInfoValue;
 use datatypes::schema::ColumnSchema;
 use itertools::Itertools;
+use operator::expr_factory::CreateExprFactory;
+use session::context::QueryContextBuilder;
 use snafu::{OptionExt, ResultExt};
+use table::table_reference::TableReference;
 
 use crate::adapter::{TableName, AUTO_CREATED_PLACEHOLDER_TS_COL};
-use crate::error::{Error, ExternalSnafu, TableNotFoundSnafu};
-use crate::expr::GlobalId;
+use crate::error::{Error, ExternalSnafu, UnexpectedSnafu};
 use crate::repr::{ColumnType, RelationDesc, RelationType};
 use crate::FlowWorkerManager;
 
 impl FlowWorkerManager {
-    /// Fetch table info or create table('s schema) from flow's schema if not exist
-    ///
-    /// will create sink table automatically if not exist
-    /// TODO(discord9): impl that
-    pub(crate) async fn try_fetch_or_create_table(
+    /// Create table from given schema(will adjust to add auto column if needed), return true if table is created
+    pub(crate) async fn create_table_from_relation(
         &self,
+        flow_name: &str,
         table_name: &TableName,
-    ) -> Result<(bool, Vec<api::v1::ColumnSchema>), Error> {
-        // TODO(discord9): instead of auto build table from request schema, actually build table
-        // before `create flow` to be able to assign pk and ts etc.
-        let (primary_keys, schema, is_ts_placeholder) =
-            if let Some((primary_keys, time_index, schema)) =
-                self.fetch_table_pk_schema(table_name).await?
-            {
-                // check if the last column is the auto created timestamp column, hence the table is auto created from
-                // flow's plan type
-                let is_auto_create = {
-                    let correct_name = schema
-                        .last()
-                        .map(|s| s.name == AUTO_CREATED_PLACEHOLDER_TS_COL)
-                        .unwrap_or(false);
-                    let correct_time_index = time_index == Some(schema.len() - 1);
-                    correct_name && correct_time_index
-                };
-                (primary_keys, schema, is_auto_create)
-            } else {
-                let schema = {
-                    let node_ctx = self.node_context.read().await;
-                    let gid: GlobalId = node_ctx
-                        .table_repr
-                        .get_by_name(table_name)
-                        .map(|x| x.1)
-                        .unwrap();
-                    node_ctx
-                        .schema
-                        .get(&gid)
-                        .with_context(|| TableNotFoundSnafu {
-                            name: format!("Table name = {:?}", table_name),
-                        })?
-                        .clone()
-                };
-                let (pks, tys, is_ts_auto) = self.adjust_auto_created_table_schema(&schema).await?;
+        relation_desc: &RelationDesc,
+    ) -> Result<bool, Error> {
+        if self.fetch_table_pk_schema(table_name).await?.is_some() {
+            return Ok(false);
+        }
+        let (pks, tys, _) = self.adjust_auto_created_table_schema(relation_desc).await?;
 
-                // TODO(discord9): create sink table using pks, column types and is_ts_auto
+        //create sink table using pks, column types and is_ts_auto
 
-                (pks, tys, is_ts_auto)
-            };
-        let proto_schema = column_schemas_to_proto(schema, &primary_keys)?;
-        Ok((is_ts_placeholder, proto_schema))
+        let proto_schema = column_schemas_to_proto(tys.clone(), &pks)?;
+
+        // create sink table
+        let create_expr = CreateExprFactory {}
+            .create_table_expr_by_column_schemas(
+                &TableReference {
+                    catalog: &table_name[0],
+                    schema: &table_name[1],
+                    table: &table_name[2],
+                },
+                &proto_schema,
+                "mito",
+                Some(&format!("Sink table for flow {}", flow_name)),
+            )
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
+        self.submit_create_sink_table_ddl(create_expr).await?;
+        Ok(true)
     }
 
-    /// Create sink table using primary keys and schema
-    pub(crate) async fn create_sink_table(
+    /// Try fetch table with adjusted schema(added auto column if needed)
+    pub(crate) async fn try_fetch_existing_table(
         &self,
         table_name: &TableName,
-        primary_keys: &[String],
-        schema: &[ColumnSchema],
+    ) -> Result<Option<(bool, Vec<api::v1::ColumnSchema>)>, Error> {
+        if let Some((primary_keys, time_index, schema)) =
+            self.fetch_table_pk_schema(table_name).await?
+        {
+            // check if the last column is the auto created timestamp column, hence the table is auto created from
+            // flow's plan type
+            let is_auto_create = {
+                let correct_name = schema
+                    .last()
+                    .map(|s| s.name == AUTO_CREATED_PLACEHOLDER_TS_COL)
+                    .unwrap_or(false);
+                let correct_time_index = time_index == Some(schema.len() - 1);
+                correct_name && correct_time_index
+            };
+            let proto_schema = column_schemas_to_proto(schema, &primary_keys)?;
+            Ok(Some((is_auto_create, proto_schema)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// submit a create table ddl
+    pub(crate) async fn submit_create_sink_table_ddl(
+        &self,
+        mut create_table: CreateTableExpr,
     ) -> Result<(), Error> {
+        let stmt_exec = {
+            self.frontend_invoker
+                .read()
+                .await
+                .as_ref()
+                .map(|f| f.statement_executor())
+        }
+        .context(UnexpectedSnafu {
+            reason: "Failed to get statement executor",
+        })?;
+        let ctx = Arc::new(
+            QueryContextBuilder::default()
+                .current_catalog(create_table.catalog_name.clone())
+                .current_schema(create_table.schema_name.clone())
+                .build(),
+        );
+        stmt_exec
+            .create_table_inner(&mut create_table, None, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
         Ok(())
     }
 }

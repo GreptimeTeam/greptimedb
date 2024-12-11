@@ -68,6 +68,7 @@ impl CreateExprFactory {
         table_name: &TableReference<'_>,
         column_schemas: &[api::v1::ColumnSchema],
         engine: &str,
+        desc: Option<&str>,
     ) -> Result<CreateTableExpr> {
         let column_exprs = ColumnExpr::from_column_schemas(column_schemas);
         let create_expr = common_grpc_expr::util::build_create_table_expr(
@@ -75,7 +76,7 @@ impl CreateExprFactory {
             table_name,
             column_exprs,
             engine,
-            "Created on insertion",
+            desc.unwrap_or("Created on insertion"),
         )
         .context(BuildCreateExprOnInsertionSnafu)?;
 
