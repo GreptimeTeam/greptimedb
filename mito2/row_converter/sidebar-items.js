@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["McmpRowCodec","SortField"],"trait":["RowCodec"]};

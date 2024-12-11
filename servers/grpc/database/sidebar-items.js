@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["GREPTIME_DB_HEADER_HINT_PREFIX"],"fn":["extract_hints"],"struct":["DatabaseService"]};

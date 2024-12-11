@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["from_substrait_agg_func","from_substrait_plan","from_substrait_rel","from_substrait_rex","from_substrait_rex_vec","from_substrait_sorts","from_substriat_func_args","name_to_op"]};

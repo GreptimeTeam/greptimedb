@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["TypeSignature","Volatility"],"fn":["concrete_types_to_arrow_types"],"struct":["Signature"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["FETCH_PARALLELISM","MERGE_GAP"],"fn":["fetch_byte_ranges","parse_column_orders","parse_parquet_metadata"]};
