@@ -1319,7 +1319,7 @@ pub async fn test_test_pipeline_api(store_type: StorageType) {
     // handshake
     let client = TestClient::new(app);
 
-    let body = r#"
+    let pipeline_content = r#"
 processors:
   - date:
       field: time
@@ -1346,7 +1346,7 @@ transform:
     let res = client
         .post("/v1/events/pipelines/test")
         .header("Content-Type", "application/x-yaml")
-        .body(body)
+        .body(pipeline_content)
         .send()
         .await;
 
@@ -1367,8 +1367,86 @@ transform:
     let pipeline = pipelines.first().unwrap();
     assert_eq!(pipeline.get("name").unwrap(), "test");
 
-    // 2. write data
-    let data_body = r#"
+    let dryrun_schema = json!([
+        {
+            "colume_type": "FIELD",
+            "data_type": "INT32",
+            "fulltext": false,
+            "name": "id1"
+        },
+        {
+            "colume_type": "FIELD",
+            "data_type": "INT32",
+            "fulltext": false,
+            "name": "id2"
+        },
+        {
+            "colume_type": "FIELD",
+            "data_type": "STRING",
+            "fulltext": false,
+            "name": "type"
+        },
+        {
+            "colume_type": "FIELD",
+            "data_type": "STRING",
+            "fulltext": false,
+            "name": "log"
+        },
+        {
+            "colume_type": "FIELD",
+            "data_type": "STRING",
+            "fulltext": false,
+            "name": "logger"
+        },
+        {
+            "colume_type": "TIMESTAMP",
+            "data_type": "TIMESTAMP_NANOSECOND",
+            "fulltext": false,
+            "name": "time"
+        }
+    ]);
+    let dryrun_rows = json!([
+        [
+            {
+                "data_type": "INT32",
+                "key": "id1",
+                "semantic_type": "FIELD",
+                "value": 2436
+            },
+            {
+                "data_type": "INT32",
+                "key": "id2",
+                "semantic_type": "FIELD",
+                "value": 2528
+            },
+            {
+                "data_type": "STRING",
+                "key": "type",
+                "semantic_type": "FIELD",
+                "value": "I"
+            },
+            {
+                "data_type": "STRING",
+                "key": "log",
+                "semantic_type": "FIELD",
+                "value": "ClusterAdapter:enter sendTextDataToCluster\\n"
+            },
+            {
+                "data_type": "STRING",
+                "key": "logger",
+                "semantic_type": "FIELD",
+                "value": "INTERACT.MANAGER"
+            },
+            {
+                "data_type": "TIMESTAMP_NANOSECOND",
+                "key": "time",
+                "semantic_type": "TIMESTAMP",
+                "value": "2024-05-25 20:16:37.217+0000"
+            }
+        ]
+    ]);
+    {
+        let data_body = r#"
         [
           {
             "id1": "2436",
@@ -1380,100 +1458,77 @@ transform:
           }
         ]
         "#;
-    let res = client
-        .post("/v1/events/pipelines/dryrun?pipeline_name=test")
-        .header("Content-Type", "application/json")
-        .body(data_body)
-        .send()
-        .await;
-    assert_eq!(res.status(), StatusCode::OK);
-    let body: Value = res.json().await;
-    let schema = &body["schema"];
-    let rows = &body["rows"];
-    assert_eq!(
-        schema,
-        &json!([
+        let res = client
+            .post("/v1/events/pipelines/dryrun?pipeline_name=test")
+            .header("Content-Type", "application/json")
+            .body(data_body)
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: Value = res.json().await;
+        let schema = &body["schema"];
+        let rows = &body["rows"];
+        assert_eq!(schema, &dryrun_schema);
+        assert_eq!(rows, &dryrun_rows);
+    }
+    {
+        let body = r#"
             {
-                "colume_type": "FIELD",
-                "data_type": "INT32",
-                "fulltext": false,
-                "name": "id1"
+            "pipeline_info": {
+                "pipeline_name": "test"
             },
-            {
-                "colume_type": "FIELD",
-                "data_type": "INT32",
-                "fulltext": false,
-                "name": "id2"
-            },
-            {
-                "colume_type": "FIELD",
-                "data_type": "STRING",
-                "fulltext": false,
-                "name": "type"
-            },
-            {
-                "colume_type": "FIELD",
-                "data_type": "STRING",
-                "fulltext": false,
-                "name": "log"
-            },
-            {
-                "colume_type": "FIELD",
-                "data_type": "STRING",
-                "fulltext": false,
-                "name": "logger"
-            },
-            {
-                "colume_type": "TIMESTAMP",
-                "data_type": "TIMESTAMP_NANOSECOND",
-                "fulltext": false,
-                "name": "time"
-            }
-        ])
-    );
-    assert_eq!(
-        rows,
-        &json!([
-            [
+            "data": [
                 {
-                    "data_type": "INT32",
-                    "key": "id1",
-                    "semantic_type": "FIELD",
-                    "value": 2436
-                },
-                {
-                    "data_type": "INT32",
-                    "key": "id2",
-                    "semantic_type": "FIELD",
-                    "value": 2528
-                },
-                {
-                    "data_type": "STRING",
-                    "key": "type",
-                    "semantic_type": "FIELD",
-                    "value": "I"
-                },
-                {
-                    "data_type": "STRING",
-                    "key": "log",
-                    "semantic_type": "FIELD",
-                    "value": "ClusterAdapter:enter sendTextDataToCluster\\n"
-                },
-                {
-                    "data_type": "STRING",
-                    "key": "logger",
-                    "semantic_type": "FIELD",
-                    "value": "INTERACT.MANAGER"
-                },
-                {
-                    "data_type": "TIMESTAMP_NANOSECOND",
-                    "key": "time",
-                    "semantic_type": "TIMESTAMP",
-                    "value": "2024-05-25 20:16:37.217+0000"
+                "id1": "2436",
+                "id2": "2528",
+                "logger": "INTERACT.MANAGER",
+                "type": "I",
+                "time": "2024-05-25 20:16:37.217",
+                "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
                 }
             ]
-        ])
-    );
+            }
+        "#;
+        let res = client
+            .post("/v1/events/pipelines/dryrun")
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: Value = res.json().await;
+        let schema = &body["schema"];
+        let rows = &body["rows"];
+        assert_eq!(schema, &dryrun_schema);
+        assert_eq!(rows, &dryrun_rows);
+    }
+    {
+        let mut body = json!({
+        "data": [
+            {
+            "id1": "2436",
+            "id2": "2528",
+            "logger": "INTERACT.MANAGER",
+            "type": "I",
+            "time": "2024-05-25 20:16:37.217",
+            "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+            }
+        ]
+        });
+        body["pipeline_info"] = json!(pipeline_content);
+        let res = client
+            .post("/v1/events/pipelines/dryrun")
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: Value = res.json().await;
+        let schema = &body["schema"];
+        let rows = &body["rows"];
+        assert_eq!(schema, &dryrun_schema);
+        assert_eq!(rows, &dryrun_rows);
+    }
     guard.remove_all().await;
 }
 
