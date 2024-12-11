@@ -40,6 +40,7 @@ use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Respon
 use servers::http::test_helpers::{TestClient, TestResponse};
 use servers::http::GreptimeQueryOutput;
 use servers::prom_store;
+use sql::statements::statement::Statement;
 use tests_integration::test_util::{
     setup_test_http_app, setup_test_http_app_with_frontend,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
@@ -360,6 +361,18 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), ErrorCode::DatabaseNotFound as u32);
+
+    // test parse method
+    let res = client.get("/v1/sql/parse?sql=desc table t").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<Vec<Statement>>(&res.text().await).unwrap();
+    assert_eq!(
+        body,
+        serde_json::from_value::<Vec<Statement>>(json!(
+            [{"DescribeTable":{"name":[{"value":"t","quote_style":null}]}}]
+        ))
+        .unwrap()
+    );
 
     // test timezone header
     let res = client

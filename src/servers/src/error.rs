@@ -189,6 +189,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to parse query"))]
+    FailedToParseQuery {
+        #[snafu(implicit)]
+        location: Location,
+        source: sql::error::Error,
+    },
+
     #[snafu(display("Failed to parse InfluxDB line protocol"))]
     InfluxdbLineProtocol {
         #[snafu(implicit)]
@@ -651,7 +658,8 @@ impl ErrorExt for Error {
             | OpenTelemetryLog { .. }
             | UnsupportedJsonDataTypeForTag { .. }
             | InvalidTableName { .. }
-            | PrepareStatementNotFound { .. } => StatusCode::InvalidArguments,
+            | PrepareStatementNotFound { .. }
+            | FailedToParseQuery { .. } => StatusCode::InvalidArguments,
 
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),
