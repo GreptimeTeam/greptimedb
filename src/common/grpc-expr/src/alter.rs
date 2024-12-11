@@ -25,7 +25,10 @@ use datatypes::schema::{ColumnSchema, FulltextOptions, RawSchema};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use table::metadata::TableId;
-use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, ModifyColumnTypeRequest};
+use table::requests::{
+    AddColumnRequest, AlterKind, AlterTableRequest, ModifyColumnTypeRequest, SetIndexOptions,
+    UnsetIndexOptions,
+};
 
 use crate::error::{
     InvalidColumnDefSnafu, InvalidSetFulltextOptionRequestSnafu, InvalidSetTableOptionRequestSnafu,
@@ -113,18 +116,37 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<
                     .context(InvalidUnsetTableOptionRequestSnafu)?,
             }
         }
-        Kind::SetColumnFulltext(c) => AlterKind::SetColumnFulltext {
-            column_name: c.column_name,
-            options: FulltextOptions {
-                enable: c.enable,
-                analyzer: as_fulltext_option(
-                    Analyzer::try_from(c.analyzer).context(InvalidSetFulltextOptionRequestSnafu)?,
-                ),
-                case_sensitive: c.case_sensitive,
+        Kind::SetIndex(o) => match o.options.unwrap() {
+            api::v1::set_index::Options::Fulltext(f) => AlterKind::SetIndex {
+                options: SetIndexOptions::Fulltext {
+                    column_name: f.column_name.clone(),
+                    options: FulltextOptions {
+                        enable: f.enable,
+                        analyzer: as_fulltext_option(
+                            Analyzer::try_from(f.analyzer)
+                                .context(InvalidSetFulltextOptionRequestSnafu)?,
+                        ),
+                        case_sensitive: f.case_sensitive,
+                    },
+                },
+            },
+            api::v1::set_index::Options::Inverted(i) => AlterKind::SetIndex {
+                options: SetIndexOptions::Inverted {
+                    column_name: i.column_name,
+                },
             },
         },
-        Kind::UnsetColumnFulltext(c) => AlterKind::UnsetColumnFulltext {
-            column_name: c.column_name,
+        Kind::UnsetIndex(o) => match o.options.unwrap() {
+            api::v1::unset_index::Options::Fulltext(f) => AlterKind::UnsetIndex {
+                options: UnsetIndexOptions::Fulltext {
+                    column_name: f.column_name,
+                },
+            },
+            api::v1::unset_index::Options::Inverted(i) => AlterKind::UnsetIndex {
+                options: UnsetIndexOptions::Inverted {
+                    column_name: i.column_name,
+                },
+            },
         },
     };
 

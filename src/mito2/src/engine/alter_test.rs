@@ -26,8 +26,8 @@ use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextOptions};
 use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
-    AddColumn, AddColumnLocation, AlterKind, RegionAlterRequest, RegionOpenRequest, RegionRequest,
-    SetRegionOption,
+    AddColumn, AddColumnLocation, AlterKind, ApiSetIndexOptions, RegionAlterRequest,
+    RegionOpenRequest, RegionRequest, SetRegionOption,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -72,12 +72,14 @@ fn add_tag1() -> RegionAlterRequest {
 fn alter_column_fulltext_options() -> RegionAlterRequest {
     RegionAlterRequest {
         schema_version: 0,
-        kind: AlterKind::SetColumnFulltext {
-            column_name: "tag_0".to_string(),
-            options: FulltextOptions {
-                enable: true,
-                analyzer: FulltextAnalyzer::English,
-                case_sensitive: false,
+        kind: AlterKind::SetIndex {
+            options: ApiSetIndexOptions::Fulltext {
+                column_name: "tag_0".to_string(),
+                options: FulltextOptions {
+                    enable: true,
+                    analyzer: FulltextAnalyzer::English,
+                    case_sensitive: false,
+                },
             },
         },
     }
