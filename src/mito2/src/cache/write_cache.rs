@@ -501,7 +501,7 @@ mod tests {
 
         // Read metadata from write cache
         let builder = ParquetReaderBuilder::new(data_home, handle.clone(), mock_store.clone())
-            .cache(cache_manager.clone());
+            .cache(Some(cache_manager.clone()));
         let reader = builder.build().await.unwrap();
 
         // Check parquet metadata

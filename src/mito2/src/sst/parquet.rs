@@ -195,11 +195,11 @@ mod tests {
             .unwrap();
 
         // Enable page cache.
-        let cache = Arc::new(
+        let cache = Some(Arc::new(
             CacheManager::builder()
                 .page_cache_size(64 * 1024 * 1024)
                 .build(),
-        );
+        ));
         let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store)
             .cache(cache.clone());
         for _ in 0..3 {
@@ -219,15 +219,15 @@ mod tests {
 
         // Doesn't have compressed page cached.
         let page_key = PageKey::new_compressed(metadata.region_id, handle.file_id(), 0, 0);
-        assert!(cache.get_pages(&page_key).is_none());
+        assert!(cache.as_ref().unwrap().get_pages(&page_key).is_none());
 
         // Cache 4 row groups.
         for i in 0..4 {
             let page_key = PageKey::new_uncompressed(metadata.region_id, handle.file_id(), i, 0);
-            assert!(cache.get_pages(&page_key).is_some());
+            assert!(cache.as_ref().unwrap().get_pages(&page_key).is_some());
         }
         let page_key = PageKey::new_uncompressed(metadata.region_id, handle.file_id(), 5, 0);
-        assert!(cache.get_pages(&page_key).is_none());
+        assert!(cache.as_ref().unwrap().get_pages(&page_key).is_none());
     }
 
     #[tokio::test]
