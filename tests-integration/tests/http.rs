@@ -886,9 +886,9 @@ with_metric_engine = true
 
 [wal]
 provider = "raft_engine"
-file_size = "256MiB"
-purge_threshold = "4GiB"
-purge_interval = "10m"
+file_size = "128MiB"
+purge_threshold = "1GiB"
+purge_interval = "1m"
 read_batch_size = 128
 sync_write = false
 enable_log_recycle = true
