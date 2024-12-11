@@ -110,7 +110,7 @@ pub enum Statement {
     Explain(Explain),
     // COPY
     Copy(Copy),
-    // Telemery Query Language
+    // Telemetry Query Language
     Tql(Tql),
     // TRUNCATE TABLE
     TruncateTable(TruncateTable),
