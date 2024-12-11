@@ -757,21 +757,26 @@ pub async fn test_health_api(store_type: StorageType) {
     let (app, _guard) = setup_test_http_app_with_frontend(store_type, "health_api").await;
     let client = TestClient::new(app);
 
-    // we can call health api with both `GET` and `POST` method.
-    let res_post = client.post("/health").send().await;
-    assert_eq!(res_post.status(), StatusCode::OK);
-    let res_get = client.get("/health").send().await;
-    assert_eq!(res_get.status(), StatusCode::OK);
+    async fn health_api(client: &TestClient, endpoint: &str) {
+        // we can call health api with both `GET` and `POST` method.
+        let res_post = client.post(endpoint).send().await;
+        assert_eq!(res_post.status(), StatusCode::OK);
+        let res_get = client.get(endpoint).send().await;
+        assert_eq!(res_get.status(), StatusCode::OK);
 
-    // both `GET` and `POST` method return same result
-    let body_text = res_post.text().await;
-    assert_eq!(body_text, res_get.text().await);
+        // both `GET` and `POST` method return same result
+        let body_text = res_post.text().await;
+        assert_eq!(body_text, res_get.text().await);
 
-    // currently health api simply returns an empty json `{}`, which can be deserialized to an empty `HealthResponse`
-    assert_eq!(body_text, "{}");
+        // currently health api simply returns an empty json `{}`, which can be deserialized to an empty `HealthResponse`
+        assert_eq!(body_text, "{}");
 
-    let body = serde_json::from_str::<HealthResponse>(&body_text).unwrap();
-    assert_eq!(body, HealthResponse {});
+        let body = serde_json::from_str::<HealthResponse>(&body_text).unwrap();
+        assert_eq!(body, HealthResponse {});
+    }
+
+    health_api(&client, "/health").await;
+    health_api(&client, "/ready").await;
 }
 
 pub async fn test_status_api(store_type: StorageType) {
