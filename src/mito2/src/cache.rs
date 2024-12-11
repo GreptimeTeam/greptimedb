@@ -53,6 +53,9 @@ const FILE_TYPE: &str = "file";
 /// Metrics type key for selector result cache.
 const SELECTOR_RESULT_TYPE: &str = "selector_result";
 
+/// Page size for cache. Currently only used for inverted index cache.
+const PAGE_SIZE: usize = 8192 * 1024; // 8MB
+
 /// Manages cached data for the engine.
 ///
 /// All caches are disabled by default.
@@ -339,7 +342,7 @@ impl CacheManagerBuilder {
                 .build()
         });
         let inverted_index_cache =
-            InvertedIndexCache::new(self.index_metadata_size, self.index_content_size);
+            InvertedIndexCache::new(self.index_metadata_size, self.index_content_size, PAGE_SIZE);
         let selector_result_cache = (self.selector_result_cache_size != 0).then(|| {
             Cache::builder()
                 .max_capacity(self.selector_result_cache_size)
