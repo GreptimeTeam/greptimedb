@@ -46,8 +46,8 @@ use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
-    DecodeOtlpRequestSnafu, Error, InvalidParameterSnafu, ParseJson5Snafu, ParseJsonSnafu,
-    PipelineSnafu, Result, UnsupportedContentTypeSnafu,
+    CatalogSnafu, DecodeOtlpRequestSnafu, Error, InvalidParameterSnafu, ParseJson5Snafu,
+    ParseJsonSnafu, PipelineSnafu, Result, UnsupportedContentTypeSnafu,
 };
 use crate::http::extractor::LogTableName;
 use crate::http::header::CONTENT_TYPE_PROTOBUF_STR;
@@ -612,10 +612,17 @@ async fn ingest_logs_inner(
     let mut results = Vec::with_capacity(pipeline_data.len());
     let transformed_data: Rows;
     if pipeline_name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME {
-        let rows = pipeline::identity_pipeline(pipeline_data)
+        let catalog = query_ctx.current_catalog();
+        let schema = query_ctx.current_schema();
+        let table = state
+            .get_table(catalog, &schema, &table_name)
+            .await
+            .context(CatalogSnafu)?;
+        let rows = pipeline::identity_pipeline(pipeline_data, table)
             .context(PipelineTransformSnafu)
             .context(PipelineSnafu)?;
-        transformed_data = rows;
+
+        transformed_data = rows
     } else {
         let pipeline = state
             .get_pipeline(&pipeline_name, version, query_ctx.clone())

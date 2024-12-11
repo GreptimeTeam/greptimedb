@@ -164,4 +164,11 @@ pub trait PipelineHandler {
         version: PipelineVersion,
         query_ctx: QueryContextRef,
     ) -> Result<Option<()>>;
+
+    async fn get_table(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table: &str,
+    ) -> std::result::Result<Option<Arc<table::Table>>, catalog::error::Error>;
 }

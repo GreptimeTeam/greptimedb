@@ -27,6 +27,7 @@ use servers::interceptor::{LogIngestInterceptor, LogIngestInterceptorRef};
 use servers::query_handler::PipelineHandler;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
+use table::Table;
 
 use crate::instance::Instance;
 
@@ -83,6 +84,17 @@ impl PipelineHandler for Instance {
             .delete_pipeline(name, version, ctx)
             .await
             .context(PipelineSnafu)
+    }
+
+    async fn get_table(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table: &str,
+    ) -> std::result::Result<Option<Arc<Table>>, catalog::error::Error> {
+        self.catalog_manager
+            .table(catalog, schema, table, None)
+            .await
     }
 }
 
