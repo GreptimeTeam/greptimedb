@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::fs::OpenOptions;
 use std::io;
@@ -81,10 +82,10 @@ pub struct Env {
     /// When running in CI, this is expected to be set.
     /// If not set, this runner will build the GreptimeDB binary itself when needed, and set this field by then.
     bins_dir: Arc<Mutex<Option<PathBuf>>>,
+    /// The path to the directory that contains the old pre-built GreptimeDB binaries.
+    versioned_bins_dirs: Arc<Mutex<HashMap<String, PathBuf>>>,
     /// Pull different versions of GreptimeDB on need.
     pull_version_on_need: bool,
-    /// old bins dir, useful when switching versions
-    old_bins_dir: Arc<Mutex<Option<PathBuf>>>,
     /// Store address for metasrv metadata
     store_config: StoreConfig,
 }
@@ -122,8 +123,11 @@ impl Env {
             server_addrs,
             wal,
             pull_version_on_need,
-            bins_dir: Arc::new(Mutex::new(bins_dir)),
-            old_bins_dir: Arc::new(Mutex::new(None)),
+            bins_dir: Arc::new(Mutex::new(bins_dir.clone())),
+            versioned_bins_dirs: Arc::new(Mutex::new(HashMap::from_iter([(
+                "latest".to_string(),
+                bins_dir.clone().unwrap_or(util::get_binary_dir("debug")),
+            )]))),
             store_config,
         }
     }
@@ -782,13 +786,15 @@ impl Database for GreptimeDB {
         if ctx.context.contains_key("restart") && self.env.server_addrs.server_addr.is_none() {
             self.env.restart_server(self, false).await;
         } else if let Some(version) = ctx.context.get("version") {
-            if self.env.old_bins_dir.lock().unwrap().is_none() {
-                // save old bins dir
-                *self.env.old_bins_dir.lock().unwrap() = self.env.bins_dir.lock().unwrap().clone();
-            }
-            if version == "latest" {
-                // use default latest by building db now
-                *self.env.bins_dir.lock().unwrap() = self.env.old_bins_dir.lock().unwrap().clone();
+            let version_bin_dir = self
+                .env
+                .versioned_bins_dirs
+                .lock()
+                .expect("lock poison")
+                .get(version.as_str())
+                .cloned();
+            if let Some(path) = version_bin_dir {
+                *self.env.bins_dir.lock().unwrap() = Some(path.clone());
             } else {
                 // use version in dir files
                 maybe_pull_binary(version, self.env.pull_version_on_need).await;
