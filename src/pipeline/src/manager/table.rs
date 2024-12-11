@@ -203,7 +203,7 @@ impl PipelineTable {
 
     /// Compile a pipeline from a string.
     pub fn compile_pipeline(pipeline: &str) -> Result<Pipeline<GreptimeTransformer>> {
-        let yaml_content = Content::Yaml(pipeline.into());
+        let yaml_content = Content::Yaml(pipeline);
         parse::<GreptimeTransformer>(&yaml_content).context(CompilePipelineSnafu)
     }
 
