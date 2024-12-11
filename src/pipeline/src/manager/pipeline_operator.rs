@@ -243,4 +243,9 @@ impl PipelineOperator {
             })
             .await
     }
+
+    /// Compile a pipeline.
+    pub fn build_pipeline(pipeline: &str) -> Result<Pipeline<GreptimeTransformer>> {
+        PipelineTable::compile_pipeline(pipeline)
+    }
 }

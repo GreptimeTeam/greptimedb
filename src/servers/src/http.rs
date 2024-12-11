@@ -743,7 +743,14 @@ impl HttpServer {
                 "/pipelines/:pipeline_name",
                 routing::delete(event::delete_pipeline),
             )
-            .route("/pipelines/dryrun", routing::post(event::pipeline_dryrun))
+            .route(
+                "/pipelines/dryrun",
+                routing::post(event::pipeline_dryrun_v0),
+            )
+            .route(
+                "/pipelines/v1/dryrun",
+                routing::post(event::pipeline_dryrun_v1),
+            )
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))

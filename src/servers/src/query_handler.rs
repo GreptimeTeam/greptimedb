@@ -164,4 +164,7 @@ pub trait PipelineHandler {
         version: PipelineVersion,
         query_ctx: QueryContextRef,
     ) -> Result<Option<()>>;
+
+    //// Build a pipeline from a string.
+    fn build_pipeline(&self, pipeline: &str) -> Result<Pipeline<GreptimeTransformer>>;
 }
