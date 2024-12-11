@@ -126,6 +126,7 @@ futures = "0.3"
 futures-util = "0.3"
 greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "a875e976441188028353f7274a46a7e6e065c5d4" }
 hex = "0.4"
+http = "0.2"
 humantime = "2.1"
 humantime-serde = "1.1"
 itertools = "0.10"
