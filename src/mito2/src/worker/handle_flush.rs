@@ -55,8 +55,6 @@ impl<S> RegionWorkerLoop<S> {
                 .schedule_flush(region.region_id, &region.version_control, task)
         {
             error!(e; "Failed to schedule flush task for region {}", region.region_id);
-        } else {
-            INFLIGHT_FLUSH_COUNT.inc();
         }
     }
 
