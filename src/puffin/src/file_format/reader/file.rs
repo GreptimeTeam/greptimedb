@@ -46,6 +46,11 @@ impl<R> PuffinFileReader<R> {
         }
     }
 
+    pub fn with_metadata(mut self, metadata: Option<FileMetadata>) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
     fn validate_file_size(file_size: u64) -> Result<()> {
         ensure!(
             file_size >= MIN_FILE_SIZE,
