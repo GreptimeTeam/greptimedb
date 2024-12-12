@@ -39,7 +39,7 @@ use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequ
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use pipeline::{GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion, PipelineWay};
 use serde_json::Value;
-use session::context::QueryContextRef;
+use session::context::{QueryContext, QueryContextRef};
 
 use crate::error::Result;
 use crate::influxdb::InfluxdbRequest;
@@ -167,8 +167,7 @@ pub trait PipelineHandler {
 
     async fn get_table(
         &self,
-        catalog: &str,
-        schema: &str,
         table: &str,
+        query_ctx: &QueryContext,
     ) -> std::result::Result<Option<Arc<table::Table>>, catalog::error::Error>;
 }

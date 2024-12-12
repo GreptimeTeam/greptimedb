@@ -25,7 +25,7 @@ use servers::error::{
 };
 use servers::interceptor::{LogIngestInterceptor, LogIngestInterceptorRef};
 use servers::query_handler::PipelineHandler;
-use session::context::QueryContextRef;
+use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
 use table::Table;
 
@@ -88,12 +88,13 @@ impl PipelineHandler for Instance {
 
     async fn get_table(
         &self,
-        catalog: &str,
-        schema: &str,
         table: &str,
+        query_ctx: &QueryContext,
     ) -> std::result::Result<Option<Arc<Table>>, catalog::error::Error> {
+        let catalog = query_ctx.current_catalog();
+        let schema = query_ctx.current_schema();
         self.catalog_manager
-            .table(catalog, schema, table, None)
+            .table(catalog, &schema, table, None)
             .await
     }
 }

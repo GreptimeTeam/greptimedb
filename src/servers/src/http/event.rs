@@ -612,10 +612,8 @@ async fn ingest_logs_inner(
     let mut results = Vec::with_capacity(pipeline_data.len());
     let transformed_data: Rows;
     if pipeline_name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME {
-        let catalog = query_ctx.current_catalog();
-        let schema = query_ctx.current_schema();
         let table = state
-            .get_table(catalog, &schema, &table_name)
+            .get_table(&table_name, &query_ctx)
             .await
             .context(CatalogSnafu)?;
         let rows = pipeline::identity_pipeline(pipeline_data, table)
