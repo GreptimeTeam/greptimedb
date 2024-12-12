@@ -17,6 +17,24 @@ GROUP BY
 
 Affected Rows: 0
 
+SHOW CREATE TABLE out_num_cnt_basic;
+
++-------------------+--------------------------------------------------+
+| Table             | Create Table                                     |
++-------------------+--------------------------------------------------+
+| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
+|                   |   "SUM(numbers_input_basic.number)" BIGINT NULL, |
+|                   |   "window_start" TIMESTAMP(3) NOT NULL,          |
+|                   |   "window_end" TIMESTAMP(3) NULL,                |
+|                   |   "update_at" TIMESTAMP(3) NULL,                 |
+|                   |   TIME INDEX ("window_start"),                   |
+|                   |   PRIMARY KEY ("window_end")                     |
+|                   | )                                                |
+|                   |                                                  |
+|                   | ENGINE=mito                                      |
+|                   |                                                  |
++-------------------+--------------------------------------------------+
+
 -- TODO(discord9): confirm if it's necessary to flush flow here?
 -- because flush_flow result is at most 1
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
@@ -27,6 +45,24 @@ ADMIN FLUSH_FLOW('test_numbers_basic');
 +----------------------------------------+
 |  FLOW_FLUSHED  |
 +----------------------------------------+
+
+SHOW CREATE TABLE out_num_cnt_basic;
+
++-------------------+--------------------------------------------------+
+| Table             | Create Table                                     |
++-------------------+--------------------------------------------------+
+| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
+|                   |   "SUM(numbers_input_basic.number)" BIGINT NULL, |
+|                   |   "window_start" TIMESTAMP(3) NOT NULL,          |
+|                   |   "window_end" TIMESTAMP(3) NULL,                |
+|                   |   "update_at" TIMESTAMP(3) NULL,                 |
+|                   |   TIME INDEX ("window_start"),                   |
+|                   |   PRIMARY KEY ("window_end")                     |
+|                   | )                                                |
+|                   |                                                  |
+|                   | ENGINE=mito                                      |
+|                   |                                                  |
++-------------------+--------------------------------------------------+
 
 -- SQLNESS ARG restart=true
 INSERT INTO
@@ -130,6 +166,22 @@ FROM
 
 Affected Rows: 0
 
+SHOW CREATE TABLE out_basic;
+
++-----------+---------------------------------------------+
+| Table     | Create Table                                |
++-----------+---------------------------------------------+
+| out_basic | CREATE TABLE IF NOT EXISTS "out_basic" (    |
+|           |   "wildcard" BIGINT NULL,                   |
+|           |   "update_at" TIMESTAMP(3) NULL,            |
+|           |   "__ts_placeholder" TIMESTAMP(3) NOT NULL, |
+|           |   TIME INDEX ("__ts_placeholder")           |
+|           | )                                           |
+|           |                                             |
+|           | ENGINE=mito                                 |
+|           |                                             |
++-----------+---------------------------------------------+
+
 DROP FLOW test_wildcard_basic;
 
 Affected Rows: 0
@@ -142,6 +194,23 @@ FROM
 
 Affected Rows: 0
 
+SHOW CREATE TABLE out_basic;
+
++-----------+---------------------------------------------+
+| Table     | Create Table                                |
++-----------+---------------------------------------------+
+| out_basic | CREATE TABLE IF NOT EXISTS "out_basic" (    |
+|           |   "wildcard" BIGINT NULL,                   |
+|           |   "update_at" TIMESTAMP(3) NULL,            |
+|           |   "__ts_placeholder" TIMESTAMP(3) NOT NULL, |
+|           |   TIME INDEX ("__ts_placeholder")           |
+|           | )                                           |
+|           |                                             |
+|           | ENGINE=mito                                 |
+|           |                                             |
++-----------+---------------------------------------------+
+
+-- SQLNESS ARG restart=true
 INSERT INTO
     input_basic
 VALUES
@@ -158,6 +227,22 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 +-----------------------------------------+
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
+
+SHOW CREATE TABLE out_basic;
+
++-----------+---------------------------------------------+
+| Table     | Create Table                                |
++-----------+---------------------------------------------+
+| out_basic | CREATE TABLE IF NOT EXISTS "out_basic" (    |
+|           |   "wildcard" BIGINT NULL,                   |
+|           |   "update_at" TIMESTAMP(3) NULL,            |
+|           |   "__ts_placeholder" TIMESTAMP(3) NOT NULL, |
+|           |   TIME INDEX ("__ts_placeholder")           |
+|           | )                                           |
+|           |                                             |
+|           | ENGINE=mito                                 |
+|           |                                             |
++-----------+---------------------------------------------+
 
 SELECT wildcard FROM out_basic;
 
@@ -196,6 +281,23 @@ FROM
     distinct_basic;
 
 Affected Rows: 0
+
+SHOW CREATE TABLE out_distinct_basic;
+
++--------------------+---------------------------------------------------+
+| Table              | Create Table                                      |
++--------------------+---------------------------------------------------+
+| out_distinct_basic | CREATE TABLE IF NOT EXISTS "out_distinct_basic" ( |
+|                    |   "dis" INT NULL,                                 |
+|                    |   "update_at" TIMESTAMP(3) NULL,                  |
+|                    |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,       |
+|                    |   TIME INDEX ("__ts_placeholder"),                |
+|                    |   PRIMARY KEY ("dis")                             |
+|                    | )                                                 |
+|                    |                                                   |
+|                    | ENGINE=mito                                       |
+|                    |                                                   |
++--------------------+---------------------------------------------------+
 
 -- TODO(discord9): confirm if it's necessary to flush flow here?
 -- because flush_flow result is at most 1
@@ -350,6 +452,23 @@ SHOW CREATE FLOW filter_numbers_basic;
 |                      | AS SELECT INTERVAL '1 day 1 second', INTERVAL '1 month 1 day 1 second', INTERVAL '1 year 1 month' FROM numbers_input_basic WHERE number > 10 |
 +----------------------+----------------------------------------------------------------------------------------------------------------------------------------------+
 
+SHOW CREATE TABLE out_num_cnt_basic;
+
++-------------------+-----------------------------------------------------------+
+| Table             | Create Table                                              |
++-------------------+-----------------------------------------------------------+
+| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" (          |
+|                   |   "a" INTERVAL NULL,                                      |
+|                   |   "b" INTERVAL NULL,                                      |
+|                   |   "c" INTERVAL NULL,                                      |
+|                   |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
+|                   |   TIME INDEX ("ts")                                       |
+|                   | )                                                         |
+|                   |                                                           |
+|                   | ENGINE=mito                                               |
+|                   |                                                           |
++-------------------+-----------------------------------------------------------+
+
 drop flow filter_numbers_basic;
 
 Affected Rows: 0
@@ -391,6 +510,22 @@ GROUP BY
     time_window;
 
 Affected Rows: 0
+
+SHOW CREATE TABLE approx_rate;
+
++-------------+--------------------------------------------+
+| Table       | Create Table                               |
++-------------+--------------------------------------------+
+| approx_rate | CREATE TABLE IF NOT EXISTS "approx_rate" ( |
+|             |   "rate" DOUBLE NULL,                      |
+|             |   "time_window" TIMESTAMP(3) NOT NULL,     |
+|             |   "update_at" TIMESTAMP(3) NULL,           |
+|             |   TIME INDEX ("time_window")               |
+|             | )                                          |
+|             |                                            |
+|             | ENGINE=mito                                |
+|             |                                            |
++-------------+--------------------------------------------+
 
 INSERT INTO
     bytes_log
@@ -544,6 +679,23 @@ FROM
 
 Affected Rows: 0
 
+SHOW CREATE TABLE ngx_country;
+
++-------------+---------------------------------------------+
+| Table       | Create Table                                |
++-------------+---------------------------------------------+
+| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" (  |
+|             |   "ngx_access_log.country" STRING NULL,     |
+|             |   "update_at" TIMESTAMP(3) NULL,            |
+|             |   "__ts_placeholder" TIMESTAMP(3) NOT NULL, |
+|             |   TIME INDEX ("__ts_placeholder"),          |
+|             |   PRIMARY KEY ("ngx_access_log.country")    |
+|             | )                                           |
+|             |                                             |
+|             | ENGINE=mito                                 |
+|             |                                             |
++-------------+---------------------------------------------+
+
 INSERT INTO
     ngx_access_log
 VALUES
@@ -677,6 +829,23 @@ GROUP BY
 
 Affected Rows: 0
 
+SHOW CREATE TABLE ngx_country;
+
++-------------+--------------------------------------------+
+| Table       | Create Table                               |
++-------------+--------------------------------------------+
+| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" ( |
+|             |   "ngx_access_log.country" STRING NULL,    |
+|             |   "time_window" TIMESTAMP(3) NOT NULL,     |
+|             |   "update_at" TIMESTAMP(3) NULL,           |
+|             |   TIME INDEX ("time_window"),              |
+|             |   PRIMARY KEY ("ngx_access_log.country")   |
+|             | )                                          |
+|             |                                            |
+|             | ENGINE=mito                                |
+|             |                                            |
++-------------+--------------------------------------------+
+
 INSERT INTO
     ngx_access_log
 VALUES
@@ -695,21 +864,20 @@ ADMIN FLUSH_FLOW('calc_ngx_country');
 
 SHOW CREATE TABLE ngx_country;
 
-+-------------+---------------------------------------------------------+
-| Table       | Create Table                                            |
-+-------------+---------------------------------------------------------+
-| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" (              |
-|             |   "ngx_access_log.country" STRING NULL,                 |
-|             |   "time_window" TIMESTAMP(3) NULL,                      |
-|             |   "update_at" TIMESTAMP(3) NULL,                        |
-|             |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,             |
-|             |   TIME INDEX ("__ts_placeholder"),                      |
-|             |   PRIMARY KEY ("ngx_access_log.country", "time_window") |
-|             | )                                                       |
-|             |                                                         |
-|             | ENGINE=mito                                             |
-|             |                                                         |
-+-------------+---------------------------------------------------------+
++-------------+--------------------------------------------+
+| Table       | Create Table                               |
++-------------+--------------------------------------------+
+| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" ( |
+|             |   "ngx_access_log.country" STRING NULL,    |
+|             |   "time_window" TIMESTAMP(3) NOT NULL,     |
+|             |   "update_at" TIMESTAMP(3) NULL,           |
+|             |   TIME INDEX ("time_window"),              |
+|             |   PRIMARY KEY ("ngx_access_log.country")   |
+|             | )                                          |
+|             |                                            |
+|             | ENGINE=mito                                |
+|             |                                            |
++-------------+--------------------------------------------+
 
 SELECT
     "ngx_access_log.country",
@@ -825,6 +993,23 @@ HAVING
     max_temp > 100;
 
 Affected Rows: 0
+
+SHOW CREATE TABLE temp_alerts;
+
++-------------+--------------------------------------------+
+| Table       | Create Table                               |
++-------------+--------------------------------------------+
+| temp_alerts | CREATE TABLE IF NOT EXISTS "temp_alerts" ( |
+|             |   "sensor_id" INT NULL,                    |
+|             |   "loc" STRING NULL,                       |
+|             |   "max_temp" DOUBLE NULL,                  |
+|             |   "ts" TIMESTAMP(3) NOT NULL,              |
+|             |   TIME INDEX ("ts")                        |
+|             | )                                          |
+|             |                                            |
+|             | ENGINE=mito                                |
+|             |                                            |
++-------------+--------------------------------------------+
 
 INSERT INTO
     temp_sensor_data
@@ -965,6 +1150,25 @@ GROUP BY
 
 Affected Rows: 0
 
+SHOW CREATE TABLE ngx_distribution;
+
++------------------+-------------------------------------------------+
+| Table            | Create Table                                    |
++------------------+-------------------------------------------------+
+| ngx_distribution | CREATE TABLE IF NOT EXISTS "ngx_distribution" ( |
+|                  |   "stat" INT NULL,                              |
+|                  |   "bucket_size" INT NULL,                       |
+|                  |   "total_logs" BIGINT NULL,                     |
+|                  |   "time_window" TIMESTAMP(3) NOT NULL,          |
+|                  |   "update_at" TIMESTAMP(3) NULL,                |
+|                  |   TIME INDEX ("time_window"),                   |
+|                  |   PRIMARY KEY ("stat", "bucket_size")           |
+|                  | )                                               |
+|                  |                                                 |
+|                  | ENGINE=mito                                     |
+|                  |                                                 |
++------------------+-------------------------------------------------+
+
 INSERT INTO
     ngx_access_log
 VALUES
@@ -1071,6 +1275,22 @@ FROM
     requests;
 
 Affected Rows: 0
+
+SHOW CREATE TABLE requests_without_ip;
+
++---------------------+----------------------------------------------------+
+| Table               | Create Table                                       |
++---------------------+----------------------------------------------------+
+| requests_without_ip | CREATE TABLE IF NOT EXISTS "requests_without_ip" ( |
+|                     |   "service_name" STRING NULL,                      |
+|                     |   "val" INT NULL,                                  |
+|                     |   "ts" TIMESTAMP(3) NOT NULL,                      |
+|                     |   TIME INDEX ("ts")                                |
+|                     | )                                                  |
+|                     |                                                    |
+|                     | ENGINE=mito                                        |
+|                     |                                                    |
++---------------------+----------------------------------------------------+
 
 INSERT INTO
     requests
@@ -1271,6 +1491,25 @@ GROUP BY
 
 Affected Rows: 0
 
+SHOW CREATE TABLE android_log_abnormal;
+
++----------------------+-----------------------------------------------------+
+| Table                | Create Table                                        |
++----------------------+-----------------------------------------------------+
+| android_log_abnormal | CREATE TABLE IF NOT EXISTS "android_log_abnormal" ( |
+|                      |   "crash" BIGINT NULL,                              |
+|                      |   "fatal" BIGINT NULL,                              |
+|                      |   "backtrace" BIGINT NULL,                          |
+|                      |   "anr" BIGINT NULL,                                |
+|                      |   "time_window" TIMESTAMP(9) NOT NULL,              |
+|                      |   "update_at" TIMESTAMP(3) NULL,                    |
+|                      |   TIME INDEX ("time_window")                        |
+|                      | )                                                   |
+|                      |                                                     |
+|                      | ENGINE=mito                                         |
+|                      |                                                     |
++----------------------+-----------------------------------------------------+
+
 INSERT INTO android_log values
 ("am_crash", "2021-07-01 00:01:01.000"),
 ("asas.backtrace.ssss", "2021-07-01 00:01:01.000");
@@ -1363,6 +1602,25 @@ GROUP BY
 
 Affected Rows: 0
 
+SHOW CREATE TABLE android_log_abnormal;
+
++----------------------+-----------------------------------------------------+
+| Table                | Create Table                                        |
++----------------------+-----------------------------------------------------+
+| android_log_abnormal | CREATE TABLE IF NOT EXISTS "android_log_abnormal" ( |
+|                      |   "crash" BIGINT NULL,                              |
+|                      |   "fatal" BIGINT NULL,                              |
+|                      |   "backtrace" BIGINT NULL,                          |
+|                      |   "anr" BIGINT NULL,                                |
+|                      |   "time_window" TIMESTAMP(9) NOT NULL,              |
+|                      |   "update_at" TIMESTAMP(3) NULL,                    |
+|                      |   TIME INDEX ("time_window")                        |
+|                      | )                                                   |
+|                      |                                                     |
+|                      | ENGINE=mito                                         |
+|                      |                                                     |
++----------------------+-----------------------------------------------------+
+
 INSERT INTO android_log values
 ("am_crash", "2021-07-01 00:01:01.000"),
 ("asas.backtrace.ssss", "2021-07-01 00:01:01.000");
@@ -1437,6 +1695,22 @@ FROM
     numbers_input_basic;
 
 Affected Rows: 0
+
+SHOW CREATE TABLE out_num_cnt_basic;
+
++-------------------+--------------------------------------------------+
+| Table             | Create Table                                     |
++-------------------+--------------------------------------------------+
+| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
+|                   |   "avg_after_filter_num" BIGINT NULL,            |
+|                   |   "update_at" TIMESTAMP(3) NULL,                 |
+|                   |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,      |
+|                   |   TIME INDEX ("__ts_placeholder")                |
+|                   | )                                                |
+|                   |                                                  |
+|                   | ENGINE=mito                                      |
+|                   |                                                  |
++-------------------+--------------------------------------------------+
 
 -- TODO(discord9): confirm if it's necessary to flush flow here?
 -- because flush_flow result is at most 1
