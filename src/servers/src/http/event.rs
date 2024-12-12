@@ -277,7 +277,7 @@ fn transform_ndjson_array_factory(
 }
 
 /// Dryrun pipeline with given data
-fn dryrun_pipeline(
+fn dryrun_pipeline_inner(
     value: Vec<Value>,
     pipeline: &pipeline::Pipeline<GreptimeTransformer>,
 ) -> Result<Response> {
@@ -372,6 +372,38 @@ pub struct PipelineDryrunParams {
     pub data: Vec<Value>,
 }
 
+/// Check if the payload is valid json
+/// Check if the payload contains pipeline or pipeline_name and data
+/// Return Some if valid, None if invalid
+fn check_pipeline_dryrun_params_valid(payload: &str) -> Option<PipelineDryrunParams> {
+    match serde_json::from_str::<PipelineDryrunParams>(payload) {
+        // payload with pipeline or pipeline_name and data is array
+        Ok(params) if params.pipeline.is_some() || params.pipeline_name.is_some() => Some(params),
+        // because of the pipeline_name or pipeline is required
+        Ok(_) => None,
+        // invalid json
+        Err(_) => None,
+    }
+}
+
+/// Check if the pipeline_name exists
+fn check_pipeline_name_exists(pipeline_name: Option<String>) -> Result<String> {
+    pipeline_name.context(InvalidParameterSnafu {
+        reason: "pipeline_name is required",
+    })
+}
+
+/// Check if the data length less than 10
+fn check_data_valid(data_len: usize) -> Result<()> {
+    ensure!(
+        data_len <= 10,
+        InvalidParameterSnafu {
+            reason: "data is required",
+        }
+    );
+    Ok(())
+}
+
 #[axum_macros::debug_handler]
 pub async fn pipeline_dryrun(
     State(log_state): State<LogState>,
@@ -381,21 +413,12 @@ pub async fn pipeline_dryrun(
     payload: String,
 ) -> Result<Response> {
     let handler = log_state.log_handler;
-    fn check_pipeline_name_exists(pipeline_name: Option<String>) -> Result<String> {
-        pipeline_name.context(InvalidParameterSnafu {
-            reason: "pipeline_name is required",
-        })
-    }
-    match serde_json::from_str::<PipelineDryrunParams>(&payload) {
-        Ok(params) if params.pipeline.is_some() || params.pipeline_name.is_some() => {
+
+    match check_pipeline_dryrun_params_valid(&payload) {
+        Some(params) => {
             let data = params.data;
 
-            ensure!(
-                data.len() <= 10,
-                InvalidParameterSnafu {
-                    reason: "too many rows for dryrun",
-                }
-            );
+            check_data_valid(data.len())?;
 
             match params.pipeline {
                 None => {
@@ -405,15 +428,15 @@ pub async fn pipeline_dryrun(
                     let pipeline = handler
                         .get_pipeline(&pipeline_name, version, Arc::new(query_ctx))
                         .await?;
-                    dryrun_pipeline(data, &pipeline)
+                    dryrun_pipeline_inner(data, &pipeline)
                 }
                 Some(pipeline) => {
                     let pipeline = handler.build_pipeline(&pipeline)?;
-                    dryrun_pipeline(data, &pipeline)
+                    dryrun_pipeline_inner(data, &pipeline)
                 }
             }
         }
-        Err(_) | Ok(_) => {
+        None => {
             let pipeline_name = check_pipeline_name_exists(query_params.pipeline_name)?;
 
             let version = to_pipeline_version(query_params.version).context(PipelineSnafu)?;
@@ -423,12 +446,7 @@ pub async fn pipeline_dryrun(
             let value =
                 extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
 
-            ensure!(
-                value.len() <= 10,
-                InvalidParameterSnafu {
-                    reason: "too many rows for dryrun",
-                }
-            );
+            check_data_valid(value.len())?;
 
             query_ctx.set_channel(Channel::Http);
             let query_ctx = Arc::new(query_ctx);
@@ -437,7 +455,7 @@ pub async fn pipeline_dryrun(
                 .get_pipeline(&pipeline_name, version, query_ctx.clone())
                 .await?;
 
-            dryrun_pipeline(value, &pipeline)
+            dryrun_pipeline_inner(value, &pipeline)
         }
     }
 }

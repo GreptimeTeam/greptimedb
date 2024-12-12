@@ -1527,6 +1527,29 @@ transform:
         assert_eq!(schema, &dryrun_schema);
         assert_eq!(rows, &dryrun_rows);
     }
+    {
+        // failback to old version api
+        // not pipeline and pipeline_name in the body
+        let body = json!({
+        "data": [
+            {
+            "id1": "2436",
+            "id2": "2528",
+            "logger": "INTERACT.MANAGER",
+            "type": "I",
+            "time": "2024-05-25 20:16:37.217",
+            "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+            }
+        ]
+        });
+        let res = client
+            .post("/v1/events/pipelines/dryrun")
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
     guard.remove_all().await;
 }
 
