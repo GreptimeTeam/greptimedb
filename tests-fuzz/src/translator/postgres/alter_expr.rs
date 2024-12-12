@@ -21,6 +21,7 @@ use crate::error::{Error, Result};
 use crate::ir::alter_expr::AlterTableOperation;
 use crate::ir::create_expr::ColumnOption;
 use crate::ir::{AlterTableExpr, Column};
+use crate::translator::common::CommonAlterTableTranslator;
 use crate::translator::postgres::sql_data_type_to_postgres_data_type;
 use crate::translator::DslTranslator;
 
@@ -30,26 +31,22 @@ impl DslTranslator<AlterTableExpr, String> for AlterTableExprTranslator {
     type Error = Error;
 
     fn translate(&self, input: &AlterTableExpr) -> Result<String> {
-        Ok(match &input.alter_options {
+        Ok(match &input.alter_kinds {
             AlterTableOperation::AddColumn { column, .. } => {
                 Self::format_add_column(&input.table_name, column)
             }
-            AlterTableOperation::DropColumn { name } => Self::format_drop(&input.table_name, name),
             AlterTableOperation::RenameTable { new_table_name } => {
                 Self::format_rename(&input.table_name, new_table_name)
             }
             AlterTableOperation::ModifyDataType { column } => {
                 Self::format_modify_data_type(&input.table_name, column)
             }
+            _ => CommonAlterTableTranslator.translate(input)?,
         })
     }
 }
 
 impl AlterTableExprTranslator {
-    fn format_drop(name: impl Display, column: impl Display) -> String {
-        format!("ALTER TABLE {name} DROP COLUMN {column};")
-    }
-
     fn format_rename(name: impl Display, new_name: impl Display) -> String {
         format!("ALTER TABLE {name} RENAME TO {new_name};")
     }
@@ -116,11 +113,15 @@ impl AlterTableExprTranslator {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
+    use common_base::readable_size::ReadableSize;
     use common_query::AddColumnLocation;
+    use common_time::Duration;
     use datatypes::data_type::ConcreteDataType;
 
     use super::AlterTableExprTranslator;
-    use crate::ir::alter_expr::AlterTableOperation;
+    use crate::ir::alter_expr::{AlterTableOperation, AlterTableOption, Ttl};
     use crate::ir::create_expr::ColumnOption;
     use crate::ir::{AlterTableExpr, Column};
     use crate::translator::DslTranslator;
@@ -129,7 +130,7 @@ mod tests {
     fn test_alter_table_expr() {
         let alter_expr = AlterTableExpr {
             table_name: "test".into(),
-            alter_options: AlterTableOperation::AddColumn {
+            alter_kinds: AlterTableOperation::AddColumn {
                 column: Column {
                     name: "host".into(),
                     column_type: ConcreteDataType::string_datatype(),
@@ -145,7 +146,7 @@ mod tests {
 
         let alter_expr = AlterTableExpr {
             table_name: "test".into(),
-            alter_options: AlterTableOperation::RenameTable {
+            alter_kinds: AlterTableOperation::RenameTable {
                 new_table_name: "foo".into(),
             },
         };
@@ -155,7 +156,7 @@ mod tests {
 
         let alter_expr = AlterTableExpr {
             table_name: "test".into(),
-            alter_options: AlterTableOperation::DropColumn { name: "foo".into() },
+            alter_kinds: AlterTableOperation::DropColumn { name: "foo".into() },
         };
 
         let output = AlterTableExprTranslator.translate(&alter_expr).unwrap();
@@ -163,7 +164,7 @@ mod tests {
 
         let alter_expr = AlterTableExpr {
             table_name: "test".into(),
-            alter_options: AlterTableOperation::ModifyDataType {
+            alter_kinds: AlterTableOperation::ModifyDataType {
                 column: Column {
                     name: "host".into(),
                     column_type: ConcreteDataType::string_datatype(),
@@ -175,5 +176,49 @@ mod tests {
         let output = AlterTableExprTranslator.translate(&alter_expr).unwrap();
         // Ignores the location and primary key option.
         assert_eq!("ALTER TABLE test MODIFY COLUMN host STRING;", output);
+    }
+
+    #[test]
+    fn test_alter_table_expr_set_table_options() {
+        let alter_expr = AlterTableExpr {
+            table_name: "test".into(),
+            alter_kinds: AlterTableOperation::SetTableOptions {
+                options: vec![
+                    AlterTableOption::Ttl(Ttl::Duration(Duration::new_second(60))),
+                    AlterTableOption::TwcsTimeWindow(Duration::new_second(60)),
+                    AlterTableOption::TwcsMaxOutputFileSize(ReadableSize::from_str("1GB").unwrap()),
+                    AlterTableOption::TwcsMaxActiveWindowFiles(10),
+                    AlterTableOption::TwcsMaxActiveWindowRuns(10),
+                    AlterTableOption::TwcsMaxInactiveWindowFiles(5),
+                    AlterTableOption::TwcsMaxInactiveWindowRuns(5),
+                ],
+            },
+        };
+
+        let output = AlterTableExprTranslator.translate(&alter_expr).unwrap();
+        let expected = concat!(
+            "ALTER TABLE test SET 'ttl' = '60s', ",
+            "'compaction.twcs.time_window' = '60s', ",
+            "'compaction.twcs.max_output_file_size' = '1.0GiB', ",
+            "'compaction.twcs.max_active_window_files' = '10', ",
+            "'compaction.twcs.max_active_window_runs' = '10', ",
+            "'compaction.twcs.max_inactive_window_files' = '5', ",
+            "'compaction.twcs.max_inactive_window_runs' = '5';"
+        );
+        assert_eq!(expected, output);
+    }
+
+    #[test]
+    fn test_alter_table_expr_unset_table_options() {
+        let alter_expr = AlterTableExpr {
+            table_name: "test".into(),
+            alter_kinds: AlterTableOperation::UnsetTableOptions {
+                keys: vec!["ttl".into(), "compaction.twcs.time_window".into()],
+            },
+        };
+
+        let output = AlterTableExprTranslator.translate(&alter_expr).unwrap();
+        let expected = "ALTER TABLE test UNSET 'ttl', 'compaction.twcs.time_window';";
+        assert_eq!(expected, output);
     }
 }
