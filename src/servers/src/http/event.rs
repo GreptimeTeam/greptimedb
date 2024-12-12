@@ -437,9 +437,9 @@ pub async fn pipeline_dryrun(
             }
         }
         None => {
-        // This path is for back compatibility with the previous dry run code
-        // where the payload is just data (JSON or plain text) and the pipeline name 
-        // is specified using query param.
+            // This path is for back compatibility with the previous dry run code
+            // where the payload is just data (JSON or plain text) and the pipeline name
+            // is specified using query param.
             let pipeline_name = check_pipeline_name_exists(query_params.pipeline_name)?;
 
             let version = to_pipeline_version(query_params.version).context(PipelineSnafu)?;
