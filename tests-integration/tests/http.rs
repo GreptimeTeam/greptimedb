@@ -1474,9 +1474,7 @@ transform:
     {
         let body = r#"
             {
-            "pipeline_info": {
-                "pipeline_name": "test"
-            },
+            "pipeline_name": "test",
             "data": [
                 {
                 "id1": "2436",
@@ -1515,7 +1513,7 @@ transform:
             }
         ]
         });
-        body["pipeline_info"] = json!(pipeline_content);
+        body["pipeline"] = json!(pipeline_content);
         let res = client
             .post("/v1/events/pipelines/dryrun")
             .header("Content-Type", "application/json")

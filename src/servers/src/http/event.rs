@@ -387,7 +387,9 @@ impl Default for PipelineInfo {
 /// data maght be list of string or list of object
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PipelineDryrunParams {
-    pub pipeline_info: PipelineInfo,
+    pub pipeline_name: Option<String>,
+    pub pipeline_version: Option<String>,
+    pub pipeline: Option<String>,
     pub data: Vec<Value>,
 }
 
@@ -400,9 +402,13 @@ pub async fn pipeline_dryrun(
     payload: String,
 ) -> Result<Response> {
     let handler = log_state.log_handler;
+    fn check_pipeline_name_exists(pipeline_name: Option<String>) -> Result<String> {
+        pipeline_name.context(InvalidParameterSnafu {
+            reason: "pipeline_name is required",
+        })
+    }
     match serde_json::from_str::<PipelineDryrunParams>(&payload) {
-        Ok(params) => {
-            let pipeline_info = params.pipeline_info;
+        Ok(params) if params.pipeline.is_some() || params.pipeline_name.is_some() => {
             let data = params.data;
 
             ensure!(
@@ -412,27 +418,24 @@ pub async fn pipeline_dryrun(
                 }
             );
 
-            match pipeline_info {
-                PipelineInfo::PipelineName {
-                    pipeline_name,
-                    pipeline_version,
-                } => {
-                    let version = to_pipeline_version(pipeline_version).context(PipelineSnafu)?;
+            match params.pipeline {
+                None => {
+                    let version =
+                        to_pipeline_version(params.pipeline_version).context(PipelineSnafu)?;
+                    let pipeline_name = check_pipeline_name_exists(params.pipeline_name)?;
                     let pipeline = handler
                         .get_pipeline(&pipeline_name, version, Arc::new(query_ctx))
                         .await?;
                     dryrun_pipeline(data, &pipeline)
                 }
-                PipelineInfo::PipelineContent(pipeline) => {
+                Some(pipeline) => {
                     let pipeline = handler.build_pipeline(&pipeline)?;
                     dryrun_pipeline(data, &pipeline)
                 }
             }
         }
-        Err(_) => {
-            let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
-                reason: "pipeline_name is required",
-            })?;
+        Err(_) | Ok(_) => {
+            let pipeline_name = check_pipeline_name_exists(query_params.pipeline_name)?;
 
             let version = to_pipeline_version(query_params.version).context(PipelineSnafu)?;
 
