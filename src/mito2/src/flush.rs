@@ -261,7 +261,9 @@ impl RegionFlushTask {
         let version_data = version_control.current();
 
         Box::pin(async move {
+            INFLIGHT_FLUSH_COUNT.inc();
             self.do_flush(version_data).await;
+            INFLIGHT_FLUSH_COUNT.dec();
         })
     }
 
@@ -531,7 +533,6 @@ impl FlushScheduler {
             return Err(e);
         }
 
-        INFLIGHT_FLUSH_COUNT.inc();
         flush_status.flushing = true;
 
         Ok(())

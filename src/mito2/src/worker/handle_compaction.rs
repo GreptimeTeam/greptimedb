@@ -18,7 +18,7 @@ use store_api::region_request::RegionCompactRequest;
 use store_api::storage::RegionId;
 
 use crate::error::RegionNotFoundSnafu;
-use crate::metrics::{COMPACTION_REQUEST_COUNT, INFLIGHT_COMPACTION_COUNT};
+use crate::metrics::{COMPACTION_REQUEST_COUNT};
 use crate::region::MitoRegionRef;
 use crate::request::{CompactionFailed, CompactionFinished, OnFailure, OptionOutputTx};
 use crate::worker::RegionWorkerLoop;
@@ -87,14 +87,12 @@ impl<S> RegionWorkerLoop<S> {
                 self.schema_metadata_manager.clone(),
             )
             .await;
-        INFLIGHT_COMPACTION_COUNT.dec();
     }
 
     /// When compaction fails, we simply log the error.
     pub(crate) async fn handle_compaction_failure(&mut self, req: CompactionFailed) {
         error!(req.err; "Failed to compact region: {}", req.region_id);
 
-        INFLIGHT_COMPACTION_COUNT.dec();
         self.compaction_scheduler
             .on_compaction_failed(req.region_id, req.err);
     }

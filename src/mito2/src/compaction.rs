@@ -53,7 +53,7 @@ use crate::error::{
     RegionTruncatedSnafu, RemoteCompactionSnafu, Result, TimeRangePredicateOverflowSnafu,
     TimeoutSnafu,
 };
-use crate::metrics::COMPACTION_STAGE_ELAPSED;
+use crate::metrics::{COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT};
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::ScanInput;
 use crate::read::seq_scan::SeqScan;
@@ -271,11 +271,11 @@ impl CompactionScheduler {
             current_version.options.ttl,
             &schema_metadata_manager,
         )
-        .await
-        .unwrap_or_else(|e| {
-            warn!(e; "Failed to get ttl for region: {}", region_id);
-            TimeToLive::default()
-        });
+            .await
+            .unwrap_or_else(|e| {
+                warn!(e; "Failed to get ttl for region: {}", region_id);
+                TimeToLive::default()
+            });
 
         debug!(
             "Pick compaction strategy {:?} for region: {}, ttl: {:?}",
@@ -340,6 +340,7 @@ impl CompactionScheduler {
                             "Scheduled remote compaction job {} for region {}",
                             job_id, region_id
                         );
+                        INFLIGHT_COMPACTION_COUNT.inc();
                         return Ok(());
                     }
                     Err(e) => {
@@ -350,7 +351,7 @@ impl CompactionScheduler {
                                 job_id: None,
                                 reason: e.reason,
                             }
-                            .fail();
+                                .fail();
                         }
 
                         error!(e; "Failed to schedule remote compaction job for region {}, fallback to local compaction", region_id);
@@ -384,7 +385,9 @@ impl CompactionScheduler {
         // Submit the compaction task.
         self.scheduler
             .schedule(Box::pin(async move {
+                INFLIGHT_COMPACTION_COUNT.inc();
                 local_compaction_task.run().await;
+                INFLIGHT_COMPACTION_COUNT.dec();
             }))
             .map_err(|e| {
                 error!(e; "Failed to submit compaction request for region {}", region_id);
