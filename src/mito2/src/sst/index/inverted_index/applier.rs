@@ -113,7 +113,7 @@ impl InvertedIndexApplier {
     }
 
     /// Applies predicates to the provided SST file id and returns the relevant row group ids
-    pub async fn apply(&self, file_id: FileId) -> Result<ApplyOutput> {
+    pub async fn apply(&self, file_id: FileId, file_size_hint: Option<u64>) -> Result<ApplyOutput> {
         let _timer = INDEX_APPLY_ELAPSED
             .with_label_values(&[TYPE_INVERTED_INDEX])
             .start_timer();
@@ -129,8 +129,7 @@ impl InvertedIndexApplier {
                 if let Err(err) = other {
                     warn!(err; "An unexpected error occurred while reading the cached index file. Fallback to remote index file.")
                 }
-
-                self.remote_blob_reader(file_id).await?
+                self.remote_blob_reader(file_id, file_size_hint).await?
             }
         };
 
@@ -181,16 +180,22 @@ impl InvertedIndexApplier {
     }
 
     /// Creates a blob reader from the remote index file.
-    async fn remote_blob_reader(&self, file_id: FileId) -> Result<BlobReader> {
+    async fn remote_blob_reader(
+        &self,
+        file_id: FileId,
+        file_size_hint: Option<u64>,
+    ) -> Result<BlobReader> {
         let puffin_manager = self
             .puffin_manager_factory
             .build(self.store.clone())
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
+
         let file_path = location::index_file_path(&self.region_dir, file_id);
         puffin_manager
             .reader(&file_path)
             .await
             .context(PuffinBuildReaderSnafu)?
+            .with_file_size_hint(file_size_hint)
             .blob(INDEX_BLOB_TYPE)
             .await
             .context(PuffinReadBlobSnafu)?
@@ -250,7 +255,7 @@ mod tests {
             Box::new(mock_index_applier),
             puffin_manager_factory,
         );
-        let output = sst_index_applier.apply(file_id).await.unwrap();
+        let output = sst_index_applier.apply(file_id, None).await.unwrap();
         assert_eq!(
             output,
             ApplyOutput {
@@ -290,7 +295,7 @@ mod tests {
             Box::new(mock_index_applier),
             puffin_manager_factory,
         );
-        let res = sst_index_applier.apply(file_id).await;
+        let res = sst_index_applier.apply(file_id, None).await;
         assert!(format!("{:?}", res.unwrap_err()).contains("Blob not found"));
     }
 }
