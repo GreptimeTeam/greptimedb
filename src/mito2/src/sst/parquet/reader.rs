@@ -918,10 +918,10 @@ enum ReaderState {
 
 impl ReaderState {
     /// Returns the metrics of the reader.
-    fn metrics(&mut self) -> &ReaderMetrics {
+    fn metrics(&self) -> ReaderMetrics {
         match self {
             ReaderState::Readable(reader) => reader.metrics(),
-            ReaderState::Exhausted(m) => m,
+            ReaderState::Exhausted(m) => m.clone(),
         }
     }
 }

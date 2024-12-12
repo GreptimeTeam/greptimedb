@@ -27,7 +27,7 @@ use crate::cache::{
 use crate::error::Result;
 use crate::read::{Batch, BatchReader, BoxedBatchReader};
 use crate::sst::file::FileId;
-use crate::sst::parquet::reader::RowGroupReader;
+use crate::sst::parquet::reader::{ReaderMetrics, RowGroupReader};
 
 /// Reader to keep the last row for each time series.
 /// It assumes that batches from the input reader are
@@ -112,6 +112,14 @@ impl RowGroupLastRowCachedReader {
             }
         } else {
             Self::new_miss(key, row_group_reader, Some(cache_manager))
+        }
+    }
+
+    /// Gets the underlying reader metrics if uncached.
+    pub(crate) fn metrics(&self) -> Option<&ReaderMetrics> {
+        match self {
+            RowGroupLastRowCachedReader::Hit(_) => None,
+            RowGroupLastRowCachedReader::Miss(reader) => Some(reader.metrics()),
         }
     }
 
@@ -233,6 +241,10 @@ impl RowGroupLastRowReader {
                 .to_vec(),
         });
         cache.put_selector_result(self.key, value);
+    }
+
+    fn metrics(&self) -> &ReaderMetrics {
+        self.reader.metrics()
     }
 }
 
