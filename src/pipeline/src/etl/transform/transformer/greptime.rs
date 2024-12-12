@@ -25,6 +25,7 @@ use api::v1::{ColumnDataType, ColumnDataTypeExtension, JsonTypeExtension, Semant
 use coerce::{coerce_columns, coerce_value};
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
+use serde::{Deserialize, Serialize};
 use serde_json::Number;
 
 use crate::error::{
@@ -45,9 +46,12 @@ const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
 
 /// fields not in the columns will be discarded
 /// to prevent automatic column creation in GreptimeDB
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GreptimeTransformer {
+    #[serde(rename = "transform")]
+    #[serde(flatten)]
     transforms: Transforms,
+    #[serde(skip)]
     schema: Vec<ColumnSchema>,
 }
 

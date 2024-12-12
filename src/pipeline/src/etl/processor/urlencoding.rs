@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use urlencoding::{decode, encode};
 
@@ -29,7 +30,7 @@ use crate::PipelineMap;
 
 pub(crate) const PROCESSOR_URL_ENCODING: &str = "urlencoding";
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 enum Method {
     #[default]
     Decode,
@@ -58,7 +59,7 @@ impl std::str::FromStr for Method {
 }
 
 /// only support string value
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct UrlEncodingProcessor {
     fields: Fields,
     method: Method,

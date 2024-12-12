@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use common_time::timestamp::TimeUnit;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Timestamp {
     Nanosecond(i64),
     Microsecond(i64),

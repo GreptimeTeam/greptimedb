@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use common_telemetry::debug;
+use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use yaml_rust::Yaml;
 
@@ -47,7 +48,7 @@ const RULES: &str = "rules";
 ///
 /// If none of the rules match the value, this pipeline will continue to process
 /// current log entry
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Dispatcher {
     pub field: String,
     pub rules: Vec<Rule>,
@@ -60,7 +61,7 @@ pub(crate) struct Dispatcher {
 ///   `greptime_identity`
 /// - `table_suffix`: the table name segment that we use to construct full table
 ///   name
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Rule {
     pub value: Value,
     pub table_suffix: String,

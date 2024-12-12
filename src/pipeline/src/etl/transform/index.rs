@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{Error, Result, UnsupportedIndexTypeSnafu};
 
 const INDEX_TIMESTAMP: &str = "timestamp";
@@ -21,7 +23,7 @@ const INDEX_FULLTEXT: &str = "fulltext";
 const INDEX_SKIPPING: &str = "skipping";
 const INDEX_INVERTED: &str = "inverted";
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
 #[allow(clippy::enum_variant_names)]
 pub enum Index {
     Time,

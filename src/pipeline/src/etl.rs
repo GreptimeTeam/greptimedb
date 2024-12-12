@@ -20,6 +20,7 @@ pub mod value;
 
 use api::v1::Row;
 use processor::{Processor, Processors};
+use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use transform::Transforms;
 use value::Value;
@@ -96,12 +97,15 @@ pub fn parse(input: &Content) -> Result<Pipeline> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Pipeline {
     description: Option<String>,
+    #[serde(flatten)]
     processors: processor::Processors,
     dispatcher: Option<Dispatcher>,
+    #[serde(flatten)]
     transformer: GreptimeTransformer,
+    #[serde(skip)]
     tablesuffix: Option<TableSuffixTemplate>,
 }
 

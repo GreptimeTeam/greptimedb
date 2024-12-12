@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
 use crate::error::{
@@ -29,7 +30,7 @@ use crate::etl::PipelineMap;
 pub(crate) const PROCESSOR_JOIN: &str = "join";
 
 /// A processor to join each element of an array into a single string using a separator string between each element
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct JoinProcessor {
     fields: Fields,
     separator: String,

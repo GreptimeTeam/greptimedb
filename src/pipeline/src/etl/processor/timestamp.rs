@@ -17,6 +17,7 @@ use std::sync::Arc;
 use chrono::{DateTime, NaiveDateTime};
 use chrono_tz::Tz;
 use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize, Serializer};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
@@ -43,7 +44,7 @@ const RESOLUTION_NAME: &str = "resolution";
 const FORMATS_NAME: &str = "formats"; // default RFC3339
 
 lazy_static! {
-    static ref DEFAULT_FORMATS: Vec<(Arc<String>,Tz)> = vec![
+    static ref DEFAULT_FORMATS: Vec<(Arc<String>, TzWrapper)> = vec![
                     // timezone with colon
                     "%Y-%m-%dT%H:%M:%S%:z",
                     "%Y-%m-%dT%H:%M:%S%.3f%:z",
@@ -62,11 +63,11 @@ lazy_static! {
                     "%Y-%m-%dT%H:%M:%S%.9f",
                 ]
                 .iter()
-                .map(|s| (Arc::new(s.to_string()),Tz::UCT))
+                .map(|s| (Arc::new(s.to_string()), TzWrapper(Tz::UCT)))
                 .collect();
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 enum Resolution {
     Second,
     #[default]
@@ -89,11 +90,23 @@ impl TryFrom<&str> for Resolution {
     }
 }
 
-#[derive(Debug)]
-struct Formats(Vec<(Arc<String>, Tz)>);
+#[derive(Debug, Serialize)]
+struct Formats(Vec<(Arc<String>, TzWrapper)>);
+
+#[derive(Clone, Debug, PartialEq)]
+struct TzWrapper(Tz);
+
+impl Serialize for TzWrapper {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.0.name())
+    }
+}
 
 impl Formats {
-    fn new(mut formats: Vec<(Arc<String>, Tz)>) -> Self {
+    fn new(mut formats: Vec<(Arc<String>, TzWrapper)>) -> Self {
         formats.sort_by_key(|(key, _)| key.clone());
         formats.dedup();
         Formats(formats)
@@ -107,7 +120,7 @@ impl Default for Formats {
 }
 
 impl std::ops::Deref for Formats {
-    type Target = Vec<(Arc<String>, Tz)>;
+    type Target = Vec<(Arc<String>, TzWrapper)>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -115,9 +128,10 @@ impl std::ops::Deref for Formats {
 }
 
 /// support string, integer, float, time, epoch
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TimestampProcessor {
     fields: Fields,
+    #[serde(skip_deserializing)]
     formats: Formats,
     resolution: Resolution,
     ignore_missing: bool,
@@ -149,7 +163,7 @@ impl TimestampProcessor {
 
     fn parse_time_str(&self, val: &str) -> Result<i64> {
         for (fmt, tz) in self.formats.iter() {
-            if let Ok(ns) = Self::try_parse(val, fmt, *tz) {
+            if let Ok(ns) = Self::try_parse(val, fmt, tz.0) {
                 return Ok(ns);
             }
         }
@@ -207,7 +221,7 @@ impl TimestampProcessor {
     }
 }
 
-fn parse_formats(yaml: &yaml_rust::yaml::Yaml) -> Result<Vec<(Arc<String>, Tz)>> {
+fn parse_formats(yaml: &yaml_rust::yaml::Yaml) -> Result<Vec<(Arc<String>, TzWrapper)>> {
     match yaml.as_vec() {
         Some(formats_yaml) => {
             let mut formats = Vec::with_capacity(formats_yaml.len());
@@ -231,7 +245,7 @@ fn parse_formats(yaml: &yaml_rust::yaml::Yaml) -> Result<Vec<(Arc<String>, Tz)>>
                             .context(DateParseTimezoneSnafu { value: tz })
                     })
                     .unwrap_or(Ok(Tz::UTC))?;
-                formats.push((Arc::new(formatter), tz));
+                formats.push((Arc::new(formatter), TzWrapper(tz)));
             }
             Ok(formats)
         }

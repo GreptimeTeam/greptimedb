@@ -41,6 +41,7 @@ use join::JoinProcessor;
 use json_path::JsonPathProcessor;
 use letter::LetterProcessor;
 use regex::RegexProcessor;
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use timestamp::TimestampProcessor;
 use urlencoding::UrlEncodingProcessor;
@@ -83,7 +84,7 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
     fn exec_mut(&self, val: &mut PipelineMap) -> Result<()>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 #[enum_dispatch]
 pub enum ProcessorKind {
     Cmcd(CmcdProcessor),
@@ -103,7 +104,7 @@ pub enum ProcessorKind {
     Digest(DigestProcessor),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Processors {
     /// A ordered list of processors
     /// The order of processors is important

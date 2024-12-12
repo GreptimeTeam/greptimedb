@@ -13,8 +13,10 @@
 // limitations under the License.
 
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
+use super::regex::RegexWrapper;
 use crate::error::{
     Error, GsubPatternRequiredSnafu, GsubReplacementRequiredSnafu, KeyMustBeStringSnafu,
     ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, RegexSnafu, Result,
@@ -32,17 +34,21 @@ pub(crate) const PROCESSOR_GSUB: &str = "gsub";
 const REPLACEMENT_NAME: &str = "replacement";
 
 /// A processor to replace all matches of a pattern in string by a replacement, only support string value, and array string value
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct GsubProcessor {
     fields: Fields,
-    pattern: Regex,
+    pattern: RegexWrapper,
     replacement: String,
     ignore_missing: bool,
 }
 
 impl GsubProcessor {
     fn process_string(&self, val: &str) -> Result<Value> {
-        let new_val = self.pattern.replace_all(val, &self.replacement).to_string();
+        let new_val = self
+            .pattern
+            .0
+            .replace_all(val, &self.replacement)
+            .to_string();
         let val = Value::String(new_val);
 
         Ok(val)
@@ -102,7 +108,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for GsubProcessor {
 
         Ok(GsubProcessor {
             fields,
-            pattern: pattern.context(GsubPatternRequiredSnafu)?,
+            pattern: RegexWrapper(pattern.context(GsubPatternRequiredSnafu)?),
             replacement: replacement.context(GsubReplacementRequiredSnafu)?,
             ignore_missing,
         })
@@ -152,7 +158,7 @@ mod tests {
     fn test_string_value() {
         let processor = GsubProcessor {
             fields: Fields::default(),
-            pattern: regex::Regex::new(r"\d+").unwrap(),
+            pattern: RegexWrapper(regex::Regex::new(r"\d+").unwrap()),
             replacement: "xxx".to_string(),
             ignore_missing: false,
         };

@@ -15,6 +15,7 @@
 pub mod index;
 pub mod transformer;
 
+use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
 use super::field::Fields;
@@ -39,7 +40,7 @@ const TRANSFORM_ON_FAILURE: &str = "on_failure";
 pub use transformer::greptime::GreptimeTransformer;
 
 /// On Failure behavior when transform fails
-#[derive(Debug, Clone, Default, Copy)]
+#[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]
 pub enum OnFailure {
     // Return None if transform fails
     #[default]
@@ -61,7 +62,7 @@ impl std::str::FromStr for OnFailure {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Transforms {
     pub(crate) transforms: Vec<Transform>,
 }
@@ -122,7 +123,7 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for Transforms {
 }
 
 /// only field is required
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transform {
     pub fields: Fields,
 

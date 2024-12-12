@@ -20,6 +20,7 @@ pub(crate) const PROCESSOR_REGEX: &str = "regex";
 
 use lazy_static::lazy_static;
 use regex::Regex;
+use serde::{Deserialize, Serialize, Serializer};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
@@ -51,10 +52,33 @@ fn generate_key(prefix: &str, group: &str) -> String {
 }
 
 #[derive(Debug)]
+pub(crate) struct RegexWrapper(pub(crate) Regex);
+
+#[derive(Debug, Serialize, Deserialize)]
 struct GroupRegex {
     origin: String,
-    regex: Regex,
+    regex: RegexWrapper,
     groups: Vec<String>,
+}
+
+impl Serialize for RegexWrapper {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for RegexWrapper {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let inner = Regex::new(s.as_str()).unwrap();
+        Ok(RegexWrapper(inner))
+    }
 }
 
 impl std::fmt::Display for GroupRegex {
@@ -76,7 +100,7 @@ impl std::str::FromStr for GroupRegex {
         let regex = Regex::new(origin).context(RegexSnafu { pattern: origin })?;
         Ok(GroupRegex {
             origin: origin.into(),
-            regex,
+            regex: RegexWrapper(regex),
             groups,
         })
     }
@@ -131,7 +155,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for RegexProcessor {
 
 /// only support string value
 /// if no value found from a pattern, the target_field will be ignored
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RegexProcessor {
     fields: Fields,
     patterns: Vec<GroupRegex>,
@@ -170,7 +194,7 @@ impl RegexProcessor {
     fn process(&self, prefix: &str, val: &str) -> Result<PipelineMap> {
         let mut result = PipelineMap::new();
         for gr in self.patterns.iter() {
-            if let Some(captures) = gr.regex.captures(val) {
+            if let Some(captures) = gr.regex.0.captures(val) {
                 for group in gr.groups.iter() {
                     if let Some(capture) = captures.name(group) {
                         let value = capture.as_str().to_string();

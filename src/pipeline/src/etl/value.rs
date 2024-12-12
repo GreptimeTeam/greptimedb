@@ -25,6 +25,7 @@ use jsonpath_rust::path::{JsonLike, Path};
 use jsonpath_rust::{jsp_idx, jsp_obj, JsonPath, JsonPathParserError, JsonPathStr};
 pub use map::Map;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 pub use time::Timestamp;
 
@@ -39,7 +40,7 @@ use crate::error::{
 /// acts as value: the enclosed value is the actual value
 /// acts as type: the enclosed value is the default value
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub enum Value {
     // as value: null
     // as type: no type specified

@@ -20,6 +20,7 @@
 
 use once_cell::sync::Lazy;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
 use crate::error::{
@@ -37,7 +38,7 @@ pub(crate) const PROCESSOR_DECOLORIZE: &str = "decolorize";
 static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\x1b\[[0-9;]*m").unwrap());
 
 /// Remove ANSI color control codes from the input text.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct DecolorizeProcessor {
     fields: Fields,
     ignore_missing: bool,
