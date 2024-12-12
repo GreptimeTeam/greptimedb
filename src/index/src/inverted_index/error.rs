@@ -26,14 +26,6 @@ use crate::inverted_index::search::predicate::Predicate;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Failed to seek"))]
-    Seek {
-        #[snafu(source)]
-        error: IoError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to read"))]
     Read {
         #[snafu(source)]
@@ -215,8 +207,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            Seek { .. }
-            | Read { .. }
+            Read { .. }
             | Write { .. }
             | Flush { .. }
             | Close { .. }
