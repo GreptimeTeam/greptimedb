@@ -53,7 +53,7 @@ use crate::config::MitoConfig;
 use crate::error::{CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::memtable::MemtableBuilderProvider;
-use crate::metrics::{INFLIGHT_COMPACTION_COUNT, REGION_COUNT, WRITE_STALL_TOTAL};
+use crate::metrics::{REGION_COUNT, WRITE_STALL_TOTAL};
 use crate::region::{MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap, RegionMapRef};
 use crate::request::{
     BackgroundNotify, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
@@ -1021,7 +1021,6 @@ impl WorkerListener {
     }
 
     pub(crate) fn on_compaction_scheduled(&self, _region_id: RegionId) {
-        INFLIGHT_COMPACTION_COUNT.inc();
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_compaction_scheduled(_region_id);
