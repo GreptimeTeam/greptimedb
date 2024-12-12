@@ -67,47 +67,33 @@ where
             return Ok(Vec::new());
         }
         let mut data = Vec::with_capacity(size as usize);
-        // Safety: indexes is not empty.
-        let first_page_id = indexes[0].page_id;
-        let last_page_id = indexes[indexes.len() - 1].page_id;
-        for index in indexes {
+        let last_index = indexes.len() - 1;
+        for (i, index) in indexes.into_iter().enumerate() {
             let page = match self.cache.get_index(&index) {
                 Some(page) => {
                     CACHE_HIT.with_label_values(&[INDEX_CONTENT_TYPE]).inc();
                     page
                 }
                 None => {
-                    let page = self
-                        .inner
-                        .range_read(
-                            index.page_id * (self.cache.page_size as u64),
-                            self.cache.page_size as u32,
-                        )
-                        .await?;
-                    self.cache.put_index(index.clone(), Arc::new(page.clone()));
                     CACHE_MISS.with_label_values(&[INDEX_CONTENT_TYPE]).inc();
-                    Arc::new(page)
+                    let offset = index.page_id * (self.cache.page_size as u64);
+                    let size = self.cache.page_size as _;
+                    let page = self.inner.range_read(offset, size).await?;
+                    let page = Arc::new(page);
+                    self.cache.put_index(index.clone(), page.clone());
+                    page
                 }
             };
-            if index.page_id == first_page_id {
-                data.extend_from_slice(
-                    &page[IndexDataPageKey::calculate_first_page_range(
-                        offset,
-                        size,
-                        self.cache.page_size,
-                    )],
-                );
-            } else if index.page_id == last_page_id {
-                data.extend_from_slice(
-                    &page[IndexDataPageKey::calculate_last_page_range(
-                        offset,
-                        size,
-                        self.cache.page_size,
-                    )],
-                );
+            let range = if i == 0 {
+                // first page range
+                IndexDataPageKey::calculate_first_page_range(offset, size, self.cache.page_size)
+            } else if i == last_index {
+                // last page range. when the first page is the last page, the range is not used.
+                IndexDataPageKey::calculate_last_page_range(offset, size, self.cache.page_size)
             } else {
-                data.extend_from_slice(&page);
-            }
+                0..self.cache.page_size
+            };
+            data.extend_from_slice(&page[range]);
         }
         Ok(data)
     }
@@ -174,7 +160,7 @@ impl IndexDataPageKey {
     /// Calculates the total number of pages that a given size spans, starting from a specific offset.
     fn calculate_page_count(offset: u64, size: u32, page_size: usize) -> u32 {
         let start_page = Self::calculate_page_id(offset, page_size);
-        let end_page = Self::calculate_page_id(offset + size as u64, page_size);
+        let end_page = Self::calculate_page_id(offset + (size as u64) - 1, page_size);
         (end_page - start_page + 1) as u32
     }
 
@@ -191,10 +177,17 @@ impl IndexDataPageKey {
     }
 
     /// Computes the byte range in the last page based on the offset and size.
-    /// For example, if offset is 1000 and size is 5000 with PAGE_SIZE of 4096, the last page range is 0..904.
+    /// For example, if offset is 1000 and size is 5000 with PAGE_SIZE of 4096, the last page range is 0..1904.
     fn calculate_last_page_range(offset: u64, size: u32, page_size: usize) -> Range<usize> {
-        0..((size as u64 + offset) % (page_size as u64)) as usize
+        let offset = offset as usize;
+        let size = size as usize;
+        if (offset + size) % page_size == 0 {
+            0..page_size
+        } else {
+            0..((offset + size) % page_size)
+        }
     }
+
     /// Generates a vector of IndexKey instances for the pages that a given offset and size span.
     fn generate_page_keys(file_id: FileId, offset: u64, size: u32, page_size: usize) -> Vec<Self> {
         let start_page = Self::calculate_page_id(offset, page_size);
@@ -295,8 +288,109 @@ mod test {
     use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
     use index::inverted_index::format::writer::{InvertedIndexBlobWriter, InvertedIndexWriter};
     use index::inverted_index::Bytes;
+    use rand::{Rng, RngCore};
 
     use super::*;
+
+    // Vanilla test for index data page key
+    #[test]
+    fn test_index_calculation() {
+        // Random.
+        let key = IndexDataPageKey {
+            file_id: FileId::random(),
+            page_id: 0,
+        };
+        let page_size = 4096;
+        let offset = 1000;
+        let size = 5000;
+        let page_id = IndexDataPageKey::calculate_page_id(offset, page_size);
+        let page_num = IndexDataPageKey::calculate_page_count(offset, size, page_size);
+        let indexes =
+            IndexDataPageKey::generate_page_keys(key.file_id, offset, size as u32, page_size);
+        assert_eq!(page_num, 2);
+        assert_eq!(indexes.len(), page_num as usize);
+        assert_eq!(indexes[0].page_id, page_id);
+        assert_eq!(indexes[1].page_id, page_id + 1);
+
+        let first_range =
+            IndexDataPageKey::calculate_first_page_range(offset, size as u32, page_size);
+        assert_eq!(first_range, 1000..4096);
+        let last_range =
+            IndexDataPageKey::calculate_last_page_range(offset, size as u32, page_size);
+        assert_eq!(last_range, 0..1904);
+
+        // Exactly end the last page.
+        let key = IndexDataPageKey {
+            file_id: FileId::random(),
+            page_id: 0,
+        };
+        let page_size = 4096;
+        let offset = 1000;
+        let size = 3096;
+        let page_id = IndexDataPageKey::calculate_page_id(offset, page_size);
+        let page_num = IndexDataPageKey::calculate_page_count(offset, size, page_size);
+        let indexes =
+            IndexDataPageKey::generate_page_keys(key.file_id, offset, size as u32, page_size);
+        assert_eq!(page_num, 1);
+        assert_eq!(indexes.len(), page_num as usize);
+        assert_eq!(indexes[0].page_id, page_id);
+
+        let first_range =
+            IndexDataPageKey::calculate_first_page_range(offset, size as u32, page_size);
+        assert_eq!(first_range, 1000..4096);
+        let last_range =
+            IndexDataPageKey::calculate_last_page_range(offset, size as u32, page_size);
+        // In this case, the last range will not be used.
+        assert_eq!(last_range, 0..4096);
+    }
+
+    // Fuzz test for index data page key
+    #[test]
+    fn fuzz_read_index() {
+        // randomly generate a large u8 array
+        let mut rng = rand::thread_rng();
+        let mut data = vec![0u8; 1024 * 1024];
+        rng.fill_bytes(&mut data);
+        let file_id = FileId::random();
+
+        for _ in 0..1000 {
+            let offset = rng.gen_range(0..data.len() as u64);
+            let size = rng.gen_range(0..data.len() as u32 - offset as u32);
+            let page_size = rng.gen_range(1..1024);
+
+            let indexes = IndexDataPageKey::generate_page_keys(file_id, offset, size, page_size);
+            let page_num = indexes.len();
+            let mut read = Vec::with_capacity(size as usize);
+            let last_index = indexes.len() - 1;
+            for (i, key) in indexes.into_iter().enumerate() {
+                let start = key.page_id as usize * page_size;
+                let page = if start + page_size < data.len() {
+                    &data[start..start + page_size]
+                } else {
+                    &data[start..]
+                };
+                let range = if i == 0 {
+                    // first page range
+                    IndexDataPageKey::calculate_first_page_range(offset, size, page_size)
+                } else if i == last_index {
+                    // last page range. when the first page is the last page, the range is not used.
+                    IndexDataPageKey::calculate_last_page_range(offset, size, page_size)
+                } else {
+                    0..page_size
+                };
+                read.extend_from_slice(&page[range]);
+            }
+            let expected_range = offset as usize..(offset + size as u64) as usize;
+            if read != data.get(expected_range).unwrap() {
+                panic!(
+                    "fuzz_read_index failed, offset: {}, size: {}, page_size: {}\n read len: {}, expected len: {}\n first page range: {:?}, last page range: {:?}, page num: {}",
+                    offset, size, page_size, read.len(), size as usize,
+                    IndexDataPageKey::calculate_first_page_range(offset, size, page_size),
+                    IndexDataPageKey::calculate_last_page_range(offset, size, page_size), page_num
+                );
+            }
+        }
+    }
 
     fn unpack(fst_value: u64) -> [u32; 2] {
         bytemuck::cast::<u64, [u32; 2]>(fst_value)
