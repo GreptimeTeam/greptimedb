@@ -22,10 +22,12 @@ use api::v1::{OpType, SemanticType};
 use common_telemetry::error;
 use datatypes::arrow::array::BooleanArray;
 use datatypes::arrow::buffer::BooleanBuffer;
+use futures::future::BoxFuture;
 use parquet::arrow::arrow_reader::RowSelection;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::TimeSeriesRowSelector;
 
+use super::fetcher::{FetcherImpl, FetcherRef};
 use crate::error::{
     DecodeStatsSnafu, FieldTypeMismatchSnafu, FilterRecordBatchSnafu, Result, StatsNotPresentSnafu,
 };
@@ -77,6 +79,59 @@ impl FileRange {
             return true;
         };
         row_selection.row_count() == rows_in_group as usize
+    }
+
+    /// Returns a reader to read the [FileRange].
+    pub(crate) fn reader_fut(
+        &self,
+        selector: Option<TimeSeriesRowSelector>,
+        fetcher: FetcherRef,
+    ) -> BoxFuture<'_, Result<PruneReader>> {
+        Box::pin(async move {
+            let parquet_reader = self
+                .context
+                .reader_builder
+                .build_fut(self.row_group_idx, self.row_selection.clone(), fetcher)
+                .await?;
+
+            let use_last_row_reader = if selector
+                .map(|s| s == TimeSeriesRowSelector::LastRow)
+                .unwrap_or(false)
+            {
+                // Only use LastRowReader if row group does not contain DELETE
+                // and all rows are selected.
+                let put_only = !self
+                .context
+                .contains_delete(self.row_group_idx)
+                .inspect_err(|e| {
+                    error!(e; "Failed to decode min value of op_type, fallback to RowGroupReader");
+                })
+                .unwrap_or(true);
+                put_only && self.select_all()
+            } else {
+                // No selector provided, use RowGroupReader
+                false
+            };
+
+            let prune_reader = if use_last_row_reader {
+                // Row group is PUT only, use LastRowReader to skip unnecessary rows.
+                let reader = RowGroupLastRowCachedReader::new(
+                    self.file_handle().file_id(),
+                    self.row_group_idx,
+                    self.context.reader_builder.cache_manager().clone(),
+                    RowGroupReader::new(self.context.clone(), parquet_reader),
+                );
+                PruneReader::new_with_last_row_reader(self.context.clone(), reader)
+            } else {
+                // Row group contains DELETE, fallback to default reader.
+                PruneReader::new_with_row_group_reader(
+                    self.context.clone(),
+                    RowGroupReader::new(self.context.clone(), parquet_reader),
+                )
+            };
+
+            Ok(prune_reader)
+        })
     }
 
     /// Returns a reader to read the [FileRange].
@@ -137,6 +192,20 @@ impl FileRange {
     /// Returns the file handle of the file range.
     pub(crate) fn file_handle(&self) -> &FileHandle {
         self.context.reader_builder.file_handle()
+    }
+
+    pub(crate) fn build_fetcher(&self) -> FetcherRef {
+        Arc::new(FetcherImpl::new(
+            self.context.reader_builder.object_store.clone(),
+            self.context.reader_builder.cache_manager.clone(),
+            self.file_handle().meta_ref().region_id,
+            self.file_handle().meta_ref().file_id,
+            self.context.reader_builder.file_path().to_string(),
+        ))
+    }
+
+    pub(crate) fn file_path(&self) -> &str {
+        self.context.reader_builder.file_path()
     }
 }
 

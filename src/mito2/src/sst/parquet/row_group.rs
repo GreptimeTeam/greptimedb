@@ -31,6 +31,7 @@ use parquet::format::PageLocation;
 use store_api::storage::RegionId;
 use tokio::task::yield_now;
 
+use super::fetcher::FetcherRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::{CacheManagerRef, PageKey, PageValue};
 use crate::metrics::{READ_STAGE_ELAPSED, READ_STAGE_FETCH_PAGES};
@@ -57,6 +58,7 @@ pub struct InMemoryRowGroup<'a> {
     file_path: &'a str,
     /// Object store.
     object_store: ObjectStore,
+    fetcher: Option<FetcherRef>,
 }
 
 impl<'a> InMemoryRowGroup<'a> {
@@ -93,7 +95,13 @@ impl<'a> InMemoryRowGroup<'a> {
             column_uncompressed_pages: vec![None; metadata.columns().len()],
             file_path,
             object_store,
+            fetcher: None,
         }
+    }
+
+    pub fn with_fetcher(mut self, fetcher: FetcherRef) -> Self {
+        self.fetcher = Some(fetcher);
+        self
     }
 
     /// Fetches the necessary column data into memory
@@ -277,6 +285,12 @@ impl<'a> InMemoryRowGroup<'a> {
     /// Try to fetch data from WriteCache,
     /// if not in WriteCache, fetch data from object store directly.
     async fn fetch_bytes(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+        if let Some(fetcher) = &self.fetcher {
+            let fut = fetcher.fetch(ranges.to_vec());
+            let data = fut.await.map_err(|e| ParquetError::External(Box::new(e)))?;
+            return Ok(data);
+        }
+
         let key = IndexKey::new(self.region_id, self.file_id, FileType::Parquet);
         match self.fetch_ranges_from_write_cache(key, ranges).await {
             Some(data) => Ok(data),

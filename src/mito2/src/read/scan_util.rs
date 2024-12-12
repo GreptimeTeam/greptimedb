@@ -165,12 +165,27 @@ pub(crate) fn scan_file_ranges(
 ) -> impl Stream<Item = Result<Batch>> {
     try_stream! {
         let mut reader_metrics = ReaderMetrics::default();
-        let ranges = range_builder.build_file_ranges(&stream_ctx.input, index, &mut reader_metrics).await?;
+        let ranges = range_builder
+            .build_file_ranges(&stream_ctx.input, index, &mut reader_metrics)
+            .await?;
         part_metrics.inc_num_file_ranges(ranges.len());
+        let fetcher = if let Some(range) = ranges.first() {
+            range.build_fetcher()
+        } else {
+            return;
+        };
 
-        for range in ranges {
+        let mut fut_readers = Vec::with_capacity(ranges.len());
+        for range in &ranges {
+            let reader = range.reader_fut(stream_ctx.input.series_row_selector, fetcher.clone());
+            fut_readers.push(reader);
+        }
+
+        fetcher.run();
+
+        for (range, reader) in ranges.iter().zip(fut_readers) {
             let build_reader_start = Instant::now();
-            let reader = range.reader(stream_ctx.input.series_row_selector).await?;
+            let reader = reader.await?;
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
             let compat_batch = range.compat_batch();

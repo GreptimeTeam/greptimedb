@@ -30,6 +30,7 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::{Expr, Operator};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
+use futures::future::BoxFuture;
 use itertools::Itertools;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
@@ -41,6 +42,7 @@ use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
+use super::fetcher::FetcherRef;
 use crate::cache::CacheManagerRef;
 use crate::error;
 use crate::error::{
@@ -839,17 +841,17 @@ pub(crate) struct RowGroupReaderBuilder {
     /// Holds the file handle to avoid the file purge it.
     file_handle: FileHandle,
     /// Path of the file.
-    file_path: String,
+    pub(crate) file_path: String,
     /// Metadata of the parquet file.
     parquet_meta: Arc<ParquetMetaData>,
     /// Object store as an Operator.
-    object_store: ObjectStore,
+    pub(crate) object_store: ObjectStore,
     /// Projection mask.
     projection: ProjectionMask,
     /// Field levels to read.
     field_levels: FieldLevels,
     /// Cache.
-    cache_manager: Option<CacheManagerRef>,
+    pub(crate) cache_manager: Option<CacheManagerRef>,
 }
 
 impl RowGroupReaderBuilder {
@@ -869,6 +871,49 @@ impl RowGroupReaderBuilder {
 
     pub(crate) fn cache_manager(&self) -> &Option<CacheManagerRef> {
         &self.cache_manager
+    }
+
+    /// Builds a [ParquetRecordBatchReader] to read the row group at `row_group_idx`.
+    pub(crate) fn build_fut(
+        &self,
+        row_group_idx: usize,
+        row_selection: Option<RowSelection>,
+        fetcher: FetcherRef,
+    ) -> BoxFuture<'_, Result<ParquetRecordBatchReader>> {
+        let mut row_group = InMemoryRowGroup::create(
+            self.file_handle.region_id(),
+            self.file_handle.file_id(),
+            &self.parquet_meta,
+            row_group_idx,
+            self.cache_manager.clone(),
+            &self.file_path,
+            self.object_store.clone(),
+        )
+        .with_fetcher(fetcher);
+
+        Box::pin(async move {
+            // Fetches data into memory.
+            row_group
+                .fetch(&self.projection, row_selection.as_ref())
+                .await
+                .context(ReadParquetSnafu {
+                    path: &self.file_path,
+                })?;
+
+            // Builds the parquet reader.
+            // Now the row selection is None.
+            let reader = ParquetRecordBatchReader::try_new_with_row_groups(
+                &self.field_levels,
+                &row_group,
+                DEFAULT_READ_BATCH_SIZE,
+                row_selection,
+            )
+            .context(ReadParquetSnafu {
+                path: &self.file_path,
+            })?;
+
+            Ok(reader)
+        })
     }
 
     /// Builds a [ParquetRecordBatchReader] to read the row group at `row_group_idx`.
