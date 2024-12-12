@@ -4,6 +4,7 @@ members = [
     "src/auth",
     "src/cache",
     "src/catalog",
+    "src/cli",
     "src/client",
     "src/cmd",
     "src/common/base",
@@ -67,7 +68,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -179,6 +180,7 @@ sysinfo = "0.30"
 # on branch v0.44.x
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "54a267ac89c09b11c0c88934690530807185d3e7", features = [
     "visitor",
+    "serde",
 ] }
 strum = { version = "0.25", features = ["derive"] }
 tempfile = "3"
@@ -200,6 +202,7 @@ api = { path = "src/api" }
 auth = { path = "src/auth" }
 cache = { path = "src/cache" }
 catalog = { path = "src/catalog" }
+cli = { path = "src/cli" }
 client = { path = "src/client" }
 cmd = { path = "src/cmd", default-features = false }
 common-base = { path = "src/common/base" }

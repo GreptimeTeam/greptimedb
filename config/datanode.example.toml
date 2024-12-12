@@ -13,9 +13,6 @@ require_lease_before_startup = false
 ## By default, it provides services after all regions have been initialized.
 init_regions_in_background = false
 
-## Enable telemetry to collect anonymous usage data.
-enable_telemetry = true
-
 ## Parallelism of initializing regions.
 init_regions_parallelism = 16
 
@@ -42,6 +39,8 @@ rpc_max_recv_message_size = "512MB"
 ## @toml2docs:none-default
 rpc_max_send_message_size = "512MB"
 
+## Enable telemetry to collect anonymous usage data. Enabled by default.
+#+ enable_telemetry = true
 
 ## The HTTP server options.
 [http]
@@ -143,15 +142,15 @@ dir = "/tmp/greptimedb/wal"
 
 ## The size of the WAL segment file.
 ## **It's only used when the provider is `raft_engine`**.
-file_size = "256MB"
+file_size = "128MB"
 
 ## The threshold of the WAL size to trigger a flush.
 ## **It's only used when the provider is `raft_engine`**.
-purge_threshold = "4GB"
+purge_threshold = "1GB"
 
 ## The interval to trigger a flush.
 ## **It's only used when the provider is `raft_engine`**.
-purge_interval = "10m"
+purge_interval = "1m"
 
 ## The read batch size.
 ## **It's only used when the provider is `raft_engine`**.
@@ -294,14 +293,14 @@ data_home = "/tmp/greptimedb/"
 ## - `Oss`: the data is stored in the Aliyun OSS.
 type = "File"
 
-## Cache configuration for object storage such as 'S3' etc. It is recommended to configure it when using object storage for better performance.
-## The local file cache directory.
+## Read cache configuration for object storage such as 'S3' etc, it's configured by default when using object storage. It is recommended to configure it when using object storage for better performance.
+## A local file directory, defaults to `{data_home}/object_cache/read`. An empty string means disabling.
 ## @toml2docs:none-default
-cache_path = "/path/local_cache"
+#+ cache_path = ""
 
 ## The local file cache capacity in bytes. If your disk space is sufficient, it is recommended to set it larger.
 ## @toml2docs:none-default
-cache_capacity = "1GiB"
+cache_capacity = "5GiB"
 
 ## The S3 bucket name.
 ## **It's only used when the storage type is `S3`, `Oss` and `Gcs`**.
@@ -476,14 +475,14 @@ auto_flush_interval = "1h"
 ## @toml2docs:none-default="Auto"
 #+ selector_result_cache_size = "512MB"
 
-## Whether to enable the experimental write cache. It is recommended to enable it when using object storage for better performance.
+## Whether to enable the experimental write cache, it's enabled by default when using object storage. It is recommended to enable it when using object storage for better performance.
 enable_experimental_write_cache = false
 
-## File system path for write cache, defaults to `{data_home}/write_cache`.
+## File system path for write cache, defaults to `{data_home}/object_cache/write`.
 experimental_write_cache_path = ""
 
 ## Capacity for write cache. If your disk space is sufficient, it is recommended to set it larger.
-experimental_write_cache_size = "1GiB"
+experimental_write_cache_size = "5GiB"
 
 ## TTL for write cache.
 ## @toml2docs:none-default
@@ -491,12 +490,6 @@ experimental_write_cache_ttl = "8h"
 
 ## Buffer size for SST writing.
 sst_write_buffer_size = "8MB"
-
-## Parallelism to scan a region (default: 1/4 of cpu cores).
-## - `0`: using the default value (1/4 of cpu cores).
-## - `1`: scan in current thread.
-## - `n`: scan in parallelism n.
-scan_parallelism = 0
 
 ## Capacity of the channel to send data from parallel scan tasks to the main task.
 parallel_scan_channel_size = 32

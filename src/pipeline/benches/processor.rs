@@ -223,7 +223,7 @@ transform:
     type: uint32
 "#;
 
-    parse(&Content::Yaml(pipeline_yaml.into())).unwrap()
+    parse(&Content::Yaml(pipeline_yaml)).unwrap()
 }
 
 fn criterion_benchmark(c: &mut Criterion) {

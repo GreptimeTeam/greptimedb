@@ -82,7 +82,7 @@ pub struct ParquetReaderBuilder {
     /// can contain columns not in the parquet file.
     projection: Option<Vec<ColumnId>>,
     /// Manager that caches SST data.
-    cache_manager: CacheManagerRef,
+    cache_manager: Option<CacheManagerRef>,
     /// Index appliers.
     inverted_index_applier: Option<InvertedIndexApplierRef>,
     fulltext_index_applier: Option<FulltextIndexApplierRef>,
@@ -106,7 +106,7 @@ impl ParquetReaderBuilder {
             predicate: None,
             time_range: None,
             projection: None,
-            cache_manager: CacheManagerRef::default(),
+            cache_manager: None,
             inverted_index_applier: None,
             fulltext_index_applier: None,
             expected_metadata: None,
@@ -138,7 +138,7 @@ impl ParquetReaderBuilder {
 
     /// Attaches the cache to the builder.
     #[must_use]
-    pub fn cache(mut self, cache: CacheManagerRef) -> ParquetReaderBuilder {
+    pub fn cache(mut self, cache: Option<CacheManagerRef>) -> ParquetReaderBuilder {
         self.cache_manager = cache;
         self
     }
@@ -313,12 +313,10 @@ impl ParquetReaderBuilder {
         let region_id = self.file_handle.region_id();
         let file_id = self.file_handle.file_id();
         // Tries to get from global cache.
-        if let Some(metadata) = self
-            .cache_manager
-            .get_parquet_meta_data(region_id, file_id)
-            .await
-        {
-            return Ok(metadata);
+        if let Some(manager) = &self.cache_manager {
+            if let Some(metadata) = manager.get_parquet_meta_data(region_id, file_id).await {
+                return Ok(metadata);
+            }
         }
 
         // Cache miss, load metadata directly.
@@ -326,11 +324,13 @@ impl ParquetReaderBuilder {
         let metadata = metadata_loader.load().await?;
         let metadata = Arc::new(metadata);
         // Cache the metadata.
-        self.cache_manager.put_parquet_meta_data(
-            self.file_handle.region_id(),
-            self.file_handle.file_id(),
-            metadata.clone(),
-        );
+        if let Some(cache) = &self.cache_manager {
+            cache.put_parquet_meta_data(
+                self.file_handle.region_id(),
+                self.file_handle.file_id(),
+                metadata.clone(),
+            );
+        }
 
         Ok(metadata)
     }
@@ -475,8 +475,11 @@ impl ParquetReaderBuilder {
         if !self.file_handle.meta_ref().inverted_index_available() {
             return false;
         }
-
-        let apply_output = match index_applier.apply(self.file_handle.file_id()).await {
+        let file_size_hint = self.file_handle.meta_ref().inverted_index_size();
+        let apply_output = match index_applier
+            .apply(self.file_handle.file_id(), file_size_hint)
+            .await
+        {
             Ok(output) => output,
             Err(err) => {
                 if cfg!(any(test, feature = "test")) {
@@ -846,7 +849,7 @@ pub(crate) struct RowGroupReaderBuilder {
     /// Field levels to read.
     field_levels: FieldLevels,
     /// Cache.
-    cache_manager: CacheManagerRef,
+    cache_manager: Option<CacheManagerRef>,
 }
 
 impl RowGroupReaderBuilder {
@@ -864,7 +867,7 @@ impl RowGroupReaderBuilder {
         &self.parquet_meta
     }
 
-    pub(crate) fn cache_manager(&self) -> &CacheManagerRef {
+    pub(crate) fn cache_manager(&self) -> &Option<CacheManagerRef> {
         &self.cache_manager
     }
 
@@ -915,10 +918,10 @@ enum ReaderState {
 
 impl ReaderState {
     /// Returns the metrics of the reader.
-    fn metrics(&mut self) -> &ReaderMetrics {
+    fn metrics(&self) -> ReaderMetrics {
         match self {
             ReaderState::Readable(reader) => reader.metrics(),
-            ReaderState::Exhausted(m) => m,
+            ReaderState::Exhausted(m) => m.clone(),
         }
     }
 }

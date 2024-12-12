@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -51,22 +52,42 @@ static VAR_VALUES: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
 static SHOW_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new("(?i)^SHOW (.*?);?$").unwrap());
 static SET_TRANSACTION_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^SET TRANSACTION (.*?);?$").unwrap());
-static TRANSACTION_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^(BEGIN|ROLLBACK|COMMIT);?").unwrap());
+static START_TRANSACTION_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new("(?i)^(START TRANSACTION.*|BEGIN);?").unwrap());
+static COMMIT_TRANSACTION_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new("(?i)^(COMMIT TRANSACTION|COMMIT);?").unwrap());
+static ABORT_TRANSACTION_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new("(?i)^(ABORT TRANSACTION|ROLLBACK);?").unwrap());
 
 /// Test if given query statement matches the patterns
 pub(crate) fn matches(query: &str) -> bool {
-    TRANSACTION_PATTERN.captures(query).is_some()
+    START_TRANSACTION_PATTERN.is_match(query)
+        || COMMIT_TRANSACTION_PATTERN.is_match(query)
+        || ABORT_TRANSACTION_PATTERN.is_match(query)
         || SHOW_PATTERN.captures(query).is_some()
         || SET_TRANSACTION_PATTERN.is_match(query)
 }
 
+fn set_transaction_warning(query_ctx: QueryContextRef) {
+    query_ctx.set_warning("Please note transaction is not supported in GreptimeDB.".to_string());
+}
+
 /// Process unsupported SQL and return fixed result as a compatibility solution
-pub(crate) fn process<'a>(query: &str, _query_ctx: QueryContextRef) -> Option<Vec<Response<'a>>> {
+pub(crate) fn process<'a>(query: &str, query_ctx: QueryContextRef) -> Option<Vec<Response<'a>>> {
     // Transaction directives:
-    if let Some(tx) = TRANSACTION_PATTERN.captures(query) {
-        let tx_tag = &tx[1];
-        Some(vec![Response::Execution(Tag::new(&tx_tag.to_uppercase()))])
+    if START_TRANSACTION_PATTERN.is_match(query) {
+        set_transaction_warning(query_ctx);
+        if query.to_lowercase().starts_with("begin") {
+            Some(vec![Response::TransactionStart(Tag::new("BEGIN"))])
+        } else {
+            Some(vec![Response::TransactionStart(Tag::new(
+                "START TRANSACTION",
+            ))])
+        }
+    } else if ABORT_TRANSACTION_PATTERN.is_match(query) {
+        Some(vec![Response::TransactionEnd(Tag::new("ROLLBACK"))])
+    } else if COMMIT_TRANSACTION_PATTERN.is_match(query) {
+        Some(vec![Response::TransactionEnd(Tag::new("COMMIT"))])
     } else if let Some(show_var) = SHOW_PATTERN.captures(query) {
         let show_var = show_var[1].to_lowercase();
         if let Some(value) = VAR_VALUES.get(&show_var.as_ref()) {
@@ -94,6 +115,13 @@ pub(crate) fn process<'a>(query: &str, _query_ctx: QueryContextRef) -> Option<Ve
     }
 }
 
+static LIMIT_CAST_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new("(?i)(LIMIT\\s+\\d+)::bigint").unwrap());
+pub(crate) fn rewrite_sql(query: &str) -> Cow<'_, str> {
+    //TODO(sunng87): remove this when we upgraded datafusion to 43 or newer
+    LIMIT_CAST_PATTERN.replace_all(query, "$1")
+}
+
 #[cfg(test)]
 mod test {
     use session::context::{QueryContext, QueryContextRef};
@@ -101,7 +129,9 @@ mod test {
     use super::*;
 
     fn assert_tag(q: &str, t: &str, query_context: QueryContextRef) {
-        if let Response::Execution(tag) = process(q, query_context.clone())
+        if let Response::Execution(tag)
+        | Response::TransactionStart(tag)
+        | Response::TransactionEnd(tag) = process(q, query_context.clone())
             .unwrap_or_else(|| panic!("fail to match {}", q))
             .remove(0)
         {
@@ -150,6 +180,19 @@ mod test {
             "SET",
             query_context.clone(),
         );
+        assert_tag(
+            "START TRANSACTION isolation level READ COMMITTED;",
+            "START TRANSACTION",
+            query_context.clone(),
+        );
+        assert_tag(
+            "start transaction isolation level READ COMMITTED;",
+            "START TRANSACTION",
+            query_context.clone(),
+        );
+        assert_tag("abort transaction;", "ROLLBACK", query_context.clone());
+        assert_tag("commit transaction;", "COMMIT", query_context.clone());
+        assert_tag("COMMIT transaction;", "COMMIT", query_context.clone());
 
         let resp = get_data("SHOW transaction isolation level", query_context.clone());
         assert_eq!(1, resp.row_schema().len());
@@ -163,5 +206,14 @@ mod test {
         assert!(process("SELECT 1", query_context.clone()).is_none());
         assert!(process("SHOW TABLES ", query_context.clone()).is_none());
         assert!(process("SET TIME_ZONE=utc ", query_context.clone()).is_none());
+    }
+
+    #[test]
+    fn test_rewrite() {
+        let sql = "SELECT * FROM number LIMIT 1::bigint";
+        let sql2 = "SELECT * FROM number limit      1::BIGINT";
+
+        assert_eq!("SELECT * FROM number LIMIT 1", rewrite_sql(sql));
+        assert_eq!("SELECT * FROM number limit      1", rewrite_sql(sql2));
     }
 }

@@ -21,6 +21,7 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::warn;
 use object_store::util::join_dir;
+use object_store::OBJECT_CACHE_DIR;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
@@ -30,7 +31,7 @@ use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
 const MULTIPART_UPLOAD_MINIMUM_SIZE: ReadableSize = ReadableSize::mb(5);
 /// Default channel size for parallel scan task.
-const DEFAULT_SCAN_CHANNEL_SIZE: usize = 32;
+pub(crate) const DEFAULT_SCAN_CHANNEL_SIZE: usize = 32;
 
 // Use `1/GLOBAL_WRITE_BUFFER_SIZE_FACTOR` of OS memory as global write buffer size in default mode
 const GLOBAL_WRITE_BUFFER_SIZE_FACTOR: u64 = 8;
@@ -44,6 +45,9 @@ const MEM_CACHE_SIZE_FACTOR: u64 = 16;
 const PAGE_CACHE_SIZE_FACTOR: u64 = 8;
 /// Use `1/INDEX_CREATE_MEM_THRESHOLD_FACTOR` of OS memory size as mem threshold for creating index
 const INDEX_CREATE_MEM_THRESHOLD_FACTOR: u64 = 16;
+
+/// Fetch option timeout
+pub(crate) const FETCH_OPTION_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -93,7 +97,7 @@ pub struct MitoConfig {
     pub selector_result_cache_size: ReadableSize,
     /// Whether to enable the experimental write cache.
     pub enable_experimental_write_cache: bool,
-    /// File system path for write cache, defaults to `{data_home}/write_cache`.
+    /// File system path for write cache, defaults to `{data_home}/object_cache/write`.
     pub experimental_write_cache_path: String,
     /// Capacity for write cache.
     pub experimental_write_cache_size: ReadableSize,
@@ -104,11 +108,6 @@ pub struct MitoConfig {
     // Other configs:
     /// Buffer size for SST writing.
     pub sst_write_buffer_size: ReadableSize,
-    /// Parallelism to scan a region (default: 1/4 of cpu cores).
-    /// - 0: using the default value (1/4 of cpu cores).
-    /// - 1: scan in current thread.
-    /// - n: scan in parallelism n.
-    pub scan_parallelism: usize,
     /// Capacity of the channel to send data from parallel scan tasks to the main task (default 32).
     pub parallel_scan_channel_size: usize,
     /// Whether to allow stale entries read during replay.
@@ -150,10 +149,9 @@ impl Default for MitoConfig {
             selector_result_cache_size: ReadableSize::mb(512),
             enable_experimental_write_cache: false,
             experimental_write_cache_path: String::new(),
-            experimental_write_cache_size: ReadableSize::gb(1),
+            experimental_write_cache_size: ReadableSize::gb(5),
             experimental_write_cache_ttl: None,
             sst_write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
-            scan_parallelism: divide_num_cpus(4),
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             allow_stale_entries: false,
             index: IndexConfig::default(),
@@ -226,11 +224,6 @@ impl MitoConfig {
             );
         }
 
-        // Use default value if `scan_parallelism` is 0.
-        if self.scan_parallelism == 0 {
-            self.scan_parallelism = divide_num_cpus(4);
-        }
-
         if self.parallel_scan_channel_size < 1 {
             self.parallel_scan_channel_size = DEFAULT_SCAN_CHANNEL_SIZE;
             warn!(
@@ -240,8 +233,9 @@ impl MitoConfig {
         }
 
         // Sets write cache path if it is empty.
-        if self.experimental_write_cache_path.is_empty() {
-            self.experimental_write_cache_path = join_dir(data_home, "write_cache");
+        if self.experimental_write_cache_path.trim().is_empty() {
+            let object_cache_path = join_dir(data_home, OBJECT_CACHE_DIR);
+            self.experimental_write_cache_path = join_dir(&object_cache_path, "write");
         }
 
         self.index.sanitize(data_home, &self.inverted_index)?;
@@ -310,6 +304,9 @@ pub struct IndexConfig {
 
     /// Write buffer size for creating the index.
     pub write_buffer_size: ReadableSize,
+
+    /// Cache size for metadata of puffin files. Setting it to 0 to disable the cache.
+    pub metadata_cache_size: ReadableSize,
 }
 
 impl Default for IndexConfig {
@@ -318,6 +315,7 @@ impl Default for IndexConfig {
             aux_path: String::new(),
             staging_size: ReadableSize::gb(2),
             write_buffer_size: ReadableSize::mb(8),
+            metadata_cache_size: ReadableSize::mb(64),
         }
     }
 }

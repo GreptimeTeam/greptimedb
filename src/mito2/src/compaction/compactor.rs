@@ -18,6 +18,7 @@ use std::time::Duration;
 use api::v1::region::compact_request;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{info, warn};
+use common_time::TimeToLive;
 use object_store::manager::ObjectStoreManagerRef;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -63,7 +64,7 @@ pub struct CompactionRegion {
     pub(crate) manifest_ctx: Arc<ManifestContext>,
     pub(crate) current_version: VersionRef,
     pub(crate) file_purger: Option<Arc<LocalFilePurger>>,
-    pub(crate) ttl: Option<Duration>,
+    pub(crate) ttl: Option<TimeToLive>,
 }
 
 /// OpenCompactionRegionRequest represents the request to open a compaction region.
@@ -180,7 +181,7 @@ pub async fn open_compaction_region(
     .await
     .unwrap_or_else(|e| {
         warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
-        None
+        TimeToLive::default()
     });
     Ok(CompactionRegion {
         region_id: req.region_id,
@@ -193,7 +194,7 @@ pub async fn open_compaction_region(
         manifest_ctx,
         current_version,
         file_purger: Some(file_purger),
-        ttl,
+        ttl: Some(ttl),
     })
 }
 
@@ -295,7 +296,6 @@ impl Compactor for DefaultCompactor {
                 let reader = CompactionSstReaderBuilder {
                     metadata: region_metadata.clone(),
                     sst_layer: sst_layer.clone(),
-                    cache: cache_manager.clone(),
                     inputs: &output.inputs,
                     append_mode,
                     filter_deleted: output.filter_deleted,

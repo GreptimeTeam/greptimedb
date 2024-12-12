@@ -28,7 +28,7 @@ use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{PartitionRange, RegionScanner, ScannerProperties};
+use store_api::region_engine::{PartitionRange, PrepareRequest, RegionScanner, ScannerProperties};
 use store_api::storage::TimeSeriesRowSelector;
 use tokio::sync::Semaphore;
 
@@ -51,37 +51,25 @@ pub struct SeqScan {
     properties: ScannerProperties,
     /// Context of streams.
     stream_ctx: Arc<StreamContext>,
-    /// Semaphore to control scan parallelism of files.
-    /// Streams created by the scanner share the same semaphore.
-    semaphore: Arc<Semaphore>,
     /// The scanner is used for compaction.
     compaction: bool,
 }
 
 impl SeqScan {
-    /// Creates a new [SeqScan].
-    pub(crate) fn new(input: ScanInput) -> Self {
-        // TODO(yingwen): Set permits according to partition num. But we need to support file
-        // level parallelism.
-        let parallelism = input.parallelism.parallelism.max(1);
+    /// Creates a new [SeqScan] with the given input and compaction flag.
+    /// If `compaction` is true, the scanner will not attempt to split ranges.
+    pub(crate) fn new(input: ScanInput, compaction: bool) -> Self {
         let mut properties = ScannerProperties::default()
             .with_append_mode(input.append_mode)
             .with_total_rows(input.total_rows());
-        let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(input));
+        let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(input, compaction));
         properties.partitions = vec![stream_ctx.partition_ranges()];
 
         Self {
             properties,
             stream_ctx,
-            semaphore: Arc::new(Semaphore::new(parallelism)),
-            compaction: false,
+            compaction,
         }
-    }
-
-    /// Sets the scanner to be used for compaction.
-    pub(crate) fn with_compaction(mut self) -> Self {
-        self.compaction = true;
-        self
     }
 
     /// Builds a stream for the query.
@@ -98,7 +86,12 @@ impl SeqScan {
     }
 
     /// Builds a [BoxedBatchReader] from sequential scan for compaction.
-    pub async fn build_reader(&self) -> Result<BoxedBatchReader> {
+    ///
+    /// # Panics
+    /// Panics if the compaction flag is not set.
+    pub async fn build_reader_for_compaction(&self) -> Result<BoxedBatchReader> {
+        assert!(self.compaction);
+
         let part_metrics = PartitionMetrics::new(
             self.stream_ctx.input.mapper.metadata().region_id,
             0,
@@ -112,23 +105,20 @@ impl SeqScan {
         debug_assert_eq!(1, self.properties.partitions.len());
         let partition_ranges = &self.properties.partitions[0];
 
-        let reader = Self::build_all_merge_reader(
+        let reader = Self::merge_all_ranges_for_compaction(
             &self.stream_ctx,
             partition_ranges,
-            self.semaphore.clone(),
-            self.compaction,
             &part_metrics,
         )
         .await?;
         Ok(Box::new(reader))
     }
 
-    /// Builds a merge reader that reads all data.
-    async fn build_all_merge_reader(
+    /// Builds a merge reader that reads all ranges.
+    /// Callers MUST not split ranges before calling this method.
+    async fn merge_all_ranges_for_compaction(
         stream_ctx: &Arc<StreamContext>,
         partition_ranges: &[PartitionRange],
-        semaphore: Arc<Semaphore>,
-        compaction: bool,
         part_metrics: &PartitionMetrics,
     ) -> Result<BoxedBatchReader> {
         let mut sources = Vec::new();
@@ -140,27 +130,37 @@ impl SeqScan {
             build_sources(
                 stream_ctx,
                 part_range,
-                compaction,
+                true,
                 part_metrics,
                 range_builder_list.clone(),
                 &mut sources,
             );
         }
-        Self::build_reader_from_sources(stream_ctx, sources, semaphore).await
+
+        common_telemetry::debug!(
+            "Build reader to read all parts, region_id: {}, num_part_ranges: {}, num_sources: {}",
+            stream_ctx.input.mapper.metadata().region_id,
+            partition_ranges.len(),
+            sources.len()
+        );
+        Self::build_reader_from_sources(stream_ctx, sources, None).await
     }
 
+    /// Builds a reader to read sources. If `semaphore` is provided, reads sources in parallel
+    /// if possible.
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     async fn build_reader_from_sources(
         stream_ctx: &StreamContext,
         mut sources: Vec<Source>,
-        semaphore: Arc<Semaphore>,
+        semaphore: Option<Arc<Semaphore>>,
     ) -> Result<BoxedBatchReader> {
-        if stream_ctx.input.parallelism.parallelism > 1 {
-            // Read sources in parallel. We always spawn a task so we can control the parallelism
-            // by the semaphore.
-            sources = stream_ctx
-                .input
-                .create_parallel_sources(sources, semaphore.clone())?;
+        if let Some(semaphore) = semaphore.as_ref() {
+            // Read sources in parallel.
+            if sources.len() > 1 {
+                sources = stream_ctx
+                    .input
+                    .create_parallel_sources(sources, semaphore.clone())?;
+            }
         }
 
         let mut builder = MergeReaderBuilder::from_sources(sources);
@@ -207,10 +207,21 @@ impl SeqScan {
         }
 
         let stream_ctx = self.stream_ctx.clone();
-        let semaphore = self.semaphore.clone();
+        let semaphore = if self.properties.target_partitions() > self.properties.num_partitions() {
+            // We can use additional tasks to read the data if we have more target partitions than actual partitions.
+            // This semaphore is partition level.
+            // We don't use a global semaphore to avoid a partition waiting for others. The final concurrency
+            // of tasks usually won't exceed the target partitions a lot as compaction can reduce the number of
+            // files in a part range.
+            Some(Arc::new(Semaphore::new(
+                self.properties.target_partitions() - self.properties.num_partitions() + 1,
+            )))
+        } else {
+            None
+        };
         let partition_ranges = self.properties.partitions[partition].clone();
         let compaction = self.compaction;
-        let distinguish_range = self.properties.distinguish_partition_range();
+        let distinguish_range = self.properties.distinguish_partition_range;
         let part_metrics = PartitionMetrics::new(
             self.stream_ctx.input.mapper.metadata().region_id,
             partition,
@@ -246,7 +257,7 @@ impl SeqScan {
                         .await
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?;
-                let cache = &stream_ctx.input.cache_manager;
+                let cache = stream_ctx.input.cache_manager.as_deref();
                 let mut metrics = ScannerMetrics::default();
                 let mut fetch_start = Instant::now();
                 #[cfg(debug_assertions)]
@@ -325,13 +336,8 @@ impl RegionScanner for SeqScan {
         self.scan_partition_impl(partition)
     }
 
-    fn prepare(
-        &mut self,
-        ranges: Vec<Vec<PartitionRange>>,
-        distinguish_partition_range: bool,
-    ) -> Result<(), BoxedError> {
-        self.properties.partitions = ranges;
-        self.properties.distinguish_partition_range = distinguish_partition_range;
+    fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
+        self.properties.prepare(request);
         Ok(())
     }
 
@@ -375,6 +381,20 @@ fn build_sources(
 ) {
     // Gets range meta.
     let range_meta = &stream_ctx.ranges[part_range.identifier];
+    #[cfg(debug_assertions)]
+    if compaction {
+        // Compaction expects input sources are not been split.
+        debug_assert_eq!(range_meta.indices.len(), range_meta.row_group_indices.len());
+        for (i, row_group_idx) in range_meta.row_group_indices.iter().enumerate() {
+            // It should scan all row groups.
+            debug_assert_eq!(
+                -1, row_group_idx.row_group_index,
+                "Expect {} range scan all row groups, given: {}",
+                i, row_group_idx.row_group_index,
+            );
+        }
+    }
+
     sources.reserve(range_meta.row_group_indices.len());
     for index in &range_meta.row_group_indices {
         let stream = if stream_ctx.is_mem_range_index(*index) {

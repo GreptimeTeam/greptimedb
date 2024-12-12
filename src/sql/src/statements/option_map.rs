@@ -16,14 +16,16 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::ControlFlow;
 
 use common_base::secrets::{ExposeSecret, ExposeSecretMut, SecretString};
+use serde::Serialize;
 use sqlparser::ast::{Visit, VisitMut, Visitor, VisitorMut};
 
 const REDACTED_OPTIONS: [&str; 2] = ["access_key_id", "secret_access_key"];
 
 /// Options hashmap.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct OptionMap {
     options: BTreeMap<String, String>,
+    #[serde(skip_serializing)]
     secrets: BTreeMap<String, SecretString>,
 }
 
@@ -79,10 +81,18 @@ impl OptionMap {
     pub fn kv_pairs(&self) -> Vec<String> {
         let mut result = Vec::with_capacity(self.options.len() + self.secrets.len());
         for (k, v) in self.options.iter() {
-            result.push(format!("{k} = '{}'", v.escape_default()));
+            if k.contains(".") {
+                result.push(format!("'{k}' = '{}'", v.escape_default()));
+            } else {
+                result.push(format!("{k} = '{}'", v.escape_default()));
+            }
         }
         for (k, _) in self.secrets.iter() {
-            result.push(format!("{k} = '******'"));
+            if k.contains(".") {
+                result.push(format!("'{k}' = '******'"));
+            } else {
+                result.push(format!("{k} = '******'"));
+            }
         }
         result
     }

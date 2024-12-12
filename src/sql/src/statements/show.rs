@@ -14,12 +14,13 @@
 
 use std::fmt::{self, Display};
 
+use serde::Serialize;
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{Expr, Ident, ObjectName};
 
 /// Show kind for SQL expressions like `SHOW DATABASE` or `SHOW TABLE`
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum ShowKind {
     All,
     Like(Ident),
@@ -46,14 +47,14 @@ macro_rules! format_kind {
 }
 
 /// SQL structure for `SHOW DATABASES`.
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct ShowDatabases {
     pub kind: ShowKind,
     pub full: bool,
 }
 
 /// The SQL `SHOW COLUMNS` statement
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct ShowColumns {
     pub kind: ShowKind,
     pub table: String,
@@ -77,7 +78,7 @@ impl Display for ShowColumns {
 }
 
 /// The SQL `SHOW INDEX` statement
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct ShowIndex {
     pub kind: ShowKind,
     pub table: String,
@@ -118,7 +119,7 @@ impl Display for ShowDatabases {
 }
 
 /// SQL structure for `SHOW TABLES`.
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct ShowTables {
     pub kind: ShowKind,
     pub database: Option<String>,
@@ -142,7 +143,7 @@ impl Display for ShowTables {
 }
 
 /// SQL structure for `SHOW TABLE STATUS`.
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct ShowTableStatus {
     pub kind: ShowKind,
     pub database: Option<String>,
@@ -162,7 +163,7 @@ impl Display for ShowTableStatus {
 }
 
 /// SQL structure for `SHOW CREATE DATABASE`.
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct ShowCreateDatabase {
     pub database_name: ObjectName,
 }
@@ -175,7 +176,7 @@ impl Display for ShowCreateDatabase {
 }
 
 /// SQL structure for `SHOW CREATE TABLE`.
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct ShowCreateTable {
     pub table_name: ObjectName,
 }
@@ -188,7 +189,7 @@ impl Display for ShowCreateTable {
 }
 
 /// SQL structure for `SHOW CREATE FLOW`.
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct ShowCreateFlow {
     pub flow_name: ObjectName,
 }
@@ -201,7 +202,7 @@ impl Display for ShowCreateFlow {
 }
 
 /// SQL structure for `SHOW FLOWS`.
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct ShowFlows {
     pub kind: ShowKind,
     pub database: Option<String>,
@@ -220,7 +221,7 @@ impl Display for ShowFlows {
 }
 
 /// SQL structure for `SHOW CREATE VIEW`.
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct ShowCreateView {
     pub view_name: ObjectName,
 }
@@ -233,7 +234,7 @@ impl Display for ShowCreateView {
 }
 
 /// SQL structure for `SHOW VIEWS`.
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct ShowViews {
     pub kind: ShowKind,
     pub database: Option<String>,
@@ -252,7 +253,7 @@ impl Display for ShowViews {
 }
 
 /// SQL structure for `SHOW VARIABLES xxx`.
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct ShowVariables {
     pub variable: ObjectName,
 }
@@ -265,7 +266,7 @@ impl Display for ShowVariables {
 }
 
 /// SQL structure for "SHOW STATUS"
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct ShowStatus {}
 
 impl Display for ShowStatus {

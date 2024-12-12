@@ -27,7 +27,6 @@ impl ToSqlText for HexOutputBytea<'_> {
     where
         Self: Sized,
     {
-        out.put_slice(b"\\x");
         let _ = self.0.to_sql_text(ty, out);
         Ok(IsNull::No)
     }

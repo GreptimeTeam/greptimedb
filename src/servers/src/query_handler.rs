@@ -40,7 +40,7 @@ use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequ
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use pipeline::{GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion, PipelineWay};
 use serde_json::Value;
-use session::context::QueryContextRef;
+use session::context::{QueryContext, QueryContextRef};
 
 use crate::error::Result;
 use crate::influxdb::InfluxdbRequest;
@@ -166,6 +166,15 @@ pub trait PipelineHandler {
         version: PipelineVersion,
         query_ctx: QueryContextRef,
     ) -> Result<Option<()>>;
+
+    async fn get_table(
+        &self,
+        table: &str,
+        query_ctx: &QueryContext,
+    ) -> std::result::Result<Option<Arc<table::Table>>, catalog::error::Error>;
+
+    //// Build a pipeline from a string.
+    fn build_pipeline(&self, pipeline: &str) -> Result<Pipeline<GreptimeTransformer>>;
 }
 
 /// Handle log query requests.

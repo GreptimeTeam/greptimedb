@@ -22,6 +22,7 @@ use index::inverted_index::search::index_apply::{
     ApplyOutput, IndexApplier, IndexNotFoundStrategy, SearchContext,
 };
 use object_store::ObjectStore;
+use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{BlobGuard, PuffinManager, PuffinReader};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -60,6 +61,9 @@ pub(crate) struct InvertedIndexApplier {
 
     /// In-memory cache for inverted index.
     inverted_index_cache: Option<InvertedIndexCacheRef>,
+
+    /// Puffin metadata cache.
+    puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
 }
 
 pub(crate) type InvertedIndexApplierRef = Arc<InvertedIndexApplier>;
@@ -70,8 +74,6 @@ impl InvertedIndexApplier {
         region_dir: String,
         region_id: RegionId,
         store: ObjectStore,
-        file_cache: Option<FileCacheRef>,
-        index_cache: Option<InvertedIndexCacheRef>,
         index_applier: Box<dyn IndexApplier>,
         puffin_manager_factory: PuffinManagerFactory,
     ) -> Self {
@@ -81,15 +83,37 @@ impl InvertedIndexApplier {
             region_dir,
             region_id,
             store,
-            file_cache,
+            file_cache: None,
             index_applier,
             puffin_manager_factory,
-            inverted_index_cache: index_cache,
+            inverted_index_cache: None,
+            puffin_metadata_cache: None,
         }
     }
 
+    /// Sets the file cache.
+    pub fn with_file_cache(mut self, file_cache: Option<FileCacheRef>) -> Self {
+        self.file_cache = file_cache;
+        self
+    }
+
+    /// Sets the index cache.
+    pub fn with_index_cache(mut self, index_cache: Option<InvertedIndexCacheRef>) -> Self {
+        self.inverted_index_cache = index_cache;
+        self
+    }
+
+    /// Sets the puffin metadata cache.
+    pub fn with_puffin_metadata_cache(
+        mut self,
+        puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
+    ) -> Self {
+        self.puffin_metadata_cache = puffin_metadata_cache;
+        self
+    }
+
     /// Applies predicates to the provided SST file id and returns the relevant row group ids
-    pub async fn apply(&self, file_id: FileId) -> Result<ApplyOutput> {
+    pub async fn apply(&self, file_id: FileId, file_size_hint: Option<u64>) -> Result<ApplyOutput> {
         let _timer = INDEX_APPLY_ELAPSED
             .with_label_values(&[TYPE_INVERTED_INDEX])
             .start_timer();
@@ -105,7 +129,7 @@ impl InvertedIndexApplier {
                 if let Err(err) = other {
                     warn!(err; "An unexpected error occurred while reading the cached index file. Fallback to remote index file.")
                 }
-                self.remote_blob_reader(file_id).await?
+                self.remote_blob_reader(file_id, file_size_hint).await?
             }
         };
 
@@ -156,13 +180,22 @@ impl InvertedIndexApplier {
     }
 
     /// Creates a blob reader from the remote index file.
-    async fn remote_blob_reader(&self, file_id: FileId) -> Result<BlobReader> {
-        let puffin_manager = self.puffin_manager_factory.build(self.store.clone());
+    async fn remote_blob_reader(
+        &self,
+        file_id: FileId,
+        file_size_hint: Option<u64>,
+    ) -> Result<BlobReader> {
+        let puffin_manager = self
+            .puffin_manager_factory
+            .build(self.store.clone())
+            .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
+
         let file_path = location::index_file_path(&self.region_dir, file_id);
         puffin_manager
             .reader(&file_path)
             .await
             .context(PuffinBuildReaderSnafu)?
+            .with_file_size_hint(file_size_hint)
             .blob(INDEX_BLOB_TYPE)
             .await
             .context(PuffinReadBlobSnafu)?
@@ -219,12 +252,10 @@ mod tests {
             region_dir.clone(),
             RegionId::new(0, 0),
             object_store,
-            None,
-            None,
             Box::new(mock_index_applier),
             puffin_manager_factory,
         );
-        let output = sst_index_applier.apply(file_id).await.unwrap();
+        let output = sst_index_applier.apply(file_id, None).await.unwrap();
         assert_eq!(
             output,
             ApplyOutput {
@@ -261,12 +292,10 @@ mod tests {
             region_dir.clone(),
             RegionId::new(0, 0),
             object_store,
-            None,
-            None,
             Box::new(mock_index_applier),
             puffin_manager_factory,
         );
-        let res = sst_index_applier.apply(file_id).await;
+        let res = sst_index_applier.apply(file_id, None).await;
         assert!(format!("{:?}", res.unwrap_err()).contains("Blob not found"));
     }
 }

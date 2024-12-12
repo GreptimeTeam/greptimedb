@@ -62,6 +62,9 @@ SHOW CREATE DATABASE alter_database;
 | Database       | Create Database                              |
 +----------------+----------------------------------------------+
 | alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
+|                | WITH(                                        |
+|                |   ttl = 'forever'                            |
+|                | )                                            |
 +----------------+----------------------------------------------+
 
 ALTER DATABASE alter_database SET 'ttl'='😁';

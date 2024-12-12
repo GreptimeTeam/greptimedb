@@ -30,6 +30,7 @@ use snafu::{Location, Snafu};
 use store_api::logstore::provider::Provider;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
+use tokio::time::error::Elapsed;
 
 use crate::cache::file_cache::FileType;
 use crate::region::{RegionLeaderState, RegionRoleState};
@@ -676,6 +677,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to create directory {}", dir))]
+    CreateDir {
+        dir: String,
+        #[snafu(source)]
+        error: std::io::Error,
+    },
+
     #[snafu(display("Failed to filter record batch"))]
     FilterRecordBatch {
         source: common_recordbatch::error::Error,
@@ -877,6 +885,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Timeout"))]
+    Timeout {
+        #[snafu(source)]
+        error: Elapsed,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -946,6 +962,7 @@ impl ErrorExt for Error {
             | ComputeVector { .. }
             | SerializeField { .. }
             | EncodeMemtable { .. }
+            | CreateDir { .. }
             | ReadDataPart { .. }
             | CorruptedEntry { .. }
             | BuildEntry { .. } => StatusCode::Internal,
@@ -1010,6 +1027,7 @@ impl ErrorExt for Error {
             DecodeStats { .. } | StatsNotPresent { .. } => StatusCode::Internal,
             RegionBusy { .. } => StatusCode::RegionBusy,
             GetSchemaMetadata { source, .. } => source.status_code(),
+            Timeout { .. } => StatusCode::Cancelled,
         }
     }
 

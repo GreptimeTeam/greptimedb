@@ -24,7 +24,7 @@ mod window;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use api::v1::region::compact_request;
 use common_base::Plugins;
@@ -32,7 +32,7 @@ use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{debug, error, info, warn};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
-use common_time::Timestamp;
+use common_time::{TimeToLive, Timestamp};
 use datafusion_common::ScalarValue;
 use datafusion_expr::Expr;
 use serde::{Deserialize, Serialize};
@@ -51,6 +51,7 @@ use crate::config::MitoConfig;
 use crate::error::{
     CompactRegionSnafu, Error, GetSchemaMetadataSnafu, RegionClosedSnafu, RegionDroppedSnafu,
     RegionTruncatedSnafu, RemoteCompactionSnafu, Result, TimeRangePredicateOverflowSnafu,
+    TimeoutSnafu,
 };
 use crate::metrics::COMPACTION_STAGE_ELAPSED;
 use crate::read::projection::ProjectionMapper;
@@ -273,7 +274,7 @@ impl CompactionScheduler {
         .await
         .unwrap_or_else(|e| {
             warn!(e; "Failed to get ttl for region: {}", region_id);
-            None
+            TimeToLive::default()
         });
 
         debug!(
@@ -292,7 +293,7 @@ impl CompactionScheduler {
             access_layer: access_layer.clone(),
             manifest_ctx: manifest_ctx.clone(),
             file_purger: None,
-            ttl,
+            ttl: Some(ttl),
         };
 
         let picker_output = {
@@ -437,18 +438,25 @@ impl PendingCompaction {
 /// Finds TTL of table by first examine table options then database options.
 async fn find_ttl(
     table_id: TableId,
-    table_ttl: Option<Duration>,
+    table_ttl: Option<TimeToLive>,
     schema_metadata_manager: &SchemaMetadataManagerRef,
-) -> Result<Option<Duration>> {
+) -> Result<TimeToLive> {
+    // If table TTL is set, we use it.
     if let Some(table_ttl) = table_ttl {
-        return Ok(Some(table_ttl));
+        return Ok(table_ttl);
     }
 
-    let ttl = schema_metadata_manager
-        .get_schema_options_by_table_id(table_id)
-        .await
-        .context(GetSchemaMetadataSnafu)?
-        .and_then(|options| options.ttl);
+    let ttl = tokio::time::timeout(
+        crate::config::FETCH_OPTION_TIMEOUT,
+        schema_metadata_manager.get_schema_options_by_table_id(table_id),
+    )
+    .await
+    .context(TimeoutSnafu)?
+    .context(GetSchemaMetadataSnafu)?
+    .and_then(|options| options.ttl)
+    .unwrap_or_default()
+    .into();
+
     Ok(ttl)
 }
 
@@ -562,7 +570,6 @@ pub struct SerializedCompactionOutput {
 struct CompactionSstReaderBuilder<'a> {
     metadata: RegionMetadataRef,
     sst_layer: AccessLayerRef,
-    cache: CacheManagerRef,
     inputs: &'a [FileHandle],
     append_mode: bool,
     filter_deleted: bool,
@@ -576,7 +583,7 @@ impl<'a> CompactionSstReaderBuilder<'a> {
         let mut scan_input = ScanInput::new(self.sst_layer, ProjectionMapper::all(&self.metadata)?)
             .with_files(self.inputs.to_vec())
             .with_append_mode(self.append_mode)
-            .with_cache(self.cache)
+            .with_cache(None)
             .with_filter_deleted(self.filter_deleted)
             // We ignore file not found error during compaction.
             .with_ignore_file_not_found(true)
@@ -589,9 +596,8 @@ impl<'a> CompactionSstReaderBuilder<'a> {
                 scan_input.with_predicate(time_range_to_predicate(time_range, &self.metadata)?);
         }
 
-        SeqScan::new(scan_input)
-            .with_compaction()
-            .build_reader()
+        SeqScan::new(scan_input, true)
+            .build_reader_for_compaction()
             .await
     }
 }
@@ -656,24 +662,16 @@ fn ts_to_lit(ts: Timestamp, ts_col_unit: TimeUnit) -> Result<Expr> {
 /// Finds all expired SSTs across levels.
 fn get_expired_ssts(
     levels: &[LevelMeta],
-    ttl: Option<Duration>,
+    ttl: Option<TimeToLive>,
     now: Timestamp,
 ) -> Vec<FileHandle> {
     let Some(ttl) = ttl else {
         return vec![];
     };
 
-    let expire_time = match now.sub_duration(ttl) {
-        Ok(expire_time) => expire_time,
-        Err(e) => {
-            error!(e; "Failed to calculate region TTL expire time");
-            return vec![];
-        }
-    };
-
     levels
         .iter()
-        .flat_map(|l| l.get_expired_files(&expire_time).into_iter())
+        .flat_map(|l| l.get_expired_files(&now, &ttl).into_iter())
         .collect()
 }
 

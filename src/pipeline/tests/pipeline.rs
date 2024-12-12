@@ -417,7 +417,7 @@ transform:
     .map(|(_, d)| GreptimeValue { value_data: d })
     .collect::<Vec<GreptimeValue>>();
 
-    let yaml_content = Content::Yaml(pipeline_yaml.into());
+    let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline<GreptimeTransformer> =
         parse(&yaml_content).expect("failed to parse pipeline");
     let mut stats = pipeline.init_intermediate_state();
@@ -487,7 +487,7 @@ transform:
       type: json
 "#;
 
-    let yaml_content = Content::Yaml(pipeline_yaml.into());
+    let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
 
     let mut status = pipeline.init_intermediate_state();
@@ -592,7 +592,7 @@ transform:
       type: json
 "#;
 
-    let yaml_content = Content::Yaml(pipeline_yaml.into());
+    let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
 
     let mut status = pipeline.init_intermediate_state();
@@ -655,7 +655,7 @@ transform:
     index: timestamp
 "#;
 
-    let yaml_content = Content::Yaml(pipeline_yaml.into());
+    let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
 
     let mut status = pipeline.init_intermediate_state();
@@ -691,7 +691,7 @@ transform:
       - message
     type: string
 "#;
-    let yaml_content = Content::Yaml(pipeline_yaml.into());
+    let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
 
     let mut status = pipeline.init_intermediate_state();

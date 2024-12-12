@@ -26,7 +26,8 @@ use snafu::ResultExt;
 
 use crate::error::{HttpQuerySqlSnafu, Result, SerdeJsonSnafu};
 
-pub(crate) struct DatabaseClient {
+#[derive(Debug, Clone)]
+pub struct DatabaseClient {
     addr: String,
     catalog: String,
     auth_header: Option<String>,

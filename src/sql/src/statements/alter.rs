@@ -18,10 +18,11 @@ use api::v1;
 use common_query::AddColumnLocation;
 use datatypes::schema::FulltextOptions;
 use itertools::Itertools;
+use serde::Serialize;
 use sqlparser::ast::{ColumnDef, DataType, Ident, ObjectName, TableConstraint};
 use sqlparser_derive::{Visit, VisitMut};
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct AlterTable {
     pub table_name: ObjectName,
     pub alter_operation: AlterTableOperation,
@@ -56,7 +57,7 @@ impl Display for AlterTable {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum AlterTableOperation {
     /// `ADD <table_constraint>`
     AddConstraint(TableConstraint),
@@ -71,29 +72,20 @@ pub enum AlterTableOperation {
         target_type: DataType,
     },
     /// `SET <table attrs key> = <table attr value>`
-    SetTableOptions {
-        options: Vec<KeyValueOption>,
-    },
-    UnsetTableOptions {
-        keys: Vec<String>,
-    },
+    SetTableOptions { options: Vec<KeyValueOption> },
+    /// `UNSET <table attrs key>`
+    UnsetTableOptions { keys: Vec<String> },
     /// `DROP COLUMN <name>`
-    DropColumn {
-        name: Ident,
-    },
+    DropColumn { name: Ident },
     /// `RENAME <new_table_name>`
-    RenameTable {
-        new_table_name: String,
-    },
+    RenameTable { new_table_name: String },
     /// `MODIFY COLUMN <column_name> SET FULLTEXT [WITH <options>]`
     SetColumnFulltext {
         column_name: Ident,
         options: FulltextOptions,
     },
     /// `MODIFY COLUMN <column_name> UNSET FULLTEXT`
-    UnsetColumnFulltext {
-        column_name: Ident,
-    },
+    UnsetColumnFulltext { column_name: Ident },
 }
 
 impl Display for AlterTableOperation {
@@ -151,7 +143,7 @@ impl Display for AlterTableOperation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct KeyValueOption {
     pub key: String,
     pub value: String,
@@ -166,7 +158,7 @@ impl From<KeyValueOption> for v1::Option {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct AlterDatabase {
     pub database_name: ObjectName,
     pub alter_operation: AlterDatabaseOperation,
@@ -197,7 +189,7 @@ impl Display for AlterDatabase {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum AlterDatabaseOperation {
     SetDatabaseOption { options: Vec<KeyValueOption> },
     UnsetDatabaseOption { keys: Vec<String> },

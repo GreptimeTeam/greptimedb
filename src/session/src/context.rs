@@ -23,6 +23,8 @@ use arc_swap::ArcSwap;
 use auth::UserInfoRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{build_db_string, parse_catalog_and_schema_from_db_string};
+use common_recordbatch::cursor::RecordBatchStreamCursor;
+use common_telemetry::warn;
 use common_time::timezone::parse_timezone;
 use common_time::Timezone;
 use derive_builder::Builder;
@@ -33,6 +35,8 @@ use crate::MutableInner;
 
 pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
+
+const CURSOR_COUNT_WARNING_LIMIT: usize = 10;
 
 #[derive(Debug, Builder, Clone)]
 #[builder(pattern = "owned")]
@@ -298,6 +302,27 @@ impl QueryContext {
 
     pub fn set_query_timeout(&self, timeout: Duration) {
         self.mutable_session_data.write().unwrap().query_timeout = Some(timeout);
+    }
+
+    pub fn insert_cursor(&self, name: String, rb: RecordBatchStreamCursor) {
+        let mut guard = self.mutable_session_data.write().unwrap();
+        guard.cursors.insert(name, Arc::new(rb));
+
+        let cursor_count = guard.cursors.len();
+        if cursor_count > CURSOR_COUNT_WARNING_LIMIT {
+            warn!("Current connection has {} open cursors", cursor_count);
+        }
+    }
+
+    pub fn remove_cursor(&self, name: &str) {
+        let mut guard = self.mutable_session_data.write().unwrap();
+        guard.cursors.remove(name);
+    }
+
+    pub fn get_cursor(&self, name: &str) -> Option<Arc<RecordBatchStreamCursor>> {
+        let guard = self.mutable_session_data.read().unwrap();
+        let rb = guard.cursors.get(name);
+        rb.cloned()
     }
 }
 

@@ -361,6 +361,14 @@ pub async fn test_sql_api(store_type: StorageType) {
     let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), ErrorCode::DatabaseNotFound as u32);
 
+    // test parse method
+    let res = client.get("/v1/sql/parse?sql=desc table t").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.text().await,
+        "[{\"DescribeTable\":{\"name\":[{\"value\":\"t\",\"quote_style\":null}]}}]"
+    );
+
     // test timezone header
     let res = client
         .get("/v1/sql?&sql=show variables system_time_zone")
@@ -757,21 +765,26 @@ pub async fn test_health_api(store_type: StorageType) {
     let (app, _guard) = setup_test_http_app_with_frontend(store_type, "health_api").await;
     let client = TestClient::new(app);
 
-    // we can call health api with both `GET` and `POST` method.
-    let res_post = client.post("/health").send().await;
-    assert_eq!(res_post.status(), StatusCode::OK);
-    let res_get = client.get("/health").send().await;
-    assert_eq!(res_get.status(), StatusCode::OK);
+    async fn health_api(client: &TestClient, endpoint: &str) {
+        // we can call health api with both `GET` and `POST` method.
+        let res_post = client.post(endpoint).send().await;
+        assert_eq!(res_post.status(), StatusCode::OK);
+        let res_get = client.get(endpoint).send().await;
+        assert_eq!(res_get.status(), StatusCode::OK);
 
-    // both `GET` and `POST` method return same result
-    let body_text = res_post.text().await;
-    assert_eq!(body_text, res_get.text().await);
+        // both `GET` and `POST` method return same result
+        let body_text = res_post.text().await;
+        assert_eq!(body_text, res_get.text().await);
 
-    // currently health api simply returns an empty json `{}`, which can be deserialized to an empty `HealthResponse`
-    assert_eq!(body_text, "{}");
+        // currently health api simply returns an empty json `{}`, which can be deserialized to an empty `HealthResponse`
+        assert_eq!(body_text, "{}");
 
-    let body = serde_json::from_str::<HealthResponse>(&body_text).unwrap();
-    assert_eq!(body, HealthResponse {});
+        let body = serde_json::from_str::<HealthResponse>(&body_text).unwrap();
+        assert_eq!(body, HealthResponse {});
+    }
+
+    health_api(&client, "/health").await;
+    health_api(&client, "/ready").await;
 }
 
 pub async fn test_status_api(store_type: StorageType) {
@@ -881,9 +894,9 @@ with_metric_engine = true
 
 [wal]
 provider = "raft_engine"
-file_size = "256MiB"
-purge_threshold = "4GiB"
-purge_interval = "10m"
+file_size = "128MiB"
+purge_threshold = "1GiB"
+purge_interval = "1m"
 read_batch_size = 128
 sync_write = false
 enable_log_recycle = true
@@ -917,7 +930,7 @@ compress_manifest = false
 auto_flush_interval = "30m"
 enable_experimental_write_cache = false
 experimental_write_cache_path = ""
-experimental_write_cache_size = "1GiB"
+experimental_write_cache_size = "5GiB"
 sst_write_buffer_size = "8MiB"
 parallel_scan_channel_size = 32
 allow_stale_entries = false
@@ -1306,7 +1319,7 @@ pub async fn test_test_pipeline_api(store_type: StorageType) {
     // handshake
     let client = TestClient::new(app);
 
-    let body = r#"
+    let pipeline_content = r#"
 processors:
   - date:
       field: time
@@ -1333,7 +1346,7 @@ transform:
     let res = client
         .post("/v1/events/pipelines/test")
         .header("Content-Type", "application/x-yaml")
-        .body(body)
+        .body(pipeline_content)
         .send()
         .await;
 
@@ -1354,8 +1367,87 @@ transform:
     let pipeline = pipelines.first().unwrap();
     assert_eq!(pipeline.get("name").unwrap(), "test");
 
-    // 2. write data
-    let data_body = r#"
+    let dryrun_schema = json!([
+        {
+            "colume_type": "FIELD",
+            "data_type": "INT32",
+            "fulltext": false,
+            "name": "id1"
+        },
+        {
+            "colume_type": "FIELD",
+            "data_type": "INT32",
+            "fulltext": false,
+            "name": "id2"
+        },
+        {
+            "colume_type": "FIELD",
+            "data_type": "STRING",
+            "fulltext": false,
+            "name": "type"
+        },
+        {
+            "colume_type": "FIELD",
+            "data_type": "STRING",
+            "fulltext": false,
+            "name": "log"
+        },
+        {
+            "colume_type": "FIELD",
+            "data_type": "STRING",
+            "fulltext": false,
+            "name": "logger"
+        },
+        {
+            "colume_type": "TIMESTAMP",
+            "data_type": "TIMESTAMP_NANOSECOND",
+            "fulltext": false,
+            "name": "time"
+        }
+    ]);
+    let dryrun_rows = json!([
+        [
+            {
+                "data_type": "INT32",
+                "key": "id1",
+                "semantic_type": "FIELD",
+                "value": 2436
+            },
+            {
+                "data_type": "INT32",
+                "key": "id2",
+                "semantic_type": "FIELD",
+                "value": 2528
+            },
+            {
+                "data_type": "STRING",
+                "key": "type",
+                "semantic_type": "FIELD",
+                "value": "I"
+            },
+            {
+                "data_type": "STRING",
+                "key": "log",
+                "semantic_type": "FIELD",
+                "value": "ClusterAdapter:enter sendTextDataToCluster\\n"
+            },
+            {
+                "data_type": "STRING",
+                "key": "logger",
+                "semantic_type": "FIELD",
+                "value": "INTERACT.MANAGER"
+            },
+            {
+                "data_type": "TIMESTAMP_NANOSECOND",
+                "key": "time",
+                "semantic_type": "TIMESTAMP",
+                "value": "2024-05-25 20:16:37.217+0000"
+            }
+        ]
+    ]);
+    {
+        // test original api
+        let data_body = r#"
         [
           {
             "id1": "2436",
@@ -1367,100 +1459,100 @@ transform:
           }
         ]
         "#;
-    let res = client
-        .post("/v1/events/pipelines/dryrun?pipeline_name=test")
-        .header("Content-Type", "application/json")
-        .body(data_body)
-        .send()
-        .await;
-    assert_eq!(res.status(), StatusCode::OK);
-    let body: Value = res.json().await;
-    let schema = &body["schema"];
-    let rows = &body["rows"];
-    assert_eq!(
-        schema,
-        &json!([
+        let res = client
+            .post("/v1/events/pipelines/dryrun?pipeline_name=test")
+            .header("Content-Type", "application/json")
+            .body(data_body)
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: Value = res.json().await;
+        let schema = &body["schema"];
+        let rows = &body["rows"];
+        assert_eq!(schema, &dryrun_schema);
+        assert_eq!(rows, &dryrun_rows);
+    }
+    {
+        // test new api specify pipeline via pipeline_name
+        let body = r#"
             {
-                "colume_type": "FIELD",
-                "data_type": "INT32",
-                "fulltext": false,
-                "name": "id1"
-            },
-            {
-                "colume_type": "FIELD",
-                "data_type": "INT32",
-                "fulltext": false,
-                "name": "id2"
-            },
-            {
-                "colume_type": "FIELD",
-                "data_type": "STRING",
-                "fulltext": false,
-                "name": "type"
-            },
-            {
-                "colume_type": "FIELD",
-                "data_type": "STRING",
-                "fulltext": false,
-                "name": "log"
-            },
-            {
-                "colume_type": "FIELD",
-                "data_type": "STRING",
-                "fulltext": false,
-                "name": "logger"
-            },
-            {
-                "colume_type": "TIMESTAMP",
-                "data_type": "TIMESTAMP_NANOSECOND",
-                "fulltext": false,
-                "name": "time"
-            }
-        ])
-    );
-    assert_eq!(
-        rows,
-        &json!([
-            [
+            "pipeline_name": "test",
+            "data": [
                 {
-                    "data_type": "INT32",
-                    "key": "id1",
-                    "semantic_type": "FIELD",
-                    "value": 2436
-                },
-                {
-                    "data_type": "INT32",
-                    "key": "id2",
-                    "semantic_type": "FIELD",
-                    "value": 2528
-                },
-                {
-                    "data_type": "STRING",
-                    "key": "type",
-                    "semantic_type": "FIELD",
-                    "value": "I"
-                },
-                {
-                    "data_type": "STRING",
-                    "key": "log",
-                    "semantic_type": "FIELD",
-                    "value": "ClusterAdapter:enter sendTextDataToCluster\\n"
-                },
-                {
-                    "data_type": "STRING",
-                    "key": "logger",
-                    "semantic_type": "FIELD",
-                    "value": "INTERACT.MANAGER"
-                },
-                {
-                    "data_type": "TIMESTAMP_NANOSECOND",
-                    "key": "time",
-                    "semantic_type": "TIMESTAMP",
-                    "value": "2024-05-25 20:16:37.217+0000"
+                "id1": "2436",
+                "id2": "2528",
+                "logger": "INTERACT.MANAGER",
+                "type": "I",
+                "time": "2024-05-25 20:16:37.217",
+                "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
                 }
             ]
-        ])
-    );
+            }
+        "#;
+        let res = client
+            .post("/v1/events/pipelines/dryrun")
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: Value = res.json().await;
+        let schema = &body["schema"];
+        let rows = &body["rows"];
+        assert_eq!(schema, &dryrun_schema);
+        assert_eq!(rows, &dryrun_rows);
+    }
+    {
+        // test new api specify pipeline via pipeline raw data
+        let mut body = json!({
+        "data": [
+            {
+            "id1": "2436",
+            "id2": "2528",
+            "logger": "INTERACT.MANAGER",
+            "type": "I",
+            "time": "2024-05-25 20:16:37.217",
+            "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+            }
+        ]
+        });
+        body["pipeline"] = json!(pipeline_content);
+        let res = client
+            .post("/v1/events/pipelines/dryrun")
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: Value = res.json().await;
+        let schema = &body["schema"];
+        let rows = &body["rows"];
+        assert_eq!(schema, &dryrun_schema);
+        assert_eq!(rows, &dryrun_rows);
+    }
+    {
+        // failback to old version api
+        // not pipeline and pipeline_name in the body
+        let body = json!({
+        "data": [
+            {
+            "id1": "2436",
+            "id2": "2528",
+            "logger": "INTERACT.MANAGER",
+            "type": "I",
+            "time": "2024-05-25 20:16:37.217",
+            "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+            }
+        ]
+        });
+        let res = client
+            .post("/v1/events/pipelines/dryrun")
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
     guard.remove_all().await;
 }
 

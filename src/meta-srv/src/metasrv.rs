@@ -179,7 +179,7 @@ impl Default for MetasrvOptions {
 
 impl Configurable for MetasrvOptions {
     fn env_list_keys() -> Option<&'static [&'static str]> {
-        Some(&["wal.broker_endpoints"])
+        Some(&["wal.broker_endpoints", "store_addrs"])
     }
 }
 
@@ -470,6 +470,10 @@ impl Metasrv {
                 });
             }
         } else {
+            warn!(
+                "Ensure only one instance of Metasrv is running, as there is no election service."
+            );
+
             if let Err(e) = self.wal_options_allocator.start().await {
                 error!(e; "Failed to start wal options allocator");
             }

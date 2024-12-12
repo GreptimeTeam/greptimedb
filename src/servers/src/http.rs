@@ -650,10 +650,15 @@ impl HttpServer {
             router.clone()
         };
 
-        router = router.route(
-            "/health",
-            routing::get(handler::health).post(handler::health),
-        );
+        router = router
+            .route(
+                "/health",
+                routing::get(handler::health).post(handler::health),
+            )
+            .route(
+                "/ready",
+                routing::get(handler::health).post(handler::health),
+            );
 
         router = router.route("/status", routing::get(handler::status));
 
@@ -762,6 +767,10 @@ impl HttpServer {
     fn route_sql<S>(api_state: ApiState) -> Router<S> {
         Router::new()
             .route("/sql", routing::get(handler::sql).post(handler::sql))
+            .route(
+                "/sql/parse",
+                routing::get(handler::sql_parse).post(handler::sql_parse),
+            )
             .route(
                 "/promql",
                 routing::get(handler::promql).post(handler::promql),

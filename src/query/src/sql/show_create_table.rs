@@ -21,7 +21,6 @@ use datatypes::schema::{
     ColumnDefaultConstraint, ColumnSchema, SchemaRef, COLUMN_FULLTEXT_OPT_KEY_ANALYZER,
     COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COMMENT_KEY,
 };
-use humantime::format_duration;
 use snafu::ResultExt;
 use sql::ast::{ColumnDef, ColumnOption, ColumnOptionDef, Expr, Ident, ObjectName};
 use sql::dialect::GreptimeDbDialect;
@@ -46,13 +45,13 @@ fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptio
             write_buffer_size.to_string(),
         );
     }
-    if let Some(ttl) = table_opts.ttl {
-        options.insert(TTL_KEY.to_string(), format_duration(ttl).to_string());
-    } else if let Some(database_ttl) = schema_options.and_then(|o| o.ttl) {
-        options.insert(
-            TTL_KEY.to_string(),
-            format_duration(database_ttl).to_string(),
-        );
+    if let Some(ttl) = table_opts.ttl.map(|t| t.to_string()) {
+        options.insert(TTL_KEY.to_string(), ttl);
+    } else if let Some(database_ttl) = schema_options
+        .and_then(|o| o.ttl)
+        .map(|ttl| ttl.to_string())
+    {
+        options.insert(TTL_KEY.to_string(), database_ttl);
     };
     for (k, v) in table_opts
         .extra_options
@@ -216,6 +215,7 @@ pub fn create_table_stmt(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use common_time::timestamp::TimeUnit;
     use datatypes::prelude::ConcreteDataType;
@@ -259,13 +259,22 @@ mod tests {
         let catalog_name = "greptime".to_string();
         let regions = vec![0, 1, 2];
 
+        let mut options = table::requests::TableOptions {
+            ttl: Some(Duration::from_secs(30).into()),
+            ..Default::default()
+        };
+
+        let _ = options
+            .extra_options
+            .insert("compaction.type".to_string(), "twcs".to_string());
+
         let meta = TableMetaBuilder::default()
             .schema(table_schema)
             .primary_key_indices(vec![0, 1])
             .value_indices(vec![2, 3])
             .engine("mito".to_string())
             .next_column_id(0)
-            .options(Default::default())
+            .options(options)
             .created_on(Default::default())
             .region_numbers(regions)
             .build()
@@ -302,7 +311,10 @@ CREATE TABLE IF NOT EXISTS "system_metrics" (
   INVERTED INDEX ("host")
 )
 ENGINE=mito
-"#,
+WITH(
+  'compaction.type' = 'twcs',
+  ttl = '30s'
+)"#,
             sql
         );
     }

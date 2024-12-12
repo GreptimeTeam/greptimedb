@@ -310,12 +310,14 @@ mod tests {
     use futures::future::BoxFuture;
     use object_store::services::Memory;
     use object_store::ObjectStore;
+    use puffin::puffin_manager::cache::PuffinMetadataCache;
     use puffin::puffin_manager::PuffinManager;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
     use super::*;
     use crate::cache::index::InvertedIndexCache;
+    use crate::metrics::CACHE_BYTES;
     use crate::read::BatchColumn;
     use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
     use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
@@ -447,21 +449,22 @@ mod tests {
         move |expr| {
             let _d = &d;
             let cache = Arc::new(InvertedIndexCache::new(10, 10));
+            let puffin_metadata_cache = Arc::new(PuffinMetadataCache::new(10, &CACHE_BYTES));
             let applier = InvertedIndexApplierBuilder::new(
                 region_dir.clone(),
                 object_store.clone(),
-                None,
-                Some(cache),
                 &region_metadata,
                 indexed_column_ids.clone(),
                 factory.clone(),
             )
+            .with_index_cache(Some(cache))
+            .with_puffin_metadata_cache(Some(puffin_metadata_cache))
             .build(&[expr])
             .unwrap()
             .unwrap();
             Box::pin(async move {
                 applier
-                    .apply(sst_file_id)
+                    .apply(sst_file_id, None)
                     .await
                     .unwrap()
                     .matched_segment_ids

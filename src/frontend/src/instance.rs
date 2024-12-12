@@ -489,7 +489,11 @@ pub fn check_permission(
         // TODO(dennis): add a hook for admin commands.
         Statement::Admin(_) => {}
         // These are executed by query engine, and will be checked there.
-        Statement::Query(_) | Statement::Explain(_) | Statement::Tql(_) | Statement::Delete(_) => {}
+        Statement::Query(_)
+        | Statement::Explain(_)
+        | Statement::Tql(_)
+        | Statement::Delete(_)
+        | Statement::DeclareCursor(_) => {}
         // database ops won't be checked
         Statement::CreateDatabase(_)
         | Statement::ShowDatabases(_)
@@ -582,6 +586,8 @@ pub fn check_permission(
         Statement::TruncateTable(stmt) => {
             validate_param(stmt.table_name(), query_ctx)?;
         }
+        // cursor operations are always allowed once it's created
+        Statement::FetchCursor(_) | Statement::CloseCursor(_) => {}
     }
     Ok(())
 }

@@ -33,6 +33,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::access_layer::AccessLayerRef;
 use crate::cache::file_cache::FileCacheRef;
 use crate::cache::CacheManagerRef;
+use crate::config::DEFAULT_SCAN_CHANNEL_SIZE;
 use crate::error::Result;
 use crate::memtable::MemtableRef;
 use crate::metrics::READ_SST_COUNT;
@@ -68,15 +69,6 @@ impl Scanner {
             Scanner::Unordered(unordered_scan) => unordered_scan.build_stream().await,
         }
     }
-
-    /// Returns a [RegionScanner] to scan the region.
-    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
-    pub(crate) fn region_scanner(self) -> Result<RegionScannerRef> {
-        match self {
-            Scanner::Seq(seq_scan) => Ok(Box::new(seq_scan)),
-            Scanner::Unordered(unordered_scan) => Ok(Box::new(unordered_scan)),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -102,6 +94,17 @@ impl Scanner {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.input().file_ids(),
             Scanner::Unordered(unordered_scan) => unordered_scan.input().file_ids(),
+        }
+    }
+
+    /// Sets the target partitions for the scanner. It can controls the parallelism of the scanner.
+    pub(crate) fn set_target_partitions(&mut self, target_partitions: usize) {
+        use store_api::region_engine::{PrepareRequest, RegionScanner};
+
+        let request = PrepareRequest::default().with_target_partitions(target_partitions);
+        match self {
+            Scanner::Seq(seq_scan) => seq_scan.prepare(request).unwrap(),
+            Scanner::Unordered(unordered_scan) => unordered_scan.prepare(request).unwrap(),
         }
     }
 }
@@ -164,9 +167,9 @@ pub(crate) struct ScanRegion {
     /// Scan request.
     request: ScanRequest,
     /// Cache.
-    cache_manager: CacheManagerRef,
-    /// Parallelism to scan.
-    parallelism: ScanParallelism,
+    cache_manager: Option<CacheManagerRef>,
+    /// Capacity of the channel to send data from parallel scan tasks to the main task.
+    parallel_scan_channel_size: usize,
     /// Whether to ignore inverted index.
     ignore_inverted_index: bool,
     /// Whether to ignore fulltext index.
@@ -181,24 +184,27 @@ impl ScanRegion {
         version: VersionRef,
         access_layer: AccessLayerRef,
         request: ScanRequest,
-        cache_manager: CacheManagerRef,
+        cache_manager: Option<CacheManagerRef>,
     ) -> ScanRegion {
         ScanRegion {
             version,
             access_layer,
             request,
             cache_manager,
-            parallelism: ScanParallelism::default(),
+            parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             ignore_inverted_index: false,
             ignore_fulltext_index: false,
             start_time: None,
         }
     }
 
-    /// Sets parallelism.
+    /// Sets parallel scan task channel size.
     #[must_use]
-    pub(crate) fn with_parallelism(mut self, parallelism: ScanParallelism) -> Self {
-        self.parallelism = parallelism;
+    pub(crate) fn with_parallel_scan_channel_size(
+        mut self,
+        parallel_scan_channel_size: usize,
+    ) -> Self {
+        self.parallel_scan_channel_size = parallel_scan_channel_size;
         self
     }
 
@@ -224,7 +230,7 @@ impl ScanRegion {
 
     /// Returns a [Scanner] to scan the region.
     pub(crate) fn scanner(self) -> Result<Scanner> {
-        if self.version.options.append_mode && self.request.series_row_selector.is_none() {
+        if self.use_unordered_scan() {
             // If table is append only and there is no series row selector, we use unordered scan in query.
             // We still use seq scan in compaction.
             self.unordered_scan().map(Scanner::Unordered)
@@ -233,10 +239,20 @@ impl ScanRegion {
         }
     }
 
+    /// Returns a [RegionScanner] to scan the region.
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
+    pub(crate) fn region_scanner(self) -> Result<RegionScannerRef> {
+        if self.use_unordered_scan() {
+            self.unordered_scan().map(|scanner| Box::new(scanner) as _)
+        } else {
+            self.seq_scan().map(|scanner| Box::new(scanner) as _)
+        }
+    }
+
     /// Scan sequentially.
     pub(crate) fn seq_scan(self) -> Result<SeqScan> {
         let input = self.scan_input(true)?;
-        Ok(SeqScan::new(input))
+        Ok(SeqScan::new(input, false))
     }
 
     /// Unordered scan.
@@ -248,7 +264,14 @@ impl ScanRegion {
     #[cfg(test)]
     pub(crate) fn scan_without_filter_deleted(self) -> Result<SeqScan> {
         let input = self.scan_input(false)?;
-        Ok(SeqScan::new(input))
+        Ok(SeqScan::new(input, false))
+    }
+
+    /// Returns true if the region can use unordered scan for current request.
+    fn use_unordered_scan(&self) -> bool {
+        // If table is append only and there is no series row selector, we use unordered scan in query.
+        // We still use seq scan in compaction.
+        self.version.options.append_mode && self.request.series_row_selector.is_none()
     }
 
     /// Creates a scan input.
@@ -314,7 +337,7 @@ impl ScanRegion {
             .with_cache(self.cache_manager)
             .with_inverted_index_applier(inverted_index_applier)
             .with_fulltext_index_applier(fulltext_index_applier)
-            .with_parallelism(self.parallelism)
+            .with_parallel_scan_channel_size(self.parallel_scan_channel_size)
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)
             .with_filter_deleted(filter_deleted)
@@ -378,18 +401,27 @@ impl ScanRegion {
         }
 
         let file_cache = || -> Option<FileCacheRef> {
-            let write_cache = self.cache_manager.write_cache()?;
+            let cache_manager = self.cache_manager.as_ref()?;
+            let write_cache = cache_manager.write_cache()?;
             let file_cache = write_cache.file_cache();
             Some(file_cache)
         }();
 
-        let index_cache = self.cache_manager.index_cache().cloned();
+        let index_cache = self
+            .cache_manager
+            .as_ref()
+            .and_then(|c| c.index_cache())
+            .cloned();
+
+        let puffin_metadata_cache = self
+            .cache_manager
+            .as_ref()
+            .and_then(|c| c.puffin_metadata_cache())
+            .cloned();
 
         InvertedIndexApplierBuilder::new(
             self.access_layer.region_dir().to_string(),
             self.access_layer.object_store().clone(),
-            file_cache,
-            index_cache,
             self.version.metadata.as_ref(),
             self.version.metadata.inverted_indexed_column_ids(
                 self.version
@@ -401,6 +433,9 @@ impl ScanRegion {
             ),
             self.access_layer.puffin_manager_factory().clone(),
         )
+        .with_file_cache(file_cache)
+        .with_index_cache(index_cache)
+        .with_puffin_metadata_cache(puffin_metadata_cache)
         .build(&self.request.filters)
         .inspect_err(|err| warn!(err; "Failed to build invereted index applier"))
         .ok()
@@ -426,15 +461,6 @@ impl ScanRegion {
         .flatten()
         .map(Arc::new)
     }
-}
-
-/// Config for parallel scan.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct ScanParallelism {
-    /// Number of tasks expect to spawn to read data.
-    pub(crate) parallelism: usize,
-    /// Channel size to send batches. Only takes effect when the parallelism > 1.
-    pub(crate) channel_size: usize,
 }
 
 /// Returns true if the time range of a SST `file` matches the `predicate`.
@@ -463,11 +489,11 @@ pub(crate) struct ScanInput {
     /// Handles to SST files to scan.
     pub(crate) files: Vec<FileHandle>,
     /// Cache.
-    pub(crate) cache_manager: CacheManagerRef,
+    pub(crate) cache_manager: Option<CacheManagerRef>,
     /// Ignores file not found error.
     ignore_file_not_found: bool,
-    /// Parallelism to scan data.
-    pub(crate) parallelism: ScanParallelism,
+    /// Capacity of the channel to send data from parallel scan tasks to the main task.
+    pub(crate) parallel_scan_channel_size: usize,
     /// Index appliers.
     inverted_index_applier: Option<InvertedIndexApplierRef>,
     fulltext_index_applier: Option<FulltextIndexApplierRef>,
@@ -494,9 +520,9 @@ impl ScanInput {
             predicate: None,
             memtables: Vec::new(),
             files: Vec::new(),
-            cache_manager: CacheManagerRef::default(),
+            cache_manager: None,
             ignore_file_not_found: false,
-            parallelism: ScanParallelism::default(),
+            parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             inverted_index_applier: None,
             fulltext_index_applier: None,
             query_start: None,
@@ -537,7 +563,7 @@ impl ScanInput {
 
     /// Sets cache for this query.
     #[must_use]
-    pub(crate) fn with_cache(mut self, cache: CacheManagerRef) -> Self {
+    pub(crate) fn with_cache(mut self, cache: Option<CacheManagerRef>) -> Self {
         self.cache_manager = cache;
         self
     }
@@ -549,10 +575,13 @@ impl ScanInput {
         self
     }
 
-    /// Sets scan parallelism.
+    /// Sets scan task channel size.
     #[must_use]
-    pub(crate) fn with_parallelism(mut self, parallelism: ScanParallelism) -> Self {
-        self.parallelism = parallelism;
+    pub(crate) fn with_parallel_scan_channel_size(
+        mut self,
+        parallel_scan_channel_size: usize,
+    ) -> Self {
+        self.parallel_scan_channel_size = parallel_scan_channel_size;
         self
     }
 
@@ -621,12 +650,15 @@ impl ScanInput {
         sources: Vec<Source>,
         semaphore: Arc<Semaphore>,
     ) -> Result<Vec<Source>> {
-        debug_assert!(self.parallelism.parallelism > 1);
+        if sources.len() <= 1 {
+            return Ok(sources);
+        }
+
         // Spawn a task for each source.
         let sources = sources
             .into_iter()
             .map(|source| {
-                let (sender, receiver) = mpsc::channel(self.parallelism.channel_size);
+                let (sender, receiver) = mpsc::channel(self.parallel_scan_channel_size);
                 self.spawn_scan_task(source, semaphore.clone(), sender);
                 let stream = Box::pin(ReceiverStream::new(receiver));
                 Source::Stream(stream)
@@ -761,9 +793,9 @@ pub(crate) struct StreamContext {
 
 impl StreamContext {
     /// Creates a new [StreamContext] for [SeqScan].
-    pub(crate) fn seq_scan_ctx(input: ScanInput) -> Self {
+    pub(crate) fn seq_scan_ctx(input: ScanInput, compaction: bool) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
-        let ranges = RangeMeta::seq_scan_ranges(&input);
+        let ranges = RangeMeta::seq_scan_ranges(&input, compaction);
         READ_SST_COUNT.observe(input.num_files() as f64);
 
         Self {
