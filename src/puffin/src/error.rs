@@ -224,6 +224,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Puffin file size too small"))]
+    PuffinFileSizeTooSmall {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -250,7 +256,8 @@ impl ErrorExt for Error {
             | BlobIndexOutOfBound { .. }
             | FileKeyNotMatch { .. }
             | WalkDir { .. }
-            | InvalidPuffinFooter { .. } => StatusCode::Unexpected,
+            | InvalidPuffinFooter { .. }
+            | PuffinFileSizeTooSmall { .. } => StatusCode::Unexpected,
 
             UnsupportedCompression { .. } | UnsupportedDecompression { .. } => {
                 StatusCode::Unsupported

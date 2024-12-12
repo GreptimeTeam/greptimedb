@@ -19,7 +19,7 @@ use snafu::{ensure, ResultExt};
 
 use crate::error::{
     DeserializeJsonSnafu, InvalidPuffinFooterSnafu, Lz4DecompressionSnafu, MagicNotMatchedSnafu,
-    ReadSnafu, Result, UnexpectedFooterPayloadSizeSnafu,
+    PuffinFileSizeTooSmallSnafu, ReadSnafu, Result, UnexpectedFooterPayloadSizeSnafu,
 };
 use crate::file_format::{Flags, FLAGS_SIZE, MAGIC, MAGIC_SIZE, MIN_FILE_SIZE, PAYLOAD_SIZE_SIZE};
 use crate::file_metadata::FileMetadata;
@@ -67,6 +67,8 @@ impl<'a, R: RangeReader + 'a> PuffinFileFooterReader<R> {
     }
 
     pub async fn metadata(&'a mut self) -> Result<FileMetadata> {
+        ensure!(self.file_size >= MIN_FILE_SIZE, PuffinFileSizeTooSmallSnafu);
+
         // Note: prefetch > content_len is allowed, since we're using saturating_sub.
         let footer_start = self.file_size.saturating_sub(self.prefetch_size());
         let suffix = self
