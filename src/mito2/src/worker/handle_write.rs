@@ -16,6 +16,7 @@
 
 use std::collections::{hash_map, HashMap};
 use std::sync::Arc;
+use std::time::Instant;
 
 use api::v1::OpType;
 use common_telemetry::debug;
@@ -43,7 +44,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         // Flush this worker if the engine needs to flush.
+        let start = Instant::now();
         self.maybe_flush_worker();
+        self.metrics.flush_worker_cost += start.elapsed();
 
         if self.should_reject_write() {
             // The memory pressure is still too high, reject write requests.
@@ -55,6 +58,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         if self.write_buffer_manager.should_stall() && allow_stall {
             self.stalled_count.add(write_requests.len() as i64);
+            self.metrics.num_stalled_request_added += write_requests.len();
+            self.metrics.num_stall += 1;
+            self.stall_start = Some(Instant::now());
             self.stalled_requests.append(&mut write_requests);
             self.listener.on_write_stall();
             return;
@@ -70,6 +76,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Write to WAL.
         {
+            let start = Instant::now();
             let _timer = WRITE_STAGE_ELAPSED
                 .with_label_values(&["write_wal"])
                 .start_timer();
@@ -87,12 +94,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         let last_entry_id = response.last_entry_ids.get(region_id).unwrap();
                         region_ctx.set_next_entry_id(last_entry_id + 1);
                     }
+                    self.metrics.write_wal_cost += start.elapsed();
                 }
                 Err(e) => {
                     // Failed to write wal.
                     for mut region_ctx in region_ctxs.into_values() {
                         region_ctx.set_error(e.clone());
                     }
+                    self.metrics.write_wal_cost += start.elapsed();
                     return;
                 }
             }
@@ -101,6 +110,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let (mut put_rows, mut delete_rows) = (0, 0);
         // Write to memtables.
         {
+            let start = Instant::now();
             let _timer = WRITE_STAGE_ELAPSED
                 .with_label_values(&["write_memtable"])
                 .start_timer();
@@ -109,6 +119,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 put_rows += region_ctx.put_num;
                 delete_rows += region_ctx.delete_num;
             }
+            self.metrics.write_memtable_cost += start.elapsed();
         }
         WRITE_ROWS_TOTAL
             .with_label_values(&["put"])
@@ -120,11 +131,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
     /// Handles all stalled write requests.
     pub(crate) async fn handle_stalled_requests(&mut self) {
+        if let Some(start) = self.stall_start.take() {
+            self.metrics.stall_cost += start.elapsed();
+        }
         // Handle stalled requests.
         let stalled = std::mem::take(&mut self.stalled_requests);
         self.stalled_count.sub(stalled.requests.len() as i64);
         // We already stalled these requests, don't stall them again.
         for (_, (_, requests)) in stalled.requests {
+            self.metrics.num_stalled_request_processed += requests.len();
             self.handle_write_requests(requests, false).await;
         }
     }
@@ -149,7 +164,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// Handles a specific region's stalled requests.
     pub(crate) async fn handle_region_stalled_requests(&mut self, region_id: &RegionId) {
         debug!("Handles stalled requests for region {}", region_id);
+        if let Some(start) = self.stall_start.take() {
+            self.metrics.stall_cost += start.elapsed();
+        }
         let requests = self.stalled_requests.remove(region_id);
+        self.metrics.num_stalled_request_processed += requests.len();
         self.stalled_count.sub(requests.len() as i64);
         self.handle_write_requests(requests, true).await;
     }

@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common_base::Plugins;
 use common_meta::key::SchemaMetadataManagerRef;
@@ -469,6 +469,8 @@ impl<S: LogStore> WorkerStarter<S> {
             region_count: REGION_COUNT.with_label_values(&[&id_string]),
             region_edit_queues: RegionEditQueues::default(),
             schema_metadata_manager: self.schema_metadata_manager,
+            metrics: WorkerMetrics::default(),
+            stall_start: None,
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -622,6 +624,46 @@ impl StalledRequests {
     }
 }
 
+/// Local metrics of the worker.
+#[derive(Debug, Default)]
+struct WorkerMetrics {
+    /// Elapsed time of the select block.
+    select_cost: Duration,
+    /// Number of times waking up by flush.
+    num_flush_wake: usize,
+    /// Number of times waking up by periodical tasks.
+    num_periodical_wake: usize,
+    /// Number of requests to handle.
+    num_requests: usize,
+    /// Number of stalled requests to process.
+    num_stalled_request_processed: usize,
+    /// Number of stalled requests to add.
+    num_stalled_request_added: usize,
+    /// Number of write stall.
+    num_stall: usize,
+
+    /// Total time of handling stall requests.
+    handle_stall_cost: Duration,
+    /// Total time of handling requests.
+    handle_request_cost: Duration,
+    /// Total time of handling write requests.
+    handle_write_request_cost: Duration,
+    /// Total time of handling periodical tasks.
+    handle_periodical_task_cost: Duration,
+    /// Total time of handling requests after waking up.
+    handle_cost: Duration,
+
+    // Cost of handle write
+    /// Total time of flushing the worker.
+    flush_worker_cost: Duration,
+    /// Total time of writing WAL.
+    write_wal_cost: Duration,
+    /// Total time of writing memtables.
+    write_memtable_cost: Duration,
+    /// Total time of stall.
+    stall_cost: Duration,
+}
+
 /// Background worker loop to handle requests.
 struct RegionWorkerLoop<S> {
     /// Id of the worker.
@@ -680,6 +722,10 @@ struct RegionWorkerLoop<S> {
     region_edit_queues: RegionEditQueues,
     /// Database level metadata manager.
     schema_metadata_manager: SchemaMetadataManagerRef,
+    /// Metrics of the worker in one loop.
+    metrics: WorkerMetrics,
+    /// Last stall start time.
+    stall_start: Option<Instant>,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -703,6 +749,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let sleep = tokio::time::sleep(max_wait_time);
             tokio::pin!(sleep);
 
+            let select_start = Instant::now();
             tokio::select! {
                 request_opt = self.receiver.recv() => {
                     match request_opt {
@@ -712,6 +759,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     }
                 }
                 recv_res = self.flush_receiver.changed() => {
+                    self.metrics.num_flush_wake += 1;
                     if recv_res.is_err() {
                         // The channel is disconnected.
                         break;
@@ -727,17 +775,23 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     }
                 }
                 _ = &mut sleep => {
+                    self.metrics.num_periodical_wake += 1;
                     // Timeout. Checks periodical tasks.
                     self.handle_periodical_tasks();
                     continue;
                 }
             }
 
+            self.metrics.select_cost = select_start.elapsed();
+            let handle_start = Instant::now();
+
             if self.flush_receiver.has_changed().unwrap_or(false) {
+                let start = Instant::now();
                 // Always checks whether we could process stalled requests to avoid a request
                 // hangs too long.
                 // If the channel is closed, do nothing.
                 self.handle_stalled_requests().await;
+                self.metrics.handle_stall_cost = start.elapsed();
             }
 
             // Try to recv more requests from the channel.
@@ -749,12 +803,27 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     Err(_) => break,
                 }
             }
+            self.metrics.num_requests = buffer.len();
 
             self.listener.on_recv_requests(buffer.len());
 
+            let start = Instant::now();
             self.handle_requests(&mut buffer).await;
+            self.metrics.handle_request_cost = start.elapsed();
 
+            let start = Instant::now();
             self.handle_periodical_tasks();
+            self.metrics.handle_periodical_task_cost = start.elapsed();
+
+            self.metrics.handle_cost = handle_start.elapsed();
+            if self.metrics.handle_cost > Duration::from_secs(3) {
+                info!(
+                    "Region worker too slow, id: {}, metrics: {:?}",
+                    self.id, self.metrics
+                );
+            }
+            // Clear the metrics.
+            self.metrics = WorkerMetrics::default();
         }
 
         self.clean().await;
@@ -802,7 +871,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Handles all write requests first. So we can alter regions without
         // considering existing write requests.
+        let start = Instant::now();
         self.handle_write_requests(write_requests, true).await;
+        self.metrics.handle_write_request_cost = start.elapsed();
 
         self.handle_ddl_requests(ddl_requests).await;
     }
