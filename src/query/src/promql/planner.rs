@@ -1213,7 +1213,7 @@ impl PromPlanner {
                 let quantile_expr = match other_input_exprs.pop_front() {
                     Some(DfExpr::Literal(ScalarValue::Float64(Some(quantile)))) => quantile,
                     other => UnexpectedPlanExprSnafu {
-                        desc: format!("expect f64 literal as quantile, but found {:?}", other),
+                        desc: format!("expected f64 literal as quantile, but found {:?}", other),
                     }
                     .fail()?,
                 };
@@ -1224,7 +1224,7 @@ impl PromPlanner {
                     Some(DfExpr::Literal(ScalarValue::Float64(Some(t)))) => t as i64,
                     Some(DfExpr::Literal(ScalarValue::Int64(Some(t)))) => t,
                     other => UnexpectedPlanExprSnafu {
-                        desc: format!("expect i64 literal as t, but found {:?}", other),
+                        desc: format!("expected i64 literal as t, but found {:?}", other),
                     }
                     .fail()?,
                 };
@@ -1235,7 +1235,7 @@ impl PromPlanner {
                     Some(DfExpr::Literal(ScalarValue::Float64(Some(sf)))) => sf,
                     other => UnexpectedPlanExprSnafu {
                         desc: format!(
-                            "expect f64 literal as smoothing factor, but found {:?}",
+                            "expected f64 literal as smoothing factor, but found {:?}",
                             other
                         ),
                     }
@@ -1244,7 +1244,10 @@ impl PromPlanner {
                 let tf_exp = match other_input_exprs.pop_front() {
                     Some(DfExpr::Literal(ScalarValue::Float64(Some(tf)))) => tf,
                     other => UnexpectedPlanExprSnafu {
-                        desc: format!("expect f64 literal as trend factor, but found {:?}", other),
+                        desc: format!(
+                            "expected f64 literal as trend factor, but found {:?}",
+                            other
+                        ),
                     }
                     .fail()?,
                 };
@@ -1463,28 +1466,28 @@ impl PromPlanner {
         let dst_label = match other_input_exprs.pop_front() {
             Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)))) => d,
             other => UnexpectedPlanExprSnafu {
-                desc: format!("expect dst_label string literal, but found {:?}", other),
+                desc: format!("expected dst_label string literal, but found {:?}", other),
             }
             .fail()?,
         };
         let replacement = match other_input_exprs.pop_front() {
             Some(DfExpr::Literal(ScalarValue::Utf8(Some(r)))) => r,
             other => UnexpectedPlanExprSnafu {
-                desc: format!("expect replacement string literal, but found {:?}", other),
+                desc: format!("expected replacement string literal, but found {:?}", other),
             }
             .fail()?,
         };
         let src_label = match other_input_exprs.pop_front() {
             Some(DfExpr::Literal(ScalarValue::Utf8(Some(s)))) => s,
             other => UnexpectedPlanExprSnafu {
-                desc: format!("expect src_label string literal, but found {:?}", other),
+                desc: format!("expected src_label string literal, but found {:?}", other),
             }
             .fail()?,
         };
         let regex = match other_input_exprs.pop_front() {
             Some(DfExpr::Literal(ScalarValue::Utf8(Some(r)))) => r,
             other => UnexpectedPlanExprSnafu {
-                desc: format!("expect regex string literal, but found {:?}", other),
+                desc: format!("expected regex string literal, but found {:?}", other),
             }
             .fail()?,
         };
@@ -1520,14 +1523,14 @@ impl PromPlanner {
         let dst_label = match other_input_exprs.pop_front() {
             Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)))) => d,
             other => UnexpectedPlanExprSnafu {
-                desc: format!("expect dst_label string literal, but found {:?}", other),
+                desc: format!("expected dst_label string literal, but found {:?}", other),
             }
             .fail()?,
         };
         let separator = match other_input_exprs.pop_front() {
             Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)))) => d,
             other => UnexpectedPlanExprSnafu {
-                desc: format!("expect separator string literal, but found {:?}", other),
+                desc: format!("expected separator string literal, but found {:?}", other),
             }
             .fail()?,
         };
@@ -1542,7 +1545,10 @@ impl PromPlanner {
                         Ok(expr)
                     }
                     other => UnexpectedPlanExprSnafu {
-                        desc: format!("expect source label string literal, but found {:?}", other),
+                        desc: format!(
+                            "expected source label string literal, but found {:?}",
+                            other
+                        ),
                     }
                     .fail(),
                 }
