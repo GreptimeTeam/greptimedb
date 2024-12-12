@@ -16,6 +16,7 @@ pub mod builder;
 
 use std::sync::Arc;
 
+use common_base::range_read::RangeReader;
 use common_telemetry::warn;
 use index::inverted_index::format::reader::InvertedIndexBlobReader;
 use index::inverted_index::search::index_apply::{
@@ -29,7 +30,9 @@ use store_api::storage::RegionId;
 
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::index::{CachedInvertedIndexBlobReader, InvertedIndexCacheRef};
-use crate::error::{ApplyInvertedIndexSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result};
+use crate::error::{
+    ApplyInvertedIndexSnafu, MetadataSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result,
+};
 use crate::metrics::{INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE};
 use crate::sst::file::FileId;
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
@@ -123,7 +126,7 @@ impl InvertedIndexApplier {
             index_not_found_strategy: IndexNotFoundStrategy::ReturnEmpty,
         };
 
-        let blob = match self.cached_blob_reader(file_id).await {
+        let mut blob = match self.cached_blob_reader(file_id).await {
             Ok(Some(puffin_reader)) => puffin_reader,
             other => {
                 if let Err(err) = other {
@@ -134,8 +137,14 @@ impl InvertedIndexApplier {
         };
 
         if let Some(index_cache) = &self.inverted_index_cache {
+            let file_size = if let Some(file_size) = file_size_hint {
+                file_size
+            } else {
+                blob.metadata().await.context(MetadataSnafu)?.content_length
+            };
             let mut index_reader = CachedInvertedIndexBlobReader::new(
                 file_id,
+                file_size,
                 InvertedIndexBlobReader::new(blob),
                 index_cache.clone(),
             );

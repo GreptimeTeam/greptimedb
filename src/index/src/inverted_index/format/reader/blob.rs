@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -57,6 +58,11 @@ impl<R: RangeReader> InvertedIndexReader for InvertedIndexBlobReader<R> {
             .await
             .context(CommonIoSnafu)?;
         Ok(buf.into())
+    }
+
+    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Vec<u8>>> {
+        let bufs = self.source.read_vec(ranges).await.context(CommonIoSnafu)?;
+        Ok(bufs.into_iter().map(|buf| buf.into()).collect())
     }
 
     async fn metadata(&mut self) -> Result<Arc<InvertedIndexMetas>> {

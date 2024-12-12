@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -32,6 +33,9 @@ mod footer;
 pub trait InvertedIndexReader: Send {
     /// Seeks to given offset and reads data with exact size as provided.
     async fn range_read(&mut self, offset: u64, size: u32) -> Result<Vec<u8>>;
+
+    /// Reads the bytes in the given ranges.
+    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Vec<u8>>>;
 
     /// Retrieves metadata of all inverted indices stored within the blob.
     async fn metadata(&mut self) -> Result<Arc<InvertedIndexMetas>>;
