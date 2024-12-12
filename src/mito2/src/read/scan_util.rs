@@ -181,8 +181,9 @@ pub(crate) fn scan_file_ranges(
                 }
                 yield batch;
             }
-            if let Source::PruneReader(mut reader) = source {
-                reader_metrics.merge_from(reader.metrics());
+            if let Source::PruneReader(reader) = source {
+                let prune_metrics = reader.metrics();
+                reader_metrics.merge_from(&prune_metrics);
             }
         }
 
