@@ -215,7 +215,9 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
                 ) = (a, b)
                 {
                     // to_string loses precision for ReadableSize, so the size in generated SQL is not the same as the size in the table context,
-                    // but the string representation should be the same
+                    // but the string representation should be the same. For example:
+                    //                                     to_string()                from_str()
+                    // ReadableSize(13001360408898724524) ------------> "11547.5PiB" -----------> ReadableSize(13001329174265200640)
                     assert_eq!(a.to_string(), b.to_string());
                 } else {
                     assert_eq!(a, b);
