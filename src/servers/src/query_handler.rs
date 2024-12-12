@@ -170,4 +170,7 @@ pub trait PipelineHandler {
         table: &str,
         query_ctx: &QueryContext,
     ) -> std::result::Result<Option<Arc<table::Table>>, catalog::error::Error>;
+
+    //// Build a pipeline from a string.
+    fn build_pipeline(&self, pipeline: &str) -> Result<Pipeline<GreptimeTransformer>>;
 }
