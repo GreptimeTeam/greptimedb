@@ -360,7 +360,8 @@ fn dryrun_pipeline(
 }
 
 /// Dryrun pipeline with given data
-/// pipeline_info to specify pipeline
+/// pipeline_name and pipeline_version to specify pipeline stored in db
+/// pipeline to specify pipeline raw content
 /// data to specify data
 /// data maght be list of string or list of object
 #[derive(Debug, Default, Serialize, Deserialize)]
