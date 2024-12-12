@@ -46,7 +46,7 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio_postgres::{Client as PgClient, SimpleQueryMessage as PgRow};
 
 use crate::protocol_interceptor::{MYSQL, PROTOCOL_KEY};
-use crate::util::{get_workspace_root, maybe_pull_binary};
+use crate::util::{get_workspace_root, maybe_pull_binary, PROGRAM};
 use crate::{util, ServerAddr};
 
 const METASRV_ADDR: &str = "127.0.0.1:29302";
@@ -400,23 +400,20 @@ impl Env {
             }
         }
 
-        #[cfg(not(windows))]
-        let program = "./greptime";
-        #[cfg(windows)]
-        let program = "greptime.exe";
+        let program = PROGRAM;
 
         let bins_dir = self.bins_dir.lock().unwrap().clone().expect(
             "GreptimeDB binary is not available. Please pass in the path to the directory that contains the pre-built GreptimeDB binary. Or you may call `self.build_db()` beforehand.",
         );
 
         let mut process = Command::new(program)
-            .current_dir(bins_dir)
+            .current_dir(bins_dir.clone())
             .env("TZ", "UTC")
             .args(args)
             .stdout(stdout_file)
             .spawn()
             .unwrap_or_else(|error| {
-                panic!("Failed to start the DB with subcommand {subcommand},Error: {error}")
+                panic!("Failed to start the DB with subcommand {subcommand},Error: {error}, path: {:?}", bins_dir.join(program));
             });
 
         for check_ip_addr in &check_ip_addrs {
@@ -793,14 +790,19 @@ impl Database for GreptimeDB {
                 .expect("lock poison")
                 .get(version.as_str())
                 .cloned();
-            if let Some(path) = version_bin_dir {
-                *self.env.bins_dir.lock().unwrap() = Some(path.clone());
-            } else {
-                // use version in dir files
-                maybe_pull_binary(version, self.env.pull_version_on_need).await;
-                let root = get_workspace_root();
-                let new_path = PathBuf::from_iter([&root, version]);
-                *self.env.bins_dir.lock().unwrap() = Some(new_path);
+
+            match version_bin_dir {
+                Some(path) if path.clone().join(PROGRAM).is_file() => {
+                    // use version in versioned_bins_dirs
+                    *self.env.bins_dir.lock().unwrap() = Some(path.clone());
+                }
+                _ => {
+                    // use version in dir files
+                    maybe_pull_binary(version, self.env.pull_version_on_need).await;
+                    let root = get_workspace_root();
+                    let new_path = PathBuf::from_iter([&root, version]);
+                    *self.env.bins_dir.lock().unwrap() = Some(new_path);
+                }
             }
 
             self.env.restart_server(self, true).await;

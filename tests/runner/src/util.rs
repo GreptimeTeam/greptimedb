@@ -27,6 +27,11 @@ use tokio_stream::StreamExt;
 /// Check port every 0.1 second.
 const PORT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
+#[cfg(not(windows))]
+pub const PROGRAM: &str = "./greptime";
+#[cfg(windows)]
+pub const PROGRAM: &str = "greptime.exe";
+
 fn http_proxy() -> Option<String> {
     for proxy in ["http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"] {
         if let Ok(proxy_addr) = std::env::var(proxy) {
@@ -124,7 +129,7 @@ pub async fn pull_binary(version: &str) {
     println!("Downloading {version} binary from {}", url);
 
     // mkdir {version}
-    std::fs::create_dir(version).unwrap();
+    let _ = std::fs::create_dir(version);
 
     let archive = Path::new(version).join(filename);
     let folder_path = Path::new(version);
@@ -176,7 +181,7 @@ pub async fn pull_binary(version: &str) {
 
 /// Pull the binary if it does not exist and `pull_version_on_need` is true.
 pub async fn maybe_pull_binary(version: &str, pull_version_on_need: bool) {
-    let exist = Path::new(version).is_dir();
+    let exist = Path::new(version).join(PROGRAM).is_file();
     match (exist, pull_version_on_need){
         (true, _) => println!("Binary {version} exists"),
         (false, false) => panic!("Binary {version} does not exist, please run with --pull-version-on-need or manually download it"),
