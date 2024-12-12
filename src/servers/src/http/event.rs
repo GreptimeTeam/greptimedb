@@ -359,28 +359,6 @@ fn dryrun_pipeline(
     Ok(Json(result).into_response())
 }
 
-/// Pipeline info
-/// PipelineName: pipeline_name and pipeline_version stored in greptime_private.pipelines
-/// PipelineContent: pipeline raw content
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum PipelineInfo {
-    PipelineName {
-        pipeline_name: String,
-        pipeline_version: Option<String>,
-    },
-    PipelineContent(String),
-}
-
-impl Default for PipelineInfo {
-    fn default() -> Self {
-        Self::PipelineName {
-            pipeline_name: GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME.to_string(),
-            pipeline_version: None,
-        }
-    }
-}
-
 /// Dryrun pipeline with given data
 /// pipeline_info to specify pipeline
 /// data to specify data
