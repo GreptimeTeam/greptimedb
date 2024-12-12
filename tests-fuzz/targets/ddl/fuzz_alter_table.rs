@@ -214,7 +214,8 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
                     AlterTableOption::TwcsMaxOutputFileSize(b),
                 ) = (a, b)
                 {
-                    // File size is not exact, so we compare string representation
+                    // to_string loses precision for ReadableSize, so the size in generated SQL is not the same as the size in the table context,
+                    // but the string representation should be the same
                     assert_eq!(a.to_string(), b.to_string());
                 } else {
                     assert_eq!(a, b);

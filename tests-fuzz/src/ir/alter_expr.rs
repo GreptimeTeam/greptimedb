@@ -175,6 +175,7 @@ impl Display for AlterTableOption {
             AlterTableOption::Ttl(d) => write!(f, "'{}' = '{}'", TTL_KEY, d),
             AlterTableOption::TwcsTimeWindow(d) => write!(f, "'{}' = '{}'", TWCS_TIME_WINDOW, d),
             AlterTableOption::TwcsMaxOutputFileSize(s) => {
+                // Caution: to_string loses precision for ReadableSize
                 write!(f, "'{}' = '{}'", TWCS_MAX_OUTPUT_FILE_SIZE, s)
             }
             AlterTableOption::TwcsMaxInactiveWindowFiles(u) => {
