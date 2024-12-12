@@ -43,6 +43,9 @@ pub struct FsPuffinReader<S, F> {
     /// The name of the puffin file.
     puffin_file_name: String,
 
+    /// The file size hint.
+    file_size_hint: Option<u64>,
+
     /// The stager.
     stager: S,
 
@@ -62,6 +65,7 @@ impl<S, F> FsPuffinReader<S, F> {
     ) -> Self {
         Self {
             puffin_file_name,
+            file_size_hint: None,
             stager,
             puffin_file_accessor,
             puffin_file_metadata_cache,
@@ -78,11 +82,19 @@ where
     type Blob = Either<RandomReadBlob<F>, S::Blob>;
     type Dir = S::Dir;
 
+    fn with_file_size_hint(mut self, file_size_hint: Option<u64>) -> Self {
+        self.file_size_hint = file_size_hint;
+        self
+    }
+
     async fn blob(&self, key: &str) -> Result<Self::Blob> {
-        let reader = self
+        let mut reader = self
             .puffin_file_accessor
             .reader(&self.puffin_file_name)
             .await?;
+        if let Some(file_size_hint) = self.file_size_hint {
+            reader.with_file_size_hint(file_size_hint);
+        }
         let mut file = PuffinFileReader::new(reader);
 
         let metadata = self.get_puffin_file_metadata(&mut file).await?;
@@ -303,6 +315,13 @@ where
     A: RangeReader,
     B: RangeReader,
 {
+    fn with_file_size_hint(&mut self, file_size_hint: u64) {
+        match self {
+            Either::L(a) => a.with_file_size_hint(file_size_hint),
+            Either::R(b) => b.with_file_size_hint(file_size_hint),
+        }
+    }
+
     async fn metadata(&mut self) -> io::Result<Metadata> {
         match self {
             Either::L(a) => a.metadata().await,

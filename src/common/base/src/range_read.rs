@@ -36,6 +36,11 @@ pub struct Metadata {
 /// `RangeReader` reads a range of bytes from a source.
 #[async_trait]
 pub trait RangeReader: Send + Unpin {
+    /// Sets the file size hint for the reader.
+    ///
+    /// It's used to optimize the reading process by reducing the number of remote requests.
+    fn with_file_size_hint(&mut self, file_size_hint: u64);
+
     /// Returns the metadata of the source.
     async fn metadata(&mut self) -> io::Result<Metadata>;
 
@@ -70,6 +75,10 @@ pub trait RangeReader: Send + Unpin {
 
 #[async_trait]
 impl<R: ?Sized + RangeReader> RangeReader for &mut R {
+    fn with_file_size_hint(&mut self, file_size_hint: u64) {
+        (*self).with_file_size_hint(file_size_hint)
+    }
+
     async fn metadata(&mut self) -> io::Result<Metadata> {
         (*self).metadata().await
     }
@@ -186,6 +195,10 @@ impl<R: RangeReader + 'static> AsyncRead for AsyncReadAdapter<R> {
 
 #[async_trait]
 impl RangeReader for Vec<u8> {
+    fn with_file_size_hint(&mut self, _file_size_hint: u64) {
+        // do nothing
+    }
+
     async fn metadata(&mut self) -> io::Result<Metadata> {
         Ok(Metadata {
             content_length: self.len() as u64,
@@ -222,6 +235,10 @@ impl FileReader {
 
 #[async_trait]
 impl RangeReader for FileReader {
+    fn with_file_size_hint(&mut self, _file_size_hint: u64) {
+        // do nothing
+    }
+
     async fn metadata(&mut self) -> io::Result<Metadata> {
         Ok(Metadata {
             content_length: self.content_length,

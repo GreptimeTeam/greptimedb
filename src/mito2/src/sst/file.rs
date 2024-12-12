@@ -146,12 +146,32 @@ pub enum IndexType {
 }
 
 impl FileMeta {
+    /// Returns true if the file has an inverted index
     pub fn inverted_index_available(&self) -> bool {
         self.available_indexes.contains(&IndexType::InvertedIndex)
     }
 
+    /// Returns true if the file has a fulltext index
     pub fn fulltext_index_available(&self) -> bool {
         self.available_indexes.contains(&IndexType::FulltextIndex)
+    }
+
+    /// Returns the size of the inverted index file
+    pub fn inverted_index_size(&self) -> Option<u64> {
+        if self.available_indexes.len() == 1 && self.inverted_index_available() {
+            Some(self.index_file_size)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the size of the fulltext index file
+    pub fn fulltext_index_size(&self) -> Option<u64> {
+        if self.available_indexes.len() == 1 && self.fulltext_index_available() {
+            Some(self.index_file_size)
+        } else {
+            None
+        }
     }
 }
 
