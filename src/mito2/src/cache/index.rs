@@ -60,7 +60,8 @@ where
         offset: u64,
         size: u32,
     ) -> index::inverted_index::error::Result<Vec<u8>> {
-        let indexes = IndexKey::index(self.file_id, offset, size, self.cache.page_size);
+        let indexes =
+            IndexDataPageKey::generate_page_keys(self.file_id, offset, size, self.cache.page_size);
         // Size is 0, return empty data.
         if indexes.is_empty() {
             return Ok(Vec::new());
@@ -90,11 +91,19 @@ where
             };
             if index.page_id == first_page_id {
                 data.extend_from_slice(
-                    &page[IndexKey::offset_to_first_range(offset, size, self.cache.page_size)],
+                    &page[IndexDataPageKey::calculate_first_page_range(
+                        offset,
+                        size,
+                        self.cache.page_size,
+                    )],
                 );
             } else if index.page_id == last_page_id {
                 data.extend_from_slice(
-                    &page[IndexKey::offset_to_last_range(offset, size, self.cache.page_size)],
+                    &page[IndexDataPageKey::calculate_last_page_range(
+                        offset,
+                        size,
+                        self.cache.page_size,
+                    )],
                 );
             } else {
                 data.extend_from_slice(&page);
@@ -146,46 +155,54 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct IndexKey {
+pub struct IndexMetadataKey {
+    file_id: FileId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IndexDataPageKey {
     file_id: FileId,
     page_id: u64,
 }
 
-impl IndexKey {
-    fn offset_to_page_id(offset: u64, page_size: usize) -> u64 {
+impl IndexDataPageKey {
+    /// Converts an offset to a page ID based on the page size.
+    fn calculate_page_id(offset: u64, page_size: usize) -> u64 {
         offset / (page_size as u64)
     }
 
-    fn size_to_page_num(offset: u64, size: u32, page_size: usize) -> u32 {
-        let first_page = Self::offset_to_page_id(offset, page_size);
-        let last_page = Self::offset_to_page_id(offset + size as u64, page_size);
-        (last_page - first_page + 1) as u32
+    /// Calculates the total number of pages that a given size spans, starting from a specific offset.
+    fn calculate_page_count(offset: u64, size: u32, page_size: usize) -> u32 {
+        let start_page = Self::calculate_page_id(offset, page_size);
+        let end_page = Self::calculate_page_id(offset + size as u64, page_size);
+        (end_page - start_page + 1) as u32
     }
 
-    /// Ranges of first page.
-    /// For example, if offset is 1000 and size is 5000 and PAGE_SIZE is 4096, then the first page is 1000..4096.
-    fn offset_to_first_range(offset: u64, size: u32, page_size: usize) -> Range<usize> {
-        (offset % (page_size as u64)) as usize
-            ..if size > page_size as u32 - (offset % (page_size as u64)) as u32 {
-                page_size
-            } else {
-                (offset % (page_size as u64) + size as u64) as usize
-            }
+    /// Computes the byte range in the first page based on the offset and size.
+    /// For example, if offset is 1000 and size is 5000 with PAGE_SIZE of 4096, the first page range is 1000..4096.
+    fn calculate_first_page_range(offset: u64, size: u32, page_size: usize) -> Range<usize> {
+        let start = (offset % (page_size as u64)) as usize;
+        let end = if size > page_size as u32 - start as u32 {
+            page_size
+        } else {
+            (start as u64 + size as u64) as usize
+        };
+        start..end
     }
 
-    /// Ranges of last page.
-    /// For example, if offset is 1000 and size is 5000 and PAGE_SIZE is 4096, then the last page is 0..904.
-    fn offset_to_last_range(offset: u64, size: u32, page_size: usize) -> Range<usize> {
+    /// Computes the byte range in the last page based on the offset and size.
+    /// For example, if offset is 1000 and size is 5000 with PAGE_SIZE of 4096, the last page range is 0..904.
+    fn calculate_last_page_range(offset: u64, size: u32, page_size: usize) -> Range<usize> {
         0..((size as u64 + offset) % (page_size as u64)) as usize
     }
-
-    fn index(file_id: FileId, offset: u64, size: u32, page_size: usize) -> Vec<Self> {
-        let page_id = Self::offset_to_page_id(offset, page_size);
-        let page_num = Self::size_to_page_num(offset, size, page_size);
-        (0..page_num)
+    /// Generates a vector of IndexKey instances for the pages that a given offset and size span.
+    fn generate_page_keys(file_id: FileId, offset: u64, size: u32, page_size: usize) -> Vec<Self> {
+        let start_page = Self::calculate_page_id(offset, page_size);
+        let total_pages = Self::calculate_page_count(offset, size, page_size);
+        (0..total_pages)
             .map(|i| Self {
                 file_id,
-                page_id: page_id + i as u64,
+                page_id: start_page + i as u64,
             })
             .collect()
     }
@@ -195,9 +212,9 @@ pub type InvertedIndexCacheRef = Arc<InvertedIndexCache>;
 
 pub struct InvertedIndexCache {
     /// Cache for inverted index metadata
-    index_metadata: moka::sync::Cache<IndexKey, Arc<InvertedIndexMetas>>,
+    index_metadata: moka::sync::Cache<IndexMetadataKey, Arc<InvertedIndexMetas>>,
     /// Cache for inverted index content.
-    index: moka::sync::Cache<IndexKey, Arc<Vec<u8>>>,
+    index: moka::sync::Cache<IndexDataPageKey, Arc<Vec<u8>>>,
     // Page size for index content.
     page_size: usize,
 }
@@ -236,28 +253,22 @@ impl InvertedIndexCache {
 
 impl InvertedIndexCache {
     pub fn get_index_metadata(&self, file_id: FileId) -> Option<Arc<InvertedIndexMetas>> {
-        self.index_metadata.get(&IndexKey {
-            file_id,
-            page_id: 0,
-        })
+        self.index_metadata.get(&&IndexMetadataKey { file_id })
     }
 
     pub fn put_index_metadata(&self, file_id: FileId, metadata: Arc<InvertedIndexMetas>) {
-        let key = IndexKey {
-            file_id,
-            page_id: 0,
-        };
+        let key = IndexMetadataKey { file_id };
         CACHE_BYTES
             .with_label_values(&[INDEX_METADATA_TYPE])
             .add(index_metadata_weight(&key, &metadata).into());
         self.index_metadata.insert(key, metadata)
     }
 
-    pub fn get_index(&self, key: &IndexKey) -> Option<Arc<Vec<u8>>> {
+    pub fn get_index(&self, key: &IndexDataPageKey) -> Option<Arc<Vec<u8>>> {
         self.index.get(key)
     }
 
-    pub fn put_index(&self, key: IndexKey, value: Arc<Vec<u8>>) {
+    pub fn put_index(&self, key: IndexDataPageKey, value: Arc<Vec<u8>>) {
         CACHE_BYTES
             .with_label_values(&[INDEX_CONTENT_TYPE])
             .add(index_content_weight(&key, &value).into());
@@ -266,12 +277,12 @@ impl InvertedIndexCache {
 }
 
 /// Calculates weight for index metadata.
-fn index_metadata_weight(k: &IndexKey, v: &Arc<InvertedIndexMetas>) -> u32 {
+fn index_metadata_weight(k: &IndexMetadataKey, v: &Arc<InvertedIndexMetas>) -> u32 {
     (k.file_id.as_bytes().len() + v.encoded_len()) as u32
 }
 
 /// Calculates weight for index content.
-fn index_content_weight(k: &IndexKey, v: &Arc<Vec<u8>>) -> u32 {
+fn index_content_weight(k: &IndexDataPageKey, v: &Arc<Vec<u8>>) -> u32 {
     (k.file_id.as_bytes().len() + v.len()) as u32
 }
 
