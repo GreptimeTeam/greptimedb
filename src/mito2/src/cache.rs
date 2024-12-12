@@ -26,7 +26,6 @@ use std::mem;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use common_base::readable_size::ReadableSize;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use moka::notification::RemovalCause;
@@ -54,9 +53,6 @@ const PAGE_TYPE: &str = "page";
 const FILE_TYPE: &str = "file";
 /// Metrics type key for selector result cache.
 const SELECTOR_RESULT_TYPE: &str = "selector_result";
-
-/// Page size for cache. Currently only used for inverted index cache.
-const PAGE_SIZE: usize = 8192 * 1024; // 8MB
 
 /// Manages cached data for the engine.
 ///
@@ -248,6 +244,7 @@ pub struct CacheManagerBuilder {
     page_cache_size: u64,
     index_metadata_size: u64,
     index_content_size: u64,
+    index_content_page_size: u64,
     puffin_metadata_size: u64,
     write_cache: Option<WriteCacheRef>,
     selector_result_cache_size: u64,
@@ -287,6 +284,12 @@ impl CacheManagerBuilder {
     /// Sets cache size for index content.
     pub fn index_content_size(mut self, bytes: u64) -> Self {
         self.index_content_size = bytes;
+        self
+    }
+
+    /// Sets page size for index content.
+    pub fn index_content_page_size(mut self, bytes: u64) -> Self {
+        self.index_content_page_size = bytes;
         self
     }
 
@@ -359,7 +362,7 @@ impl CacheManagerBuilder {
         let inverted_index_cache = InvertedIndexCache::new(
             self.index_metadata_size,
             self.index_content_size,
-            ReadableSize::kb(PAGE_SIZE as u64),
+            self.index_content_page_size,
         );
         let puffin_metadata_cache =
             PuffinMetadataCache::new(self.puffin_metadata_size, &CACHE_BYTES);

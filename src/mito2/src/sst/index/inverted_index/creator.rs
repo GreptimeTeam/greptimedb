@@ -302,7 +302,6 @@ mod tests {
     use std::iter;
 
     use api::v1::SemanticType;
-    use common_base::readable_size::ReadableSize;
     use datafusion_expr::{binary_expr, col, lit, Expr as DfExpr, Operator};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
@@ -449,7 +448,7 @@ mod tests {
 
         move |expr| {
             let _d = &d;
-            let cache = Arc::new(InvertedIndexCache::new(10, 10, ReadableSize(10)));
+            let cache = Arc::new(InvertedIndexCache::new(10, 10, 100));
             let puffin_metadata_cache = Arc::new(PuffinMetadataCache::new(10, &CACHE_BYTES));
             let applier = InvertedIndexApplierBuilder::new(
                 region_dir.clone(),
