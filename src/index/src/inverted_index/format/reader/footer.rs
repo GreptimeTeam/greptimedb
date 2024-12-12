@@ -18,7 +18,7 @@ use prost::Message;
 use snafu::{ensure, ResultExt};
 
 use crate::inverted_index::error::{
-    CommonIoSnafu, DecodeProtoSnafu, InvalidFooterPayloadSizeSnafu, Result,
+    BlobSizeTooSmallSnafu, CommonIoSnafu, DecodeProtoSnafu, InvalidFooterPayloadSizeSnafu, Result,
     UnexpectedFooterPayloadSizeSnafu, UnexpectedOffsetSizeSnafu,
     UnexpectedZeroSegmentRowCountSnafu,
 };
@@ -55,6 +55,11 @@ impl<R> InvertedIndexFooterReader<R> {
 
 impl<R: RangeReader> InvertedIndexFooterReader<R> {
     pub async fn metadata(&mut self) -> Result<InvertedIndexMetas> {
+        ensure!(
+            self.blob_size >= FOOTER_PAYLOAD_SIZE_SIZE,
+            BlobSizeTooSmallSnafu
+        );
+
         let footer_start = self.blob_size.saturating_sub(self.prefetch_size());
         let suffix = self
             .source

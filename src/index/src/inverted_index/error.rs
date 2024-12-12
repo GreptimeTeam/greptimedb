@@ -76,6 +76,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Blob size too small"))]
+    BlobSizeTooSmall {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid footer payload size"))]
     InvalidFooterPayloadSize {
         #[snafu(implicit)]
@@ -236,7 +242,8 @@ impl ErrorExt for Error {
             | CommonIo { .. }
             | UnknownIntermediateCodecMagic { .. }
             | FstCompile { .. }
-            | InvalidFooterPayloadSize { .. } => StatusCode::Unexpected,
+            | InvalidFooterPayloadSize { .. }
+            | BlobSizeTooSmall { .. } => StatusCode::Unexpected,
 
             ParseRegex { .. }
             | ParseDFA { .. }
