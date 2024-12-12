@@ -216,6 +216,7 @@ impl KeyValPlan {
 
 /// find out the column that should be time index in group exprs(which is all columns that should be keys)
 /// TODO(discord9): better ways to assign time index
+/// for now, it will found the first column that is timestamp or has a tumble window floor function
 fn find_time_index_in_group_exprs(group_exprs: &[TypedExpr]) -> Option<usize> {
     group_exprs.iter().position(|expr| {
         matches!(
@@ -224,7 +225,7 @@ fn find_time_index_in_group_exprs(group_exprs: &[TypedExpr]) -> Option<usize> {
                 func: UnaryFunc::TumbleWindowFloor { .. },
                 expr: _
             }
-        )
+        ) || expr.typ.scalar_type.is_timestamp()
     })
 }
 
