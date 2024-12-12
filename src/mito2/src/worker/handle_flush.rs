@@ -24,6 +24,7 @@ use store_api::storage::RegionId;
 use crate::config::MitoConfig;
 use crate::error::{RegionNotFoundSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
+use crate::metrics::INFLIGHT_FLUSH_COUNT;
 use crate::region::MitoRegionRef;
 use crate::request::{FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
 use crate::worker::RegionWorkerLoop;
@@ -54,11 +55,14 @@ impl<S> RegionWorkerLoop<S> {
                 .schedule_flush(region.region_id, &region.version_control, task)
         {
             error!(e; "Failed to schedule flush task for region {}", region.region_id);
+        } else {
+            INFLIGHT_FLUSH_COUNT.inc();
         }
     }
 
     /// On region flush job failed.
     pub(crate) async fn handle_flush_failed(&mut self, region_id: RegionId, request: FlushFailed) {
+        INFLIGHT_FLUSH_COUNT.dec();
         self.flush_scheduler.on_flush_failed(region_id, request.err);
     }
 
@@ -191,6 +195,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region_id: RegionId,
         mut request: FlushFinished,
     ) {
+        INFLIGHT_FLUSH_COUNT.dec();
         // Notifies other workers. Even the remaining steps of this method fail we still
         // wake up other workers as we have released some memory by flush.
         self.notify_group();
