@@ -411,8 +411,8 @@ impl Value {
             Value::Timestamp(t) => timestamp_to_scalar_value(t.unit(), Some(t.value())),
             Value::Time(t) => time_to_scalar_value(*t.unit(), Some(t.value()))?,
             Value::IntervalYearMonth(v) => ScalarValue::IntervalYearMonth(Some(v.to_i32())),
-            Value::IntervalDayTime(v) => ScalarValue::IntervalDayTime(Some(v.to_i64())),
-            Value::IntervalMonthDayNano(v) => ScalarValue::IntervalMonthDayNano(Some(v.to_i128())),
+            Value::IntervalDayTime(v) => ScalarValue::IntervalDayTime(Some((*v).into())),
+            Value::IntervalMonthDayNano(v) => ScalarValue::IntervalMonthDayNano(Some((*v).into())),
             Value::Duration(d) => duration_to_scalar_value(d.unit(), Some(d.value())),
             Value::Decimal128(d) => {
                 let (v, p, s) = d.to_scalar_value();
@@ -852,6 +852,7 @@ impl ListValue {
         Ok(ScalarValue::List(ScalarValue::new_list(
             &vs,
             &self.datatype.as_arrow_type(),
+            true,
         )))
     }
 
@@ -964,10 +965,10 @@ impl TryFrom<ScalarValue> for Value {
                 .map(|x| Value::IntervalYearMonth(IntervalYearMonth::from_i32(x)))
                 .unwrap_or(Value::Null),
             ScalarValue::IntervalDayTime(t) => t
-                .map(|x| Value::IntervalDayTime(IntervalDayTime::from_i64(x)))
+                .map(|x| Value::IntervalDayTime(IntervalDayTime::from(x)))
                 .unwrap_or(Value::Null),
             ScalarValue::IntervalMonthDayNano(t) => t
-                .map(|x| Value::IntervalMonthDayNano(IntervalMonthDayNano::from_i128(x)))
+                .map(|x| Value::IntervalMonthDayNano(IntervalMonthDayNano::from(x)))
                 .unwrap_or(Value::Null),
             ScalarValue::DurationSecond(d) => d
                 .map(|x| Value::Duration(Duration::new(x, TimeUnit::Second)))
@@ -990,7 +991,10 @@ impl TryFrom<ScalarValue> for Value {
             | ScalarValue::LargeList(_)
             | ScalarValue::Dictionary(_, _)
             | ScalarValue::Union(_, _, _)
-            | ScalarValue::Float16(_) => {
+            | ScalarValue::Float16(_)
+            | ScalarValue::Utf8View(_)
+            | ScalarValue::BinaryView(_)
+            | ScalarValue::Map(_) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: v.data_type(),
                 }
@@ -1733,6 +1737,7 @@ mod tests {
             ScalarValue::List(ScalarValue::new_list(
                 &[ScalarValue::Int32(Some(1)), ScalarValue::Int32(None)],
                 &ArrowDataType::Int32,
+                true,
             ))
             .try_into()
             .unwrap()
@@ -1742,7 +1747,7 @@ mod tests {
                 vec![],
                 ConcreteDataType::list_datatype(ConcreteDataType::uint32_datatype())
             )),
-            ScalarValue::List(ScalarValue::new_list(&[], &ArrowDataType::UInt32))
+            ScalarValue::List(ScalarValue::new_list(&[], &ArrowDataType::UInt32, true))
                 .try_into()
                 .unwrap()
         );
@@ -1814,7 +1819,7 @@ mod tests {
         );
         assert_eq!(
             Value::IntervalMonthDayNano(IntervalMonthDayNano::new(1, 1, 1)),
-            ScalarValue::IntervalMonthDayNano(Some(IntervalMonthDayNano::new(1, 1, 1).to_i128()))
+            ScalarValue::IntervalMonthDayNano(Some(IntervalMonthDayNano::new(1, 1, 1).into()))
                 .try_into()
                 .unwrap()
         );
