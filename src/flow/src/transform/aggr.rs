@@ -1483,7 +1483,7 @@ mod test {
                 ColumnType::new(CDT::float64_datatype(), true),
                 ColumnType::new(CDT::timestamp_millisecond_datatype(), true),
             ])
-            .with_key(vec![1])
+            .with_time_index(Some(1))
             .into_named(vec![
                 Some(
                     "MAX(numbers_with_ts.number) - MIN(numbers_with_ts.number) / Float64(30)"
@@ -1572,7 +1572,7 @@ mod test {
                             ColumnType::new(ConcreteDataType::uint32_datatype(), true), // max
                             ColumnType::new(ConcreteDataType::uint32_datatype(), true), // min
                         ])
-                        .with_key(vec![0])
+                        .with_time_index(Some(0))
                         .into_unnamed(),
                     ),
                 ),
