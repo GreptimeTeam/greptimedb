@@ -368,9 +368,9 @@ fn json_value_to_row(
     Ok(Row { values: row })
 }
 
-fn identity_pipeline_inner(
+fn identity_pipeline_inner<'a>(
     array: Vec<serde_json::Value>,
-    tag_column_names: Option<Vec<&String>>,
+    tag_column_names: Option<impl Iterator<Item = &'a String>>,
 ) -> Result<Rows> {
     let mut rows = Vec::with_capacity(array.len());
     let mut schema_info = SchemaInfo::default();
@@ -403,8 +403,8 @@ fn identity_pipeline_inner(
 
     // set the semantic type of the row key column to Tag
     if let Some(tag_column_names) = tag_column_names {
-        tag_column_names.iter().for_each(|tag_column_name| {
-            if let Some(index) = schema_info.index.get(*tag_column_name) {
+        tag_column_names.for_each(|tag_column_name| {
+            if let Some(index) = schema_info.index.get(tag_column_name) {
                 schema_info.schema[*index].semantic_type = SemanticType::Tag as i32;
             }
         });
@@ -430,10 +430,10 @@ pub fn identity_pipeline(
     match table {
         Some(table) => {
             let table_info = table.table_info();
-            let tag_column_names = table_info.meta.row_key_column_names().collect();
+            let tag_column_names = table_info.meta.row_key_column_names();
             identity_pipeline_inner(array, Some(tag_column_names))
         }
-        None => identity_pipeline_inner(array, None),
+        None => identity_pipeline_inner(array, None::<std::iter::Empty<&String>>),
     }
 }
 
@@ -553,7 +553,7 @@ mod tests {
                 }),
             ];
             let tag_column_names = ["name".to_string(), "address".to_string()];
-            let rows = identity_pipeline_inner(array, Some(tag_column_names.iter().collect()));
+            let rows = identity_pipeline_inner(array, Some(tag_column_names.iter()));
             assert!(rows.is_ok());
             let rows = rows.unwrap();
             assert_eq!(rows.schema.len(), 8);
