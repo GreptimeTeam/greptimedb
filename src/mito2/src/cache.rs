@@ -26,6 +26,7 @@ use std::mem;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use common_base::readable_size::ReadableSize;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use moka::notification::RemovalCause;
@@ -355,8 +356,11 @@ impl CacheManagerBuilder {
                 })
                 .build()
         });
-        let inverted_index_cache =
-            InvertedIndexCache::new(self.index_metadata_size, self.index_content_size, PAGE_SIZE);
+        let inverted_index_cache = InvertedIndexCache::new(
+            self.index_metadata_size,
+            self.index_content_size,
+            ReadableSize::kb(PAGE_SIZE as u64),
+        );
         let puffin_metadata_cache =
             PuffinMetadataCache::new(self.puffin_metadata_size, &CACHE_BYTES);
         let selector_result_cache = (self.selector_result_cache_size != 0).then(|| {

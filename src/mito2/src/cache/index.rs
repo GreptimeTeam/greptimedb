@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use api::v1::index::InvertedIndexMetas;
 use async_trait::async_trait;
+use common_base::readable_size::ReadableSize;
 use common_base::BitVec;
 use index::inverted_index::error::DecodeFstSnafu;
 use index::inverted_index::format::reader::InvertedIndexReader;
@@ -214,7 +215,7 @@ pub struct InvertedIndexCache {
 
 impl InvertedIndexCache {
     /// Creates `InvertedIndexCache` with provided `index_metadata_cap` and `index_content_cap`.
-    pub fn new(index_metadata_cap: u64, index_content_cap: u64, page_size: usize) -> Self {
+    pub fn new(index_metadata_cap: u64, index_content_cap: u64, page_size: ReadableSize) -> Self {
         common_telemetry::debug!("Building InvertedIndexCache with metadata size: {index_metadata_cap}, content size: {index_content_cap}");
         let index_metadata = moka::sync::CacheBuilder::new(index_metadata_cap)
             .name("inverted_index_metadata")
@@ -239,7 +240,7 @@ impl InvertedIndexCache {
         Self {
             index_metadata,
             index: index_cache,
-            page_size,
+            page_size: page_size.as_bytes() as usize,
         }
     }
 }
@@ -346,7 +347,7 @@ mod test {
 
     // Fuzz test for index data page key
     #[test]
-    fn fuzz_read_index() {
+    fn fuzz_index_calculation() {
         // randomly generate a large u8 array
         let mut rng = rand::thread_rng();
         let mut data = vec![0u8; 1024 * 1024];
@@ -438,7 +439,7 @@ mod test {
         let mut cached_reader = CachedInvertedIndexBlobReader::new(
             FileId::random(),
             reader,
-            Arc::new(InvertedIndexCache::new(8192, 8192, 10)),
+            Arc::new(InvertedIndexCache::new(8192, 8192, ReadableSize(10))),
         );
         let metadata = cached_reader.metadata().await.unwrap();
         assert_eq!(metadata.total_row_count, 8);
