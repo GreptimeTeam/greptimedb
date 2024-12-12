@@ -1446,6 +1446,7 @@ transform:
         ]
     ]);
     {
+        // test original api
         let data_body = r#"
         [
           {
@@ -1472,6 +1473,7 @@ transform:
         assert_eq!(rows, &dryrun_rows);
     }
     {
+        // test new api specify pipeline via pipeline_name
         let body = r#"
             {
             "pipeline_name": "test",
@@ -1501,6 +1503,7 @@ transform:
         assert_eq!(rows, &dryrun_rows);
     }
     {
+        // test new api specify pipeline via pipeline raw data
         let mut body = json!({
         "data": [
             {
