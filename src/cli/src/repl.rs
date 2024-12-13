@@ -47,9 +47,9 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
 use crate::cmd::ReplCommand;
 use crate::error::{
-    CollectRecordBatchesSnafu, MetaClusterClientSnafu, ParseSqlSnafu, PlanStatementSnafu,
-    PrettyPrintRecordBatchesSnafu, ReadlineSnafu, ReplCreationSnafu, RequestDatabaseSnafu, Result,
-    StartMetaClientSnafu, SubstraitEncodeLogicalPlanSnafu,
+    CollectRecordBatchesSnafu, ParseSqlSnafu, PlanStatementSnafu, PrettyPrintRecordBatchesSnafu,
+    ReadlineSnafu, ReplCreationSnafu, RequestDatabaseSnafu, Result, StartMetaClientSnafu,
+    SubstraitEncodeLogicalPlanSnafu,
 };
 use crate::helper::RustylineHelper;
 use crate::{error, AttachCommand};

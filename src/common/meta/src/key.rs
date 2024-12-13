@@ -1263,8 +1263,8 @@ impl_metadata_value! {
     FlowRouteValue,
     TableFlowValue,
     NodeAddressValue,
-    SchemaNameValue
-    FlowStateValue,
+    SchemaNameValue,
+    FlowStateValue
 }
 
 impl_optional_metadata_value! {
