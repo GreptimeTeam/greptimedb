@@ -1918,6 +1918,7 @@ dependencies = [
  "futures",
  "paste",
  "pin-project",
+ "rand",
  "serde",
  "snafu 0.8.5",
  "tokio",
