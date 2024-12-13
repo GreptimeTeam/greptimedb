@@ -17,8 +17,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use arrow::csv;
-#[allow(deprecated)]
-use arrow::csv::reader::infer_reader_schema as infer_csv_schema;
+use arrow::csv::reader::Format;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::{Schema, SchemaRef};
 use async_trait::async_trait;
@@ -161,7 +160,6 @@ impl FileOpener for CsvOpener {
     }
 }
 
-#[allow(deprecated)]
 #[async_trait]
 impl FileFormat for CsvFormat {
     async fn infer_schema(&self, store: &ObjectStore, path: &str) -> Result<Schema> {
@@ -188,9 +186,12 @@ impl FileFormat for CsvFormat {
         common_runtime::spawn_blocking_global(move || {
             let reader = SyncIoBridge::new(decoded);
 
-            let (schema, _records_read) =
-                infer_csv_schema(reader, delimiter, schema_infer_max_record, has_header)
-                    .context(error::InferSchemaSnafu)?;
+            let format = Format::default()
+                .with_delimiter(delimiter)
+                .with_header(has_header);
+            let (schema, _records_read) = format
+                .infer_schema(reader, schema_infer_max_record)
+                .context(error::InferSchemaSnafu)?;
             Ok(schema)
         })
         .await
