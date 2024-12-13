@@ -138,17 +138,22 @@ impl WriteBufferManager for WriteBufferManagerImpl {
         // If the memory exceeds the buffer size, we trigger more aggressive
         // flush. But if already more than half memory is being flushed,
         // triggering more flush may not help. We will hold it instead.
-        if memory_usage >= self.global_write_buffer_size
-            && mutable_memtable_memory_usage >= self.global_write_buffer_size / 2
-        {
-            debug!(
+        if memory_usage >= self.global_write_buffer_size {
+            if mutable_memtable_memory_usage >= self.global_write_buffer_size / 2 {
+                debug!(
                 "Engine should flush (over total limit), memory_usage: {}, global_write_buffer_size: {}, \
                  mutable_usage: {}.",
                 memory_usage,
                 self.global_write_buffer_size,
-                mutable_memtable_memory_usage,
-            );
-            return true;
+                mutable_memtable_memory_usage);
+                return true;
+            } else {
+                debug!(
+                    "Engine won't flush, memory_usage: {}, global_write_buffer_size: {}, \
+                 mutable_usage: {}.",
+                    memory_usage, self.global_write_buffer_size, mutable_memtable_memory_usage,
+                );
+            }
         }
 
         false
