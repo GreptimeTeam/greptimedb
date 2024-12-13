@@ -99,11 +99,11 @@ struct Args {
     #[clap(long, default_value = "true")]
     pull_version_on_need: bool,
 
-    /// The store addresses for the raft engine.
-    #[clap(long, default_value = "0.0.0.0:2379")]
+    /// The store addresses for metadata, if empty, will use memory store.
+    #[clap(long)]
     store_addrs: Vec<String>,
 
-    /// Whether to setup etcd, by default it is true.
+    /// Whether to setup etcd, by default it is false.
     #[clap(long, default_value = "false")]
     setup_etcd: bool,
 }

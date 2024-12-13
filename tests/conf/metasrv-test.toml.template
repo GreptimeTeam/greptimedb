@@ -1,5 +1,5 @@
 flush_stats_factor = 1
-{{ if setup_etcd }}
+{{ if use_etcd }}
 ## Store server address default to etcd store.
 store_addrs = [{store_addrs | unescaped}]
 

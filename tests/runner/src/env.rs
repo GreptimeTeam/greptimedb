@@ -383,7 +383,7 @@ impl Env {
                     "-c".to_string(),
                     self.generate_config_file(subcommand, db_ctx),
                 ];
-                if !db_ctx.store_config().setup_etcd {
+                if db_ctx.store_config().store_addrs.is_empty() {
                     args.extend(vec!["--backend".to_string(), "memory-store".to_string()])
                 }
                 (args, vec![METASRV_ADDR.to_string()])
@@ -586,7 +586,7 @@ impl Env {
             procedure_dir: String,
             is_raft_engine: bool,
             kafka_wal_broker_endpoints: String,
-            setup_etcd: bool,
+            use_etcd: bool,
             store_addrs: String,
         }
 
@@ -601,7 +601,7 @@ impl Env {
             procedure_dir,
             is_raft_engine: db_ctx.is_raft_engine(),
             kafka_wal_broker_endpoints: db_ctx.kafka_wal_broker_endpoints(),
-            setup_etcd: self.store_config.setup_etcd,
+            use_etcd: !self.store_config.store_addrs.is_empty(),
             store_addrs: self
                 .store_config
                 .store_addrs
