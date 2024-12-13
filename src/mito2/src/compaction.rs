@@ -271,11 +271,11 @@ impl CompactionScheduler {
             current_version.options.ttl,
             &schema_metadata_manager,
         )
-            .await
-            .unwrap_or_else(|e| {
-                warn!(e; "Failed to get ttl for region: {}", region_id);
-                TimeToLive::default()
-            });
+        .await
+        .unwrap_or_else(|e| {
+            warn!(e; "Failed to get ttl for region: {}", region_id);
+            TimeToLive::default()
+        });
 
         debug!(
             "Pick compaction strategy {:?} for region: {}, ttl: {:?}",
@@ -351,7 +351,7 @@ impl CompactionScheduler {
                                 job_id: None,
                                 reason: e.reason,
                             }
-                                .fail();
+                            .fail();
                         }
 
                         error!(e; "Failed to schedule remote compaction job for region {}, fallback to local compaction", region_id);
