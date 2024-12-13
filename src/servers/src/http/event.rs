@@ -514,8 +514,8 @@ pub async fn loki_ingest(
             let line = entry.line;
 
             // create and init row
-            let mut row = Vec::with_capacity(schemas.capacity());
-            for _ in 0..row.capacity() {
+            let mut row = Vec::with_capacity(schemas.len());
+            for _ in 0..schemas.len() {
                 row.push(GreptimeValue { value_data: None });
             }
             // insert ts and line
