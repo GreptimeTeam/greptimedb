@@ -893,6 +893,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to read file metadata"))]
+    Metadata {
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -965,7 +973,8 @@ impl ErrorExt for Error {
             | CreateDir { .. }
             | ReadDataPart { .. }
             | CorruptedEntry { .. }
-            | BuildEntry { .. } => StatusCode::Internal,
+            | BuildEntry { .. }
+            | Metadata { .. } => StatusCode::Internal,
 
             OpenRegion { source, .. } => source.status_code(),
 

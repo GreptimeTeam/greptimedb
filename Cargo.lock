@@ -6643,6 +6643,7 @@ dependencies = [
  "async-channel 1.9.0",
  "async-stream",
  "async-trait",
+ "bytemuck",
  "bytes",
  "common-base",
  "common-config",
