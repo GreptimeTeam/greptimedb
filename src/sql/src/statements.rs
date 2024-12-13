@@ -1519,6 +1519,7 @@ mod tests {
                     .into(),
                 ),
                 vector_options: None,
+                skip_index_options: None,
             },
         };
 

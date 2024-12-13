@@ -36,7 +36,9 @@ use crate::error::{
     SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::parser::{ParserContext, FLOW};
-use crate::parsers::utils::validate_column_fulltext_create_option;
+use crate::parsers::utils::{
+    validate_column_fulltext_create_option, validate_column_skip_index_create_option,
+};
 use crate::statements::create::{
     Column, ColumnExtensions, CreateDatabase, CreateExternalTable, CreateFlow, CreateTable,
     CreateTableLike, CreateView, Partitions, TableConstraint, VECTOR_OPT_DIM,
@@ -701,6 +703,38 @@ impl<'a> ParserContext<'a> {
             column_extensions.vector_options = Some(options.into());
         }
 
+        let mut is_index_declared = false;
+
+        if parser.parse_keyword(Keyword::SKIP) {
+            ensure!(
+                column_extensions.skip_index_options.is_none(),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: "duplicated SKIP index option",
+                }
+            );
+
+            let options = parser
+                .parse_options(Keyword::WITH)
+                .context(error::SyntaxSnafu)?
+                .into_iter()
+                .map(parse_option_string)
+                .collect::<Result<HashMap<String, String>>>()?;
+
+            for key in options.keys() {
+                ensure!(
+                    validate_column_skip_index_create_option(key),
+                    InvalidColumnOptionSnafu {
+                        name: column_name.to_string(),
+                        msg: format!("invalid SKIP option: {key}"),
+                    }
+                );
+            }
+
+            column_extensions.skip_index_options = Some(options.into());
+            is_index_declared |= true;
+        }
+
         if parser.parse_keyword(Keyword::FULLTEXT) {
             ensure!(
                 column_extensions.fulltext_options.is_none(),
@@ -738,10 +772,10 @@ impl<'a> ParserContext<'a> {
             }
 
             column_extensions.fulltext_options = Some(options.into());
-            Ok(true)
-        } else {
-            Ok(false)
+            is_index_declared |= true;
         }
+
+        Ok(is_index_declared)
     }
 
     fn parse_optional_table_constraint(&mut self) -> Result<Option<TableConstraint>> {
@@ -2101,6 +2135,57 @@ CREATE TABLE log (
             .unwrap_err()
             .to_string()
             .contains("invalid FULLTEXT option"));
+    }
+
+    #[test]
+    fn test_parse_create_table_skip_options() {
+        let sql = r"
+CREATE TABLE log (
+    ts TIMESTAMP TIME INDEX,
+    msg INT SKIP WITH (granularity='8192', type='bloom'),
+)";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+
+        if let Statement::CreateTable(c) = &result[0] {
+            c.columns.iter().for_each(|col| {
+                if col.name().value == "msg" {
+                    assert!(!col
+                        .extensions
+                        .skip_index_options
+                        .as_ref()
+                        .unwrap()
+                        .is_empty());
+                }
+            });
+        } else {
+            panic!("should be create_table statement");
+        }
+
+        let sql = r"
+        CREATE TABLE log (
+            ts TIMESTAMP TIME INDEX,
+            msg INT SKIP,
+        )";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+
+        if let Statement::CreateTable(c) = &result[0] {
+            c.columns.iter().for_each(|col| {
+                if col.name().value == "msg" {
+                    assert!(col
+                        .extensions
+                        .skip_index_options
+                        .as_ref()
+                        .unwrap()
+                        .is_empty());
+                }
+            });
+        } else {
+            panic!("should be create_table statement");
+        }
     }
 
     #[test]

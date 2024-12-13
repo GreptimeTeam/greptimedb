@@ -45,6 +45,10 @@ pub const COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE: &str = "enable";
 pub const COLUMN_FULLTEXT_OPT_KEY_ANALYZER: &str = "analyzer";
 pub const COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE: &str = "case_sensitive";
 
+/// Keys used in SKIP index options
+pub const COLUMN_SKIP_INDEX_OPT_KEY_GRANULARITY: &str = "granularity";
+pub const COLUMN_SKIP_INDEX_OPT_KEY_TYPE: &str = "type";
+
 /// Schema of a column, used as an immutable struct.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnSchema {

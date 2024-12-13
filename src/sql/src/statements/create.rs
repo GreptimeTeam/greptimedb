@@ -116,6 +116,8 @@ pub struct ColumnExtensions {
     pub fulltext_options: Option<OptionMap>,
     /// Vector options.
     pub vector_options: Option<OptionMap>,
+    /// Skip index options.
+    pub skip_index_options: Option<OptionMap>,
 }
 
 impl Column {
@@ -156,6 +158,15 @@ impl Display for Column {
                 write!(f, " FULLTEXT WITH({})", format_list_comma!(options))?;
             } else {
                 write!(f, " FULLTEXT")?;
+            }
+        }
+
+        if let Some(skip_index_options) = &self.extensions.skip_index_options {
+            if !skip_index_options.is_empty() {
+                let options = skip_index_options.kv_pairs();
+                write!(f, " SKIP WITH({})", format_list_comma!(options))?;
+            } else {
+                write!(f, " SKIP")?;
             }
         }
         Ok(())
