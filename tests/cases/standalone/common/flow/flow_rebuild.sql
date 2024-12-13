@@ -311,3 +311,9 @@ VALUES
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
 SELECT wildcard FROM out_basic;
+
+DROP FLOW test_wildcard_basic;
+
+DROP TABLE input_basic;
+
+DROP TABLE out_basic;

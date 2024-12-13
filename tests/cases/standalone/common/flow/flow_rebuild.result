@@ -564,3 +564,15 @@ SELECT wildcard FROM out_basic;
 | 3        |
 +----------+
 
+DROP FLOW test_wildcard_basic;
+
+Affected Rows: 0
+
+DROP TABLE input_basic;
+
+Affected Rows: 0
+
+DROP TABLE out_basic;
+
+Affected Rows: 0
+
