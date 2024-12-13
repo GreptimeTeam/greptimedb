@@ -2412,7 +2412,7 @@ dependencies = [
  "criterion 0.4.0",
  "dashmap 5.5.3",
  "datatypes",
- "flatbuffers 23.5.26",
+ "flatbuffers 24.3.25",
  "lazy_static",
  "prost 0.12.6",
  "rand",
