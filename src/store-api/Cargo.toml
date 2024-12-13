@@ -9,7 +9,6 @@ workspace = true
 
 [dependencies]
 api.workspace = true
-aquamarine.workspace = true
 async-trait.workspace = true
 common-base.workspace = true
 common-error.workspace = true

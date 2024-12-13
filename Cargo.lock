@@ -223,26 +223,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "approx_eq"
-version = "0.1.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3f9eb837c6a783fbf002e3e5cc7925a3aa6893d6d42f9169517528983777590"
-
-[[package]]
-name = "aquamarine"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1da02abba9f9063d786eab1509833ebb2fac0f966862ca59439c76b9c566760"
-dependencies = [
- "include_dir",
- "itertools 0.10.5",
- "proc-macro-error",
- "proc-macro2",
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
 name = "arbitrary"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4068,15 +4048,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "format_num"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14ac05eb8d2eb4ed1eeff847911deae077b0b53332465de9d6a26b0ea9961bc8"
-dependencies = [
- "regex",
-]
-
-[[package]]
 name = "fragile"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5194,25 +5165,6 @@ name = "if_chain"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb56e1aa765b4b4f3aadfab769793b7087bb03a4ea4920644a6d238e2df5b9ed"
-
-[[package]]
-name = "include_dir"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "923d117408f1e49d914f1a379a309cffe4f18c05cf4e3d12e613a15fc81bd0dd"
-dependencies = [
- "include_dir_macros",
-]
-
-[[package]]
-name = "include_dir_macros"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cab85a7ed0bd5f0e76d93846e0147172bed2e2d3f859bcc33a8d9699cad1a75"
-dependencies = [
- "proc-macro2",
- "quote",
-]
 
 [[package]]
 name = "index"
@@ -6486,7 +6438,6 @@ name = "metric-engine"
 version = "0.12.0"
 dependencies = [
  "api",
- "aquamarine",
  "async-trait",
  "base64 0.21.7",
  "common-base",
@@ -6580,7 +6531,6 @@ name = "mito2"
 version = "0.12.0"
 dependencies = [
  "api",
- "aquamarine",
  "async-channel 1.9.0",
  "async-stream",
  "async-trait",
@@ -6594,7 +6544,6 @@ dependencies = [
  "common-function",
  "common-macro",
  "common-meta",
- "common-procedure-test",
  "common-query",
  "common-recordbatch",
  "common-runtime",
@@ -8171,7 +8120,6 @@ dependencies = [
  "query",
  "rayon",
  "regex",
- "ron",
  "serde",
  "serde_json",
  "session",
@@ -8583,10 +8531,7 @@ dependencies = [
  "greptime-proto",
  "lazy_static",
  "prometheus",
- "promql-parser",
  "prost 0.12.6",
- "query",
- "session",
  "snafu 0.8.5",
  "tokio",
 ]
@@ -8934,7 +8879,6 @@ version = "0.12.0"
 dependencies = [
  "ahash 0.8.11",
  "api",
- "approx_eq",
  "arc-swap",
  "arrow",
  "arrow-schema",
@@ -8966,7 +8910,6 @@ dependencies = [
  "datafusion-sql",
  "datatypes",
  "fastrand",
- "format_num",
  "futures",
  "futures-util",
  "greptime-proto",
@@ -8994,9 +8937,7 @@ dependencies = [
  "sql",
  "sqlparser 0.45.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=54a267ac89c09b11c0c88934690530807185d3e7)",
  "statrs",
- "stats-cli",
  "store-api",
- "streaming-stats",
  "substrait 0.12.0",
  "table",
  "tokio",
@@ -10487,7 +10428,6 @@ dependencies = [
  "datatypes",
  "futures",
  "lazy_static",
- "log-store",
  "once_cell",
  "operator",
  "paste",
@@ -10510,7 +10450,6 @@ dependencies = [
  "sql",
  "table",
  "tokio",
- "tokio-test",
 ]
 
 [[package]]
@@ -10852,7 +10791,6 @@ dependencies = [
  "tokio-postgres-rustls",
  "tokio-rustls 0.26.0",
  "tokio-stream",
- "tokio-test",
  "tokio-util",
  "tonic 0.11.0",
  "tonic-reflection",
@@ -11487,21 +11425,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "stats-cli"
-version = "3.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8786c4fc8a91bc4fcd90aed33413f79e4dc9811f24ba14d1d59adf57cf1c871"
-dependencies = [
- "clap 2.34.0",
- "num-traits",
-]
-
-[[package]]
 name = "store-api"
 version = "0.12.0"
 dependencies = [
  "api",
- "aquamarine",
  "async-stream",
  "async-trait",
  "common-base",
@@ -11536,15 +11463,6 @@ name = "str_stack"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9091b6114800a5f2141aee1d1b9d6ca3592ac062dc5decb3764ec5895a47b4eb"
-
-[[package]]
-name = "streaming-stats"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0d670ce4e348a2081843569e0f79b21c99c91bb9028b3b3ecb0f050306de547"
-dependencies = [
- "num-traits",
-]
 
 [[package]]
 name = "strfmt"
