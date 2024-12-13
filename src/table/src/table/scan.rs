@@ -242,6 +242,10 @@ impl ExecutionPlan for RegionScanExec {
         };
         Ok(statistics)
     }
+
+    fn name(&self) -> &str {
+        "RegionScanExec"
+    }
 }
 
 impl DisplayAs for RegionScanExec {

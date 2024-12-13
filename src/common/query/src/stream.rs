@@ -119,6 +119,10 @@ impl ExecutionPlan for StreamScanAdapter {
             .ok_or_else(|| DataFusionError::Execution("Stream already exhausted".to_string()))?;
         Ok(Box::pin(DfRecordBatchStreamAdapter::new(stream)))
     }
+
+    fn name(&self) -> &str {
+        "StreamScanAdapter"
+    }
 }
 
 #[cfg(test)]

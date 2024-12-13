@@ -58,6 +58,14 @@ impl DfTableProviderAdapter {
     }
 }
 
+impl std::fmt::Debug for DfTableProviderAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DfTableProviderAdapter")
+            .field("table", &self.table.table_info.full_table_name())
+            .finish()
+    }
+}
+
 #[async_trait::async_trait]
 impl TableProvider for DfTableProviderAdapter {
     fn as_any(&self) -> &dyn Any {

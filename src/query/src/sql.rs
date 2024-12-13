@@ -41,6 +41,7 @@ use common_time::timezone::get_timezone;
 use common_time::Timestamp;
 use datafusion::common::ScalarValue;
 use datafusion::prelude::SessionContext;
+use datafusion_expr::expr::WildcardOptions;
 use datafusion_expr::{case, col, lit, Expr};
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema, Schema};
@@ -423,7 +424,10 @@ pub async fn show_index(
         lit("").alias(INDEX_COMMENT_COLUMN),
         lit(YES_STR).alias(INDEX_VISIBLE_COLUMN),
         null().alias(INDEX_EXPRESSION_COLUMN),
-        Expr::Wildcard { qualifier: None },
+        Expr::Wildcard {
+            qualifier: None,
+            options: WildcardOptions::default(),
+        },
     ];
 
     let projects = vec![
