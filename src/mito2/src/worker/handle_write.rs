@@ -131,6 +131,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
     /// Handles all stalled write requests.
     pub(crate) async fn handle_stalled_requests(&mut self) {
+        let handle_stall_start = Instant::now();
         if let Some(start) = self.stall_start.take() {
             self.metrics.stall_cost += start.elapsed();
         }
@@ -142,6 +143,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.metrics.num_stalled_request_processed += requests.len();
             self.handle_write_requests(requests, false).await;
         }
+        self.metrics.handle_stall_cost += handle_stall_start.elapsed();
     }
 
     /// Rejects all stalled requests.

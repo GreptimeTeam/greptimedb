@@ -795,12 +795,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let handle_start = Instant::now();
 
             if self.flush_receiver.has_changed().unwrap_or(false) {
-                let start = Instant::now();
                 // Always checks whether we could process stalled requests to avoid a request
                 // hangs too long.
                 // If the channel is closed, do nothing.
                 self.handle_stalled_requests().await;
-                self.metrics.handle_stall_cost = start.elapsed();
             }
 
             // Try to recv more requests from the channel.
