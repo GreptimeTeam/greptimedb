@@ -187,7 +187,7 @@ impl IndexDataPageKey {
     fn calculate_page_count(offset: u64, size: u32, page_size: u64) -> u32 {
         let start_page = Self::calculate_page_id(offset, page_size);
         let end_page = Self::calculate_page_id(offset + (size as u64) - 1, page_size);
-        (end_page - start_page + 1) as u32
+        (end_page + 1 - start_page) as u32
     }
 
     /// Computes the byte range in the first page based on the offset and size.
@@ -324,9 +324,12 @@ mod test {
     use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
     use index::inverted_index::format::writer::{InvertedIndexBlobWriter, InvertedIndexWriter};
     use index::inverted_index::Bytes;
+    use prometheus::register_int_counter_vec;
     use rand::{Rng, RngCore};
 
     use super::*;
+    use crate::sst::index::store::InstrumentedStore;
+    use crate::test_util::TestEnv;
 
     // Fuzz test for index data page key
     #[test]
@@ -419,13 +422,28 @@ mod test {
     #[tokio::test]
     async fn test_inverted_index_cache() {
         let blob = create_inverted_index_blob().await;
+
+        // Init a test range reader in local fs.
+        let mut env = TestEnv::new();
         let file_size = blob.len() as u64;
-        let reader = InvertedIndexBlobReader::new(blob);
+        let store = env.init_object_store_manager();
+        let temp_path = "data";
+        store.write(temp_path, blob).await.unwrap();
+        let store = InstrumentedStore::new(store);
+        let metric =
+            register_int_counter_vec!("test_bytes", "a counter for test", &["test"]).unwrap();
+        let counter = metric.with_label_values(&["test"]);
+        let range_reader = store
+            .range_reader("data", &counter, &counter)
+            .await
+            .unwrap();
+
+        let reader = InvertedIndexBlobReader::new(range_reader);
         let mut cached_reader = CachedInvertedIndexBlobReader::new(
             FileId::random(),
             file_size,
             reader,
-            Arc::new(InvertedIndexCache::new(8192, 8192, 10)),
+            Arc::new(InvertedIndexCache::new(8192, 8192, 50)),
         );
         let metadata = cached_reader.metadata().await.unwrap();
         assert_eq!(metadata.total_row_count, 8);
