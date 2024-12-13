@@ -1310,7 +1310,6 @@ dependencies = [
  "common-meta",
  "moka",
  "snafu 0.8.5",
- "substrait 0.12.0",
 ]
 
 [[package]]
@@ -1349,7 +1348,6 @@ dependencies = [
  "catalog",
  "chrono",
  "common-catalog",
- "common-config",
  "common-error",
  "common-macro",
  "common-meta",
@@ -1358,7 +1356,6 @@ dependencies = [
  "common-recordbatch",
  "common-runtime",
  "common-telemetry",
- "common-test-util",
  "common-time",
  "common-version",
  "dashmap",
@@ -1369,7 +1366,6 @@ dependencies = [
  "humantime",
  "itertools 0.10.5",
  "lazy_static",
- "log-store",
  "meta-client",
  "moka",
  "object-store",
@@ -1693,7 +1689,6 @@ dependencies = [
  "common-grpc",
  "common-macro",
  "common-meta",
- "common-options",
  "common-procedure",
  "common-query",
  "common-recordbatch",
@@ -1722,7 +1717,6 @@ dependencies = [
  "store-api",
  "substrait 0.12.0",
  "table",
- "temp-env",
  "tempfile",
  "tokio",
  "tracing-appender",
@@ -1746,8 +1740,6 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-telemetry",
- "datanode",
- "derive-new 0.5.9",
  "enum_dispatch",
  "futures-util",
  "lazy_static",
@@ -1928,13 +1920,6 @@ dependencies = [
 [[package]]
 name = "common-catalog"
 version = "0.12.0"
-dependencies = [
- "chrono",
- "common-error",
- "common-macro",
- "snafu 0.8.5",
- "tokio",
-]
 
 [[package]]
 name = "common-config"
@@ -1978,7 +1963,6 @@ dependencies = [
  "datafusion",
  "datatypes",
  "derive_builder 0.12.0",
- "dotenv",
  "futures",
  "lazy_static",
  "object-store",
@@ -2022,15 +2006,10 @@ dependencies = [
 name = "common-frontend"
 version = "0.12.0"
 dependencies = [
- "api",
  "async-trait",
- "common-base",
  "common-error",
  "common-macro",
- "common-query",
- "session",
  "snafu 0.8.5",
- "sql",
 ]
 
 [[package]]
@@ -2064,7 +2043,6 @@ dependencies = [
  "num-traits",
  "once_cell",
  "paste",
- "ron",
  "s2",
  "serde",
  "serde_json",
@@ -2353,8 +2331,6 @@ dependencies = [
  "snafu 0.8.5",
  "tempfile",
  "tokio",
- "tokio-metrics",
- "tokio-metrics-collector",
  "tokio-test",
  "tokio-util",
 ]
@@ -2832,16 +2808,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5efa2b3d7902f4b634a20cae3c9c4e6209dc4779feb6863329607560143efa70"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "ctor"
-version = "0.1.26"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d2301688392eb071b0bf1a37be05c469d3cc4dbbd95df672fe28ab021e6a096"
-dependencies = [
- "quote",
- "syn 1.0.109",
 ]
 
 [[package]]
@@ -3388,17 +3354,6 @@ dependencies = [
 
 [[package]]
 name = "derive-new"
-version = "0.5.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3418329ca0ad70234b9735dc4ceed10af4df60eff9c8e7b06cb5e520d92c3535"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
-name = "derive-new"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2cdc8d50f426189eef89dac62fabfa0abb27d5cc008f25bf4156a0203325becc"
@@ -3919,7 +3874,6 @@ dependencies = [
  "common-error",
  "common-macro",
  "common-procedure",
- "common-procedure-test",
  "common-query",
  "common-recordbatch",
  "common-telemetry",
@@ -4067,7 +4021,6 @@ dependencies = [
  "itertools 0.10.5",
  "lazy_static",
  "meta-client",
- "minstant",
  "nom",
  "num-traits",
  "operator",
@@ -4145,7 +4098,6 @@ dependencies = [
  "common-config",
  "common-datasource",
  "common-error",
- "common-frontend",
  "common-function",
  "common-grpc",
  "common-macro",
@@ -4167,7 +4119,6 @@ dependencies = [
  "lazy_static",
  "log-store",
  "meta-client",
- "meta-srv",
  "opentelemetry-proto 0.5.0",
  "operator",
  "partition",
@@ -6601,16 +6552,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "minstant"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fb9b5c752f145ac5046bccc3c4f62892e3c950c1d1eab80c5949cd68a2078db"
-dependencies = [
- "ctor",
- "web-time 1.1.0",
-]
-
-[[package]]
 name = "mio"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8090,7 +8031,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
- "derive-new 0.7.0",
+ "derive-new",
  "futures",
  "hex",
  "lazy-regex",
@@ -12563,30 +12504,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-metrics"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eace09241d62c98b7eeb1107d4c5c64ca3bd7da92e8c218c153ab3a78f9be112"
-dependencies = [
- "futures-util",
- "pin-project-lite",
- "tokio",
- "tokio-stream",
-]
-
-[[package]]
-name = "tokio-metrics-collector"
-version = "0.2.1"
-source = "git+https://github.com/MichaelScofield/tokio-metrics-collector.git?rev=89d692d5753d28564a7aac73c6ac5aba22243ba0#89d692d5753d28564a7aac73c6ac5aba22243ba0"
-dependencies = [
- "lazy_static",
- "parking_lot 0.12.3",
- "prometheus",
- "tokio",
- "tokio-metrics",
-]
-
-[[package]]
 name = "tokio-postgres"
 version = "0.7.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13012,7 +12929,7 @@ dependencies = [
  "tracing-core",
  "tracing-log 0.2.0",
  "tracing-subscriber",
- "web-time 0.2.4",
+ "web-time",
 ]
 
 [[package]]
@@ -13778,16 +13695,6 @@ name = "web-time"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa30049b1c872b72c89866d458eae9f20380ab280ffd1b1e18df2d3e2d98cfe0"
-dependencies = [
- "js-sys",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "web-time"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",

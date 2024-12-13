@@ -35,8 +35,6 @@ serde_json.workspace = true
 snafu.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
-tokio-metrics = "0.3"
-tokio-metrics-collector = { git = "https://github.com/MichaelScofield/tokio-metrics-collector.git", rev = "89d692d5753d28564a7aac73c6ac5aba22243ba0" }
 tokio-util.workspace = true
 
 [dev-dependencies]
