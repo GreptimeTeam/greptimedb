@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 
 use common_catalog::consts::FILE_ENGINE;
-use datatypes::schema::FulltextOptions;
+use datatypes::schema::{FulltextOptions, SkipIndexOptions};
 use itertools::Itertools;
 use serde::Serialize;
 use snafu::ResultExt;
@@ -24,7 +24,7 @@ use sqlparser::ast::{ColumnOptionDef, DataType, Expr, Query};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, Value as SqlValue};
-use crate::error::{Result, SetFulltextOptionSnafu};
+use crate::error::{Result, SetFulltextOptionSnafu, SetSkipIndexOptionSnafu};
 use crate::statements::statement::Statement;
 use crate::statements::OptionMap;
 
@@ -181,6 +181,15 @@ impl ColumnExtensions {
 
         let options: HashMap<String, String> = options.clone().into_map();
         Ok(Some(options.try_into().context(SetFulltextOptionSnafu)?))
+    }
+
+    pub fn build_skip_index_options(&self) -> Result<Option<SkipIndexOptions>> {
+        let Some(options) = self.skip_index_options.as_ref() else {
+            return Ok(None);
+        };
+
+        let options: HashMap<String, String> = options.clone().into_map();
+        Ok(Some(options.try_into().context(SetSkipIndexOptionSnafu)?))
     }
 }
 

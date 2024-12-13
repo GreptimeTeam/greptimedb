@@ -58,7 +58,8 @@ use crate::error::{
     self, ColumnTypeMismatchSnafu, ConvertSqlValueSnafu, ConvertToGrpcDataTypeSnafu,
     ConvertValueSnafu, DatatypeSnafu, InvalidCastSnafu, InvalidSqlValueSnafu, InvalidUnaryOpSnafu,
     ParseSqlValueSnafu, Result, SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu,
-    TimestampOverflowSnafu, UnsupportedDefaultValueSnafu, UnsupportedUnaryOpSnafu,
+    SetSkipIndexOptionSnafu, TimestampOverflowSnafu, UnsupportedDefaultValueSnafu,
+    UnsupportedUnaryOpSnafu,
 };
 use crate::statements::create::Column;
 pub use crate::statements::option_map::OptionMap;
@@ -511,6 +512,12 @@ pub fn column_to_schema(
         column_schema = column_schema
             .with_fulltext_options(options)
             .context(SetFulltextOptionSnafu)?;
+    }
+
+    if let Some(options) = column.extensions.build_skip_index_options()? {
+        column_schema = column_schema
+            .with_skip_options(options)
+            .context(SetSkipIndexOptionSnafu)?;
     }
 
     Ok(column_schema)

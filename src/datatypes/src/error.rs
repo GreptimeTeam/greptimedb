@@ -232,6 +232,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("Invalid skip index option: {}", msg))]
+    InvalidSkipIndexOption {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -252,7 +258,8 @@ impl ErrorExt for Error {
             | InvalidPrecisionOrScale { .. }
             | InvalidJson { .. }
             | InvalidVector { .. }
-            | InvalidFulltextOption { .. } => StatusCode::InvalidArguments,
+            | InvalidFulltextOption { .. }
+            | InvalidSkipIndexOption { .. } => StatusCode::InvalidArguments,
 
             ValueExceedsPrecision { .. }
             | CastType { .. }
