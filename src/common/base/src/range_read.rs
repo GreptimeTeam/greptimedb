@@ -205,9 +205,7 @@ impl RangeReader for Vec<u8> {
         })
     }
 
-    async fn read(&mut self, mut range: Range<u64>) -> io::Result<Bytes> {
-        range.end = range.end.min(self.len() as u64);
-
+    async fn read(&mut self, range: Range<u64>) -> io::Result<Bytes> {
         let bytes = Bytes::copy_from_slice(&self[range.start as usize..range.end as usize]);
         Ok(bytes)
     }

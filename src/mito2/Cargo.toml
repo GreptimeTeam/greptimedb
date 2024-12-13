@@ -17,6 +17,7 @@ aquamarine.workspace = true
 async-channel = "1.9"
 async-stream.workspace = true
 async-trait = "0.1"
+bytemuck.workspace = true
 bytes.workspace = true
 common-base.workspace = true
 common-config.workspace = true

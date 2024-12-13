@@ -416,6 +416,8 @@ pub struct InvertedIndexConfig {
     pub metadata_cache_size: ReadableSize,
     /// Cache size for inverted index content. Setting it to 0 to disable the cache.
     pub content_cache_size: ReadableSize,
+    /// Page size for inverted index content.
+    pub content_cache_page_size: ReadableSize,
 }
 
 impl InvertedIndexConfig {
@@ -441,6 +443,7 @@ impl Default for InvertedIndexConfig {
             intermediate_path: String::new(),
             metadata_cache_size: ReadableSize::mb(64),
             content_cache_size: ReadableSize::mb(128),
+            content_cache_page_size: ReadableSize::mb(8),
         };
 
         if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {

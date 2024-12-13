@@ -946,6 +946,7 @@ create_on_flush = "auto"
 create_on_compaction = "auto"
 apply_on_query = "auto"
 mem_threshold_on_create = "auto"
+content_cache_page_size = "8MiB"
 
 [region_engine.mito.fulltext_index]
 create_on_flush = "auto"
