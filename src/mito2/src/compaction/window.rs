@@ -251,7 +251,7 @@ mod tests {
                 memtable: None,
                 merge_mode: None,
             },
-            compaction_time_window:None,
+            compaction_time_window: None,
         }
     }
 

@@ -59,7 +59,7 @@ use crate::read::scan_region::ScanInput;
 use crate::read::seq_scan::SeqScan;
 use crate::read::BoxedBatchReader;
 use crate::region::options::MergeMode;
-use crate::region::version::{VersionControlRef};
+use crate::region::version::VersionControlRef;
 use crate::region::ManifestContextRef;
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
 use crate::schedule::remote_job_scheduler::{
