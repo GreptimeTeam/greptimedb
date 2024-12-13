@@ -316,6 +316,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to get skip inde options"))]
+    GetSkipIndexOptions {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -366,7 +373,9 @@ impl ErrorExt for Error {
             MissingTableMutationHandler { .. } => StatusCode::Unexpected,
             GetRegionMetadata { .. } => StatusCode::RegionNotReady,
             TableReadOnly { .. } => StatusCode::Unsupported,
-            GetFulltextOptions { source, .. } => source.status_code(),
+            GetFulltextOptions { source, .. } | GetSkipIndexOptions { source, .. } => {
+                source.status_code()
+            }
         }
     }
 

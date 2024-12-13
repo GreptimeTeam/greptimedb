@@ -13,19 +13,19 @@ show
 create table
     skipping_table;
 
-+----------------+-----------------------------------------------+
-| Table          | Create Table                                  |
-+----------------+-----------------------------------------------+
-| skipping_table | CREATE TABLE IF NOT EXISTS "skipping_table" ( |
-|                |   "ts" TIMESTAMP(3) NOT NULL,                 |
-|                |   "id" STRING NULL,                           |
-|                |   "name" STRING NULL,                         |
-|                |   TIME INDEX ("ts")                           |
-|                | )                                             |
-|                |                                               |
-|                | ENGINE=mito                                   |
-|                |                                               |
-+----------------+-----------------------------------------------+
++----------------+-----------------------------------------------------------------------+
+| Table          | Create Table                                                          |
++----------------+-----------------------------------------------------------------------+
+| skipping_table | CREATE TABLE IF NOT EXISTS "skipping_table" (                         |
+|                |   "ts" TIMESTAMP(3) NOT NULL,                                         |
+|                |   "id" STRING NULL SKIP WITH(granularity = '10240', type = 'BLOOM'),  |
+|                |   "name" STRING NULL SKIP WITH(granularity = '8192', type = 'BLOOM'), |
+|                |   TIME INDEX ("ts")                                                   |
+|                | )                                                                     |
+|                |                                                                       |
+|                | ENGINE=mito                                                           |
+|                |                                                                       |
++----------------+-----------------------------------------------------------------------+
 
 drop table skipping_table;
 
