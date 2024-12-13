@@ -115,11 +115,6 @@ pub struct FlowStateManager {
     in_memory: KvBackendRef,
 }
 
-#[async_trait::async_trait]
-pub trait LocalFlowStateReporter: Send + Sync {
-    async fn report(&self) -> FlowStateValue;
-}
-
 impl FlowStateManager {
     pub fn new(in_memory: KvBackendRef) -> Self {
         Self { in_memory }

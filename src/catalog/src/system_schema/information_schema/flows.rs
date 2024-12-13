@@ -212,7 +212,7 @@ impl InformationSchemaFlowsBuilder {
             .flow_names(&catalog_name)
             .await;
 
-        let flow_state_size = {
+        let flow_stat = {
             let information_extension =
                 utils::information_extension(&self.catalog_manager).unwrap();
             information_extension.flow_stats().await?.clone()
@@ -236,7 +236,7 @@ impl InformationSchemaFlowsBuilder {
                     catalog_name: catalog_name.to_string(),
                     flow_name: flow_name.to_string(),
                 })?;
-            self.add_flow(&predicates, flow_id.flow_id(), flow_info, &flow_state_size)?;
+            self.add_flow(&predicates, flow_id.flow_id(), flow_info, &flow_stat)?;
         }
 
         self.finish()
@@ -247,7 +247,7 @@ impl InformationSchemaFlowsBuilder {
         predicates: &Predicates,
         flow_id: FlowId,
         flow_info: FlowInfoValue,
-        flow_state_size: &Option<FlowStat>,
+        flow_stat: &Option<FlowStat>,
     ) -> Result<()> {
         let row = [
             (FLOW_NAME, &Value::from(flow_info.flow_name().to_string())),
@@ -263,7 +263,7 @@ impl InformationSchemaFlowsBuilder {
         self.flow_names.push(Some(flow_info.flow_name()));
         self.flow_ids.push(Some(flow_id));
         self.state_sizes.push(
-            flow_state_size
+            flow_stat
                 .as_ref()
                 .and_then(|state| state.state_size.get(&flow_id).map(|v| *v as u64)),
         );

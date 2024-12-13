@@ -571,7 +571,7 @@ FROM
 
 -- Test if FLOWS table works, but don't care about the result since it vary from runs
 SELECT
-    1
+    count(CASE WHEN state_size > 0 THEN 1 ELSE 0 END) as active_flows,
 FROM
     INFORMATION_SCHEMA.FLOWS;
 
