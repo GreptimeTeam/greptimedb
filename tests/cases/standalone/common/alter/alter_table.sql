@@ -67,10 +67,15 @@ ALTER TABLE
 ADD
     COLUMN at2 STRING;
 
+ALTER TABLE 
+    t2 
+ADD 
+    COLUMN at4 UINT16;
+
 INSERT INTO
     t2
 VALUES
-    ("loc_1", "loc_2", "loc_3", 'job1', 0, 1);
+    ("loc_1", "loc_2", "loc_3", 2, 'job1', 0, 1);
 
 SELECT
     *
