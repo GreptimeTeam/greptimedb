@@ -323,8 +323,6 @@ jobs:
         uses: ./.github/actions/setup-kafka-cluster
       - name: Setup Etcd cluser
         uses: ./.github/actions/setup-etcd-cluster
-      - name: Setup Postgres cluser
-        uses: ./.github/actions/setup-postgres-cluster
       # Prepares for fuzz tests
       - uses: arduino/setup-protoc@v3
         with:
