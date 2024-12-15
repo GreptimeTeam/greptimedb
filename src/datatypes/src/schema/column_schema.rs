@@ -156,6 +156,10 @@ impl ColumnSchema {
             .unwrap_or(false)
     }
 
+    pub fn has_fulltext_index_key(&self) -> bool {
+        self.metadata.contains_key(FULLTEXT_KEY)
+    }
+
     pub fn has_inverted_index_key(&self) -> bool {
         self.metadata.contains_key(INVERTED_INDEX_KEY)
     }
