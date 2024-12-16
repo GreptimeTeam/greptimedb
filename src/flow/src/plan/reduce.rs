@@ -28,9 +28,9 @@ impl KeyValPlan {
     pub fn get_nth_expr(&self, n: usize) -> Option<&ScalarExpr> {
         let key_len = self.key_plan.expressions.len();
         if n < key_len {
-            return self.key_plan.expressions.get(n);
+            self.key_plan.expressions.get(n)
         } else {
-            return self.val_plan.expressions.get(n - key_len);
+            self.val_plan.expressions.get(n - key_len)
         }
     }
 }
