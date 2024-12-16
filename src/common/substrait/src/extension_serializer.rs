@@ -22,6 +22,7 @@ use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, ScalarCalculate, SeriesDivide, SeriesNormalize,
 };
 
+#[derive(Debug)]
 pub struct ExtensionSerializer;
 
 impl SerializerRegistry for ExtensionSerializer {

@@ -25,7 +25,7 @@ use snafu::{OptionExt, ResultExt};
 use tonic::transport::{
     Certificate, Channel as InnerChannel, ClientTlsConfig, Endpoint, Identity, Uri,
 };
-use tower::make::MakeConnection;
+use tower::Service;
 
 use crate::error::{CreateChannelSnafu, InvalidConfigFilePathSnafu, InvalidTlsConfigSnafu, Result};
 
@@ -137,8 +137,8 @@ impl ChannelManager {
         connector: C,
     ) -> Result<InnerChannel>
     where
-        C: MakeConnection<Uri> + Send + 'static,
-        C::Connection: Unpin + Send + 'static,
+        C: Service<Uri> + Send + 'static,
+        C::Response: hyper::rt::Read + hyper::rt::Write + Send + Unpin,
         C::Future: Send + 'static,
         Box<dyn std::error::Error + Send + Sync>: From<C::Error> + Send + 'static,
     {

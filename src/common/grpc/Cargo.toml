@@ -20,6 +20,7 @@ common-time.workspace = true
 dashmap.workspace = true
 datatypes.workspace = true
 flatbuffers = "24"
+hyper.workspace = true
 lazy_static.workspace = true
 prost.workspace = true
 snafu.workspace = true
