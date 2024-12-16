@@ -55,6 +55,7 @@ pub const SINK: &str = "SINK";
 pub const EXPIRE: &str = "EXPIRE";
 pub const AFTER: &str = "AFTER";
 pub const INVERTED: &str = "INVERTED";
+pub const SKIPPING: &str = "SKIPPING";
 
 const DB_OPT_KEY_TTL: &str = "ttl";
 
@@ -705,12 +706,23 @@ impl<'a> ParserContext<'a> {
 
         let mut is_index_declared = false;
 
-        if parser.parse_keyword(Keyword::SKIP) {
+        if let Token::Word(word) = parser.peek_token().token
+            && word.value.eq_ignore_ascii_case(SKIPPING)
+        {
+            parser.next_token();
+            // Consume `INDEX` keyword
             ensure!(
-                column_extensions.skip_index_options.is_none(),
+                parser.parse_keyword(Keyword::INDEX),
                 InvalidColumnOptionSnafu {
                     name: column_name.to_string(),
-                    msg: "duplicated SKIP index option",
+                    msg: "expect INDEX after SKIPPING keyword",
+                }
+            );
+            ensure!(
+                column_extensions.skipping_index_options.is_none(),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: "duplicated SKIPPING index option",
                 }
             );
 
@@ -731,7 +743,7 @@ impl<'a> ParserContext<'a> {
                 );
             }
 
-            column_extensions.skip_index_options = Some(options.into());
+            column_extensions.skipping_index_options = Some(options.into());
             is_index_declared |= true;
         }
 
@@ -2142,7 +2154,7 @@ CREATE TABLE log (
         let sql = r"
 CREATE TABLE log (
     ts TIMESTAMP TIME INDEX,
-    msg INT SKIP WITH (granularity='8192', type='bloom'),
+    msg INT SKIPPING INDEX WITH (granularity='8192', type='bloom'),
 )";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
@@ -2153,7 +2165,7 @@ CREATE TABLE log (
                 if col.name().value == "msg" {
                     assert!(!col
                         .extensions
-                        .skip_index_options
+                        .skipping_index_options
                         .as_ref()
                         .unwrap()
                         .is_empty());
@@ -2166,7 +2178,7 @@ CREATE TABLE log (
         let sql = r"
         CREATE TABLE log (
             ts TIMESTAMP TIME INDEX,
-            msg INT SKIP,
+            msg INT SKIPPING INDEX,
         )";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
@@ -2177,7 +2189,7 @@ CREATE TABLE log (
                 if col.name().value == "msg" {
                     assert!(col
                         .extensions
-                        .skip_index_options
+                        .skipping_index_options
                         .as_ref()
                         .unwrap()
                         .is_empty());

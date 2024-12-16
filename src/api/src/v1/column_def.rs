@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use datatypes::schema::{
     ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextOptions, COMMENT_KEY,
-    FULLTEXT_KEY, INVERTED_INDEX_KEY, SKIP_KEY,
+    FULLTEXT_KEY, INVERTED_INDEX_KEY, SKIPPING_INDEX_KEY,
 };
 use greptime_proto::v1::Analyzer;
 use snafu::ResultExt;
@@ -30,7 +30,7 @@ const FULLTEXT_GRPC_KEY: &str = "fulltext";
 /// Key used to store inverted index options in gRPC column options.
 const INVERTED_INDEX_GRPC_KEY: &str = "inverted_index";
 /// Key used to store skip index options in gRPC column options.
-const SKIP_INDEX_GRPC_KEY: &str = "skip_index";
+const SKIPPING_INDEX_GRPC_KEY: &str = "skipping_index";
 
 /// Tries to construct a `ColumnSchema` from the given  `ColumnDef`.
 pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
@@ -62,8 +62,8 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         if let Some(inverted_index) = options.options.get(INVERTED_INDEX_GRPC_KEY) {
             metadata.insert(INVERTED_INDEX_KEY.to_string(), inverted_index.clone());
         }
-        if let Some(skip_index) = options.options.get(SKIP_INDEX_GRPC_KEY) {
-            metadata.insert(SKIP_KEY.to_string(), skip_index.clone());
+        if let Some(skip_index) = options.options.get(SKIPPING_INDEX_GRPC_KEY) {
+            metadata.insert(SKIPPING_INDEX_KEY.to_string(), skip_index.clone());
         }
     }
 
@@ -89,10 +89,10 @@ pub fn options_from_column_schema(column_schema: &ColumnSchema) -> Option<Column
             .options
             .insert(INVERTED_INDEX_GRPC_KEY.to_string(), inverted_index.clone());
     }
-    if let Some(skip_index) = column_schema.metadata().get(SKIP_KEY) {
+    if let Some(skip_index) = column_schema.metadata().get(SKIPPING_INDEX_KEY) {
         options
             .options
-            .insert(SKIP_INDEX_GRPC_KEY.to_string(), skip_index.clone());
+            .insert(SKIPPING_INDEX_GRPC_KEY.to_string(), skip_index.clone());
     }
 
     (!options.options.is_empty()).then_some(options)

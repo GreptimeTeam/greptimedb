@@ -326,8 +326,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to set skip index option"))]
-    SetSkipIndexOption {
+    #[snafu(display("Failed to set SKIPPING index option"))]
+    SetSkippingIndexOption {
         source: datatypes::error::Error,
         #[snafu(implicit)]
         location: Location,
@@ -382,7 +382,7 @@ impl ErrorExt for Error {
             ConvertSqlValue { .. } | ConvertValue { .. } => StatusCode::Unsupported,
 
             PermissionDenied { .. } => StatusCode::PermissionDenied,
-            SetFulltextOption { .. } | SetSkipIndexOption { .. } => StatusCode::Unexpected,
+            SetFulltextOption { .. } | SetSkippingIndexOption { .. } => StatusCode::Unexpected,
         }
     }
 
