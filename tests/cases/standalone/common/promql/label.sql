@@ -20,9 +20,11 @@ INSERT INTO TABLE test VALUES
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "new_host", "-");
 
 -- dst_label is equal to source label --
+-- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "host", "-", "host");
 
 -- dst_label is in source labels --
+-- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "host", "-", "idc", "host");
 
 -- SQLNESS SORT_RESULT 3 1
@@ -37,6 +39,7 @@ TQL EVAL (0, 15, '5s') label_replace(test{host="host1"}, "new_idc", "idc99", "id
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "new_idc", "$2", "idc", "(.*):(.*)");
 
+-- dst_label is equal to source label --
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "idc", "$2", "idc", "(.*):(.*)");
 
