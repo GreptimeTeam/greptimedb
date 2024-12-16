@@ -142,7 +142,7 @@ macro_rules! make_get_from_env_helper {
 
 make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_ALTER_ACTIONS, 256);
 make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_INSERT_ACTIONS, 8);
-make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_ROWS, 2048);
+make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_ROWS, 512);
 make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_TABLES, 64);
 make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_COLUMNS, 32);
 

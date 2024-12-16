@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_telemetry::debug;
 use snafu::ResultExt;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionCatchupRequest, RegionRequest};
@@ -35,6 +36,7 @@ impl MetricEngineInner {
         }
         let metadata_region_id = utils::to_metadata_region_id(region_id);
         // TODO(weny): improve the catchup, we can read the wal entries only once.
+        debug!("Catchup metadata region {metadata_region_id}");
         self.mito
             .handle_request(
                 metadata_region_id,
@@ -48,6 +50,7 @@ impl MetricEngineInner {
             .context(MitoCatchupOperationSnafu)?;
 
         let data_region_id = utils::to_data_region_id(region_id);
+        debug!("Catchup data region {data_region_id}");
         self.mito
             .handle_request(
                 data_region_id,
