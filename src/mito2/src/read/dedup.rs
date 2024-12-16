@@ -224,6 +224,12 @@ pub(crate) struct DedupMetrics {
 }
 
 /// Buffer to store fields in the last row to merge.
+///
+/// Usage:
+/// We should call `maybe_init()` to initialize the builder and then call `push_first_row()`
+/// to push the first row of batches that the timestamp is the same as the row in this builder.
+/// Finally we should call `merge_last_non_null()` to merge the last non-null fields and
+/// return the merged batch.
 struct LastFieldsBuilder {
     /// Filter deleted rows.
     filter_deleted: bool,
@@ -311,6 +317,10 @@ impl LastFieldsBuilder {
             return;
         }
 
+        // Both `maybe_init()` and `push_first_row()` can update the builder. If the delete
+        // op is not in the latest row, then we can't set the deletion flag in the `maybe_init()`.
+        // We must check the batch and update the deletion flag here to prevent
+        // the builder from merging non-null fields in rows that insert before the deleted row.
         self.contains_deletion = batch.op_types().get_data(0).unwrap() == OpType::Delete as u8;
         if self.contains_deletion {
             // Deletes this row.
@@ -329,7 +339,8 @@ impl LastFieldsBuilder {
     }
 
     /// Merges last non-null fields, builds a new batch and resets the builder.
-    /// It may overwrites the last row of the `buffer`.
+    /// It may overwrites the last row of the `buffer`. The `buffer` is the batch
+    /// that initialized the builder.
     fn merge_last_non_null(
         &mut self,
         buffer: Batch,
