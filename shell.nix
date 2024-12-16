@@ -15,6 +15,7 @@ pkgs.mkShellNoCC {
     (fenix.fromToolchainFile {
       dir = ./.;
     })
+    fenix.rust-analyzer
     cargo-nextest
   ];
 
