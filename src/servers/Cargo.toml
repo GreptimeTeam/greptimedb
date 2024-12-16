@@ -134,7 +134,6 @@ table.workspace = true
 tempfile = "3.0.0"
 tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.12"
-tokio-test = "0.4"
 
 [target.'cfg(unix)'.dev-dependencies]
 pprof = { version = "0.13", features = ["criterion", "flamegraph"] }
