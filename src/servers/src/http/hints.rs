@@ -26,6 +26,7 @@ pub async fn extract_hints<B>(mut request: Request<B>, next: Next<B>) -> Respons
         .filter_map(|(key, value)| {
             let key = key.as_str();
             let new_key = key.strip_prefix(GREPTIME_DB_HEADER_HINT_PREFIX)?;
+            // Simply return None for non-string values.
             let value = value.to_str().ok()?;
             Some((new_key.to_string(), value.trim().to_string()))
         })
