@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use datatypes::value::Value;
-use snafu::{ensure, OptionExt};
+use snafu::ensure;
 
 use crate::error::UnexpectedSnafu;
 use crate::expr::ScalarExpr;
@@ -92,15 +93,22 @@ pub fn find_time_window_lower_bound(
 
         let prev_time_window = eval_to_timestamp(&rewrote_expr, &[prev_time_probe.into()])?;
 
-        if prev_time_window < cur_time_window {
-            lower_bound = Some(prev_time_probe);
-            break;
-        } else if prev_time_window == cur_time_window {
-            upper_bound = Some(prev_time_probe);
-        } else {
-            UnexpectedSnafu{
-                reason: format!("Unsupported time window expression {rewrote_expr:?}, expect monotonic increasing for time window expression {expr:?}"),
-            }.fail()?
+        match prev_time_window.cmp(&cur_time_window) {
+            Ordering::Less => {
+                lower_bound = Some(prev_time_probe);
+                break;
+            }
+            Ordering::Equal => {
+                upper_bound = Some(prev_time_probe);
+            }
+            Ordering::Greater => {
+                UnexpectedSnafu {
+                    reason: format!(
+                        "Unsupported time window expression {rewrote_expr:?}, expect monotonic increasing for time window expression {expr:?}"
+                    ),
+                }
+                .fail()?
+            }
         }
 
         let Some(new_offset) = offset.checked_mul(2) else {
@@ -124,15 +132,14 @@ pub fn find_time_window_lower_bound(
         let mid = (low + high) / 2;
         let mid_probe = common_time::Timestamp::new(mid, output_unit);
         let mid_time_window = eval_to_timestamp(&rewrote_expr, &[mid_probe.into()])?;
-        if mid_time_window < cur_time_window {
-            low = mid + 1;
-        } else if mid_time_window == cur_time_window {
-            high = mid;
-        } else {
-            UnexpectedSnafu {
+
+        match mid_time_window.cmp(&cur_time_window) {
+            Ordering::Less => low = mid + 1,
+            Ordering::Equal => high = mid,
+            Ordering::Greater => UnexpectedSnafu {
                 reason: format!("Binary search failed for time window expression {expr:?}"),
             }
-            .fail()?
+            .fail()?,
         }
     }
 
