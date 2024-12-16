@@ -18,8 +18,8 @@ runs:
         --set controller.replicaCount=${{ inputs.controller-replicas }} \
         --set controller.resources.requests.cpu=50m \
         --set controller.resources.requests.memory=128Mi \
-        --set controller.resources.limits.cpu=4000m \
-        --set controller.resources.limits.memory=4Gi \
+        --set controller.resources.limits.cpu=2000m \
+        --set controller.resources.limits.memory=2Gi \
         --set listeners.controller.protocol=PLAINTEXT \
         --set listeners.client.protocol=PLAINTEXT \
         --create-namespace \

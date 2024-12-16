@@ -58,8 +58,8 @@ runs:
         --set image.tag=${{ inputs.image-tag }} \
         --set base.podTemplate.main.resources.requests.cpu=50m \
         --set base.podTemplate.main.resources.requests.memory=256Mi \
-        --set base.podTemplate.main.resources.limits.cpu=4000m \
-        --set base.podTemplate.main.resources.limits.memory=4Gi \
+        --set base.podTemplate.main.resources.limits.cpu=2000m \
+        --set base.podTemplate.main.resources.limits.memory=2Gi \
         --set frontend.replicas=${{ inputs.frontend-replicas }} \
         --set datanode.replicas=${{ inputs.datanode-replicas }} \
         --set meta.replicas=${{ inputs.meta-replicas }} \
