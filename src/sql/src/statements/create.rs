@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 
 use common_catalog::consts::FILE_ENGINE;
-use datatypes::schema::FulltextOptions;
+use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use itertools::Itertools;
 use serde::Serialize;
 use snafu::ResultExt;
@@ -24,7 +24,7 @@ use sqlparser::ast::{ColumnOptionDef, DataType, Expr, Query};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, Value as SqlValue};
-use crate::error::{Result, SetFulltextOptionSnafu};
+use crate::error::{Result, SetFulltextOptionSnafu, SetSkippingIndexOptionSnafu};
 use crate::statements::statement::Statement;
 use crate::statements::OptionMap;
 
@@ -116,6 +116,8 @@ pub struct ColumnExtensions {
     pub fulltext_options: Option<OptionMap>,
     /// Vector options.
     pub vector_options: Option<OptionMap>,
+    /// Skipping index options.
+    pub skipping_index_options: Option<OptionMap>,
 }
 
 impl Column {
@@ -158,6 +160,15 @@ impl Display for Column {
                 write!(f, " FULLTEXT")?;
             }
         }
+
+        if let Some(skipping_index_options) = &self.extensions.skipping_index_options {
+            if !skipping_index_options.is_empty() {
+                let options = skipping_index_options.kv_pairs();
+                write!(f, " SKIPPING INDEX WITH({})", format_list_comma!(options))?;
+            } else {
+                write!(f, " SKIPPING INDEX")?;
+            }
+        }
         Ok(())
     }
 }
@@ -170,6 +181,17 @@ impl ColumnExtensions {
 
         let options: HashMap<String, String> = options.clone().into_map();
         Ok(Some(options.try_into().context(SetFulltextOptionSnafu)?))
+    }
+
+    pub fn build_skipping_index_options(&self) -> Result<Option<SkippingIndexOptions>> {
+        let Some(options) = self.skipping_index_options.as_ref() else {
+            return Ok(None);
+        };
+
+        let options: HashMap<String, String> = options.clone().into_map();
+        Ok(Some(
+            options.try_into().context(SetSkippingIndexOptionSnafu)?,
+        ))
     }
 }
 
