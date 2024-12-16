@@ -70,7 +70,7 @@ impl BloomFilterCreator {
 
     /// Adds a row of elements to the bloom filter. If the number of accumulated rows
     /// reaches `rows_per_segment`, it finalizes the current segment.
-    pub fn push_row_elems<'a>(&mut self, elems: impl IntoIterator<Item = Bytes>) {
+    pub fn push_row_elems(&mut self, elems: impl IntoIterator<Item = Bytes>) {
         self.accumulated_row_count += 1;
         for elem in elems.into_iter() {
             let len = elem.len();
@@ -91,10 +91,12 @@ impl BloomFilterCreator {
             self.finalize_segment();
         }
 
-        let mut meta = BloomFilterMeta::default();
-        meta.rows_per_segment = self.rows_per_segment;
-        meta.seg_count = self.finalized_bloom_filters.len();
-        meta.row_count = self.accumulated_row_count;
+        let mut meta = BloomFilterMeta {
+            rows_per_segment: self.rows_per_segment,
+            seg_count: self.finalized_bloom_filters.len(),
+            row_count: self.accumulated_row_count,
+            ..Default::default()
+        };
 
         let mut buf = Vec::new();
         for segment in self.finalized_bloom_filters.drain() {
@@ -191,7 +193,7 @@ struct FinalizedBloomFilterSegment {
 
 impl FinalizedBloomFilterSegment {
     fn new(bloom_filter: BloomFilter, elem_count: usize) -> Self {
-        let memory_usage = bloom_filter.as_slice().len() * std::mem::size_of::<u64>();
+        let memory_usage = std::mem::size_of_val(bloom_filter.as_slice());
         Self {
             bloom_filter,
             element_count: elem_count,
@@ -202,6 +204,7 @@ impl FinalizedBloomFilterSegment {
 
 /// Writes a slice of `u64` to the buffer in little-endian order.
 fn write_u64_slice(buf: &mut Vec<u8>, slice: &[u64]) {
+    buf.reserve(std::mem::size_of_val(slice));
     for &x in slice {
         buf.extend_from_slice(&x.to_le_bytes());
     }
