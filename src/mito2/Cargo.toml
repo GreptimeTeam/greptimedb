@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 api.workspace = true
+aquamarine.workspace = true
 async-channel = "1.9"
 async-stream.workspace = true
 async-trait = "0.1"
