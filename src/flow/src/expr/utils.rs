@@ -16,11 +16,58 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use datatypes::value::Value;
-use snafu::ensure;
+use snafu::{ensure, OptionExt};
 
 use crate::error::UnexpectedSnafu;
 use crate::expr::ScalarExpr;
+use crate::plan::TypedPlan;
 use crate::Result;
+
+/// Find lower bound for time `current` in given `plan`
+///
+/// if `plan` doesn't contain a `TIME INDEX` column, return `None`
+pub fn find_time_lower_bound_for_plan(
+    plan: &TypedPlan,
+    current: common_time::Timestamp,
+) -> Result<Option<common_time::Timestamp>> {
+    let typ = plan.schema.typ();
+    let Some(mut time_index) = typ.time_index else {
+        return Ok(None);
+    };
+
+    let mut cur_plan = plan;
+    let mut expr_time_index = None;
+
+    while let Some(input) = cur_plan.plan.get_first_input_plan() {
+        // follow upward and find deepest time index expr that is not a column ref
+        expr_time_index = Some(input.plan.get_nth_expr(time_index).cloned().context(
+            UnexpectedSnafu {
+                reason: "Failed to find time index expr",
+            },
+        )?);
+        if let Some(ScalarExpr::Column(i)) = expr_time_index {
+            time_index = i;
+        } else {
+            break;
+        }
+        cur_plan = input;
+    }
+
+    let expr_time_index = expr_time_index.context(UnexpectedSnafu {
+        reason: "Failed to find time index expr",
+    })?;
+
+    let ts_col = expr_time_index
+        .get_all_ref_columns()
+        .first()
+        .cloned()
+        .context(UnexpectedSnafu {
+            reason: "Failed to find time index column",
+        })?;
+    let ts_col = ScalarExpr::Column(ts_col);
+
+    find_time_window_lower_bound(&expr_time_index, &ts_col, current)
+}
 
 /// Find the lower bound of time window in given `expr` and `current` timestamp.
 ///

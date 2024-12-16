@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::expr::{AggregateExpr, SafeMfpPlan};
+use crate::expr::{AggregateExpr, SafeMfpPlan, ScalarExpr};
 
 /// Describe how to extract key-value pair from a `Row`
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -21,6 +21,18 @@ pub struct KeyValPlan {
     pub key_plan: SafeMfpPlan,
     /// Extract value from row
     pub val_plan: SafeMfpPlan,
+}
+
+impl KeyValPlan {
+    /// Get nth expr using column ref
+    pub fn get_nth_expr(&self, n: usize) -> Option<&ScalarExpr> {
+        let key_len = self.key_plan.expressions.len();
+        if n < key_len {
+            return self.key_plan.expressions.get(n);
+        } else {
+            return self.val_plan.expressions.get(n - key_len);
+        }
+    }
 }
 
 /// TODO(discord9): def&impl of Hierarchical aggregates(for min/max with support to deletion) and
