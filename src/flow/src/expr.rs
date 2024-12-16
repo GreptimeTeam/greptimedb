@@ -22,6 +22,7 @@ mod linear;
 pub(crate) mod relation;
 mod scalar;
 mod signature;
+mod utils;
 
 use arrow::compute::FilterBuilder;
 use datatypes::prelude::{ConcreteDataType, DataType};

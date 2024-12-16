@@ -152,30 +152,17 @@ impl common_function::function::Function for TumbleFunction {
 
 #[cfg(test)]
 mod test {
-    use std::sync::Arc;
 
-    use catalog::RegisterTableRequest;
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
-    use datatypes::prelude::*;
-    use datatypes::schema::Schema;
-    use datatypes::timestamp::TimestampMillisecond;
-    use datatypes::vectors::{TimestampMillisecondVectorBuilder, VectorRef};
-    use itertools::Itertools;
-    use prost::Message;
     use query::parser::QueryLanguageParser;
-    use query::query_engine::DefaultSerializer;
-    use query::QueryEngine;
     use session::context::QueryContext;
-    use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
-    use substrait_proto::proto;
-    use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
-    use table::test_util::MemTable;
 
     use super::*;
     use crate::adapter::node_context::IdToNameMap;
     use crate::adapter::table_source::test::FlowDummyTableSource;
     use crate::df_optimizer::apply_df_optimizer;
     use crate::expr::GlobalId;
+    use crate::df_optimizer::apply_df_optimizer;
+    use crate::test_utils::create_test_query_engine;
 
     pub fn create_test_ctx() -> FlownodeContext {
         let mut tri_map = IdToNameMap::new();
