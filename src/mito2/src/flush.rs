@@ -32,7 +32,10 @@ use crate::error::{
     Error, FlushRegionSnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::metrics::{FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_ERRORS_TOTAL, FLUSH_REQUESTS_TOTAL};
+use crate::metrics::{
+    FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_ERRORS_TOTAL, FLUSH_REQUESTS_TOTAL,
+    INFLIGHT_FLUSH_COUNT,
+};
 use crate::read::Source;
 use crate::region::options::IndexOptions;
 use crate::region::version::{VersionControlData, VersionControlRef};
@@ -261,7 +264,9 @@ impl RegionFlushTask {
         let version_data = version_control.current();
 
         Box::pin(async move {
+            INFLIGHT_FLUSH_COUNT.inc();
             self.do_flush(version_data).await;
+            INFLIGHT_FLUSH_COUNT.dec();
         })
     }
 
@@ -530,6 +535,7 @@ impl FlushScheduler {
             self.region_status.remove(&region_id);
             return Err(e);
         }
+
         flush_status.flushing = true;
 
         Ok(())
