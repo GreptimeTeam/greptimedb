@@ -42,8 +42,6 @@ tonic.workspace = true
 
 [dev-dependencies]
 common-grpc-expr.workspace = true
-datanode.workspace = true
-derive-new = "0.5"
 tracing = "0.1"
 
 [dev-dependencies.substrait_proto]
