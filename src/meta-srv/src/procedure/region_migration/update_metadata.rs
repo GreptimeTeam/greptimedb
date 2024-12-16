@@ -22,10 +22,10 @@ use common_procedure::Status;
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 
-use super::migration_abort::RegionMigrationAbort;
-use super::migration_end::RegionMigrationEnd;
 use crate::error::Result;
 use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
+use crate::procedure::region_migration::migration_abort::RegionMigrationAbort;
+use crate::procedure::region_migration::migration_end::RegionMigrationEnd;
 use crate::procedure::region_migration::{Context, State};
 
 #[derive(Debug, Serialize, Deserialize)]

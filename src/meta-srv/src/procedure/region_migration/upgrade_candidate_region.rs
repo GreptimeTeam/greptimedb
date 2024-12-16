@@ -23,9 +23,9 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::time::{sleep, Instant};
 
-use super::update_metadata::UpdateMetadata;
 use crate::error::{self, Result};
 use crate::handler::HeartbeatMailbox;
+use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 use crate::procedure::region_migration::{Context, State};
 use crate::service::mailbox::Channel;
 
