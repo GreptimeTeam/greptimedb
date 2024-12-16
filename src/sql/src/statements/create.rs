@@ -161,9 +161,9 @@ impl Display for Column {
             }
         }
 
-        if let Some(skip_index_options) = &self.extensions.skipping_index_options {
-            if !skip_index_options.is_empty() {
-                let options = skip_index_options.kv_pairs();
+        if let Some(skipping_index_options) = &self.extensions.skipping_index_options {
+            if !skipping_index_options.is_empty() {
+                let options = skipping_index_options.kv_pairs();
                 write!(f, " SKIPPING INDEX WITH({})", format_list_comma!(options))?;
             } else {
                 write!(f, " SKIPPING INDEX")?;

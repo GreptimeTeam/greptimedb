@@ -62,8 +62,8 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         if let Some(inverted_index) = options.options.get(INVERTED_INDEX_GRPC_KEY) {
             metadata.insert(INVERTED_INDEX_KEY.to_string(), inverted_index.clone());
         }
-        if let Some(skip_index) = options.options.get(SKIPPING_INDEX_GRPC_KEY) {
-            metadata.insert(SKIPPING_INDEX_KEY.to_string(), skip_index.clone());
+        if let Some(skipping_index) = options.options.get(SKIPPING_INDEX_GRPC_KEY) {
+            metadata.insert(SKIPPING_INDEX_KEY.to_string(), skipping_index.clone());
         }
     }
 
@@ -89,10 +89,10 @@ pub fn options_from_column_schema(column_schema: &ColumnSchema) -> Option<Column
             .options
             .insert(INVERTED_INDEX_GRPC_KEY.to_string(), inverted_index.clone());
     }
-    if let Some(skip_index) = column_schema.metadata().get(SKIPPING_INDEX_KEY) {
+    if let Some(skipping_index) = column_schema.metadata().get(SKIPPING_INDEX_KEY) {
         options
             .options
-            .insert(SKIPPING_INDEX_GRPC_KEY.to_string(), skip_index.clone());
+            .insert(SKIPPING_INDEX_GRPC_KEY.to_string(), skipping_index.clone());
     }
 
     (!options.options.is_empty()).then_some(options)

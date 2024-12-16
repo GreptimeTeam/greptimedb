@@ -123,7 +123,7 @@ pub fn validate_column_fulltext_create_option(key: &str) -> bool {
     .contains(&key)
 }
 
-pub fn validate_column_skip_index_create_option(key: &str) -> bool {
+pub fn validate_column_skipping_index_create_option(key: &str) -> bool {
     [
         COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY,
         COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE,
