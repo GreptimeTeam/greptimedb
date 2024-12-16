@@ -1336,28 +1336,40 @@ impl PromPlanner {
             }
 
             "label_join" => {
-                // Reserve the current columns
+                let (concat_expr, dst_label) =
+                    Self::build_concat_labels_expr(&mut other_input_exprs, session_state)?;
+
+                // Reserve the current field columns except the `dst_label`.
                 for value in &self.ctx.field_columns {
-                    let expr = DfExpr::Column(Column::from_name(value));
-                    exprs.push(expr);
+                    if *value != dst_label {
+                        let expr = DfExpr::Column(Column::from_name(value));
+                        exprs.push(expr);
+                    }
                 }
 
-                let concat_expr =
-                    Self::build_concat_labels_expr(&mut other_input_exprs, session_state)?;
+                // Remove it from tag columns
+                self.ctx.tag_columns.retain(|tag| *tag != dst_label);
+
                 // Add the new label expr
                 exprs.push(concat_expr);
 
                 ScalarFunc::GeneratedExpr
             }
             "label_replace" => {
-                // Reserve the current columns
+                let (replace_expr, dst_label) =
+                    Self::build_regexp_replace_label_expr(&mut other_input_exprs, session_state)?;
+
+                // Reserve the current field columns except the `dst_label`.
                 for value in &self.ctx.field_columns {
-                    let expr = DfExpr::Column(Column::from_name(value));
-                    exprs.push(expr);
+                    if *value != dst_label {
+                        let expr = DfExpr::Column(Column::from_name(value));
+                        exprs.push(expr);
+                    }
                 }
 
-                let replace_expr =
-                    Self::build_regexp_replace_label_expr(&mut other_input_exprs, session_state)?;
+                // Remove it from tag columns
+                self.ctx.tag_columns.retain(|tag| *tag != dst_label);
+
                 // Add the new label expr
                 exprs.push(replace_expr);
 
@@ -1443,6 +1455,7 @@ impl PromPlanner {
 
         // update value columns' name, and alias them to remove qualifiers
         let mut new_field_columns = Vec::with_capacity(exprs.len());
+
         exprs = exprs
             .into_iter()
             .map(|expr| {
@@ -1452,6 +1465,7 @@ impl PromPlanner {
             })
             .collect::<std::result::Result<Vec<_>, _>>()
             .context(DataFusionPlanningSnafu)?;
+
         self.ctx.field_columns = new_field_columns;
 
         Ok(exprs)
@@ -1461,7 +1475,7 @@ impl PromPlanner {
     fn build_regexp_replace_label_expr(
         other_input_exprs: &mut VecDeque<DfExpr>,
         session_state: &SessionState,
-    ) -> Result<DfExpr> {
+    ) -> Result<(DfExpr, String)> {
         // label_replace(vector, dst_label, replacement, src_label, regex)
         let dst_label = match other_input_exprs.pop_front() {
             Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)))) => d,
@@ -1506,18 +1520,21 @@ impl PromPlanner {
             DfExpr::Literal(ScalarValue::Utf8(Some(replacement))),
         ];
 
-        Ok(DfExpr::ScalarFunction(ScalarFunction {
-            func: func.clone(),
-            args,
-        })
-        .alias(dst_label))
+        Ok((
+            DfExpr::ScalarFunction(ScalarFunction {
+                func: func.clone(),
+                args,
+            })
+            .alias(&dst_label),
+            dst_label,
+        ))
     }
 
     /// Build expr for `label_join` function
     fn build_concat_labels_expr(
         other_input_exprs: &mut VecDeque<DfExpr>,
         session_state: &SessionState,
-    ) -> Result<DfExpr> {
+    ) -> Result<(DfExpr, String)> {
         // label_join(vector, dst_label, separator, src_label_1, src_label_2, ...)
 
         let dst_label = match other_input_exprs.pop_front() {
@@ -1542,6 +1559,7 @@ impl PromPlanner {
                 match expr {
                     DfExpr::Literal(ScalarValue::Utf8(Some(label))) => {
                         let expr = DfExpr::Column(Column::from_name(label));
+
                         Ok(expr)
                     }
                     other => UnexpectedPlanExprSnafu {
@@ -1571,11 +1589,14 @@ impl PromPlanner {
         args.push(DfExpr::Literal(ScalarValue::Utf8(Some(separator))));
         args.extend(src_labels);
 
-        Ok(DfExpr::ScalarFunction(ScalarFunction {
-            func: func.clone(),
-            args,
-        })
-        .alias(dst_label))
+        Ok((
+            DfExpr::ScalarFunction(ScalarFunction {
+                func: func.clone(),
+                args,
+            })
+            .alias(&dst_label),
+            dst_label,
+        ))
     }
 
     fn create_time_index_column_expr(&self) -> Result<DfExpr> {
