@@ -86,7 +86,7 @@ impl ColumnDataTypeWrapper {
 
     /// Get a tuple of ColumnDataType and ColumnDataTypeExtension.
     pub fn to_parts(&self) -> (ColumnDataType, Option<ColumnDataTypeExtension>) {
-        (self.datatype, self.datatype_ext.clone())
+        (self.datatype, self.datatype_ext)
     }
 }
 

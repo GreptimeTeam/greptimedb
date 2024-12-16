@@ -850,7 +850,7 @@ pub enum MetadataError {
     #[snafu(display("Failed to decode protobuf"))]
     DecodeProto {
         #[snafu(source)]
-        error: prost::DecodeError,
+        error: prost::UnknownEnumValue,
         #[snafu(implicit)]
         location: Location,
     },

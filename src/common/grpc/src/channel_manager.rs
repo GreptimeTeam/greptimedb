@@ -607,7 +607,7 @@ mod tests {
         });
 
         let (client, _) = tokio::io::duplex(1024);
-        let mut client = Some(client);
+        let mut client = Some(hyper_util::rt::TokioIo::new(client));
         let res = mgr.reset_with_connector(
             addr,
             service_fn(move |_| {

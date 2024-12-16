@@ -30,6 +30,7 @@ tower.workspace = true
 
 [dev-dependencies]
 criterion = "0.4"
+hyper-util = { version = "0.1", features = ["tokio"] }
 rand.workspace = true
 
 [[bench]]

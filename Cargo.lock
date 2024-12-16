@@ -198,10 +198,10 @@ dependencies = [
  "datatypes",
  "greptime-proto",
  "paste",
- "prost 0.12.6",
+ "prost 0.13.3",
  "serde_json",
  "snafu 0.8.5",
- "tonic-build",
+ "tonic-build 0.11.0",
 ]
 
 [[package]]
@@ -1841,7 +1841,7 @@ dependencies = [
  "moka",
  "parking_lot 0.12.3",
  "prometheus",
- "prost 0.12.6",
+ "prost 0.13.3",
  "query",
  "rand",
  "serde_json",
@@ -1933,7 +1933,7 @@ dependencies = [
  "nu-ansi-term",
  "plugins",
  "prometheus",
- "prost 0.12.6",
+ "prost 0.13.3",
  "query",
  "rand",
  "regex",
@@ -2200,8 +2200,9 @@ dependencies = [
  "datatypes",
  "flatbuffers",
  "hyper 1.4.1",
+ "hyper-util",
  "lazy_static",
- "prost 0.12.6",
+ "prost 0.13.3",
  "rand",
  "snafu 0.8.5",
  "tokio",
@@ -2222,7 +2223,7 @@ dependencies = [
  "common-time",
  "datatypes",
  "paste",
- "prost 0.12.6",
+ "prost 0.13.3",
  "snafu 0.8.5",
  "store-api",
  "table",
@@ -2293,7 +2294,7 @@ dependencies = [
  "lazy_static",
  "moka",
  "prometheus",
- "prost 0.12.6",
+ "prost 0.13.3",
  "rand",
  "regex",
  "rskafka",
@@ -2332,7 +2333,7 @@ dependencies = [
  "common-error",
  "common-macro",
  "pprof",
- "prost 0.12.6",
+ "prost 0.13.3",
  "snafu 0.8.5",
  "tokio",
 ]
@@ -3517,7 +3518,7 @@ dependencies = [
  "mito2",
  "object-store",
  "prometheus",
- "prost 0.12.6",
+ "prost 0.13.3",
  "query",
  "reqwest",
  "serde",
@@ -4061,7 +4062,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic 0.11.0",
- "tonic-build",
+ "tonic-build 0.11.0",
  "tower 0.4.13",
  "tower-service",
 ]
@@ -4317,7 +4318,7 @@ dependencies = [
  "partition",
  "pretty_assertions",
  "prometheus",
- "prost 0.12.6",
+ "prost 0.13.3",
  "query",
  "serde",
  "serde_json",
@@ -4416,7 +4417,7 @@ dependencies = [
  "partition",
  "pipeline",
  "prometheus",
- "prost 0.12.6",
+ "prost 0.13.3",
  "query",
  "raft-engine",
  "script",
@@ -4799,15 +4800,15 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=a875e976441188028353f7274a46a7e6e065c5d4#a875e976441188028353f7274a46a7e6e065c5d4"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?branch=chore%2Fupdate-prost#6a3d19038821098337ccc1bf353e5b16dd6a7989"
 dependencies = [
- "prost 0.12.6",
+ "prost 0.13.3",
  "serde",
  "serde_json",
  "strum 0.25.0",
  "strum_macros 0.25.3",
- "tonic 0.11.0",
- "tonic-build",
+ "tonic 0.12.3",
+ "tonic-build 0.12.3",
 ]
 
 [[package]]
@@ -5552,7 +5553,7 @@ dependencies = [
  "greptime-proto",
  "mockall",
  "pin-project",
- "prost 0.12.6",
+ "prost 0.13.3",
  "rand",
  "regex",
  "regex-automata 0.4.8",
@@ -6796,7 +6797,7 @@ dependencies = [
  "once_cell",
  "parking_lot 0.12.3",
  "prometheus",
- "prost 0.12.6",
+ "prost 0.13.3",
  "rand",
  "regex",
  "serde",
@@ -6986,7 +6987,7 @@ dependencies = [
  "paste",
  "pin-project",
  "prometheus",
- "prost 0.12.6",
+ "prost 0.13.3",
  "puffin",
  "rand",
  "regex",
@@ -8948,7 +8949,7 @@ dependencies = [
  "lazy_static",
  "prometheus",
  "promql-parser",
- "prost 0.12.6",
+ "prost 0.13.3",
  "query",
  "session",
  "snafu 0.8.5",
@@ -9358,7 +9359,7 @@ dependencies = [
  "prometheus",
  "promql",
  "promql-parser",
- "prost 0.12.6",
+ "prost 0.13.3",
  "rand",
  "regex",
  "serde",
@@ -11218,7 +11219,7 @@ dependencies = [
  "pprof",
  "prometheus",
  "promql-parser",
- "prost 0.12.6",
+ "prost 0.13.3",
  "query",
  "rand",
  "regex",
@@ -11926,7 +11927,7 @@ dependencies = [
  "derive_builder 0.12.0",
  "futures",
  "humantime",
- "prost 0.12.6",
+ "prost 0.13.3",
  "serde",
  "serde_json",
  "snafu 0.8.5",
@@ -12091,7 +12092,7 @@ dependencies = [
  "datafusion-substrait",
  "datatypes",
  "promql",
- "prost 0.12.6",
+ "prost 0.13.3",
  "snafu 0.8.5",
  "substrait 0.37.3",
  "tokio",
@@ -12636,7 +12637,7 @@ dependencies = [
  "operator",
  "partition",
  "paste",
- "prost 0.12.6",
+ "prost 0.13.3",
  "query",
  "rand",
  "rstest",
@@ -13179,6 +13180,20 @@ dependencies = [
  "prettyplease",
  "proc-macro2",
  "prost-build 0.12.6",
+ "quote",
+ "syn 2.0.90",
+]
+
+[[package]]
+name = "tonic-build"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9557ce109ea773b399c9b9e5dca39294110b74f1f342cb347a80d1fce8c26a11"
+dependencies = [
+ "prettyplease",
+ "proc-macro2",
+ "prost-build 0.13.3",
+ "prost-types 0.13.3",
  "quote",
  "syn 2.0.90",
 ]

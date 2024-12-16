@@ -288,13 +288,7 @@ impl<'a> ParserContext<'a> {
                     reason: format!("cannot cast {} to interval type", expire_after_expr),
                 })?;
             if let ScalarValue::IntervalMonthDayNano(Some(nanoseconds)) = expire_after_lit {
-                Some(
-                    i64::try_from(nanoseconds / 1_000_000_000)
-                        .ok()
-                        .with_context(|| InvalidIntervalSnafu {
-                            reason: format!("interval {} overflows", nanoseconds),
-                        })?,
-                )
+                Some(nanoseconds.nanoseconds / 1_000_000_000)
             } else {
                 unreachable!()
             }

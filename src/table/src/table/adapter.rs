@@ -18,9 +18,9 @@ use std::sync::{Arc, Mutex};
 use common_query::stream::StreamScanAdapter;
 use common_recordbatch::OrderOption;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
+use datafusion::catalog::Session;
 use datafusion::datasource::{TableProvider, TableType as DfTableType};
 use datafusion::error::Result as DfResult;
-use datafusion::execution::context::SessionState;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_expr::expr::Expr;
 use datafusion_expr::TableProviderFilterPushDown as DfTableProviderFilterPushDown;
@@ -90,7 +90,7 @@ impl TableProvider for DfTableProviderAdapter {
 
     async fn scan(
         &self,
-        _ctx: &SessionState,
+        _state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
