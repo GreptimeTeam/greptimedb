@@ -210,7 +210,6 @@ impl RegionEngine for MetricEngine {
         for x in [
             utils::to_metadata_region_id(region_id),
             utils::to_data_region_id(region_id),
-            region_id,
         ] {
             if let Err(e) = self.inner.mito.set_region_role(x, role)
                 && e.status_code() != StatusCode::RegionNotFound
@@ -226,6 +225,13 @@ impl RegionEngine for MetricEngine {
         region_id: RegionId,
         region_role_state: SettableRegionRoleState,
     ) -> std::result::Result<SetRegionRoleStateResponse, BoxedError> {
+        self.inner
+            .mito
+            .set_region_role_state_gracefully(
+                utils::to_metadata_region_id(region_id),
+                region_role_state,
+            )
+            .await?;
         self.inner
             .mito
             .set_region_role_state_gracefully(region_id, region_role_state)
