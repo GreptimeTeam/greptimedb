@@ -681,7 +681,6 @@ impl ScanInput {
             .access_layer
             .read_sst(file.clone())
             .predicate(self.predicate.clone())
-            .time_range(self.time_range)
             .projection(Some(self.mapper.column_ids().to_vec()))
             .cache(self.cache_manager.clone())
             .inverted_index_applier(self.inverted_index_applier.clone())
