@@ -59,9 +59,9 @@ pub fn find_time_window_lower_bound(
     }
     let permute_map = BTreeMap::from([(ts_col_idx, 0usize)]);
 
-    let mut rewrited_expr = expr.clone();
+    let mut rewrote_expr = expr.clone();
 
-    rewrited_expr.permute_map(&permute_map)?;
+    rewrote_expr.permute_map(&permute_map)?;
 
     fn eval_to_timestamp(expr: &ScalarExpr, values: &[Value]) -> Result<common_time::Timestamp> {
         let val = expr.eval(values)?;
@@ -75,7 +75,7 @@ pub fn find_time_window_lower_bound(
         }
     }
 
-    let cur_time_window = eval_to_timestamp(&rewrited_expr, &[current.into()])?;
+    let cur_time_window = eval_to_timestamp(&rewrote_expr, &[current.into()])?;
 
     // search to find the lower bound
     let mut offset: i64 = 1;
@@ -90,7 +90,7 @@ pub fn find_time_window_lower_bound(
 
         let prev_time_probe = common_time::Timestamp::new(next_val, current.unit());
 
-        let prev_time_window = eval_to_timestamp(&rewrited_expr, &[prev_time_probe.into()])?;
+        let prev_time_window = eval_to_timestamp(&rewrote_expr, &[prev_time_probe.into()])?;
 
         if prev_time_window < cur_time_window {
             lower_bound = Some(prev_time_probe);
@@ -99,7 +99,7 @@ pub fn find_time_window_lower_bound(
             upper_bound = Some(prev_time_probe);
         } else {
             UnexpectedSnafu{
-                reason: format!("Unsupported time window expression {rewrited_expr:?}, expect monotonic increasing for time window expression {expr:?}"),
+                reason: format!("Unsupported time window expression {rewrote_expr:?}, expect monotonic increasing for time window expression {expr:?}"),
             }.fail()?
         }
 
@@ -123,7 +123,7 @@ pub fn find_time_window_lower_bound(
     while low < high {
         let mid = (low + high) / 2;
         let mid_probe = common_time::Timestamp::new(mid, output_unit);
-        let mid_time_window = eval_to_timestamp(&rewrited_expr, &[mid_probe.into()])?;
+        let mid_time_window = eval_to_timestamp(&rewrote_expr, &[mid_probe.into()])?;
         if mid_time_window < cur_time_window {
             low = mid + 1;
         } else if mid_time_window == cur_time_window {
