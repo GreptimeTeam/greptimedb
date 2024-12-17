@@ -31,6 +31,18 @@ const FALSE_POSITIVE_RATE: f64 = 0.01;
 /// `BloomFilterCreator` is responsible for creating and managing bloom filters
 /// for a set of elements. It divides the rows into segments and creates
 /// bloom filters for each segment.
+///
+/// # Format
+///
+/// The bloom filter creator writes the following format to the writer:
+///
+/// ```text
+/// +--------------------+--------------------+-----+----------------------+----------------------+
+/// | Bloom filter 0     | Bloom filter 1     | ... | BloomFilterMeta      | Meta size            |
+/// +--------------------+--------------------+-----+----------------------+----------------------+
+/// |<- bytes (size 0) ->|<- bytes (size 1) ->| ... |<- json (meta size) ->|<- u32 LE (4 bytes) ->|
+/// ```
+///
 pub struct BloomFilterCreator {
     /// The number of rows per segment set by the user.
     rows_per_segment: usize,
