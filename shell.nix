@@ -4,19 +4,23 @@ let
   pkgs = import nixpkgs { config = {}; overlays = []; };
 in
 
-pkgs.mkShellNoCC {
-  packages = with pkgs; [
+pkgs.mkShell rec {
+  nativeBuildInputs = with pkgs; [
     git
     clang
     gcc
-    mold
-    libgit2
     protobuf
+    mold
     (fenix.fromToolchainFile {
       dir = ./.;
     })
-    fenix.rust-analyzer
     cargo-nextest
+    taplo
   ];
 
+  buildInputs = with pkgs; [
+    libgit2
+  ];
+
+  LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath buildInputs;
 }
