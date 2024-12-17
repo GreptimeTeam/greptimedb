@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod close_downgraded_region;
 pub(crate) mod downgrade_leader_region;
 pub(crate) mod manager;
 pub(crate) mod migration_abort;
@@ -773,6 +774,12 @@ mod tests {
             ),
             // UpdateMetadata::Upgrade
             Step::next(
+                "Should be the close downgraded region",
+                None,
+                Assertion::simple(assert_close_downgraded_region, assert_no_persist),
+            ),
+            // CloseDowngradedRegion
+            Step::next(
                 "Should be the region migration end",
                 None,
                 Assertion::simple(assert_region_migration_end, assert_done),
@@ -1142,6 +1149,12 @@ mod tests {
                 Assertion::simple(assert_update_metadata_upgrade, assert_no_persist),
             ),
             // UpdateMetadata::Upgrade
+            Step::next(
+                "Should be the close downgraded region",
+                None,
+                Assertion::simple(assert_close_downgraded_region, assert_no_persist),
+            ),
+            // CloseDowngradedRegion
             Step::next(
                 "Should be the region migration end",
                 None,
