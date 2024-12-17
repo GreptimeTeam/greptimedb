@@ -35,12 +35,10 @@ use crate::error::{EmptyRegionDirSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Res
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::manifest_compress_type;
-use crate::memtable::time_partition::TimePartitions;
-use crate::memtable::MemtableBuilderProvider;
 use crate::read::Source;
 use crate::region::opener::new_manifest_dir;
 use crate::region::options::RegionOptions;
-use crate::region::version::{VersionBuilder, VersionRef};
+use crate::region::version::VersionRef;
 use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
 use crate::schedule::scheduler::LocalScheduler;
 use crate::sst::file::{FileMeta, IndexType};
@@ -48,6 +46,34 @@ use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::parquet::WriteOptions;
+use crate::sst::version::{SstVersion, SstVersionRef};
+
+/// Region version for compaction that does not hold memtables.
+#[derive(Clone)]
+pub struct CompactionVersion {
+    /// Metadata of the region.
+    ///
+    /// Altering metadata isn't frequent, storing metadata in Arc to allow sharing
+    /// metadata and reuse metadata when creating a new `Version`.
+    pub(crate) metadata: RegionMetadataRef,
+    /// Options of the region.
+    pub(crate) options: RegionOptions,
+    /// SSTs of the region.
+    pub(crate) ssts: SstVersionRef,
+    /// Inferred compaction time window.
+    pub(crate) compaction_time_window: Option<Duration>,
+}
+
+impl From<VersionRef> for CompactionVersion {
+    fn from(value: VersionRef) -> Self {
+        Self {
+            metadata: value.metadata.clone(),
+            options: value.options.clone(),
+            ssts: value.ssts.clone(),
+            compaction_time_window: value.compaction_time_window,
+        }
+    }
+}
 
 /// CompactionRegion represents a region that needs to be compacted.
 /// It's the subset of MitoRegion.
@@ -62,7 +88,7 @@ pub struct CompactionRegion {
     pub(crate) cache_manager: CacheManagerRef,
     pub(crate) access_layer: AccessLayerRef,
     pub(crate) manifest_ctx: Arc<ManifestContext>,
-    pub(crate) current_version: VersionRef,
+    pub(crate) current_version: CompactionVersion,
     pub(crate) file_purger: Option<Arc<LocalFilePurger>>,
     pub(crate) ttl: Option<TimeToLive>,
 }
@@ -147,30 +173,14 @@ pub async fn open_compaction_region(
     };
 
     let current_version = {
-        let memtable_builder = MemtableBuilderProvider::new(None, Arc::new(mito_config.clone()))
-            .builder_for_options(
-                req.region_options.memtable.as_ref(),
-                req.region_options.need_dedup(),
-                req.region_options.merge_mode(),
-            );
-
-        // Initial memtable id is 0.
-        let mutable = Arc::new(TimePartitions::new(
-            region_metadata.clone(),
-            memtable_builder.clone(),
-            0,
-            req.region_options.compaction.time_window(),
-        ));
-
-        let version = VersionBuilder::new(region_metadata.clone(), mutable)
-            .add_files(file_purger.clone(), manifest.files.values().cloned())
-            .flushed_entry_id(manifest.flushed_entry_id)
-            .flushed_sequence(manifest.flushed_sequence)
-            .truncated_entry_id(manifest.truncated_entry_id)
-            .compaction_time_window(manifest.compaction_time_window)
-            .options(req.region_options.clone())
-            .build();
-        Arc::new(version)
+        let mut ssts = SstVersion::new();
+        ssts.add_files(file_purger.clone(), manifest.files.values().cloned());
+        CompactionVersion {
+            metadata: region_metadata.clone(),
+            options: req.region_options.clone(),
+            ssts: Arc::new(ssts),
+            compaction_time_window: manifest.compaction_time_window,
+        }
     };
 
     let ttl = find_ttl(
