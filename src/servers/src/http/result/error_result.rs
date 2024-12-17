@@ -72,7 +72,13 @@ impl IntoResponse for ErrorResponse {
     fn into_response(self) -> Response {
         let code = self.code;
         let execution_time = self.execution_time_ms;
-        let new_header = from_err_code_msg_to_header(code, execution_time);
+        let new_header = from_err_code_msg_to_header(
+            code,
+            &format!(
+                "error: {}, execution_time_ms: {}",
+                self.error, execution_time
+            ),
+        );
         let mut resp = Json(self).into_response();
         resp.headers_mut().extend(new_header);
 
