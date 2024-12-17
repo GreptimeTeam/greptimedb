@@ -66,6 +66,8 @@ mod tests;
 mod util;
 mod worker;
 
+mod refill;
+
 pub(crate) mod node_context;
 pub(crate) mod table_source;
 
