@@ -155,7 +155,7 @@ impl UpgradeCandidateRegion {
                     exists,
                     error::UnexpectedSnafu {
                         violated: format!(
-                            "Expected region {} doesn't exist on datanode {:?}",
+                            "Candidate region {} doesn't exist on datanode {:?}",
                             region_id, candidate
                         )
                     }

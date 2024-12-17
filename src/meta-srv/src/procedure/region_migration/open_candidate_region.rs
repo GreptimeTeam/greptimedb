@@ -145,7 +145,10 @@ impl OpenCandidateRegion {
         match receiver.await? {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
-                info!("Received open region reply: {:?}", reply);
+                info!(
+                    "Received open region reply: {:?}, region: {}",
+                    reply, region_id
+                );
                 let InstructionReply::OpenRegion(SimpleReply { result, error }) = reply else {
                     return error::UnexpectedInstructionReplySnafu {
                         mailbox_message: msg.to_string(),
