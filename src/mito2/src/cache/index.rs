@@ -188,8 +188,13 @@ impl IndexDataPageKey {
         (end_page + 1 - start_page) as u32
     }
 
-    /// Computes the byte range based on the offset and size.
-    /// For example, if offset is 5000 and size is 5000 with PAGE_SIZE of 4096, the range is 904..5904.
+    /// Calculates the byte range for data retrieval based on the specified offset and size.
+    ///
+    /// This function determines the starting and ending byte positions required for reading data.
+    /// For example, with an offset of 5000 and a size of 5000, using a PAGE_SIZE of 4096,
+    /// the resulting byte range will be 904..5904. This indicates that:
+    /// - The reader will first access fixed-size pages [4096, 8192) and [8192, 12288).
+    /// - To read the range [5000..10000), it only needs to fetch bytes within the range [904, 5904) across two pages.
     fn calculate_range(offset: u64, size: u32, page_size: u64) -> Range<usize> {
         let start = (offset % page_size) as usize;
         let end = start + size as usize;
