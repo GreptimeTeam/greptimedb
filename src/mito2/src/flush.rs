@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, error, info, trace};
 use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -148,11 +148,11 @@ impl WriteBufferManager for WriteBufferManagerImpl {
                 mutable_memtable_memory_usage);
                 return true;
             } else {
-                common_telemetry::trace!(
-                    "Engine won't flush, memory_usage: {}, global_write_buffer_size: {}, \
-                 mutable_usage: {}.",
-                    memory_usage, self.global_write_buffer_size, mutable_memtable_memory_usage,
-                );
+                trace!(
+                    "Engine won't flush, memory_usage: {}, global_write_buffer_size: {}, mutable_usage: {}.",
+                    memory_usage,
+                    self.global_write_buffer_size,
+                    mutable_memtable_memory_usage);
             }
         }
 
