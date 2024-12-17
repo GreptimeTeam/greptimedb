@@ -44,7 +44,7 @@ use tokio::sync::mpsc::{self, Sender};
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
-use crate::compaction::compactor::{CompactionRegion, DefaultCompactor};
+use crate::compaction::compactor::{CompactionRegion, CompactionVersion, DefaultCompactor};
 use crate::compaction::picker::{new_picker, CompactionTask};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::config::MitoConfig;
@@ -59,7 +59,7 @@ use crate::read::scan_region::ScanInput;
 use crate::read::seq_scan::SeqScan;
 use crate::read::BoxedBatchReader;
 use crate::region::options::MergeMode;
-use crate::region::version::{VersionControlRef, VersionRef};
+use crate::region::version::VersionControlRef;
 use crate::region::ManifestContextRef;
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
 use crate::schedule::remote_job_scheduler::{
@@ -73,7 +73,7 @@ use crate::worker::WorkerListener;
 /// Region compaction request.
 pub struct CompactionRequest {
     pub(crate) engine_config: Arc<MitoConfig>,
-    pub(crate) current_version: VersionRef,
+    pub(crate) current_version: CompactionVersion,
     pub(crate) access_layer: AccessLayerRef,
     /// Sender to send notification to the region worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
@@ -522,7 +522,7 @@ impl CompactionStatus {
         listener: WorkerListener,
         schema_metadata_manager: SchemaMetadataManagerRef,
     ) -> CompactionRequest {
-        let current_version = self.version_control.current().version;
+        let current_version = CompactionVersion::from(self.version_control.current().version);
         let start_time = Instant::now();
         let mut req = CompactionRequest {
             engine_config,
