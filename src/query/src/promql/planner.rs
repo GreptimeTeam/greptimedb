@@ -1515,7 +1515,11 @@ impl PromPlanner {
 
         // regexp_replace(src_label, regex, replacement)
         let args = vec![
-            DfExpr::Column(Column::from_name(src_label)),
+            if src_label.is_empty() {
+                DfExpr::Literal(ScalarValue::Null)
+            } else {
+                DfExpr::Column(Column::from_name(src_label))
+            },
             DfExpr::Literal(ScalarValue::Utf8(Some(regex))),
             DfExpr::Literal(ScalarValue::Utf8(Some(replacement))),
         ];
@@ -1558,9 +1562,11 @@ impl PromPlanner {
                 // Cast source label into column
                 match expr {
                     DfExpr::Literal(ScalarValue::Utf8(Some(label))) => {
-                        let expr = DfExpr::Column(Column::from_name(label));
-
-                        Ok(expr)
+                        if label.is_empty() {
+                            Ok(DfExpr::Literal(ScalarValue::Null))
+                        } else {
+                            Ok(DfExpr::Column(Column::from_name(label)))
+                        }
                     }
                     other => UnexpectedPlanExprSnafu {
                         desc: format!(
