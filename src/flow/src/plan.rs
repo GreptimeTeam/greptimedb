@@ -186,9 +186,9 @@ pub enum Plan {
 
 impl Plan {
     /// Get nth expr using column ref
-    pub fn get_nth_expr(&self, n: usize) -> Option<&ScalarExpr> {
+    pub fn get_nth_expr(&self, n: usize) -> Option<ScalarExpr> {
         match self {
-            Self::Mfp { mfp, .. } => mfp.expressions.get(n),
+            Self::Mfp { mfp, .. } => mfp.get_nth_expr(n),
             Self::Reduce { key_val_plan, .. } => key_val_plan.get_nth_expr(n),
             _ => None,
         }

@@ -25,13 +25,11 @@ pub struct KeyValPlan {
 
 impl KeyValPlan {
     /// Get nth expr using column ref
-    pub fn get_nth_expr(&self, n: usize) -> Option<&ScalarExpr> {
-        let key_len = self.key_plan.expressions.len();
-        if n < key_len {
-            self.key_plan.expressions.get(n)
-        } else {
-            self.val_plan.expressions.get(n - key_len)
-        }
+    pub fn get_nth_expr(&self, n: usize) -> Option<ScalarExpr> {
+        self.key_plan.get_nth_expr(n).or_else(|| {
+            self.val_plan
+                .get_nth_expr(n - self.key_plan.projection.len())
+        })
     }
 }
 

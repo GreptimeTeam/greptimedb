@@ -26,7 +26,7 @@ use crate::Result;
 /// Find lower bound for time `current` in given `plan`
 ///
 /// if `plan` doesn't contain a `TIME INDEX` column, return `None`
-pub fn find_time_lower_bound_for_plan(
+pub fn find_plan_time_lower_bound(
     plan: &TypedPlan,
     current: common_time::Timestamp,
 ) -> Result<Option<common_time::Timestamp>> {
@@ -36,21 +36,26 @@ pub fn find_time_lower_bound_for_plan(
     };
 
     let mut cur_plan = plan;
-    let mut expr_time_index = None;
+    let mut expr_time_index;
 
-    while let Some(input) = cur_plan.plan.get_first_input_plan() {
+    loop {
         // follow upward and find deepest time index expr that is not a column ref
-        expr_time_index = Some(input.plan.get_nth_expr(time_index).cloned().context(
+        expr_time_index = Some(cur_plan.plan.get_nth_expr(time_index).context(
             UnexpectedSnafu {
                 reason: "Failed to find time index expr",
             },
         )?);
+
         if let Some(ScalarExpr::Column(i)) = expr_time_index {
             time_index = i;
         } else {
             break;
         }
-        cur_plan = input;
+        if let Some(input) = cur_plan.plan.get_first_input_plan() {
+            cur_plan = input;
+        } else {
+            break;
+        }
     }
 
     let expr_time_index = expr_time_index.context(UnexpectedSnafu {
@@ -197,13 +202,64 @@ pub fn find_time_window_lower_bound(
 
 #[cfg(test)]
 mod test {
+    use pretty_assertions::assert_eq;
+
     use super::*;
     use crate::plan::{Plan, TypedPlan};
     use crate::test_utils::{create_test_ctx, create_test_query_engine, sql_to_substrait};
 
     #[tokio::test]
+    async fn test_plan_time_window_lower_bound() {
+        let testcases = [
+            // no time index
+            (
+                "SELECT date_bin('5 minutes', ts) FROM numbers_with_ts;",
+                "2021-07-01 00:01:01.000",
+                None,
+            ),
+            // time index
+            (
+                "SELECT date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window;",
+                "2021-07-01 00:01:01.000",
+                Some("2021-07-01 00:00:00.000"),
+            ),
+            // time index with other fields
+            (
+                "SELECT sum(number) as sum_up, date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window;",
+                "2021-07-01 00:01:01.000",
+                Some("2021-07-01 00:00:00.000"),
+            ),
+            // time index with other pks
+            (
+                "SELECT number, date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window, number;",
+                "2021-07-01 00:01:01.000",
+                Some("2021-07-01 00:00:00.000"),
+            ),
+        ];
+        let engine = create_test_query_engine();
+
+        for (sql, current, expected) in &testcases[3..] {
+            let plan = sql_to_substrait(engine.clone(), sql).await;
+            let mut ctx = create_test_ctx();
+            let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
+                .await
+                .unwrap();
+
+            let current = common_time::Timestamp::from_str(current, None).unwrap();
+
+            let expected =
+                expected.map(|expected| common_time::Timestamp::from_str(expected, None).unwrap());
+
+            assert_eq!(
+                find_plan_time_lower_bound(&flow_plan, current).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_timewindow_lower_bound() {
-        let testcases = vec![
+        let testcases = [
             (
                 ("'5 minutes'", "ts", Some("2021-07-01 00:00:00.000")),
                 "2021-07-01 00:01:01.000",
