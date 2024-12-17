@@ -15,25 +15,24 @@
 use async_trait::async_trait;
 use futures::{AsyncRead, AsyncWrite};
 
-use crate::inverted_index::error::Result;
+use crate::error::Error;
 
-/// Trait for managing intermediate files during external sorting for a particular index.
+pub type Writer = Box<dyn AsyncWrite + Unpin + Send>;
+pub type Reader = Box<dyn AsyncRead + Unpin + Send>;
+
+/// Trait for managing intermediate files to control memory usage for a particular index.
 #[mockall::automock]
 #[async_trait]
 pub trait ExternalTempFileProvider: Send + Sync {
-    /// Creates and opens a new intermediate file associated with a specific index for writing.
+    /// Creates and opens a new intermediate file associated with a specific `file_group` for writing.
     /// The implementation should ensure that the file does not already exist.
     ///
-    /// - `index_name`: the name of the index for which the file will be associated
+    /// - `file_group`: a unique identifier for the group of files
     /// - `file_id`: a unique identifier for the new file
-    async fn create(
-        &self,
-        index_name: &str,
-        file_id: &str,
-    ) -> Result<Box<dyn AsyncWrite + Unpin + Send>>;
+    async fn create(&self, file_group: &str, file_id: &str) -> Result<Writer, Error>;
 
-    /// Retrieves all intermediate files associated with a specific index for an external sorting operation.
+    /// Retrieves all intermediate files and their associated file identifiers for a specific `file_group`.
     ///
-    /// `index_name`: the name of the index to retrieve intermediate files for
-    async fn read_all(&self, index_name: &str) -> Result<Vec<Box<dyn AsyncRead + Unpin + Send>>>;
+    /// `file_group` is a unique identifier for the group of files.
+    async fn read_all(&self, file_group: &str) -> Result<Vec<(String, Reader)>, Error>;
 }
