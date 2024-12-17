@@ -21,7 +21,6 @@ use common_error::{define_into_tonic_status, from_err_code_msg_to_header};
 use common_macro::stack_trace_debug;
 use common_telemetry::common_error::ext::ErrorExt;
 use common_telemetry::common_error::status_code::StatusCode;
-use http::HeaderValue;
 use snafu::{Location, Snafu};
 use tonic::metadata::MetadataMap;
 
@@ -193,19 +192,7 @@ pub fn to_status_with_last_err(err: impl ErrorExt) -> tonic::Status {
     let msg = err.to_string();
     let last_err_msg = common_error::ext::StackError::last(&err).to_string();
     let code = err.status_code() as u32;
-    let header = from_err_code_msg_to_header(
-        code,
-        HeaderValue::from_str(&last_err_msg).unwrap_or_else(|_| {
-            HeaderValue::from_bytes(
-                &last_err_msg
-                    .as_bytes()
-                    .iter()
-                    .flat_map(|b| std::ascii::escape_default(*b))
-                    .collect::<Vec<u8>>(),
-            )
-            .expect("Already escaped string should be valid ascii")
-        }),
-    );
+    let header = from_err_code_msg_to_header(code, &last_err_msg);
 
     tonic::Status::with_metadata(
         tonic::Code::InvalidArgument,
