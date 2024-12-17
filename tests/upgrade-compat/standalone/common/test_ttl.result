@@ -1,0 +1,153 @@
+-- SQLNESS ARG version=v0.9.5
+CREATE TABLE test_ttl_0s(ts TIMESTAMP TIME INDEX, val INT) WITH (ttl = '0 second');
+
+Affected Rows: 0
+
+CREATE TABLE test_ttl_1s(ts TIMESTAMP TIME INDEX, val INT) WITH (ttl = '1 second');
+
+Affected Rows: 0
+
+CREATE TABLE test_ttl_none(ts TIMESTAMP TIME INDEX, val INT);
+
+Affected Rows: 0
+
+CREATE DATABASE ttl_db_1s WITH (ttl = '1 second');
+
+Affected Rows: 1
+
+CREATE DATABASE ttl_db_0s WITH (ttl = '0 second');
+
+Affected Rows: 1
+
+CREATE DATABASE ttl_db_none;
+
+Affected Rows: 1
+
+-- SQLNESS ARG version=latest
+SHOW TABLES;
+
++---------------+
+| Tables        |
++---------------+
+| numbers       |
+| test_ttl_0s   |
+| test_ttl_1s   |
+| test_ttl_none |
++---------------+
+
+SHOW CREATE TABLE test_ttl_1s;
+
++-------------+--------------------------------------------+
+| Table       | Create Table                               |
++-------------+--------------------------------------------+
+| test_ttl_1s | CREATE TABLE IF NOT EXISTS "test_ttl_1s" ( |
+|             |   "ts" TIMESTAMP(3) NOT NULL,              |
+|             |   "val" INT NULL,                          |
+|             |   TIME INDEX ("ts")                        |
+|             | )                                          |
+|             |                                            |
+|             | ENGINE=mito                                |
+|             | WITH(                                      |
+|             |   ttl = '1s'                               |
+|             | )                                          |
++-------------+--------------------------------------------+
+
+SHOW CREATE TABLE test_ttl_0s;
+
++-------------+--------------------------------------------+
+| Table       | Create Table                               |
++-------------+--------------------------------------------+
+| test_ttl_0s | CREATE TABLE IF NOT EXISTS "test_ttl_0s" ( |
+|             |   "ts" TIMESTAMP(3) NOT NULL,              |
+|             |   "val" INT NULL,                          |
+|             |   TIME INDEX ("ts")                        |
+|             | )                                          |
+|             |                                            |
+|             | ENGINE=mito                                |
+|             | WITH(                                      |
+|             |   ttl = '0s'                               |
+|             | )                                          |
++-------------+--------------------------------------------+
+
+SHOW CREATE TABLE test_ttl_none;
+
++---------------+----------------------------------------------+
+| Table         | Create Table                                 |
++---------------+----------------------------------------------+
+| test_ttl_none | CREATE TABLE IF NOT EXISTS "test_ttl_none" ( |
+|               |   "ts" TIMESTAMP(3) NOT NULL,                |
+|               |   "val" INT NULL,                            |
+|               |   TIME INDEX ("ts")                          |
+|               | )                                            |
+|               |                                              |
+|               | ENGINE=mito                                  |
+|               |                                              |
++---------------+----------------------------------------------+
+
+DROP TABLE test_ttl_1s;
+
+Affected Rows: 0
+
+DROP TABLE test_ttl_0s;
+
+Affected Rows: 0
+
+DROP TABLE test_ttl_none;
+
+Affected Rows: 0
+
+SHOW DATABASES;
+
++--------------------+
+| Database           |
++--------------------+
+| greptime_private   |
+| information_schema |
+| public             |
+| ttl_db_0s          |
+| ttl_db_1s          |
+| ttl_db_none        |
++--------------------+
+
+SHOW CREATE DATABASE ttl_db_1s;
+
++-----------+-----------------------------------------+
+| Database  | Create Database                         |
++-----------+-----------------------------------------+
+| ttl_db_1s | CREATE DATABASE IF NOT EXISTS ttl_db_1s |
+|           | WITH(                                   |
+|           |   ttl = '1s'                            |
+|           | )                                       |
++-----------+-----------------------------------------+
+
+SHOW CREATE DATABASE ttl_db_0s;
+
++-----------+-----------------------------------------+
+| Database  | Create Database                         |
++-----------+-----------------------------------------+
+| ttl_db_0s | CREATE DATABASE IF NOT EXISTS ttl_db_0s |
+|           | WITH(                                   |
+|           |   ttl = '0s'                            |
+|           | )                                       |
++-----------+-----------------------------------------+
+
+SHOW CREATE DATABASE ttl_db_none;
+
++-------------+-------------------------------------------+
+| Database    | Create Database                           |
++-------------+-------------------------------------------+
+| ttl_db_none | CREATE DATABASE IF NOT EXISTS ttl_db_none |
++-------------+-------------------------------------------+
+
+DROP DATABASE ttl_db_1s;
+
+Affected Rows: 0
+
+DROP DATABASE ttl_db_0s;
+
+Affected Rows: 0
+
+DROP DATABASE ttl_db_none;
+
+Affected Rows: 0
+
