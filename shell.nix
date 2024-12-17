@@ -6,6 +6,7 @@ in
 
 pkgs.mkShell rec {
   nativeBuildInputs = with pkgs; [
+    pkg-config
     git
     clang
     gcc
