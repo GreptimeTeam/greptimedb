@@ -148,7 +148,7 @@ impl WriteBufferManager for WriteBufferManagerImpl {
                 mutable_memtable_memory_usage);
                 return true;
             } else {
-                debug!(
+                common_telemetry::trace!(
                     "Engine won't flush, memory_usage: {}, global_write_buffer_size: {}, \
                  mutable_usage: {}.",
                     memory_usage, self.global_write_buffer_size, mutable_memtable_memory_usage,
