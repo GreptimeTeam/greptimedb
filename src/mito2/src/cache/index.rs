@@ -70,15 +70,14 @@ where
         if keys.is_empty() {
             return Ok(Vec::new());
         }
-        // TODO: Can be replaced by an uncontinuous structure like opendal::Buffer.
         let mut data = Vec::with_capacity(keys.len());
         data.resize(keys.len(), Bytes::new());
         let mut cache_miss_range = vec![];
         let mut cache_miss_idx = vec![];
         let last_index = keys.len() - 1;
         // TODO: Avoid copy as much as possible.
-        for (i, index) in keys.clone().into_iter().enumerate() {
-            match self.cache.get_index(&index) {
+        for (i, index) in keys.iter().enumerate() {
+            match self.cache.get_index(index) {
                 Some(page) => {
                     CACHE_HIT.with_label_values(&[INDEX_CONTENT_TYPE]).inc();
                     data[i] = page;
@@ -99,7 +98,6 @@ where
         if !cache_miss_range.is_empty() {
             let pages = self.inner.read_vec(&cache_miss_range).await?;
             for (i, page) in cache_miss_idx.into_iter().zip(pages.into_iter()) {
-                let page = page;
                 let key = keys[i].clone();
                 data[i] = page.clone();
                 self.cache.put_index(key, page.clone());
