@@ -23,11 +23,7 @@ use api::v1::SemanticType;
 use async_trait::async_trait;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::{debug, warn};
-use common_time::range::TimestampRange;
-use common_time::timestamp::TimeUnit;
-use common_time::Timestamp;
-use datafusion_common::ScalarValue;
-use datafusion_expr::{Expr, Operator};
+use datafusion_expr::Expr;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
@@ -42,7 +38,6 @@ use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
 use crate::cache::CacheManagerRef;
-use crate::error;
 use crate::error::{
     ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadParquetSnafu, Result,
 };
@@ -74,8 +69,6 @@ pub struct ParquetReaderBuilder {
     object_store: ObjectStore,
     /// Predicate to push down.
     predicate: Option<Predicate>,
-    /// Time range to filter.
-    time_range: Option<TimestampRange>,
     /// Metadata of columns to read.
     ///
     /// `None` reads all columns. Due to schema change, the projection
@@ -104,7 +97,6 @@ impl ParquetReaderBuilder {
             file_handle,
             object_store,
             predicate: None,
-            time_range: None,
             projection: None,
             cache_manager: None,
             inverted_index_applier: None,
@@ -117,13 +109,6 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub fn predicate(mut self, predicate: Option<Predicate>) -> ParquetReaderBuilder {
         self.predicate = predicate;
-        self
-    }
-
-    /// Attaches the time range to the builder.
-    #[must_use]
-    pub fn time_range(mut self, time_range: Option<TimestampRange>) -> ParquetReaderBuilder {
-        self.time_range = time_range;
         self
     }
 
@@ -238,7 +223,7 @@ impl ParquetReaderBuilder {
             cache_manager: self.cache_manager.clone(),
         };
 
-        let mut filters = if let Some(predicate) = &self.predicate {
+        let filters = if let Some(predicate) = &self.predicate {
             predicate
                 .exprs()
                 .iter()
@@ -253,10 +238,6 @@ impl ParquetReaderBuilder {
         } else {
             vec![]
         };
-
-        if let Some(time_range) = &self.time_range {
-            filters.extend(time_range_to_predicate(*time_range, &region_meta)?);
-        }
 
         let codec = McmpRowCodec::new(
             read_format
@@ -678,59 +659,6 @@ impl ParquetReaderBuilder {
     }
 }
 
-/// Transforms time range into [SimpleFilterEvaluator].
-fn time_range_to_predicate(
-    time_range: TimestampRange,
-    metadata: &RegionMetadataRef,
-) -> Result<Vec<SimpleFilterContext>> {
-    let ts_col = metadata.time_index_column();
-    let ts_col_id = ts_col.column_id;
-
-    let ts_to_filter = |op: Operator, timestamp: &Timestamp| {
-        let value = match timestamp.unit() {
-            TimeUnit::Second => ScalarValue::TimestampSecond(Some(timestamp.value()), None),
-            TimeUnit::Millisecond => {
-                ScalarValue::TimestampMillisecond(Some(timestamp.value()), None)
-            }
-            TimeUnit::Microsecond => {
-                ScalarValue::TimestampMicrosecond(Some(timestamp.value()), None)
-            }
-            TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(timestamp.value()), None),
-        };
-        let evaluator = SimpleFilterEvaluator::new(ts_col.column_schema.name.clone(), value, op)
-            .context(error::BuildTimeRangeFilterSnafu {
-                timestamp: *timestamp,
-            })?;
-        Ok(SimpleFilterContext::new(
-            evaluator,
-            ts_col_id,
-            SemanticType::Timestamp,
-            ts_col.column_schema.data_type.clone(),
-        ))
-    };
-
-    let predicates = match (time_range.start(), time_range.end()) {
-        (Some(start), Some(end)) => {
-            vec![
-                ts_to_filter(Operator::GtEq, start)?,
-                ts_to_filter(Operator::Lt, end)?,
-            ]
-        }
-
-        (Some(start), None) => {
-            vec![ts_to_filter(Operator::GtEq, start)?]
-        }
-
-        (None, Some(end)) => {
-            vec![ts_to_filter(Operator::Lt, end)?]
-        }
-        (None, None) => {
-            vec![]
-        }
-    };
-    Ok(predicates)
-}
-
 /// Metrics of filtering rows groups and rows.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct ReaderFilterMetrics {
@@ -939,20 +867,6 @@ pub(crate) struct SimpleFilterContext {
 }
 
 impl SimpleFilterContext {
-    fn new(
-        filter: SimpleFilterEvaluator,
-        column_id: ColumnId,
-        semantic_type: SemanticType,
-        data_type: ConcreteDataType,
-    ) -> Self {
-        Self {
-            filter,
-            column_id,
-            semantic_type,
-            data_type,
-        }
-    }
-
     /// Creates a context for the `expr`.
     ///
     /// Returns None if the column to filter doesn't exist in the SST metadata or the
