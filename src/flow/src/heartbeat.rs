@@ -38,9 +38,12 @@ use crate::error::ExternalSnafu;
 use crate::utils::SizeReportSender;
 use crate::{Error, FlownodeOptions};
 
-async fn query_flow_state(query_stat_size: &Option<SizeReportSender>) -> Option<FlowStat> {
+async fn query_flow_state(
+    query_stat_size: &Option<SizeReportSender>,
+    timeout: Duration,
+) -> Option<FlowStat> {
     if let Some(report_requester) = query_stat_size.as_ref() {
-        let ret = report_requester.query().await;
+        let ret = report_requester.query(timeout).await;
         match ret {
             Ok(latest) => Some(latest),
             Err(err) => {
@@ -220,7 +223,8 @@ impl HeartbeatTask {
                 }
                 // after sending heartbeat, try to get the latest report
                 // TODO(discord9): consider a better place to update the size report
-                latest_report = query_flow_state(&query_stat_size).await;
+                // set the timeout to half of the report interval so that it wouldn't delay heartbeat if something went horribly wrong
+                latest_report = query_flow_state(&query_stat_size, report_interval / 2).await;
             }
         });
     }

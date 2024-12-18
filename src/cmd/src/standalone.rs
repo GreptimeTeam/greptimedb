@@ -769,15 +769,15 @@ impl InformationExtension for StandaloneInformationExtension {
     }
 
     async fn flow_stats(&self) -> std::result::Result<Option<FlowStat>, Self::Error> {
-        let state = self
-            .flow_worker_manager
-            .read()
-            .await
-            .as_ref()
-            .unwrap()
-            .gen_state_report()
-            .await;
-        Ok(Some(state))
+        Ok(Some(
+            self.flow_worker_manager
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .gen_state_report()
+                .await,
+        ))
     }
 }
 

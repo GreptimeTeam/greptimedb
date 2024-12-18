@@ -213,9 +213,8 @@ impl InformationSchemaFlowsBuilder {
             .await;
 
         let flow_stat = {
-            let information_extension =
-                utils::information_extension(&self.catalog_manager).unwrap();
-            information_extension.flow_stats().await?.clone()
+            let information_extension = utils::information_extension(&self.catalog_manager)?;
+            information_extension.flow_stats().await?
         };
 
         while let Some((flow_name, flow_id)) = stream

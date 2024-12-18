@@ -56,7 +56,7 @@ impl SizeReportSender {
     }
 
     /// Query the size report, will timeout after one second if no response
-    pub async fn query(&self) -> crate::Result<FlowStat> {
+    pub async fn query(&self, timeout: std::time::Duration) -> crate::Result<FlowStat> {
         let (tx, rx) = oneshot::channel();
         self.inner.send(tx).await.map_err(|_| {
             InternalSnafu {
@@ -64,7 +64,7 @@ impl SizeReportSender {
             }
             .build()
         })?;
-        let timeout = tokio::time::timeout(std::time::Duration::from_secs(1), rx);
+        let timeout = tokio::time::timeout(timeout, rx);
         timeout
             .await
             .map_err(|_elapsed| {
