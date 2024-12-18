@@ -209,7 +209,7 @@ impl Flownode for FlowWorkerManager {
                 .collect_vec();
             let batch_datatypes = insert_schema
                 .iter()
-                .map(|s| from_proto_to_column_schema(s))
+                .map(from_proto_to_column_schema)
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(to_meta_err)?;
             self.handle_write_request(region_id.into(), rows, &batch_datatypes)
