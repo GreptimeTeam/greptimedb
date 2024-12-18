@@ -168,8 +168,8 @@ impl TimePartitions {
         Ok(())
     }
 
-    /// Forks latest partition.
-    pub fn fork(&self, metadata: &RegionMetadataRef) -> Self {
+    /// Forks latest partition and updates the partition duration.
+    pub fn fork(&self, metadata: &RegionMetadataRef, part_duration: Option<Duration>) -> Self {
         let mut inner = self.inner.lock().unwrap();
         let latest_part = inner
             .parts
@@ -178,17 +178,31 @@ impl TimePartitions {
             .cloned();
 
         let Some(old_part) = latest_part else {
+            // If there is no partition, then we create a new partition with the new duration.
             return Self::new(
                 metadata.clone(),
                 self.builder.clone(),
                 inner.next_memtable_id,
-                self.part_duration,
+                part_duration,
             );
         };
+
+        let old_stats = old_part.memtable.stats();
+        // Use the max timestamp to compute the new time range for the memtable.
+        // If `part_duration` is None, the new range will be None.
+        let new_time_range =
+            old_stats
+                .time_range()
+                .zip(part_duration)
+                .and_then(|(range, bucket)| {
+                    partition_start_timestamp(range.1, bucket)
+                        .and_then(|start| PartTimeRange::from_start_duration(start, bucket))
+                });
+        // Forks the latest partition, but compute the time range based on the new duration.
         let memtable = old_part.memtable.fork(inner.alloc_memtable_id(), metadata);
         let new_part = TimePartition {
             memtable,
-            time_range: old_part.time_range,
+            time_range: new_time_range,
         };
         Self {
             inner: Mutex::new(PartitionsInner::with_partition(
@@ -236,6 +250,16 @@ impl TimePartitions {
     pub(crate) fn next_memtable_id(&self) -> MemtableId {
         let inner = self.inner.lock().unwrap();
         inner.next_memtable_id
+    }
+
+    /// Creates a new empty partition list from this list and a part_duration.
+    pub(crate) fn new_with_part_duration(&self, part_duration: Option<Duration>) -> Self {
+        Self::new(
+            self.metadata.clone(),
+            self.builder.clone(),
+            self.next_memtable_id(),
+            part_duration,
+        )
     }
 
     /// Returns all partitions.
