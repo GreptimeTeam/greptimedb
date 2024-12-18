@@ -57,6 +57,10 @@ impl TransformRule for TypeAliasTransformRule {
                     alter_table.alter_operation_mut()
                 {
                     replace_type_alias(target_type)
+                } else if let AlterTableOperation::AddColumn { column_def, .. } =
+                    alter_table.alter_operation_mut()
+                {
+                    replace_type_alias(&mut column_def.data_type);
                 }
             }
             _ => {}

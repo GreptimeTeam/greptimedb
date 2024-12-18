@@ -15,5 +15,6 @@
 #![feature(iter_partition_in_place)]
 #![feature(assert_matches)]
 
+pub mod bloom_filter;
 pub mod fulltext_index;
 pub mod inverted_index;

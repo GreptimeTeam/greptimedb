@@ -24,7 +24,7 @@ use crate::sst::index::IndexOutput;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
 pub(crate) mod file_range;
-pub(crate) mod format;
+pub mod format;
 pub(crate) mod helper;
 pub(crate) mod metadata;
 mod page_reader;

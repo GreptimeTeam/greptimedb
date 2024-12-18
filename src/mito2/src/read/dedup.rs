@@ -224,6 +224,12 @@ pub(crate) struct DedupMetrics {
 }
 
 /// Buffer to store fields in the last row to merge.
+///
+/// Usage:
+/// We should call `maybe_init()` to initialize the builder and then call `push_first_row()`
+/// to push the first row of batches that the timestamp is the same as the row in this builder.
+/// Finally we should call `merge_last_non_null()` to merge the last non-null fields and
+/// return the merged batch.
 struct LastFieldsBuilder {
     /// Filter deleted rows.
     filter_deleted: bool,
@@ -311,6 +317,16 @@ impl LastFieldsBuilder {
             return;
         }
 
+        // Both `maybe_init()` and `push_first_row()` can update the builder. If the delete
+        // op is not in the latest row, then we can't set the deletion flag in the `maybe_init()`.
+        // We must check the batch and update the deletion flag here to prevent
+        // the builder from merging non-null fields in rows that insert before the deleted row.
+        self.contains_deletion = batch.op_types().get_data(0).unwrap() == OpType::Delete as u8;
+        if self.contains_deletion {
+            // Deletes this row.
+            return;
+        }
+
         let fields = batch.fields();
         for (idx, value) in self.last_fields.iter_mut().enumerate() {
             if value.is_null() && !fields[idx].data.is_null(0) {
@@ -323,7 +339,8 @@ impl LastFieldsBuilder {
     }
 
     /// Merges last non-null fields, builds a new batch and resets the builder.
-    /// It may overwrites the last row of the `buffer`.
+    /// It may overwrites the last row of the `buffer`. The `buffer` is the batch
+    /// that initialized the builder.
     fn merge_last_non_null(
         &mut self,
         buffer: Batch,
@@ -1078,6 +1095,32 @@ mod tests {
                 new_batch_multi_fields(b"k1", &[1], &[6], &[OpType::Put], &[(Some(11), None)]),
                 new_batch_multi_fields(b"k1", &[2], &[7], &[OpType::Put], &[(Some(22), Some(222))]),
                 new_batch_multi_fields(b"k1", &[3], &[5], &[OpType::Put], &[(Some(13), Some(3))]),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_last_non_null_strategy_delete_middle() {
+        let input = [
+            new_batch_multi_fields(b"k1", &[1], &[7], &[OpType::Put], &[(Some(11), None)]),
+            new_batch_multi_fields(b"k1", &[1], &[4], &[OpType::Delete], &[(None, None)]),
+            new_batch_multi_fields(b"k1", &[1], &[1], &[OpType::Put], &[(Some(12), Some(1))]),
+            new_batch_multi_fields(b"k1", &[2], &[8], &[OpType::Put], &[(Some(21), None)]),
+            new_batch_multi_fields(b"k1", &[2], &[5], &[OpType::Delete], &[(None, None)]),
+            new_batch_multi_fields(b"k1", &[2], &[2], &[OpType::Put], &[(Some(22), Some(2))]),
+            new_batch_multi_fields(b"k1", &[3], &[9], &[OpType::Put], &[(Some(31), None)]),
+            new_batch_multi_fields(b"k1", &[3], &[6], &[OpType::Delete], &[(None, None)]),
+            new_batch_multi_fields(b"k1", &[3], &[3], &[OpType::Put], &[(Some(32), Some(3))]),
+        ];
+
+        let mut strategy = LastNonNull::new(true);
+        check_dedup_strategy(
+            &input,
+            &mut strategy,
+            &[
+                new_batch_multi_fields(b"k1", &[1], &[7], &[OpType::Put], &[(Some(11), None)]),
+                new_batch_multi_fields(b"k1", &[2], &[8], &[OpType::Put], &[(Some(21), None)]),
+                new_batch_multi_fields(b"k1", &[3], &[9], &[OpType::Put], &[(Some(31), None)]),
             ],
         );
     }

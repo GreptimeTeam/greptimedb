@@ -946,6 +946,7 @@ create_on_flush = "auto"
 create_on_compaction = "auto"
 apply_on_query = "auto"
 mem_threshold_on_create = "auto"
+content_cache_page_size = "8MiB"
 
 [region_engine.mito.fulltext_index]
 create_on_flush = "auto"
@@ -1319,7 +1320,7 @@ pub async fn test_test_pipeline_api(store_type: StorageType) {
     // handshake
     let client = TestClient::new(app);
 
-    let body = r#"
+    let pipeline_content = r#"
 processors:
   - date:
       field: time
@@ -1346,7 +1347,7 @@ transform:
     let res = client
         .post("/v1/events/pipelines/test")
         .header("Content-Type", "application/x-yaml")
-        .body(body)
+        .body(pipeline_content)
         .send()
         .await;
 
@@ -1367,8 +1368,87 @@ transform:
     let pipeline = pipelines.first().unwrap();
     assert_eq!(pipeline.get("name").unwrap(), "test");
 
-    // 2. write data
-    let data_body = r#"
+    let dryrun_schema = json!([
+        {
+            "colume_type": "FIELD",
+            "data_type": "INT32",
+            "fulltext": false,
+            "name": "id1"
+        },
+        {
+            "colume_type": "FIELD",
+            "data_type": "INT32",
+            "fulltext": false,
+            "name": "id2"
+        },
+        {
+            "colume_type": "FIELD",
+            "data_type": "STRING",
+            "fulltext": false,
+            "name": "type"
+        },
+        {
+            "colume_type": "FIELD",
+            "data_type": "STRING",
+            "fulltext": false,
+            "name": "log"
+        },
+        {
+            "colume_type": "FIELD",
+            "data_type": "STRING",
+            "fulltext": false,
+            "name": "logger"
+        },
+        {
+            "colume_type": "TIMESTAMP",
+            "data_type": "TIMESTAMP_NANOSECOND",
+            "fulltext": false,
+            "name": "time"
+        }
+    ]);
+    let dryrun_rows = json!([
+        [
+            {
+                "data_type": "INT32",
+                "key": "id1",
+                "semantic_type": "FIELD",
+                "value": 2436
+            },
+            {
+                "data_type": "INT32",
+                "key": "id2",
+                "semantic_type": "FIELD",
+                "value": 2528
+            },
+            {
+                "data_type": "STRING",
+                "key": "type",
+                "semantic_type": "FIELD",
+                "value": "I"
+            },
+            {
+                "data_type": "STRING",
+                "key": "log",
+                "semantic_type": "FIELD",
+                "value": "ClusterAdapter:enter sendTextDataToCluster\\n"
+            },
+            {
+                "data_type": "STRING",
+                "key": "logger",
+                "semantic_type": "FIELD",
+                "value": "INTERACT.MANAGER"
+            },
+            {
+                "data_type": "TIMESTAMP_NANOSECOND",
+                "key": "time",
+                "semantic_type": "TIMESTAMP",
+                "value": "2024-05-25 20:16:37.217+0000"
+            }
+        ]
+    ]);
+    {
+        // test original api
+        let data_body = r#"
         [
           {
             "id1": "2436",
@@ -1380,100 +1460,100 @@ transform:
           }
         ]
         "#;
-    let res = client
-        .post("/v1/events/pipelines/dryrun?pipeline_name=test")
-        .header("Content-Type", "application/json")
-        .body(data_body)
-        .send()
-        .await;
-    assert_eq!(res.status(), StatusCode::OK);
-    let body: Value = res.json().await;
-    let schema = &body["schema"];
-    let rows = &body["rows"];
-    assert_eq!(
-        schema,
-        &json!([
+        let res = client
+            .post("/v1/events/pipelines/dryrun?pipeline_name=test")
+            .header("Content-Type", "application/json")
+            .body(data_body)
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: Value = res.json().await;
+        let schema = &body["schema"];
+        let rows = &body["rows"];
+        assert_eq!(schema, &dryrun_schema);
+        assert_eq!(rows, &dryrun_rows);
+    }
+    {
+        // test new api specify pipeline via pipeline_name
+        let body = r#"
             {
-                "colume_type": "FIELD",
-                "data_type": "INT32",
-                "fulltext": false,
-                "name": "id1"
-            },
-            {
-                "colume_type": "FIELD",
-                "data_type": "INT32",
-                "fulltext": false,
-                "name": "id2"
-            },
-            {
-                "colume_type": "FIELD",
-                "data_type": "STRING",
-                "fulltext": false,
-                "name": "type"
-            },
-            {
-                "colume_type": "FIELD",
-                "data_type": "STRING",
-                "fulltext": false,
-                "name": "log"
-            },
-            {
-                "colume_type": "FIELD",
-                "data_type": "STRING",
-                "fulltext": false,
-                "name": "logger"
-            },
-            {
-                "colume_type": "TIMESTAMP",
-                "data_type": "TIMESTAMP_NANOSECOND",
-                "fulltext": false,
-                "name": "time"
-            }
-        ])
-    );
-    assert_eq!(
-        rows,
-        &json!([
-            [
+            "pipeline_name": "test",
+            "data": [
                 {
-                    "data_type": "INT32",
-                    "key": "id1",
-                    "semantic_type": "FIELD",
-                    "value": 2436
-                },
-                {
-                    "data_type": "INT32",
-                    "key": "id2",
-                    "semantic_type": "FIELD",
-                    "value": 2528
-                },
-                {
-                    "data_type": "STRING",
-                    "key": "type",
-                    "semantic_type": "FIELD",
-                    "value": "I"
-                },
-                {
-                    "data_type": "STRING",
-                    "key": "log",
-                    "semantic_type": "FIELD",
-                    "value": "ClusterAdapter:enter sendTextDataToCluster\\n"
-                },
-                {
-                    "data_type": "STRING",
-                    "key": "logger",
-                    "semantic_type": "FIELD",
-                    "value": "INTERACT.MANAGER"
-                },
-                {
-                    "data_type": "TIMESTAMP_NANOSECOND",
-                    "key": "time",
-                    "semantic_type": "TIMESTAMP",
-                    "value": "2024-05-25 20:16:37.217+0000"
+                "id1": "2436",
+                "id2": "2528",
+                "logger": "INTERACT.MANAGER",
+                "type": "I",
+                "time": "2024-05-25 20:16:37.217",
+                "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
                 }
             ]
-        ])
-    );
+            }
+        "#;
+        let res = client
+            .post("/v1/events/pipelines/dryrun")
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: Value = res.json().await;
+        let schema = &body["schema"];
+        let rows = &body["rows"];
+        assert_eq!(schema, &dryrun_schema);
+        assert_eq!(rows, &dryrun_rows);
+    }
+    {
+        // test new api specify pipeline via pipeline raw data
+        let mut body = json!({
+        "data": [
+            {
+            "id1": "2436",
+            "id2": "2528",
+            "logger": "INTERACT.MANAGER",
+            "type": "I",
+            "time": "2024-05-25 20:16:37.217",
+            "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+            }
+        ]
+        });
+        body["pipeline"] = json!(pipeline_content);
+        let res = client
+            .post("/v1/events/pipelines/dryrun")
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: Value = res.json().await;
+        let schema = &body["schema"];
+        let rows = &body["rows"];
+        assert_eq!(schema, &dryrun_schema);
+        assert_eq!(rows, &dryrun_rows);
+    }
+    {
+        // failback to old version api
+        // not pipeline and pipeline_name in the body
+        let body = json!({
+        "data": [
+            {
+            "id1": "2436",
+            "id2": "2528",
+            "logger": "INTERACT.MANAGER",
+            "type": "I",
+            "time": "2024-05-25 20:16:37.217",
+            "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+            }
+        ]
+        });
+        let res = client
+            .post("/v1/events/pipelines/dryrun")
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
     guard.remove_all().await;
 }
 
@@ -1736,11 +1816,17 @@ pub async fn test_loki_logs(store_type: StorageType) {
     // init loki request
     let req: PushRequest = PushRequest {
         streams: vec![StreamAdapter {
-            labels: "{service=\"test\",source=\"integration\"}".to_string(),
-            entries: vec![EntryAdapter {
-                timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
-                line: "this is a log message".to_string(),
-            }],
+            labels: r#"{service="test",source="integration","wadaxi"="do anything"}"#.to_string(),
+            entries: vec![
+                EntryAdapter {
+                    timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
+                    line: "this is a log message".to_string(),
+                },
+                EntryAdapter {
+                    timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
+                    line: "this is a log message".to_string(),
+                },
+            ],
             hash: rand::random(),
         }],
     };
@@ -1768,7 +1854,7 @@ pub async fn test_loki_logs(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // test schema
-    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"service\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"service\\\", \\\"source\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"service\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  \\\"wadaxi\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"service\\\", \\\"source\\\", \\\"wadaxi\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
     validate_data(
         "loki_schema",
         &client,
@@ -1778,7 +1864,7 @@ pub async fn test_loki_logs(store_type: StorageType) {
     .await;
 
     // test content
-    let expected = r#"[[1730976830000000000,"this is a log message","test","integration"]]"#;
+    let expected = r#"[[1730976830000000000,"this is a log message","test","integration","do anything"],[1730976830000000000,"this is a log message","test","integration","do anything"]]"#;
     validate_data(
         "loki_content",
         &client,
