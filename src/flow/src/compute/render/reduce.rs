@@ -47,6 +47,7 @@ impl Context<'_, '_> {
         reduce_plan: &ReducePlan,
         output_type: &RelationType,
     ) -> Result<CollectionBundle<Batch>, Error> {
+        common_telemetry::debug!("render reduce batch");
         let accum_plan = if let ReducePlan::Accumulable(accum_plan) = reduce_plan {
             if !accum_plan.distinct_aggrs.is_empty() {
                 NotImplementedSnafu {
@@ -87,6 +88,8 @@ impl Context<'_, '_> {
         })?;
         let key_val_plan = key_val_plan.clone();
 
+        let output_type = output_type.clone();
+
         let now = self.compute_state.current_time_ref();
 
         let err_collector = self.err_collector.clone();
@@ -118,6 +121,7 @@ impl Context<'_, '_> {
                     src_data,
                     &key_val_plan,
                     &accum_plan,
+                    &output_type,
                     SubgraphArg {
                         now,
                         err_collector: &err_collector,
@@ -354,6 +358,7 @@ fn reduce_batch_subgraph(
     src_data: impl IntoIterator<Item = Batch>,
     key_val_plan: &KeyValPlan,
     accum_plan: &AccumulablePlan,
+    output_type: &RelationType,
     SubgraphArg {
         now,
         err_collector,
@@ -535,17 +540,13 @@ fn reduce_batch_subgraph(
     // this output part is not supposed to be resource intensive
     // (because for every batch there wouldn't usually be as many output row?),
     // so we can do some costly operation here
-    let output_types = all_output_dict.first_entry().map(|entry| {
-        entry
-            .key()
-            .iter()
-            .chain(entry.get().iter())
-            .map(|v| v.data_type())
-            .collect::<Vec<ConcreteDataType>>()
-    });
+    let output_types = output_type
+        .column_types
+        .iter()
+        .map(|t| t.scalar_type.clone())
+        .collect_vec();
 
-    if let Some(output_types) = output_types {
-        err_collector.run(|| {
+    err_collector.run(|| {
             let column_cnt = output_types.len();
             let row_cnt = all_output_dict.len();
 
@@ -585,7 +586,6 @@ fn reduce_batch_subgraph(
 
             Ok(())
         });
-    }
 }
 
 /// reduce subgraph, reduce the input data into a single row
@@ -1516,7 +1516,9 @@ mod test {
         let mut ctx = harness_test_ctx(&mut df, &mut state);
 
         let rows = vec![
-            (Row::new(vec![1i64.into()]), 1, 1),
+            (Row::new(vec![Value::Null]), -1, 1),
+            (Row::new(vec![1i64.into()]), 0, 1),
+            (Row::new(vec![Value::Null]), 1, 1),
             (Row::new(vec![2i64.into()]), 2, 1),
             (Row::new(vec![3i64.into()]), 3, 1),
             (Row::new(vec![1i64.into()]), 4, 1),
@@ -1558,13 +1560,15 @@ mod test {
                 Box::new(input_plan.with_types(typ.into_unnamed())),
                 &key_val_plan,
                 &reduce_plan,
-                &RelationType::empty(),
+                &RelationType::new(vec![ColumnType::new(CDT::int64_datatype(), true)]),
             )
             .unwrap();
 
         {
             let now_inner = now.clone();
             let expected = BTreeMap::<i64, Vec<i64>>::from([
+                (-1, vec![]),
+                (0, vec![1i64]),
                 (1, vec![1i64]),
                 (2, vec![3i64]),
                 (3, vec![6i64]),

@@ -16,11 +16,26 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{ColumnDataType, ColumnDataTypeExtension, SemanticType};
 use common_error::ext::BoxedError;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use itertools::Itertools;
 use snafu::ResultExt;
 
 use crate::error::{Error, ExternalSnafu};
+
+pub fn from_proto_to_column_schema(
+    column_schema: &api::v1::ColumnSchema,
+) -> Result<ConcreteDataType, Error> {
+    let wrapper = ColumnDataTypeWrapper::try_new(
+        column_schema.datatype,
+        column_schema.datatype_extension.clone(),
+    )
+    .map_err(BoxedError::new)
+    .context(ExternalSnafu)?;
+    let cdt = ConcreteDataType::from(wrapper);
+
+    Ok(cdt)
+}
 
 /// convert `ColumnSchema` lists to it's corresponding proto type
 pub fn column_schemas_to_proto(

@@ -28,6 +28,7 @@ use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
+use super::util::from_proto_to_column_schema;
 use crate::adapter::{CreateFlowArgs, FlowWorkerManager};
 use crate::error::InternalSnafu;
 use crate::metrics::METRIC_FLOW_TASK_COUNT;
@@ -206,9 +207,17 @@ impl Flownode for FlowWorkerManager {
                 })
                 .map(|r| (r, now, 1))
                 .collect_vec();
-            self.handle_write_request(region_id.into(), rows)
-                .await
+            let batch_datatypes = insert_schema
+                .iter()
+                .map(|s| from_proto_to_column_schema(s))
+                .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(to_meta_err)?;
+            self.handle_write_request(region_id.into(), rows, &batch_datatypes)
+                .await
+                .map_err(|err| {
+                    common_telemetry::error!(err;"Failed to handle write request");
+                    to_meta_err(err)
+                })?;
         }
         Ok(Default::default())
     }
