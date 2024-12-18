@@ -15,17 +15,11 @@
 use std::fmt::Display;
 
 use common_telemetry::{debug, error, trace};
-use futures::TryStreamExt;
 use opendal::layers::{LoggingInterceptor, LoggingLayer, TracingLayer};
 use opendal::raw::{AccessorInfo, Operation};
-use opendal::{Entry, ErrorKind, Lister};
+use opendal::ErrorKind;
 
 use crate::ObjectStore;
-
-/// Collect all entries from the [Lister].
-pub async fn collect(stream: Lister) -> Result<Vec<Entry>, opendal::Error> {
-    stream.try_collect::<Vec<_>>().await
-}
 
 /// Join two paths and normalize the output dir.
 ///
