@@ -49,14 +49,6 @@ impl TableRoute {
             TableRoute::Logical(_) => None,
         }
     }
-
-    /// Returns [LogicalTableRouteValue] reference if it's [TableRoute::Logical]; Otherwise it returns [None].
-    pub fn as_logical_table_route_ref(&self) -> Option<&Arc<LogicalTableRouteValue>> {
-        match self {
-            TableRoute::Physical(_) => None,
-            TableRoute::Logical(table_route) => Some(table_route),
-        }
-    }
 }
 
 /// [TableRouteCache] caches the [TableId] to [TableRoute] mapping.

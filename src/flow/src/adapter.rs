@@ -206,28 +206,6 @@ impl DiffRequest {
     }
 }
 
-/// iterate through the diff row and form continuous diff row with same diff type
-pub fn diff_row_to_request(rows: Vec<DiffRow>) -> Vec<DiffRequest> {
-    let mut reqs = Vec::new();
-    for (row, ts, diff) in rows {
-        let last = reqs.last_mut();
-        match (last, diff) {
-            (Some(DiffRequest::Insert(rows)), 1) => {
-                rows.push((row, ts));
-            }
-            (Some(DiffRequest::Insert(_)), -1) => reqs.push(DiffRequest::Delete(vec![(row, ts)])),
-            (Some(DiffRequest::Delete(rows)), -1) => {
-                rows.push((row, ts));
-            }
-            (Some(DiffRequest::Delete(_)), 1) => reqs.push(DiffRequest::Insert(vec![(row, ts)])),
-            (None, 1) => reqs.push(DiffRequest::Insert(vec![(row, ts)])),
-            (None, -1) => reqs.push(DiffRequest::Delete(vec![(row, ts)])),
-            _ => {}
-        }
-    }
-    reqs
-}
-
 pub fn batches_to_rows_req(batches: Vec<Batch>) -> Result<Vec<DiffRequest>, Error> {
     let mut reqs = Vec::new();
     for batch in batches {
