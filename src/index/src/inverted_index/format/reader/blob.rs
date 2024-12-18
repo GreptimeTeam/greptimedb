@@ -16,6 +16,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use common_base::range_read::RangeReader;
 use greptime_proto::v1::index::InvertedIndexMetas;
 use snafu::{ensure, ResultExt};
@@ -60,9 +61,8 @@ impl<R: RangeReader> InvertedIndexReader for InvertedIndexBlobReader<R> {
         Ok(buf.into())
     }
 
-    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Vec<u8>>> {
-        let bufs = self.source.read_vec(ranges).await.context(CommonIoSnafu)?;
-        Ok(bufs.into_iter().map(|buf| buf.into()).collect())
+    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+        self.source.read_vec(ranges).await.context(CommonIoSnafu)
     }
 
     async fn metadata(&mut self) -> Result<Arc<InvertedIndexMetas>> {

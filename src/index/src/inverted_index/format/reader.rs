@@ -16,6 +16,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use common_base::BitVec;
 use greptime_proto::v1::index::InvertedIndexMetas;
 use snafu::ResultExt;
@@ -35,7 +36,7 @@ pub trait InvertedIndexReader: Send {
     async fn range_read(&mut self, offset: u64, size: u32) -> Result<Vec<u8>>;
 
     /// Reads the bytes in the given ranges.
-    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Vec<u8>>>;
+    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>>;
 
     /// Retrieves metadata of all inverted indices stored within the blob.
     async fn metadata(&mut self) -> Result<Arc<InvertedIndexMetas>>;
