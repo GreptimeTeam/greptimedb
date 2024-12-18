@@ -11,3 +11,15 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+use crate::adapter::FlowWorkerManagerRef;
+use crate::{Error, FlownodeBuilder};
+
+impl FlownodeBuilder {
+    /// Create a series of tasks to refill flow, will be transfer to flownode if
+    ///
+    /// tasks havn't completed, and will show up in `flows` table
+    async fn start_refill_flows(&self, manager: &FlowWorkerManagerRef) -> Result<(), Error> {
+        todo!()
+    }
+}

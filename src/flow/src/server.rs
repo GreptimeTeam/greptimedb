@@ -316,10 +316,6 @@ impl FlownodeBuilder {
         Ok(instance)
     }
 
-    async fn start_refill_flows(&self, manager: &FlowWorkerManagerRef) -> Result<(), Error> {
-        todo!()
-    }
-
     /// recover all flow tasks in this flownode in distributed mode(nodeid is Some(<num>))
     ///
     /// or recover all existing flow tasks if in standalone mode(nodeid is None)
