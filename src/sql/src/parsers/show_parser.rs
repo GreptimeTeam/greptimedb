@@ -21,9 +21,9 @@ use crate::error::{
 };
 use crate::parser::ParserContext;
 use crate::statements::show::{
-    ShowColumns, ShowCreateDatabase, ShowCreateFlow, ShowCreateTable, ShowCreateView,
-    ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowStatus, ShowTableStatus, ShowTables,
-    ShowVariables, ShowViews,
+    ShowColumns, ShowCreateDatabase, ShowCreateFlow, ShowCreateTable, ShowCreateTableVariant,
+    ShowCreateView, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowStatus, ShowTableStatus,
+    ShowTables, ShowVariables, ShowViews,
 };
 use crate::statements::statement::Statement;
 
@@ -146,7 +146,19 @@ impl ParserContext<'_> {
                 name: table_name.to_string(),
             }
         );
-        Ok(Statement::ShowCreateTable(ShowCreateTable { table_name }))
+        let mut variant = ShowCreateTableVariant::Original;
+        if self.consume_token("FOR") {
+            if self.consume_token("POSTGRES_FOREIGN_TABLE") {
+                variant = ShowCreateTableVariant::PostgresForeignTable;
+            } else {
+                self.unsupported(self.peek_token_as_string())?;
+            }
+        }
+
+        Ok(Statement::ShowCreateTable(ShowCreateTable {
+            table_name,
+            variant,
+        }))
     }
 
     fn parse_show_create_flow(&mut self) -> Result<Statement> {
