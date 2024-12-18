@@ -17,20 +17,10 @@ use axum::middleware::Next;
 use axum::response::Response;
 use session::context::QueryContext;
 
-use crate::GREPTIME_DB_HEADER_HINT_PREFIX;
+use crate::hint_headers;
 
 pub async fn extract_hints<B>(mut request: Request<B>, next: Next<B>) -> Response {
-    let hints = request
-        .headers()
-        .iter()
-        .filter_map(|(key, value)| {
-            let key = key.as_str();
-            let new_key = key.strip_prefix(GREPTIME_DB_HEADER_HINT_PREFIX)?;
-            // Simply return None for non-string values.
-            let value = value.to_str().ok()?;
-            Some((new_key.to_string(), value.trim().to_string()))
-        })
-        .collect::<Vec<_>>();
+    let hints = hint_headers::extract_hints(request.headers());
     if let Some(query_ctx) = request.extensions_mut().get_mut::<QueryContext>() {
         for (key, value) in hints {
             query_ctx.set_extension(key, value);

@@ -27,6 +27,7 @@ pub mod error;
 pub mod export_metrics;
 pub mod grpc;
 pub mod heartbeat_options;
+mod hint_headers;
 pub mod http;
 pub mod influxdb;
 pub mod interceptor;
@@ -47,8 +48,6 @@ pub mod server;
 pub mod tls;
 
 pub use common_config::Mode;
-
-pub const GREPTIME_DB_HEADER_HINT_PREFIX: &str = "x-greptime-hint-";
 
 /// Cached SQL and logical plan for database interfaces
 #[derive(Clone)]

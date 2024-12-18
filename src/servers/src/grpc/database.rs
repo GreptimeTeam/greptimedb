@@ -20,12 +20,11 @@ use common_error::status_code::StatusCode;
 use common_query::OutputData;
 use common_telemetry::{debug, warn};
 use futures::StreamExt;
-use tonic::metadata::{KeyAndValueRef, MetadataMap};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
 use crate::grpc::{cancellation, TonicResult};
-use crate::GREPTIME_DB_HEADER_HINT_PREFIX;
+use crate::hint_headers;
 
 pub(crate) struct DatabaseService {
     handler: GreptimeRequestHandler,
@@ -44,7 +43,7 @@ impl GreptimeDatabase for DatabaseService {
         request: Request<GreptimeRequest>,
     ) -> TonicResult<Response<GreptimeResponse>> {
         let remote_addr = request.remote_addr();
-        let hints = extract_hints(request.metadata());
+        let hints = hint_headers::extract_hints(request.metadata());
         debug!(
             "GreptimeDatabase::Handle: request from {:?} with hints: {:?}",
             remote_addr, hints
@@ -90,7 +89,7 @@ impl GreptimeDatabase for DatabaseService {
         request: Request<Streaming<GreptimeRequest>>,
     ) -> Result<Response<GreptimeResponse>, Status> {
         let remote_addr = request.remote_addr();
-        let hints = extract_hints(request.metadata());
+        let hints = hint_headers::extract_hints(request.metadata());
         debug!(
             "GreptimeDatabase::HandleRequests: request from {:?} with hints: {:?}",
             remote_addr, hints
@@ -139,52 +138,5 @@ impl GreptimeDatabase for DatabaseService {
             ))
         };
         cancellation::with_cancellation_handler(request_future, cancellation_future).await
-    }
-}
-
-fn extract_hints(metadata: &MetadataMap) -> Vec<(String, String)> {
-    metadata
-        .iter()
-        .filter_map(|kv| {
-            let KeyAndValueRef::Ascii(key, value) = kv else {
-                return None;
-            };
-            let key = key.as_str();
-            let new_key = key.strip_prefix(GREPTIME_DB_HEADER_HINT_PREFIX)?;
-            // Simply return None for non-string values.
-            let value = value.to_str().ok()?;
-            Some((new_key.to_string(), value.trim().to_string()))
-        })
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use tonic::metadata::MetadataValue;
-
-    use super::*;
-
-    #[test]
-    fn test_extract_hints() {
-        let mut metadata = MetadataMap::new();
-        let prev = metadata.insert(
-            "x-greptime-hint-append_mode",
-            MetadataValue::from_static("true"),
-        );
-        metadata.insert("test-key", MetadataValue::from_static("test-value"));
-        assert!(prev.is_none());
-        let hints = extract_hints(&metadata);
-        assert_eq!(hints, vec![("append_mode".to_string(), "true".to_string())]);
-    }
-
-    #[test]
-    fn extract_hints_ignores_non_ascii_metadata() {
-        let mut metadata = MetadataMap::new();
-        metadata.insert_bin(
-            "x-greptime-hint-merge_mode-bin",
-            MetadataValue::from_bytes(b"last_non_null"),
-        );
-        let hints = extract_hints(&metadata);
-        assert!(hints.is_empty());
     }
 }
