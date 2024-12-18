@@ -97,7 +97,6 @@ impl UnorderedScan {
                         part_metrics.clone(),
                         *index,
                         range_meta.time_range,
-                        range_builder_list.clone(),
                     );
                     for await batch in stream {
                         yield batch;

@@ -35,7 +35,7 @@ use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::data::{timestamp_array_to_i64_slice, DataBatch, DataBuffer};
 use crate::memtable::{
     BoxedBatchIterator, BulkPart, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRange,
-    MemtableRef, MemtableStats,
+    MemtableRanges, MemtableRef, MemtableStats,
 };
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
@@ -93,8 +93,8 @@ impl Memtable for EmptyMemtable {
         &self,
         _projection: Option<&[ColumnId]>,
         _predicate: Option<Predicate>,
-    ) -> BTreeMap<usize, MemtableRange> {
-        BTreeMap::new()
+    ) -> MemtableRanges {
+        MemtableRanges::default()
     }
 
     fn is_empty(&self) -> bool {

@@ -23,7 +23,6 @@ mod shard;
 mod shard_builder;
 mod tree;
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -41,7 +40,7 @@ use crate::memtable::partition_tree::tree::PartitionTree;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, BulkPart, IterBuilder, KeyValues, Memtable, MemtableBuilder,
-    MemtableId, MemtableRange, MemtableRangeContext, MemtableRef, MemtableStats,
+    MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
 };
 use crate::region::options::MergeMode;
 
@@ -176,7 +175,7 @@ impl Memtable for PartitionTreeMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-    ) -> BTreeMap<usize, MemtableRange> {
+    ) -> MemtableRanges {
         let projection = projection.map(|ids| ids.to_vec());
         let builder = Box::new(PartitionTreeIterBuilder {
             tree: self.tree.clone(),
@@ -185,7 +184,10 @@ impl Memtable for PartitionTreeMemtable {
         });
         let context = Arc::new(MemtableRangeContext::new(self.id, builder));
 
-        [(0, MemtableRange::new(context))].into()
+        MemtableRanges {
+            ranges: [(0, MemtableRange::new(context))].into(),
+            stats: self.stats(),
+        }
     }
 
     fn is_empty(&self) -> bool {
