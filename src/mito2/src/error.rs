@@ -756,13 +756,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to build time range filters for value: {:?}", timestamp))]
-    BuildTimeRangeFilter {
-        timestamp: Timestamp,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to open region"))]
     OpenRegion {
         #[snafu(implicit)]
@@ -1023,7 +1016,6 @@ impl ErrorExt for Error {
             ChecksumMismatch { .. } => StatusCode::Unexpected,
             RegionStopped { .. } => StatusCode::RegionNotReady,
             TimeRangePredicateOverflow { .. } => StatusCode::InvalidArguments,
-            BuildTimeRangeFilter { .. } => StatusCode::Unexpected,
             UnsupportedOperation { .. } => StatusCode::Unsupported,
             RemoteCompaction { .. } => StatusCode::Unexpected,
 

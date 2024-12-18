@@ -355,8 +355,8 @@ impl ScanRegion {
         Ok(input)
     }
 
-    /// Build time range predicate from filters, also remove time filters from request.
-    fn build_time_range_predicate(&mut self) -> TimestampRange {
+    /// Build time range predicate from filters.
+    fn build_time_range_predicate(&self) -> TimestampRange {
         let time_index = self.version.metadata.time_index_column();
         let unit = time_index
             .column_schema
@@ -364,11 +364,7 @@ impl ScanRegion {
             .as_timestamp()
             .expect("Time index must have timestamp-compatible type")
             .unit();
-        build_time_range_predicate(
-            &time_index.column_schema.name,
-            unit,
-            &mut self.request.filters,
-        )
+        build_time_range_predicate(&time_index.column_schema.name, unit, &self.request.filters)
     }
 
     /// Remove field filters if the merge mode is [MergeMode::LastNonNull].
@@ -695,7 +691,6 @@ impl ScanInput {
             .access_layer
             .read_sst(file.clone())
             .predicate(self.predicate.clone())
-            .time_range(self.time_range)
             .projection(Some(self.mapper.column_ids().to_vec()))
             .cache(self.cache_manager.clone())
             .inverted_index_applier(self.inverted_index_applier.clone())
