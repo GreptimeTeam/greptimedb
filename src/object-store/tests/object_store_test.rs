@@ -245,7 +245,7 @@ async fn test_file_backend_with_lru_cache() -> Result<()> {
     test_object_crud(&store).await?;
     test_object_list(&store).await?;
 
-    assert_eq!(cache_layer.read_cache_stat().await, (1, 0));
+    assert_eq!(cache_layer.read_cache_stat().await, (0, 0));
 
     Ok(())
 }
@@ -330,7 +330,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
     let _ = store.read_with(p2).range(7..).await?;
     let _ = store.read(p2).await?;
 
-    assert_eq!(cache_layer.read_cache_stat().await, (4, 38));
+    assert_eq!(cache_layer.read_cache_stat().await, (3, 38));
     assert_cache_files(
         &cache_store,
         &[
@@ -354,7 +354,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
     // Delete p2 file
     store.delete(p2).await.unwrap();
 
-    assert_eq!(cache_layer.read_cache_stat().await, (2, 15));
+    assert_eq!(cache_layer.read_cache_stat().await, (1, 15));
     assert_cache_files(
         &cache_store,
         &["6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-"],
@@ -378,14 +378,14 @@ async fn test_object_store_cache_policy() -> Result<()> {
     let _ = store.read(p3).await.unwrap();
     let _ = store.read_with(p3).range(0..5).await.unwrap();
 
-    assert_eq!(cache_layer.read_cache_stat().await, (4, 35));
+    assert_eq!(cache_layer.read_cache_stat().await, (3, 35));
 
     // However, The real open file happens after the reader is created.
     // The reader will throw an error during the reading
     // instead of returning `NotFound` during the reader creation.
     // The entry count is 4, because we have the p2 `NotFound` cache.
     assert!(store.read_with(p2).range(0..4).await.is_err());
-    assert_eq!(cache_layer.read_cache_stat().await, (4, 35));
+    assert_eq!(cache_layer.read_cache_stat().await, (3, 35));
 
     assert_cache_files(
         &cache_store,
@@ -445,7 +445,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
     cache_layer.recover_cache(true).await;
 
     // The p2 `NotFound` cache will not be recovered
-    assert_eq!(cache_layer.read_cache_stat().await, (4, 34));
+    assert_eq!(cache_layer.read_cache_stat().await, (3, 34));
     assert_lru_cache(
         &cache_layer,
         &[
