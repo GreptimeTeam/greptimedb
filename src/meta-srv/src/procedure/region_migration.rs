@@ -364,12 +364,6 @@ impl Context {
         Ok(datanode_value.as_ref().unwrap())
     }
 
-    /// Removes the `table_info` of [VolatileContext], returns true if any.
-    pub fn remove_table_info_value(&mut self) -> bool {
-        let value = self.volatile_ctx.table_info.take();
-        value.is_some()
-    }
-
     /// Returns the [RegionId].
     pub fn region_id(&self) -> RegionId {
         self.persistent_ctx.region_id
