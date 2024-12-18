@@ -23,7 +23,7 @@ use snafu::ResultExt;
 
 use crate::error::{Error, ExternalSnafu};
 
-pub fn from_proto_to_column_schema(
+pub fn from_proto_to_data_type(
     column_schema: &api::v1::ColumnSchema,
 ) -> Result<ConcreteDataType, Error> {
     let wrapper = ColumnDataTypeWrapper::try_new(
