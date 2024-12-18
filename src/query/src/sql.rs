@@ -40,7 +40,7 @@ use common_recordbatch::RecordBatches;
 use common_time::timezone::get_timezone;
 use common_time::Timestamp;
 use datafusion::common::ScalarValue;
-use datafusion::prelude::SessionContext;
+use datafusion::prelude::{concat_ws, SessionContext};
 use datafusion_expr::{case, col, lit, Expr};
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema, Schema};
@@ -400,6 +400,20 @@ pub async fn show_index(
         query_ctx.current_schema()
     };
 
+    let fulltext_index_expr = case(col("constraint_name").like(lit("%FULLTEXT INDEX%")))
+        .when(lit(true), lit("greptime-fulltext-index-v1"))
+        .otherwise(null())
+        .context(error::PlanSqlSnafu)?;
+
+    let inverted_index_expr = case(
+        col("constraint_name")
+            .like(lit("%INVERTED INDEX%"))
+            .or(col("constraint_name").like(lit("%PRIMARY%"))),
+    )
+    .when(lit(true), lit("greptime-inverted-index-v1"))
+    .otherwise(null())
+    .context(error::PlanSqlSnafu)?;
+
     let select = vec![
         // 1 as `Non_unique`: contain duplicates
         lit(1).alias(INDEX_NONT_UNIQUE_COLUMN),
@@ -417,8 +431,11 @@ pub async fn show_index(
             .otherwise(lit(YES_STR))
             .context(error::PlanSqlSnafu)?
             .alias(COLUMN_NULLABLE_COLUMN),
-        // TODO(dennis): maybe 'BTREE'?
-        lit("greptime-inverted-index-v1").alias(INDEX_INDEX_TYPE_COLUMN),
+        concat_ws(
+            lit(", "),
+            vec![inverted_index_expr.clone(), fulltext_index_expr.clone()],
+        )
+        .alias(INDEX_INDEX_TYPE_COLUMN),
         lit("").alias(COLUMN_COMMENT_COLUMN),
         lit("").alias(INDEX_COMMENT_COLUMN),
         lit(YES_STR).alias(INDEX_VISIBLE_COLUMN),
