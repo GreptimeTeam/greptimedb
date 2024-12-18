@@ -18,11 +18,11 @@ use std::sync::Arc;
 use api::v1::index::InvertedIndexMetas;
 use async_trait::async_trait;
 use bytes::Bytes;
-use common_base::buffer::Buffer;
 use common_base::BitVec;
 use index::inverted_index::error::DecodeFstSnafu;
 use index::inverted_index::format::reader::InvertedIndexReader;
 use index::inverted_index::FstMap;
+use object_store::Buffer;
 use prost::Message;
 use snafu::ResultExt;
 
