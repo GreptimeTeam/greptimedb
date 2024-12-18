@@ -215,7 +215,7 @@ impl RowGroupLastRowReader {
         };
 
         // All last rows in row group are yielded, update cache.
-        self.update_cache();
+        self.maybe_update_cache();
         Ok(last_batch)
     }
 
