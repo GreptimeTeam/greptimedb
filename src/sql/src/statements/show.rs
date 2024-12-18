@@ -183,7 +183,7 @@ pub struct ShowCreateTable {
 }
 
 /// Variant of a show create table
-#[derive(Default, Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum ShowCreateTableVariant {
     #[default]
     Original,
