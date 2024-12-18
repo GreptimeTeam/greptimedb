@@ -499,26 +499,6 @@ pub fn exec_parsed(
     }
 }
 
-/// execute script just like [`exec_coprocessor`] do,
-/// but instead of return a internal [`Error`] type,
-/// return a friendly String format of error
-///
-/// use `ln_offset` and `filename` to offset line number and mark file name in error prompt
-#[cfg(test)]
-#[allow(dead_code)]
-pub fn exec_copr_print(
-    script: &str,
-    rb: &Option<RecordBatch>,
-    ln_offset: usize,
-    filename: &str,
-    eval_ctx: &EvalContext,
-) -> StdResult<RecordBatch, String> {
-    let res = exec_coprocessor(script, rb, eval_ctx);
-    res.map_err(|e| {
-        crate::python::error::pretty_print_error_in_src(script, &e, ln_offset, filename)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use crate::python::ffi_types::copr::parse::parse_and_compile_copr;

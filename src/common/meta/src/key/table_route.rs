@@ -290,28 +290,6 @@ impl TableRouteManager {
         }
     }
 
-    /// Returns the [`PhysicalTableRouteValue`] in the first level,
-    /// It won't follow the [`LogicalTableRouteValue`] to find the next level [`PhysicalTableRouteValue`].
-    ///
-    /// Returns an error if the first level value is not a [`PhysicalTableRouteValue`].
-    pub async fn try_get_physical_table_route(
-        &self,
-        table_id: TableId,
-    ) -> Result<Option<PhysicalTableRouteValue>> {
-        match self.storage.get(table_id).await? {
-            Some(route) => {
-                ensure!(
-                    route.is_physical(),
-                    UnexpectedLogicalRouteTableSnafu {
-                        err_msg: format!("{route:?} is a non-physical TableRouteValue.")
-                    }
-                );
-                Ok(Some(route.into_physical_table_route()))
-            }
-            None => Ok(None),
-        }
-    }
-
     /// Returns the [TableId] recursively.
     ///
     /// Returns a [TableRouteNotFound](crate::error::Error::TableRouteNotFound) Error if:
@@ -567,37 +545,6 @@ impl TableRouteStorage {
             .await?
             .map(|kv| DeserializedValueWithBytes::from_inner_slice(&kv.value))
             .transpose()
-    }
-
-    /// Returns the physical `DeserializedValueWithBytes<TableRouteValue>` recursively.
-    ///
-    /// Returns a [TableRouteNotFound](crate::error::Error::TableRouteNotFound) Error if:
-    /// - the physical table(`logical_or_physical_table_id`) does not exist
-    /// - the corresponding physical table of the logical table(`logical_or_physical_table_id`) does not exist.
-    pub async fn get_physical_table_route_with_raw_bytes(
-        &self,
-        logical_or_physical_table_id: TableId,
-    ) -> Result<(TableId, DeserializedValueWithBytes<TableRouteValue>)> {
-        let table_route = self
-            .get_with_raw_bytes(logical_or_physical_table_id)
-            .await?
-            .context(TableRouteNotFoundSnafu {
-                table_id: logical_or_physical_table_id,
-            })?;
-
-        match table_route.get_inner_ref() {
-            TableRouteValue::Physical(_) => Ok((logical_or_physical_table_id, table_route)),
-            TableRouteValue::Logical(x) => {
-                let physical_table_id = x.physical_table_id();
-                let physical_table_route = self
-                    .get_with_raw_bytes(physical_table_id)
-                    .await?
-                    .context(TableRouteNotFoundSnafu {
-                        table_id: physical_table_id,
-                    })?;
-                Ok((physical_table_id, physical_table_route))
-            }
-        }
     }
 
     /// Returns batch of [`TableRouteValue`] that respects the order of `table_ids`.

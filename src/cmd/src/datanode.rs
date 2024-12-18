@@ -59,10 +59,6 @@ impl Instance {
         }
     }
 
-    pub fn datanode_mut(&mut self) -> &mut Datanode {
-        &mut self.datanode
-    }
-
     pub fn datanode(&self) -> &Datanode {
         &self.datanode
     }
