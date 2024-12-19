@@ -374,3 +374,90 @@ async fn test_readonly_during_compaction() {
     let vec = collect_stream_ts(stream).await;
     assert_eq!((0..20).map(|v| v * 1000).collect::<Vec<_>>(), vec);
 }
+
+#[tokio::test]
+async fn test_compaction_update_time_window() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.max_active_window_runs", "2")
+        .insert_option("compaction.twcs.max_active_window_files", "2")
+        .insert_option("compaction.twcs.max_inactive_window_runs", "2")
+        .insert_option("compaction.twcs.max_inactive_window_files", "2")
+        .build();
+
+    let column_schemas = request
+        .column_metadatas
+        .iter()
+        .map(column_metadata_to_column_schema)
+        .collect::<Vec<_>>();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    // Flush 3 SSTs for compaction.
+    put_and_flush(&engine, region_id, &column_schemas, 0..1200).await; // window 3600
+    put_and_flush(&engine, region_id, &column_schemas, 1200..2400).await; // window 3600
+    put_and_flush(&engine, region_id, &column_schemas, 2400..3600).await; // window 3600
+
+    let result = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest::default()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.affected_rows, 0);
+
+    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    assert_eq!(0, scanner.num_memtables());
+    // We keep at most two files.
+    assert_eq!(
+        2,
+        scanner.num_files(),
+        "unexpected files: {:?}",
+        scanner.file_ids()
+    );
+
+    // Flush a new SST and the time window is applied.
+    put_and_flush(&engine, region_id, &column_schemas, 0..1200).await; // window 3600
+
+    // Puts window 7200.
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("a", 3600, 4000, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    assert_eq!(1, scanner.num_memtables());
+    let stream = scanner.scan().await.unwrap();
+    let vec = collect_stream_ts(stream).await;
+    assert_eq!((0..4000).map(|v| v * 1000).collect::<Vec<_>>(), vec);
+
+    // Puts window 3600.
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("a", 2400, 3600, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    assert_eq!(2, scanner.num_memtables());
+    let stream = scanner.scan().await.unwrap();
+    let vec = collect_stream_ts(stream).await;
+    assert_eq!((0..4000).map(|v| v * 1000).collect::<Vec<_>>(), vec);
+}
