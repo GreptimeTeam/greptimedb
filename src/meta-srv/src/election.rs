@@ -13,11 +13,12 @@
 // limitations under the License.
 
 pub mod etcd;
+#[cfg(feature = "pg_kvbackend")]
+pub mod postgres;
 
-use std::fmt;
+use std::fmt::{self, Debug};
 use std::sync::Arc;
 
-use etcd_client::LeaderKey;
 use tokio::sync::broadcast::Receiver;
 
 use crate::error::Result;
@@ -26,10 +27,20 @@ use crate::metasrv::MetasrvNodeInfo;
 pub const ELECTION_KEY: &str = "__metasrv_election";
 pub const CANDIDATES_ROOT: &str = "__metasrv_election_candidates/";
 
+const CANDIDATE_LEASE_SECS: u64 = 600;
+const KEEP_ALIVE_INTERVAL_SECS: u64 = CANDIDATE_LEASE_SECS / 2;
+
 #[derive(Debug, Clone)]
 pub enum LeaderChangeMessage {
-    Elected(Arc<LeaderKey>),
-    StepDown(Arc<LeaderKey>),
+    Elected(Arc<dyn LeaderKey>),
+    StepDown(Arc<dyn LeaderKey>),
+}
+
+pub trait LeaderKey: Send + Sync + Debug {
+    fn name(&self) -> &[u8];
+    fn key(&self) -> &[u8];
+    fn rev(&self) -> i64;
+    fn lease(&self) -> i64;
 }
 
 impl fmt::Display for LeaderChangeMessage {
