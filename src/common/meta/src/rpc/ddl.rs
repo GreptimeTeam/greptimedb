@@ -31,7 +31,7 @@ use api::v1::meta::{
 use api::v1::{
     AlterDatabaseExpr, AlterTableExpr, CreateDatabaseExpr, CreateFlowExpr, CreateTableExpr,
     CreateViewExpr, DropDatabaseExpr, DropFlowExpr, DropTableExpr, DropViewExpr, ExpireAfter,
-    Option as PbOption, QueryContext as PbQueryContext, TruncateTableExpr,
+    Option as PbOption, TruncateTableExpr,
 };
 use base64::engine::general_purpose;
 use base64::Engine as _;
@@ -1198,47 +1198,6 @@ impl From<DropFlowTask> for PbDropFlowTask {
                 flow_id: Some(api::v1::FlowId { id: flow_id }),
                 drop_if_exists,
             }),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryContext {
-    current_catalog: String,
-    current_schema: String,
-    timezone: String,
-    extensions: HashMap<String, String>,
-    channel: u8,
-}
-
-impl From<QueryContextRef> for QueryContext {
-    fn from(query_context: QueryContextRef) -> Self {
-        QueryContext {
-            current_catalog: query_context.current_catalog().to_string(),
-            current_schema: query_context.current_schema().to_string(),
-            timezone: query_context.timezone().to_string(),
-            extensions: query_context.extensions(),
-            channel: query_context.channel() as u8,
-        }
-    }
-}
-
-impl From<QueryContext> for PbQueryContext {
-    fn from(
-        QueryContext {
-            current_catalog,
-            current_schema,
-            timezone,
-            extensions,
-            channel,
-        }: QueryContext,
-    ) -> Self {
-        PbQueryContext {
-            current_catalog,
-            current_schema,
-            timezone,
-            extensions,
-            channel: channel as u32,
         }
     }
 }

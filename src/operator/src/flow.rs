@@ -102,9 +102,7 @@ impl FlowServiceOperator {
                 let flush_req = FlowRequest {
                     header: Some(FlowRequestHeader {
                         tracing_context: TracingContext::from_current_span().to_w3c(),
-                        query_context: Some(
-                            common_meta::rpc::ddl::QueryContext::from(ctx.clone()).into(),
-                        ),
+                        query_context: Some((*ctx).clone().into()),
                     }),
                     body: Some(flow_request::Body::Flush(FlushFlow {
                         flow_id: Some(api::v1::FlowId { id }),
