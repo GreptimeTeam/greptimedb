@@ -130,7 +130,7 @@ mod tests {
         assert_eq!(region.metadata.primary_key, vec![1]);
 
         assert!(object_store
-            .is_exist("create_region_dir/manifest/_file_manifest")
+            .exists("create_region_dir/manifest/_file_manifest")
             .await
             .unwrap());
 
@@ -198,13 +198,13 @@ mod tests {
             .unwrap();
 
         assert!(object_store
-            .is_exist("drop_region_dir/manifest/_file_manifest")
+            .exists("drop_region_dir/manifest/_file_manifest")
             .await
             .unwrap());
 
         FileRegion::drop(&region, &object_store).await.unwrap();
         assert!(!object_store
-            .is_exist("drop_region_dir/manifest/_file_manifest")
+            .exists("drop_region_dir/manifest/_file_manifest")
             .await
             .unwrap());
 
