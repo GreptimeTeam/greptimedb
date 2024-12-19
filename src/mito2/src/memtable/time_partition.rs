@@ -541,7 +541,7 @@ mod tests {
         assert_eq!(0, partitions.num_partitions());
 
         let kvs = memtable_util::build_key_values(
-            &metadata,
+            metadata,
             "hello".to_string(),
             0,
             &[2000, 0],
@@ -553,7 +553,7 @@ mod tests {
         assert!(!partitions.is_empty());
 
         let kvs = memtable_util::build_key_values(
-            &metadata,
+            metadata,
             "hello".to_string(),
             0,
             &[3000, 7000, 4000, 5000],

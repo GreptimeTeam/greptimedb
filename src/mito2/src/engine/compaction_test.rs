@@ -439,7 +439,7 @@ async fn test_compaction_update_time_window() {
 
     // Puts window 7200.
     let rows = Rows {
-        schema: column_schemas.to_vec(),
+        schema: column_schemas.clone(),
         rows: build_rows_for_key("a", 3600, 4000, 0),
     };
     put_rows(&engine, region_id, rows).await;
@@ -451,7 +451,7 @@ async fn test_compaction_update_time_window() {
 
     // Puts window 3600.
     let rows = Rows {
-        schema: column_schemas.to_vec(),
+        schema: column_schemas.clone(),
         rows: build_rows_for_key("a", 2400, 3600, 0),
     };
     put_rows(&engine, region_id, rows).await;
