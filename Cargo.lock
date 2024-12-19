@@ -5219,6 +5219,7 @@ dependencies = [
  "futures",
  "greptime-proto",
  "mockall",
+ "parquet",
  "pin-project",
  "prost 0.12.6",
  "rand",
