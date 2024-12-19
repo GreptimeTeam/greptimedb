@@ -72,6 +72,14 @@ lazy_static! {
         vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
+    /// Http logs query duration per database.
+    pub static ref METRIC_HTTP_LOGS_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_servers_http_logs_elapsed",
+        "servers http logs elapsed",
+        &[METRIC_DB_LABEL],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
+    )
+    .unwrap();
     pub static ref METRIC_AUTH_FAILURE: IntCounterVec = register_int_counter_vec!(
         "greptime_servers_auth_failure_count",
         "servers auth failure count",

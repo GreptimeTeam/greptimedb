@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::Snafu;
 
@@ -40,6 +41,15 @@ pub enum Error {
 impl ErrorExt for Error {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn status_code(&self) -> StatusCode {
+        match self {
+            Error::InvalidTimeFilter { .. }
+            | Error::InvalidDateFormat { .. }
+            | Error::InvalidSpanFormat { .. }
+            | Error::EndBeforeStart { .. } => StatusCode::InvalidArguments,
+        }
     }
 }
 
