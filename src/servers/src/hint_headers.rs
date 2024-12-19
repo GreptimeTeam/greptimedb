@@ -15,6 +15,9 @@
 use http::HeaderMap;
 use tonic::metadata::MetadataMap;
 
+// For the given format: `x-greptime-hints: auto_create_table=true, ttl=7d`
+pub const HINTS_KEY: &str = "x-greptime-hints";
+
 pub const HINT_KEYS: [&str; 5] = [
     "x-greptime-hint-auto_create_table",
     "x-greptime-hint-ttl",
@@ -25,6 +28,14 @@ pub const HINT_KEYS: [&str; 5] = [
 
 pub(crate) fn extract_hints<T: ToHeaderMap>(headers: &T) -> Vec<(String, String)> {
     let mut hints = Vec::new();
+    if let Some(value_str) = headers.get(HINTS_KEY) {
+        value_str.split(',').for_each(|hint| {
+            let mut parts = hint.splitn(2, '=');
+            if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+                hints.push((key.trim().to_string(), value.trim().to_string()));
+            }
+        });
+    }
     for key in HINT_KEYS.iter() {
         if let Some(value) = headers.get(key) {
             let new_key = key.replace("x-greptime-hint-", "");
@@ -110,6 +121,30 @@ mod tests {
             ("auto_create_table".to_string(), "true".to_string())
         );
         assert_eq!(hints[1], ("ttl".to_string(), "3600d".to_string()));
+    }
+
+    #[test]
+    fn test_extract_hints_all_in_one() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-greptime-hints",
+            HeaderValue::from_static(" auto_create_table=true, ttl =3600d, append_mode=true , merge_mode=false , physical_table= table1"),
+        );
+
+        let hints = extract_hints(&headers);
+
+        assert_eq!(hints.len(), 5);
+        assert_eq!(
+            hints[0],
+            ("auto_create_table".to_string(), "true".to_string())
+        );
+        assert_eq!(hints[1], ("ttl".to_string(), "3600d".to_string()));
+        assert_eq!(hints[2], ("append_mode".to_string(), "true".to_string()));
+        assert_eq!(hints[3], ("merge_mode".to_string(), "false".to_string()));
+        assert_eq!(
+            hints[4],
+            ("physical_table".to_string(), "table1".to_string())
+        );
     }
 
     #[test]
