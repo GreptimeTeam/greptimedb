@@ -15,14 +15,28 @@ RUN apt-get update && \
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     libssl-dev \
     tzdata \
-    protobuf-compiler \
     curl \
+    unzip \
     ca-certificates \
     git \
     build-essential \
     pkg-config \
     python3.10 \
     python3.10-dev
+
+ARG TARGETPLATFORM
+RUN echo "target platform: $TARGETPLATFORM"
+
+# Install protobuf, because the one in the apt is too old (v3.12).
+RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
+    curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-aarch_64.zip && \
+    unzip protoc-29.1-linux-aarch_64.zip -d protoc3; \
+elif [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
+    curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip && \
+    unzip protoc-29.1-linux-x86_64.zip -d protoc3; \
+fi
+RUN mv protoc3/bin/* /usr/local/bin/
+RUN mv protoc3/include/* /usr/local/include/
 
 # https://github.com/GreptimeTeam/greptimedb/actions/runs/10935485852/job/30357457188#step:3:7106
 # `aws-lc-sys` require gcc >= 10.3.0 to work, hence alias to use gcc-10
@@ -49,7 +63,7 @@ RUN apt-get -y purge python3.8 && \
 # wildcard here. However, that requires the git's config files and the submodules all owned by the very same user.
 # It's troublesome to do this since the dev build runs in Docker, which is under user "root"; while outside the Docker,
 # it can be a different user that have prepared the submodules.
-RUN git config --global --add safe.directory *
+RUN git config --global --add safe.directory '*'
 
 # Install Python dependencies.
 COPY $DOCKER_BUILD_ROOT/docker/python/requirements.txt /etc/greptime/requirements.txt
