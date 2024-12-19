@@ -257,7 +257,7 @@ impl Context {
                 .await
                 .context(error::TableMetadataManagerSnafu)
                 .map_err(BoxedError::new)
-                .context(error::RetryLaterWithSourceSnafu {
+                .with_context(|_| error::RetryLaterWithSourceSnafu {
                     reason: format!("Failed to get TableRoute: {table_id}"),
                 })?
                 .context(error::TableRouteNotFoundSnafu { table_id })?;
@@ -321,7 +321,7 @@ impl Context {
                 .await
                 .context(error::TableMetadataManagerSnafu)
                 .map_err(BoxedError::new)
-                .context(error::RetryLaterWithSourceSnafu {
+                .with_context(|_| error::RetryLaterWithSourceSnafu {
                     reason: format!("Failed to get TableInfo: {table_id}"),
                 })?
                 .context(error::TableInfoNotFoundSnafu { table_id })?;
@@ -354,7 +354,7 @@ impl Context {
                 .await
                 .context(error::TableMetadataManagerSnafu)
                 .map_err(BoxedError::new)
-                .context(error::RetryLaterWithSourceSnafu {
+                .with_context(|_| error::RetryLaterWithSourceSnafu {
                     reason: format!("Failed to get DatanodeTable: ({datanode_id},{table_id})"),
                 })?
                 .context(error::DatanodeTableNotFoundSnafu {
@@ -486,20 +486,11 @@ impl RegionMigrationProcedure {
 
         let table_id = self.context.region_id().table_id();
         let region_id = self.context.region_id();
-        let table_route = self
-            .context
-            .table_metadata_manager
-            .table_route_manager()
-            .table_route_storage()
-            .get_with_raw_bytes(table_id)
-            .await
-            .context(error::TableMetadataManagerSnafu)
-            .map_err(BoxedError::new)
-            .context(error::RetryLaterWithSourceSnafu {
-                reason: format!("Failed to get TableRoute: {table_id}"),
-            })?
-            .context(error::TableRouteNotFoundSnafu { table_id })?;
+        self.context.remove_table_route_value();
+        let table_metadata_manager = self.context.table_metadata_manager.clone();
+        let table_route = self.context.get_table_route_value().await?;
 
+        // Safety: It must be a physical table route.
         let downgraded = table_route
             .region_routes()
             .unwrap()
@@ -509,9 +500,8 @@ impl RegionMigrationProcedure {
 
         if downgraded {
             info!("Rollbacking downgraded region leader table route, region: {region_id}");
-            self.context
-                    .table_metadata_manager
-                    .update_leader_region_status(table_id, &table_route, |route| {
+            table_metadata_manager
+                    .update_leader_region_status(table_id, table_route, |route| {
                         if route.region.id == region_id {
                             Some(None)
                         } else {
@@ -521,7 +511,7 @@ impl RegionMigrationProcedure {
                     .await
                     .context(error::TableMetadataManagerSnafu)
                     .map_err(BoxedError::new)
-                    .context(error::RetryLaterWithSourceSnafu {
+                    .with_context(|_| error::RetryLaterWithSourceSnafu {
                         reason: format!("Failed to update the table route during the rollback downgraded leader region: {region_id}"),
                     })?;
         }
