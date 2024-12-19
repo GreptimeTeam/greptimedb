@@ -24,6 +24,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
 use datafusion_expr::utils::expr_to_columns;
+use smallvec::SmallVec;
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{ScanRequest, TimeSeriesRowSelector};
 use table::predicate::{build_time_range_predicate, Predicate};
@@ -35,7 +36,7 @@ use crate::cache::file_cache::FileCacheRef;
 use crate::cache::CacheManagerRef;
 use crate::config::DEFAULT_SCAN_CHANNEL_SIZE;
 use crate::error::Result;
-use crate::memtable::MemtableRef;
+use crate::memtable::MemtableRange;
 use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::{self, CompatBatch};
 use crate::read::projection::ProjectionMapper;
@@ -328,6 +329,14 @@ impl ScanRegion {
             Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied())?,
             None => ProjectionMapper::all(&self.version.metadata)?,
         };
+        // Get memtable ranges to scan.
+        let memtables = memtables
+            .into_iter()
+            .map(|mem| {
+                let ranges = mem.ranges(Some(mapper.column_ids()), Some(predicate.clone()));
+                MemRangeBuilder::new(ranges)
+            })
+            .collect();
 
         let input = ScanInput::new(self.access_layer, mapper)
             .with_time_range(Some(time_range))
@@ -346,8 +355,8 @@ impl ScanRegion {
         Ok(input)
     }
 
-    /// Build time range predicate from filters, also remove time filters from request.
-    fn build_time_range_predicate(&mut self) -> TimestampRange {
+    /// Build time range predicate from filters.
+    fn build_time_range_predicate(&self) -> TimestampRange {
         let time_index = self.version.metadata.time_index_column();
         let unit = time_index
             .column_schema
@@ -355,11 +364,7 @@ impl ScanRegion {
             .as_timestamp()
             .expect("Time index must have timestamp-compatible type")
             .unit();
-        build_time_range_predicate(
-            &time_index.column_schema.name,
-            unit,
-            &mut self.request.filters,
-        )
+        build_time_range_predicate(&time_index.column_schema.name, unit, &self.request.filters)
     }
 
     /// Remove field filters if the merge mode is [MergeMode::LastNonNull].
@@ -484,8 +489,8 @@ pub(crate) struct ScanInput {
     time_range: Option<TimestampRange>,
     /// Predicate to push down.
     pub(crate) predicate: Option<Predicate>,
-    /// Memtables to scan.
-    pub(crate) memtables: Vec<MemtableRef>,
+    /// Memtable range builders for memtables in the time range..
+    pub(crate) memtables: Vec<MemRangeBuilder>,
     /// Handles to SST files to scan.
     pub(crate) files: Vec<FileHandle>,
     /// Cache.
@@ -547,9 +552,9 @@ impl ScanInput {
         self
     }
 
-    /// Sets memtables to read.
+    /// Sets memtable range builders.
     #[must_use]
-    pub(crate) fn with_memtables(mut self, memtables: Vec<MemtableRef>) -> Self {
+    pub(crate) fn with_memtables(mut self, memtables: Vec<MemRangeBuilder>) -> Self {
         self.memtables = memtables;
         self
     }
@@ -667,11 +672,12 @@ impl ScanInput {
         Ok(sources)
     }
 
-    /// Prunes a memtable to scan and returns the builder to build readers.
-    pub(crate) fn prune_memtable(&self, mem_index: usize) -> MemRangeBuilder {
-        let memtable = &self.memtables[mem_index];
-        let row_groups = memtable.ranges(Some(self.mapper.column_ids()), self.predicate.clone());
-        MemRangeBuilder::new(row_groups)
+    /// Builds memtable ranges to scan by `index`.
+    pub(crate) fn build_mem_ranges(&self, index: RowGroupIndex) -> SmallVec<[MemtableRange; 2]> {
+        let memtable = &self.memtables[index.index];
+        let mut ranges = SmallVec::new();
+        memtable.build_ranges(index.row_group_index, &mut ranges);
+        ranges
     }
 
     /// Prunes a file to scan and returns the builder to build readers.
@@ -685,7 +691,6 @@ impl ScanInput {
             .access_layer
             .read_sst(file.clone())
             .predicate(self.predicate.clone())
-            .time_range(self.time_range)
             .projection(Some(self.mapper.column_ids().to_vec()))
             .cache(self.cache_manager.clone())
             .inverted_index_applier(self.inverted_index_applier.clone())

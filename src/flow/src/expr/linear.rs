@@ -359,14 +359,6 @@ impl MapFilterProject {
         )
     }
 
-    /// Convert the `MapFilterProject` into a staged evaluation plan.
-    ///
-    /// The main behavior is extract temporal predicates, which cannot be evaluated
-    /// using the standard machinery.
-    pub fn into_plan(self) -> Result<MfpPlan, Error> {
-        MfpPlan::create_from(self)
-    }
-
     /// Lists input columns whose values are used in outputs.
     ///
     /// It is entirely appropriate to determine the demand of an instance
@@ -599,26 +591,6 @@ impl SafeMfpPlan {
             row_buf.clear();
             row_buf.extend(self.mfp.projection.iter().map(|c| values[*c].clone()));
             Ok(Some(row_buf.clone()))
-        }
-    }
-
-    /// A version of `evaluate` which produces an iterator over `Datum`
-    /// as output.
-    ///
-    /// This version can be useful when one wants to capture the resulting
-    /// datums without packing and then unpacking a row.
-    #[inline(always)]
-    pub fn evaluate_iter<'a>(
-        &'a self,
-        datums: &'a mut Vec<Value>,
-    ) -> Result<Option<impl Iterator<Item = Value> + 'a>, EvalError> {
-        let passed_predicates = self.evaluate_inner(datums)?;
-        if !passed_predicates {
-            Ok(None)
-        } else {
-            Ok(Some(
-                self.mfp.projection.iter().map(move |i| datums[*i].clone()),
-            ))
         }
     }
 

@@ -204,10 +204,6 @@ impl Context {
     pub fn reset_in_memory(&self) {
         self.in_memory.reset();
     }
-
-    pub fn reset_leader_cached_kv_backend(&self) {
-        self.leader_cached_kv_backend.reset();
-    }
 }
 
 /// The value of the leader. It is used to store the leader's address.

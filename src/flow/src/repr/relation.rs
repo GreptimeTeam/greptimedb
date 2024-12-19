@@ -46,14 +46,6 @@ impl Key {
         self.column_indices.push(col);
     }
 
-    /// Add columns to Key
-    pub fn add_cols<I>(&mut self, cols: I)
-    where
-        I: IntoIterator<Item = usize>,
-    {
-        self.column_indices.extend(cols);
-    }
-
     /// Remove a column from Key
     pub fn remove_col(&mut self, col: usize) {
         self.column_indices.retain(|&r| r != col);

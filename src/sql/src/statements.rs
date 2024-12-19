@@ -34,10 +34,8 @@ pub mod truncate;
 use std::str::FromStr;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::add_column_location::LocationType;
-use api::v1::{AddColumnLocation as Location, SemanticType};
+use api::v1::SemanticType;
 use common_base::bytes::Bytes;
-use common_query::AddColumnLocation;
 use common_time::timezone::Timezone;
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
@@ -58,7 +56,8 @@ use crate::error::{
     self, ColumnTypeMismatchSnafu, ConvertSqlValueSnafu, ConvertToGrpcDataTypeSnafu,
     ConvertValueSnafu, DatatypeSnafu, InvalidCastSnafu, InvalidSqlValueSnafu, InvalidUnaryOpSnafu,
     ParseSqlValueSnafu, Result, SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu,
-    TimestampOverflowSnafu, UnsupportedDefaultValueSnafu, UnsupportedUnaryOpSnafu,
+    SetSkippingIndexOptionSnafu, TimestampOverflowSnafu, UnsupportedDefaultValueSnafu,
+    UnsupportedUnaryOpSnafu,
 };
 use crate::statements::create::Column;
 pub use crate::statements::option_map::OptionMap;
@@ -513,6 +512,12 @@ pub fn column_to_schema(
             .context(SetFulltextOptionSnafu)?;
     }
 
+    if let Some(options) = column.extensions.build_skipping_index_options()? {
+        column_schema = column_schema
+            .with_skipping_options(options)
+            .context(SetSkippingIndexOptionSnafu)?;
+    }
+
     Ok(column_schema)
 }
 
@@ -678,22 +683,6 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
         | ConcreteDataType::Dictionary(_) => {
             unreachable!()
         }
-    }
-}
-
-pub fn sql_location_to_grpc_add_column_location(
-    location: &Option<AddColumnLocation>,
-) -> Option<Location> {
-    match location {
-        Some(AddColumnLocation::First) => Some(Location {
-            location_type: LocationType::First.into(),
-            after_column_name: String::default(),
-        }),
-        Some(AddColumnLocation::After { column_name }) => Some(Location {
-            location_type: LocationType::After.into(),
-            after_column_name: column_name.to_string(),
-        }),
-        None => None,
     }
 }
 
@@ -1519,6 +1508,7 @@ mod tests {
                     .into(),
                 ),
                 vector_options: None,
+                skipping_index_options: None,
             },
         };
 

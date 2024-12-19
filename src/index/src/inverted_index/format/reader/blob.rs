@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use common_base::range_read::RangeReader;
 use greptime_proto::v1::index::InvertedIndexMetas;
 use snafu::{ensure, ResultExt};
@@ -50,22 +52,17 @@ impl<R> InvertedIndexBlobReader<R> {
 
 #[async_trait]
 impl<R: RangeReader> InvertedIndexReader for InvertedIndexBlobReader<R> {
-    async fn read_all(&mut self, dest: &mut Vec<u8>) -> Result<usize> {
-        let metadata = self.source.metadata().await.context(CommonIoSnafu)?;
-        self.source
-            .read_into(0..metadata.content_length, dest)
-            .await
-            .context(CommonIoSnafu)?;
-        Ok(metadata.content_length as usize)
-    }
-
-    async fn seek_read(&mut self, offset: u64, size: u32) -> Result<Vec<u8>> {
+    async fn range_read(&mut self, offset: u64, size: u32) -> Result<Vec<u8>> {
         let buf = self
             .source
             .read(offset..offset + size as u64)
             .await
             .context(CommonIoSnafu)?;
         Ok(buf.into())
+    }
+
+    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+        self.source.read_vec(ranges).await.context(CommonIoSnafu)
     }
 
     async fn metadata(&mut self) -> Result<Arc<InvertedIndexMetas>> {

@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, error, info, trace};
 use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -32,7 +32,10 @@ use crate::error::{
     Error, FlushRegionSnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::metrics::{FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_ERRORS_TOTAL, FLUSH_REQUESTS_TOTAL};
+use crate::metrics::{
+    FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_ERRORS_TOTAL, FLUSH_REQUESTS_TOTAL,
+    INFLIGHT_FLUSH_COUNT,
+};
 use crate::read::Source;
 use crate::region::options::IndexOptions;
 use crate::region::version::{VersionControlData, VersionControlRef};
@@ -138,17 +141,22 @@ impl WriteBufferManager for WriteBufferManagerImpl {
         // If the memory exceeds the buffer size, we trigger more aggressive
         // flush. But if already more than half memory is being flushed,
         // triggering more flush may not help. We will hold it instead.
-        if memory_usage >= self.global_write_buffer_size
-            && mutable_memtable_memory_usage >= self.global_write_buffer_size / 2
-        {
-            debug!(
+        if memory_usage >= self.global_write_buffer_size {
+            if mutable_memtable_memory_usage >= self.global_write_buffer_size / 2 {
+                debug!(
                 "Engine should flush (over total limit), memory_usage: {}, global_write_buffer_size: {}, \
                  mutable_usage: {}.",
                 memory_usage,
                 self.global_write_buffer_size,
-                mutable_memtable_memory_usage,
-            );
-            return true;
+                mutable_memtable_memory_usage);
+                return true;
+            } else {
+                trace!(
+                    "Engine won't flush, memory_usage: {}, global_write_buffer_size: {}, mutable_usage: {}.",
+                    memory_usage,
+                    self.global_write_buffer_size,
+                    mutable_memtable_memory_usage);
+            }
         }
 
         false
@@ -261,7 +269,9 @@ impl RegionFlushTask {
         let version_data = version_control.current();
 
         Box::pin(async move {
+            INFLIGHT_FLUSH_COUNT.inc();
             self.do_flush(version_data).await;
+            INFLIGHT_FLUSH_COUNT.dec();
         })
     }
 
@@ -530,6 +540,7 @@ impl FlushScheduler {
             self.region_status.remove(&region_id);
             return Err(e);
         }
+
         flush_status.flushing = true;
 
         Ok(())

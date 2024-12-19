@@ -946,6 +946,7 @@ create_on_flush = "auto"
 create_on_compaction = "auto"
 apply_on_query = "auto"
 mem_threshold_on_create = "auto"
+content_cache_page_size = "8MiB"
 
 [region_engine.mito.fulltext_index]
 create_on_flush = "auto"
@@ -1815,11 +1816,17 @@ pub async fn test_loki_logs(store_type: StorageType) {
     // init loki request
     let req: PushRequest = PushRequest {
         streams: vec![StreamAdapter {
-            labels: "{service=\"test\",source=\"integration\"}".to_string(),
-            entries: vec![EntryAdapter {
-                timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
-                line: "this is a log message".to_string(),
-            }],
+            labels: r#"{service="test",source="integration","wadaxi"="do anything"}"#.to_string(),
+            entries: vec![
+                EntryAdapter {
+                    timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
+                    line: "this is a log message".to_string(),
+                },
+                EntryAdapter {
+                    timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
+                    line: "this is a log message".to_string(),
+                },
+            ],
             hash: rand::random(),
         }],
     };
@@ -1847,7 +1854,7 @@ pub async fn test_loki_logs(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // test schema
-    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"service\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"service\\\", \\\"source\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"service\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  \\\"wadaxi\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"service\\\", \\\"source\\\", \\\"wadaxi\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
     validate_data(
         "loki_schema",
         &client,
@@ -1857,7 +1864,7 @@ pub async fn test_loki_logs(store_type: StorageType) {
     .await;
 
     // test content
-    let expected = r#"[[1730976830000000000,"this is a log message","test","integration"]]"#;
+    let expected = r#"[[1730976830000000000,"this is a log message","test","integration","do anything"],[1730976830000000000,"this is a log message","test","integration","do anything"]]"#;
     validate_data(
         "loki_content",
         &client,

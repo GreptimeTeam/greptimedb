@@ -80,13 +80,11 @@ tokio.workspace = true
 catalog = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 criterion = { version = "0.4", features = ["html_reports", "async_tokio"] }
-log-store.workspace = true
 operator.workspace = true
 rayon = "1.0"
 ron = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 session = { workspace = true, features = ["testing"] }
-tokio-test = "0.4"
 
 [[bench]]
 name = "py_benchmark"

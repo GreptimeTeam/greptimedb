@@ -15,6 +15,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use common_telemetry::info;
 use etcd_client::{
     Client, DeleteOptions, GetOptions, PutOptions, Txn, TxnOp, TxnOpResponse, TxnResponse,
 };
@@ -55,6 +56,7 @@ impl EtcdStore {
     }
 
     pub fn with_etcd_client(client: Client, max_txn_ops: usize) -> KvBackendRef {
+        info!("Connected to etcd");
         Arc::new(Self {
             client,
             max_txn_ops,

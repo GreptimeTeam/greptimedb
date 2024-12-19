@@ -16,6 +16,7 @@ mod convert;
 mod distance;
 pub(crate) mod impl_conv;
 mod scalar_add;
+mod scalar_mul;
 
 use std::sync::Arc;
 
@@ -36,5 +37,6 @@ impl VectorFunction {
 
         // scalar calculation
         registry.register(Arc::new(scalar_add::ScalarAddFunction));
+        registry.register(Arc::new(scalar_mul::ScalarMulFunction));
     }
 }
