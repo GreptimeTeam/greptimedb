@@ -21,7 +21,6 @@ use futures::stream::StreamExt;
 use futures::{stream, AsyncReadExt, AsyncWriteExt, Stream};
 use snafu::ResultExt;
 
-use super::write_u64_slice;
 use crate::bloom_filter::creator::{FALSE_POSITIVE_RATE, SEED};
 use crate::bloom_filter::error::{IntermediateSnafu, IoSnafu, Result};
 use crate::bloom_filter::Bytes;
@@ -53,9 +52,6 @@ pub struct FinalizedBloomFilterStorage {
 
     /// The threshold of the global memory usage of the creating Bloom filters.
     global_memory_usage_threshold: Option<usize>,
-
-    /// Buffer for writing Bloom filters.
-    bloom_filter_buf: Vec<u8>,
 }
 
 impl FinalizedBloomFilterStorage {
@@ -74,7 +70,6 @@ impl FinalizedBloomFilterStorage {
             memory_usage: 0,
             global_memory_usage,
             global_memory_usage_threshold,
-            bloom_filter_buf: vec![],
         }
     }
 
@@ -98,12 +93,7 @@ impl FinalizedBloomFilterStorage {
             bf.insert(&elem);
         }
 
-        self.bloom_filter_buf.clear();
-        write_u64_slice(&mut self.bloom_filter_buf, bf.as_slice());
-        let fbf = FinalizedBloomFilterSegment {
-            bloom_filter_bytes: self.bloom_filter_buf.clone(),
-            element_count,
-        };
+        let fbf = FinalizedBloomFilterSegment::from(bf, element_count);
 
         // Update memory usage.
         let memory_diff = fbf.bloom_filter_bytes.len();
@@ -228,6 +218,21 @@ pub struct FinalizedBloomFilterSegment {
 
     /// The number of elements in the Bloom filter.
     pub element_count: usize,
+}
+
+impl FinalizedBloomFilterSegment {
+    fn from(bf: BloomFilter, elem_count: usize) -> Self {
+        let bf_slice = bf.as_slice();
+        let mut bloom_filter_bytes = Vec::with_capacity(std::mem::size_of_val(bf_slice));
+        for &x in bf_slice {
+            bloom_filter_bytes.extend_from_slice(&x.to_le_bytes());
+        }
+
+        Self {
+            bloom_filter_bytes,
+            element_count: elem_count,
+        }
+    }
 }
 
 #[cfg(test)]

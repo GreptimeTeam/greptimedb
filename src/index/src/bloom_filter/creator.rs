@@ -184,14 +184,6 @@ impl BloomFilterCreator {
     }
 }
 
-/// Writes a slice of `u64` to the buffer in little-endian order.
-fn write_u64_slice(buf: &mut Vec<u8>, slice: &[u64]) {
-    buf.reserve(std::mem::size_of_val(slice));
-    for &x in slice {
-        buf.extend_from_slice(&x.to_le_bytes());
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use fastbloom::BloomFilter;
