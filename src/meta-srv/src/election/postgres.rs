@@ -36,6 +36,7 @@ use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
 const CAMPAIGN: &str = "SELECT pg_try_advisory_lock(28319)";
 const STEP_DOWN: &str = "SELECT pg_advisory_unlock(28319)";
 
+<<<<<<< HEAD
 // Separator between value and expire time.
 const LEASE_SEP: &str = r#"||__metadata_lease_sep||"#;
 
@@ -90,6 +91,17 @@ fn parse_value_and_expire_time(value: &str) -> Result<(String, Timestamp)> {
 }
 
 #[derive(Debug, Clone, Default)]
+=======
+/// Value with a expire time. The expire time is in seconds since UNIX epoch.
+#[derive(Debug, Serialize, Deserialize)]
+struct ValueWithLease {
+    value: String,
+    expire_time: f64,
+}
+
+/// Leader key for PostgreSql.
+#[derive(Debug, Clone)]
+>>>>>>> a059fa118 (chore: update comments)
 struct PgLeaderKey {
     name: Vec<u8>,
     key: Vec<u8>,
@@ -534,6 +546,7 @@ impl PgElection {
         Ok(())
     }
 
+<<<<<<< HEAD
     /// Still consider itself as the leader locally but failed to acquire the lock. Step down without deleting the key.
     async fn step_down_without_lock(&self) -> Result<()> {
         let key = self.election_key().into_bytes();
@@ -552,6 +565,23 @@ impl PgElection {
                 .send(LeaderChangeMessage::StepDown(Arc::new(leader_key)))
             {
                 error!(e; "Failed to send leader change message");
+=======
+    // Check if the leader is still valid
+    async fn check_leadership(&self, key: &Vec<u8>) -> Result<()> {
+        let check_interval = Duration::from_secs(META_LEASE_SECS);
+        let mut check_interval = tokio::time::interval(check_interval);
+        loop {
+            let _ = check_interval.tick().await;
+            let leader_value_with_lease = self.get_value_with_lease(key).await?;
+            let now = time::SystemTime::now()
+                .duration_since(time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64();
+            if leader_value_with_lease.expire_time <= now {
+                // Invalidate previous leader
+                self.delete_value(key).await?;
+                return Ok(());
+>>>>>>> a059fa118 (chore: update comments)
             }
         }
         Ok(())
