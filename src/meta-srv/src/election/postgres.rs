@@ -41,12 +41,14 @@ use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
 const CAMPAIGN: &str = "SELECT pg_try_advisory_lock(1)";
 const UNLOCK: &str = "SELECT pg_advisory_unlock(1)";
 
+/// Value with a expire time. The expire time is in seconds since UNIX epoch.
 #[derive(Debug, Serialize, Deserialize)]
 struct ValueWithLease {
     value: String,
     expire_time: f64,
 }
 
+/// Leader key for PostgreSql.
 #[derive(Debug, Clone)]
 struct PgLeaderKey {
     name: Vec<u8>,
@@ -73,6 +75,7 @@ impl LeaderKey for PgLeaderKey {
     }
 }
 
+/// PostgreSql implementation of Election.
 pub struct PgElection {
     leader_value: String,
     client: Client,
@@ -535,7 +538,7 @@ impl PgElection {
                 .unwrap_or_default()
                 .as_secs_f64();
             if leader_value_with_lease.expire_time <= now {
-                // Invalidate preivous leader
+                // Invalidate previous leader
                 self.delete_value(key).await?;
                 return Ok(());
             }
