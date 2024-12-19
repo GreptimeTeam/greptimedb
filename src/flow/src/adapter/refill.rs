@@ -14,13 +14,18 @@
 
 use std::collections::{BTreeSet, VecDeque};
 
+use common_error::ext::BoxedError;
 use common_query::OutputData;
 use datatypes::value::Value;
+use query::parser::QueryLanguageParser;
+use session::context::QueryContext;
+use snafu::ResultExt;
 use table::metadata::TableId;
 
 use crate::adapter::table_source::TableSource;
 use crate::adapter::FlowWorkerManagerRef;
 use crate::error::UnexpectedSnafu;
+use crate::expr::error::ExternalSnafu;
 use crate::{Error, FlownodeBuilder, FrontendInvoker};
 
 impl FlownodeBuilder {
@@ -35,7 +40,7 @@ impl FlownodeBuilder {
 /// Task to refill flow with given table id and a time range
 pub struct RefillTask {
     table_id: TableId,
-    output_data: OutputData,
+    output_data: common_query::Output,
 }
 
 impl RefillTask {
@@ -75,6 +80,25 @@ impl RefillTask {
             Value::from(time_range.0),
             Value::from(time_range.1),
         );
-        todo!()
+
+        // we don't need information from query context in this query so a default query context is enough
+        let query_ctx = QueryContext::arc();
+
+        let stmt = QueryLanguageParser::parse_sql(&sql, &query_ctx)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
+        let stmt_exec = invoker.statement_executor();
+
+        let output_data = stmt_exec
+            .execute_stmt(stmt, query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
+        Ok(RefillTask {
+            table_id,
+            output_data,
+        })
     }
 }
