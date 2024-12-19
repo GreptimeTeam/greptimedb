@@ -504,6 +504,10 @@ impl FrontendInvoker {
         let invoker = FrontendInvoker::new(inserter, deleter, statement_executor);
         Ok(invoker)
     }
+
+    pub fn statement_executor(&self) -> Arc<StatementExecutor> {
+        self.statement_executor.clone()
+    }
 }
 
 impl FrontendInvoker {
