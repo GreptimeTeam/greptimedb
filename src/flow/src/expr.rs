@@ -240,11 +240,8 @@ impl Batch {
                     dts.push(datatypes::prelude::ConcreteDataType::null_datatype())
                 }
             }
-            if self.batch.is_empty() {
-                other.batch.iter().map(|v| v.data_type()).collect_vec()
-            } else {
-                self.batch.iter().map(|v| v.data_type()).collect_vec()
-            }
+
+            dts
         };
 
         let batch_builders = dts

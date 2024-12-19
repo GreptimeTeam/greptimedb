@@ -47,7 +47,6 @@ impl Context<'_, '_> {
         reduce_plan: &ReducePlan,
         output_type: &RelationType,
     ) -> Result<CollectionBundle<Batch>, Error> {
-        common_telemetry::debug!("render reduce batch");
         let accum_plan = if let ReducePlan::Accumulable(accum_plan) = reduce_plan {
             if !accum_plan.distinct_aggrs.is_empty() {
                 NotImplementedSnafu {

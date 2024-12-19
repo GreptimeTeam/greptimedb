@@ -565,7 +565,7 @@ impl FlowWorkerManager {
         let default_interval = Duration::from_secs(1);
         let mut avg_spd = 0; // rows/sec
         let mut since_last_run = tokio::time::Instant::now();
-        let run_per_trace = 5;
+        let run_per_trace = 10;
         let mut run_cnt = 0;
         loop {
             // TODO(discord9): only run when new inputs arrive or scheduled to
