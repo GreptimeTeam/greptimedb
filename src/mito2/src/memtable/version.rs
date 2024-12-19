@@ -83,6 +83,11 @@ impl MemtableVersion {
 
             // Update the time window.
             let mutable = self.mutable.new_with_part_duration(time_window);
+            common_telemetry::debug!(
+                "Freeze empty memtable, update partition duration from {:?} to {:?}",
+                self.mutable.part_duration(),
+                time_window
+            );
             return Ok(Some(MemtableVersion {
                 mutable: Arc::new(mutable),
                 immutables: self.immutables.clone(),
@@ -93,6 +98,13 @@ impl MemtableVersion {
         // soft limit.
         self.mutable.freeze()?;
         // Fork the memtable.
+        if self.mutable.part_duration() != time_window {
+            common_telemetry::debug!(
+                "Fork memtable, update partition duration from {:?}, to {:?}",
+                self.mutable.part_duration(),
+                time_window
+            );
+        }
         let mutable = Arc::new(self.mutable.fork(metadata, time_window));
 
         let mut immutables =
