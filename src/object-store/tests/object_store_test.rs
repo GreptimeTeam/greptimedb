@@ -65,24 +65,39 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
     store.write(p3, "Hello, object3!").await?;
 
     // List objects
-    let entries = store.list("/").await?;
-    assert_eq!(4, entries.len()); // plus the dir itself
+    let entries = store
+        .list("/")
+        .await?
+        .into_iter()
+        .filter(|x| x.metadata().mode() == EntryMode::FILE)
+        .collect::<Vec<_>>();
+    assert_eq!(3, entries.len());
 
     store.delete(p1).await?;
     store.delete(p3).await?;
 
     // List objects again
     // Only o2 and root exist
-    let entries = store.list("/").await?;
-    assert_eq!(2, entries.len());
-    assert_eq!(p2, entries[1].path());
+    let entries = store
+        .list("/")
+        .await?
+        .into_iter()
+        .filter(|x| x.metadata().mode() == EntryMode::FILE)
+        .collect::<Vec<_>>();
+    assert_eq!(1, entries.len());
+    assert_eq!(p2, entries[0].path());
 
     let content = store.read(p2).await?;
     assert_eq!("Hello, object2!", String::from_utf8(content.to_vec())?);
 
     store.delete(p2).await?;
-    let entries = store.list("/").await?;
-    assert_eq!(1, entries.len());
+    let entries = store
+        .list("/")
+        .await?
+        .into_iter()
+        .filter(|x| x.metadata().mode() == EntryMode::FILE)
+        .collect::<Vec<_>>();
+    assert!(entries.is_empty());
 
     assert!(store.read(p1).await.is_err());
     assert!(store.read(p2).await.is_err());
