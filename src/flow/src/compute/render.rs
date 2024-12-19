@@ -30,7 +30,7 @@ use crate::compute::types::{Collection, CollectionBundle, ErrCollector, Toff};
 use crate::error::{Error, InvalidQuerySnafu, NotImplementedSnafu};
 use crate::expr::{self, Batch, GlobalId, LocalId};
 use crate::plan::{Plan, TypedPlan};
-use crate::repr::{self, DiffRow};
+use crate::repr::{self, DiffRow, RelationType};
 
 mod map;
 mod reduce;
@@ -124,10 +124,10 @@ impl Context<'_, '_> {
     /// Like `render_plan` but in Batch Mode
     pub fn render_plan_batch(&mut self, plan: TypedPlan) -> Result<CollectionBundle<Batch>, Error> {
         match plan.plan {
-            Plan::Constant { rows } => Ok(self.render_constant_batch(rows)),
+            Plan::Constant { rows } => Ok(self.render_constant_batch(rows, &plan.schema.typ)),
             Plan::Get { id } => self.get_batch_by_id(id),
             Plan::Let { id, value, body } => self.eval_batch_let(id, value, body),
-            Plan::Mfp { input, mfp } => self.render_mfp_batch(input, mfp),
+            Plan::Mfp { input, mfp } => self.render_mfp_batch(input, mfp, &plan.schema.typ),
             Plan::Reduce {
                 input,
                 key_val_plan,
@@ -172,7 +172,11 @@ impl Context<'_, '_> {
     /// render Constant, take all rows that have a timestamp not greater than the current time
     /// This function is primarily used for testing
     /// Always assume input is sorted by timestamp
-    pub fn render_constant_batch(&mut self, rows: Vec<DiffRow>) -> CollectionBundle<Batch> {
+    pub fn render_constant_batch(
+        &mut self,
+        rows: Vec<DiffRow>,
+        output_type: &RelationType,
+    ) -> CollectionBundle<Batch> {
         let (send_port, recv_port) = self.df.make_edge::<_, Toff<Batch>>("constant_batch");
         let mut per_time: BTreeMap<repr::Timestamp, Vec<DiffRow>> = Default::default();
         for (key, group) in &rows.into_iter().group_by(|(_row, ts, _diff)| *ts) {
@@ -184,6 +188,8 @@ impl Context<'_, '_> {
         let scheduler = self.compute_state.get_scheduler();
         let scheduler_inner = scheduler.clone();
         let err_collector = self.err_collector.clone();
+
+        let output_type = output_type.clone();
 
         let subgraph_id =
             self.df
@@ -199,7 +205,14 @@ impl Context<'_, '_> {
                     not_great_than_now.into_iter().for_each(|(_ts, rows)| {
                         err_collector.run(|| {
                             let rows = rows.into_iter().map(|(row, _ts, _diff)| row).collect();
-                            let batch = Batch::try_from_rows(rows)?;
+                            let batch = Batch::try_from_rows_with_types(
+                                rows,
+                                &output_type
+                                    .column_types
+                                    .iter()
+                                    .map(|ty| ty.scalar_type().clone())
+                                    .collect_vec(),
+                            )?;
                             send_port.give(vec![batch]);
                             Ok(())
                         });
