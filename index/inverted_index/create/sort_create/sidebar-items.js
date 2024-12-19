@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["SortIndexCreator"],"type":["IndexName","SegmentRowCount","SorterFactory"]};

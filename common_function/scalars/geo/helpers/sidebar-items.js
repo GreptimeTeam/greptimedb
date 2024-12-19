@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"macro":["ensure_and_coerce","ensure_columns_len","ensure_columns_n"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["__mock_MockInvertedIndexReader","__mock_MockInvertedIndexReader_InvertedIndexReader","blob","footer"],"struct":["InvertedIndexBlobReader","MockInvertedIndexReader","MockInvertedIndexReader_InvertedIndexReader"],"trait":["InvertedIndexReader"]};

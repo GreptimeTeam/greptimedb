@@ -1,0 +1,843 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/flow/src/compute/render/map.rs`."><title>map.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-46f98efaafac5295.ttf.woff2,FiraSans-Regular-018c141bf0843ffd.woff2,FiraSans-Medium-8f9a781e4970d388.woff2,SourceCodePro-Regular-562dcc5011b6de7d.ttf.woff2,SourceCodePro-Semibold-d899c5a5c4aeb14a.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2" crossorigin href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-76eba96aa4d2e634.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-b0742ba02757f159.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="flow" data-themes="" data-resource-suffix="" data-rustdoc-version="1.84.0-nightly (e92993dbb 2024-10-18)" data-channel="nightly" data-search-js="search-e056c65ede92db13.js" data-settings-js="settings-805db61a62df4bd2.js" ><script src="../../../../static.files/storage-1d39b6787ed640ff.js"></script><script defer src="../../../../static.files/src-script-e66d777a5a92e9b2.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-f070b9041d14864c.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-0111fcff984fae8f.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-422f7d1d52889060.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-2c020d218678b618.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer"></div><main><rustdoc-search></rustdoc-search><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">flow/compute/render/</div>map.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap"><div data-nosnippet><pre class="src-line-numbers">
+<a href="#1" id="1">1</a>
+<a href="#2" id="2">2</a>
+<a href="#3" id="3">3</a>
+<a href="#4" id="4">4</a>
+<a href="#5" id="5">5</a>
+<a href="#6" id="6">6</a>
+<a href="#7" id="7">7</a>
+<a href="#8" id="8">8</a>
+<a href="#9" id="9">9</a>
+<a href="#10" id="10">10</a>
+<a href="#11" id="11">11</a>
+<a href="#12" id="12">12</a>
+<a href="#13" id="13">13</a>
+<a href="#14" id="14">14</a>
+<a href="#15" id="15">15</a>
+<a href="#16" id="16">16</a>
+<a href="#17" id="17">17</a>
+<a href="#18" id="18">18</a>
+<a href="#19" id="19">19</a>
+<a href="#20" id="20">20</a>
+<a href="#21" id="21">21</a>
+<a href="#22" id="22">22</a>
+<a href="#23" id="23">23</a>
+<a href="#24" id="24">24</a>
+<a href="#25" id="25">25</a>
+<a href="#26" id="26">26</a>
+<a href="#27" id="27">27</a>
+<a href="#28" id="28">28</a>
+<a href="#29" id="29">29</a>
+<a href="#30" id="30">30</a>
+<a href="#31" id="31">31</a>
+<a href="#32" id="32">32</a>
+<a href="#33" id="33">33</a>
+<a href="#34" id="34">34</a>
+<a href="#35" id="35">35</a>
+<a href="#36" id="36">36</a>
+<a href="#37" id="37">37</a>
+<a href="#38" id="38">38</a>
+<a href="#39" id="39">39</a>
+<a href="#40" id="40">40</a>
+<a href="#41" id="41">41</a>
+<a href="#42" id="42">42</a>
+<a href="#43" id="43">43</a>
+<a href="#44" id="44">44</a>
+<a href="#45" id="45">45</a>
+<a href="#46" id="46">46</a>
+<a href="#47" id="47">47</a>
+<a href="#48" id="48">48</a>
+<a href="#49" id="49">49</a>
+<a href="#50" id="50">50</a>
+<a href="#51" id="51">51</a>
+<a href="#52" id="52">52</a>
+<a href="#53" id="53">53</a>
+<a href="#54" id="54">54</a>
+<a href="#55" id="55">55</a>
+<a href="#56" id="56">56</a>
+<a href="#57" id="57">57</a>
+<a href="#58" id="58">58</a>
+<a href="#59" id="59">59</a>
+<a href="#60" id="60">60</a>
+<a href="#61" id="61">61</a>
+<a href="#62" id="62">62</a>
+<a href="#63" id="63">63</a>
+<a href="#64" id="64">64</a>
+<a href="#65" id="65">65</a>
+<a href="#66" id="66">66</a>
+<a href="#67" id="67">67</a>
+<a href="#68" id="68">68</a>
+<a href="#69" id="69">69</a>
+<a href="#70" id="70">70</a>
+<a href="#71" id="71">71</a>
+<a href="#72" id="72">72</a>
+<a href="#73" id="73">73</a>
+<a href="#74" id="74">74</a>
+<a href="#75" id="75">75</a>
+<a href="#76" id="76">76</a>
+<a href="#77" id="77">77</a>
+<a href="#78" id="78">78</a>
+<a href="#79" id="79">79</a>
+<a href="#80" id="80">80</a>
+<a href="#81" id="81">81</a>
+<a href="#82" id="82">82</a>
+<a href="#83" id="83">83</a>
+<a href="#84" id="84">84</a>
+<a href="#85" id="85">85</a>
+<a href="#86" id="86">86</a>
+<a href="#87" id="87">87</a>
+<a href="#88" id="88">88</a>
+<a href="#89" id="89">89</a>
+<a href="#90" id="90">90</a>
+<a href="#91" id="91">91</a>
+<a href="#92" id="92">92</a>
+<a href="#93" id="93">93</a>
+<a href="#94" id="94">94</a>
+<a href="#95" id="95">95</a>
+<a href="#96" id="96">96</a>
+<a href="#97" id="97">97</a>
+<a href="#98" id="98">98</a>
+<a href="#99" id="99">99</a>
+<a href="#100" id="100">100</a>
+<a href="#101" id="101">101</a>
+<a href="#102" id="102">102</a>
+<a href="#103" id="103">103</a>
+<a href="#104" id="104">104</a>
+<a href="#105" id="105">105</a>
+<a href="#106" id="106">106</a>
+<a href="#107" id="107">107</a>
+<a href="#108" id="108">108</a>
+<a href="#109" id="109">109</a>
+<a href="#110" id="110">110</a>
+<a href="#111" id="111">111</a>
+<a href="#112" id="112">112</a>
+<a href="#113" id="113">113</a>
+<a href="#114" id="114">114</a>
+<a href="#115" id="115">115</a>
+<a href="#116" id="116">116</a>
+<a href="#117" id="117">117</a>
+<a href="#118" id="118">118</a>
+<a href="#119" id="119">119</a>
+<a href="#120" id="120">120</a>
+<a href="#121" id="121">121</a>
+<a href="#122" id="122">122</a>
+<a href="#123" id="123">123</a>
+<a href="#124" id="124">124</a>
+<a href="#125" id="125">125</a>
+<a href="#126" id="126">126</a>
+<a href="#127" id="127">127</a>
+<a href="#128" id="128">128</a>
+<a href="#129" id="129">129</a>
+<a href="#130" id="130">130</a>
+<a href="#131" id="131">131</a>
+<a href="#132" id="132">132</a>
+<a href="#133" id="133">133</a>
+<a href="#134" id="134">134</a>
+<a href="#135" id="135">135</a>
+<a href="#136" id="136">136</a>
+<a href="#137" id="137">137</a>
+<a href="#138" id="138">138</a>
+<a href="#139" id="139">139</a>
+<a href="#140" id="140">140</a>
+<a href="#141" id="141">141</a>
+<a href="#142" id="142">142</a>
+<a href="#143" id="143">143</a>
+<a href="#144" id="144">144</a>
+<a href="#145" id="145">145</a>
+<a href="#146" id="146">146</a>
+<a href="#147" id="147">147</a>
+<a href="#148" id="148">148</a>
+<a href="#149" id="149">149</a>
+<a href="#150" id="150">150</a>
+<a href="#151" id="151">151</a>
+<a href="#152" id="152">152</a>
+<a href="#153" id="153">153</a>
+<a href="#154" id="154">154</a>
+<a href="#155" id="155">155</a>
+<a href="#156" id="156">156</a>
+<a href="#157" id="157">157</a>
+<a href="#158" id="158">158</a>
+<a href="#159" id="159">159</a>
+<a href="#160" id="160">160</a>
+<a href="#161" id="161">161</a>
+<a href="#162" id="162">162</a>
+<a href="#163" id="163">163</a>
+<a href="#164" id="164">164</a>
+<a href="#165" id="165">165</a>
+<a href="#166" id="166">166</a>
+<a href="#167" id="167">167</a>
+<a href="#168" id="168">168</a>
+<a href="#169" id="169">169</a>
+<a href="#170" id="170">170</a>
+<a href="#171" id="171">171</a>
+<a href="#172" id="172">172</a>
+<a href="#173" id="173">173</a>
+<a href="#174" id="174">174</a>
+<a href="#175" id="175">175</a>
+<a href="#176" id="176">176</a>
+<a href="#177" id="177">177</a>
+<a href="#178" id="178">178</a>
+<a href="#179" id="179">179</a>
+<a href="#180" id="180">180</a>
+<a href="#181" id="181">181</a>
+<a href="#182" id="182">182</a>
+<a href="#183" id="183">183</a>
+<a href="#184" id="184">184</a>
+<a href="#185" id="185">185</a>
+<a href="#186" id="186">186</a>
+<a href="#187" id="187">187</a>
+<a href="#188" id="188">188</a>
+<a href="#189" id="189">189</a>
+<a href="#190" id="190">190</a>
+<a href="#191" id="191">191</a>
+<a href="#192" id="192">192</a>
+<a href="#193" id="193">193</a>
+<a href="#194" id="194">194</a>
+<a href="#195" id="195">195</a>
+<a href="#196" id="196">196</a>
+<a href="#197" id="197">197</a>
+<a href="#198" id="198">198</a>
+<a href="#199" id="199">199</a>
+<a href="#200" id="200">200</a>
+<a href="#201" id="201">201</a>
+<a href="#202" id="202">202</a>
+<a href="#203" id="203">203</a>
+<a href="#204" id="204">204</a>
+<a href="#205" id="205">205</a>
+<a href="#206" id="206">206</a>
+<a href="#207" id="207">207</a>
+<a href="#208" id="208">208</a>
+<a href="#209" id="209">209</a>
+<a href="#210" id="210">210</a>
+<a href="#211" id="211">211</a>
+<a href="#212" id="212">212</a>
+<a href="#213" id="213">213</a>
+<a href="#214" id="214">214</a>
+<a href="#215" id="215">215</a>
+<a href="#216" id="216">216</a>
+<a href="#217" id="217">217</a>
+<a href="#218" id="218">218</a>
+<a href="#219" id="219">219</a>
+<a href="#220" id="220">220</a>
+<a href="#221" id="221">221</a>
+<a href="#222" id="222">222</a>
+<a href="#223" id="223">223</a>
+<a href="#224" id="224">224</a>
+<a href="#225" id="225">225</a>
+<a href="#226" id="226">226</a>
+<a href="#227" id="227">227</a>
+<a href="#228" id="228">228</a>
+<a href="#229" id="229">229</a>
+<a href="#230" id="230">230</a>
+<a href="#231" id="231">231</a>
+<a href="#232" id="232">232</a>
+<a href="#233" id="233">233</a>
+<a href="#234" id="234">234</a>
+<a href="#235" id="235">235</a>
+<a href="#236" id="236">236</a>
+<a href="#237" id="237">237</a>
+<a href="#238" id="238">238</a>
+<a href="#239" id="239">239</a>
+<a href="#240" id="240">240</a>
+<a href="#241" id="241">241</a>
+<a href="#242" id="242">242</a>
+<a href="#243" id="243">243</a>
+<a href="#244" id="244">244</a>
+<a href="#245" id="245">245</a>
+<a href="#246" id="246">246</a>
+<a href="#247" id="247">247</a>
+<a href="#248" id="248">248</a>
+<a href="#249" id="249">249</a>
+<a href="#250" id="250">250</a>
+<a href="#251" id="251">251</a>
+<a href="#252" id="252">252</a>
+<a href="#253" id="253">253</a>
+<a href="#254" id="254">254</a>
+<a href="#255" id="255">255</a>
+<a href="#256" id="256">256</a>
+<a href="#257" id="257">257</a>
+<a href="#258" id="258">258</a>
+<a href="#259" id="259">259</a>
+<a href="#260" id="260">260</a>
+<a href="#261" id="261">261</a>
+<a href="#262" id="262">262</a>
+<a href="#263" id="263">263</a>
+<a href="#264" id="264">264</a>
+<a href="#265" id="265">265</a>
+<a href="#266" id="266">266</a>
+<a href="#267" id="267">267</a>
+<a href="#268" id="268">268</a>
+<a href="#269" id="269">269</a>
+<a href="#270" id="270">270</a>
+<a href="#271" id="271">271</a>
+<a href="#272" id="272">272</a>
+<a href="#273" id="273">273</a>
+<a href="#274" id="274">274</a>
+<a href="#275" id="275">275</a>
+<a href="#276" id="276">276</a>
+<a href="#277" id="277">277</a>
+<a href="#278" id="278">278</a>
+<a href="#279" id="279">279</a>
+<a href="#280" id="280">280</a>
+<a href="#281" id="281">281</a>
+<a href="#282" id="282">282</a>
+<a href="#283" id="283">283</a>
+<a href="#284" id="284">284</a>
+<a href="#285" id="285">285</a>
+<a href="#286" id="286">286</a>
+<a href="#287" id="287">287</a>
+<a href="#288" id="288">288</a>
+<a href="#289" id="289">289</a>
+<a href="#290" id="290">290</a>
+<a href="#291" id="291">291</a>
+<a href="#292" id="292">292</a>
+<a href="#293" id="293">293</a>
+<a href="#294" id="294">294</a>
+<a href="#295" id="295">295</a>
+<a href="#296" id="296">296</a>
+<a href="#297" id="297">297</a>
+<a href="#298" id="298">298</a>
+<a href="#299" id="299">299</a>
+<a href="#300" id="300">300</a>
+<a href="#301" id="301">301</a>
+<a href="#302" id="302">302</a>
+<a href="#303" id="303">303</a>
+<a href="#304" id="304">304</a>
+<a href="#305" id="305">305</a>
+<a href="#306" id="306">306</a>
+<a href="#307" id="307">307</a>
+<a href="#308" id="308">308</a>
+<a href="#309" id="309">309</a>
+<a href="#310" id="310">310</a>
+<a href="#311" id="311">311</a>
+<a href="#312" id="312">312</a>
+<a href="#313" id="313">313</a>
+<a href="#314" id="314">314</a>
+<a href="#315" id="315">315</a>
+<a href="#316" id="316">316</a>
+<a href="#317" id="317">317</a>
+<a href="#318" id="318">318</a>
+<a href="#319" id="319">319</a>
+<a href="#320" id="320">320</a>
+<a href="#321" id="321">321</a>
+<a href="#322" id="322">322</a>
+<a href="#323" id="323">323</a>
+<a href="#324" id="324">324</a>
+<a href="#325" id="325">325</a>
+<a href="#326" id="326">326</a>
+<a href="#327" id="327">327</a>
+<a href="#328" id="328">328</a>
+<a href="#329" id="329">329</a>
+<a href="#330" id="330">330</a>
+<a href="#331" id="331">331</a>
+<a href="#332" id="332">332</a>
+<a href="#333" id="333">333</a>
+<a href="#334" id="334">334</a>
+<a href="#335" id="335">335</a>
+<a href="#336" id="336">336</a>
+<a href="#337" id="337">337</a>
+<a href="#338" id="338">338</a>
+<a href="#339" id="339">339</a>
+<a href="#340" id="340">340</a>
+<a href="#341" id="341">341</a>
+<a href="#342" id="342">342</a>
+<a href="#343" id="343">343</a>
+<a href="#344" id="344">344</a>
+<a href="#345" id="345">345</a>
+<a href="#346" id="346">346</a>
+<a href="#347" id="347">347</a>
+<a href="#348" id="348">348</a>
+<a href="#349" id="349">349</a>
+<a href="#350" id="350">350</a>
+<a href="#351" id="351">351</a>
+<a href="#352" id="352">352</a>
+<a href="#353" id="353">353</a>
+<a href="#354" id="354">354</a>
+<a href="#355" id="355">355</a>
+<a href="#356" id="356">356</a>
+<a href="#357" id="357">357</a>
+<a href="#358" id="358">358</a>
+<a href="#359" id="359">359</a>
+<a href="#360" id="360">360</a>
+<a href="#361" id="361">361</a>
+<a href="#362" id="362">362</a>
+<a href="#363" id="363">363</a>
+<a href="#364" id="364">364</a>
+<a href="#365" id="365">365</a>
+<a href="#366" id="366">366</a>
+<a href="#367" id="367">367</a>
+<a href="#368" id="368">368</a>
+<a href="#369" id="369">369</a>
+<a href="#370" id="370">370</a>
+<a href="#371" id="371">371</a>
+<a href="#372" id="372">372</a>
+<a href="#373" id="373">373</a>
+<a href="#374" id="374">374</a>
+<a href="#375" id="375">375</a>
+<a href="#376" id="376">376</a>
+<a href="#377" id="377">377</a>
+<a href="#378" id="378">378</a>
+<a href="#379" id="379">379</a>
+<a href="#380" id="380">380</a>
+<a href="#381" id="381">381</a>
+<a href="#382" id="382">382</a>
+<a href="#383" id="383">383</a>
+<a href="#384" id="384">384</a>
+<a href="#385" id="385">385</a>
+<a href="#386" id="386">386</a>
+<a href="#387" id="387">387</a>
+<a href="#388" id="388">388</a>
+<a href="#389" id="389">389</a>
+<a href="#390" id="390">390</a>
+<a href="#391" id="391">391</a>
+<a href="#392" id="392">392</a>
+<a href="#393" id="393">393</a>
+<a href="#394" id="394">394</a>
+<a href="#395" id="395">395</a>
+<a href="#396" id="396">396</a>
+<a href="#397" id="397">397</a>
+<a href="#398" id="398">398</a>
+<a href="#399" id="399">399</a>
+<a href="#400" id="400">400</a>
+<a href="#401" id="401">401</a>
+<a href="#402" id="402">402</a>
+<a href="#403" id="403">403</a>
+<a href="#404" id="404">404</a>
+<a href="#405" id="405">405</a>
+<a href="#406" id="406">406</a>
+<a href="#407" id="407">407</a>
+<a href="#408" id="408">408</a>
+<a href="#409" id="409">409</a>
+<a href="#410" id="410">410</a>
+<a href="#411" id="411">411</a>
+<a href="#412" id="412">412</a>
+<a href="#413" id="413">413</a>
+<a href="#414" id="414">414</a>
+<a href="#415" id="415">415</a>
+<a href="#416" id="416">416</a>
+<a href="#417" id="417">417</a>
+<a href="#418" id="418">418</a>
+<a href="#419" id="419">419</a>
+<a href="#420" id="420">420</a>
+<a href="#421" id="421">421</a></pre></div><pre class="rust"><code><span class="comment">// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+</span><span class="kw">use </span>std::collections::BTreeMap;
+
+<span class="kw">use </span>hydroflow::scheduled::graph_ext::GraphExt;
+<span class="kw">use </span>hydroflow::scheduled::port::{PortCtx, SEND};
+<span class="kw">use </span>itertools::Itertools;
+<span class="kw">use </span>snafu::OptionExt;
+
+<span class="kw">use </span><span class="kw">crate</span>::compute::render::Context;
+<span class="kw">use </span><span class="kw">crate</span>::compute::state::Scheduler;
+<span class="kw">use </span><span class="kw">crate</span>::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
+<span class="kw">use </span><span class="kw">crate</span>::error::{Error, PlanSnafu};
+<span class="kw">use </span><span class="kw">crate</span>::expr::{Batch, EvalError, MapFilterProject, MfpPlan, ScalarExpr};
+<span class="kw">use </span><span class="kw">crate</span>::plan::TypedPlan;
+<span class="kw">use </span><span class="kw">crate</span>::repr::{<span class="self">self</span>, DiffRow, KeyValDiffRow, RelationType, Row};
+<span class="kw">use </span><span class="kw">crate</span>::utils::ArrangeHandler;
+
+<span class="kw">impl </span>Context&lt;<span class="lifetime">'_</span>, <span class="lifetime">'_</span>&gt; {
+    <span class="doccomment">/// Like `render_mfp` but in batch mode
+    </span><span class="kw">pub fn </span>render_mfp_batch(
+        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
+        input: Box&lt;TypedPlan&gt;,
+        mfp: MapFilterProject,
+        _output_type: <span class="kw-2">&amp;</span>RelationType,
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;CollectionBundle&lt;Batch&gt;, Error&gt; {
+        <span class="kw">let </span>input = <span class="self">self</span>.render_plan_batch(<span class="kw-2">*</span>input)<span class="question-mark">?</span>;
+
+        <span class="kw">let </span>(out_send_port, out_recv_port) = <span class="self">self</span>.df.make_edge::&lt;<span class="kw">_</span>, Toff&lt;Batch&gt;&gt;(<span class="string">"mfp_batch"</span>);
+
+        <span class="comment">// This closure capture following variables:
+        </span><span class="kw">let </span>mfp_plan = MfpPlan::create_from(mfp)<span class="question-mark">?</span>;
+
+        <span class="kw">let </span>err_collector = <span class="self">self</span>.err_collector.clone();
+
+        <span class="comment">// TODO(discord9): better way to schedule future run
+        </span><span class="kw">let </span>scheduler = <span class="self">self</span>.compute_state.get_scheduler();
+
+        <span class="kw">let </span>subgraph = <span class="self">self</span>.df.add_subgraph_in_out(
+            <span class="string">"mfp_batch"</span>,
+            input.collection.into_inner(),
+            out_send_port,
+            <span class="kw">move </span>|_ctx, recv, send| {
+                <span class="comment">// mfp only need to passively receive updates from recvs
+                </span><span class="kw">let </span>src_data = recv.take_inner().into_iter().flat_map(|v| v.into_iter());
+
+                <span class="kw">let </span>output_batches = src_data
+                    .filter_map(|<span class="kw-2">mut </span>input_batch| {
+                        err_collector.run(|| {
+                            <span class="kw">let </span>res_batch = mfp_plan.mfp.eval_batch_into(<span class="kw-2">&amp;mut </span>input_batch)<span class="question-mark">?</span>;
+                            <span class="prelude-val">Ok</span>(res_batch)
+                        })
+                    })
+                    .collect_vec();
+
+                send.give(output_batches);
+            },
+        );
+
+        <span class="comment">// register current subgraph in scheduler for future scheduling
+        </span>scheduler.set_cur_subgraph(subgraph);
+
+        <span class="kw">let </span>bundle =
+            CollectionBundle::from_collection(Collection::&lt;Batch&gt;::from_port(out_recv_port));
+        <span class="prelude-val">Ok</span>(bundle)
+    }
+
+    <span class="doccomment">/// render MapFilterProject, will only emit the `rows` once. Assume all incoming row's sys time being `now`` and ignore the row's stated sys time
+    /// TODO(discord9): schedule mfp operator to run when temporal filter need
+    ///
+    /// `MapFilterProject`(`mfp` for short) is scheduled to run when there is enough amount of input updates
+    /// ***or*** when a future update in it's output buffer(a `Arrangement`) is supposed to emit now.
+    </span><span class="comment">// There is a false positive in using `Vec&lt;ScalarExpr&gt;` as key due to `Value` have `bytes` variant
+    </span><span class="attr">#[allow(clippy::mutable_key_type)]
+    </span><span class="kw">pub fn </span>render_mfp(
+        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
+        input: Box&lt;TypedPlan&gt;,
+        mfp: MapFilterProject,
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;CollectionBundle, Error&gt; {
+        <span class="kw">let </span>input = <span class="self">self</span>.render_plan(<span class="kw-2">*</span>input)<span class="question-mark">?</span>;
+        <span class="comment">// TODO(discord9): consider if check if contain temporal to determine if
+        // need arrange or not, or does this added complexity worth it
+        </span><span class="kw">let </span>(out_send_port, out_recv_port) = <span class="self">self</span>.df.make_edge::&lt;<span class="kw">_</span>, Toff&gt;(<span class="string">"mfp"</span>);
+
+        <span class="kw">let </span>output_arity = mfp.output_arity();
+
+        <span class="comment">// default to have a arrange with only future updates, so it can be empty if no temporal filter is applied
+        // as stream only sends current updates and etc.
+        </span><span class="kw">let </span>arrange_handler = <span class="self">self</span>.compute_state.new_arrange(<span class="prelude-val">None</span>);
+        <span class="kw">let </span>arrange_handler_inner =
+            arrange_handler
+                .clone_future_only()
+                .with_context(|| PlanSnafu {
+                    reason: <span class="string">"No write is expected at this point"</span>,
+                })<span class="question-mark">?</span>;
+
+        <span class="comment">// This closure capture following variables:
+        </span><span class="kw">let </span>mfp_plan = MfpPlan::create_from(mfp)<span class="question-mark">?</span>;
+        <span class="kw">let </span>now = <span class="self">self</span>.compute_state.current_time_ref();
+
+        <span class="kw">let </span>err_collector = <span class="self">self</span>.err_collector.clone();
+
+        <span class="comment">// TODO(discord9): better way to schedule future run
+        </span><span class="kw">let </span>scheduler = <span class="self">self</span>.compute_state.get_scheduler();
+        <span class="kw">let </span>scheduler_inner = scheduler.clone();
+
+        <span class="kw">let </span>subgraph = <span class="self">self</span>.df.add_subgraph_in_out(
+            <span class="string">"mfp"</span>,
+            input.collection.into_inner(),
+            out_send_port,
+            <span class="kw">move </span>|_ctx, recv, send| {
+                <span class="comment">// mfp only need to passively receive updates from recvs
+                </span><span class="kw">let </span>data = recv.take_inner().into_iter().flat_map(|v| v.into_iter());
+
+                mfp_subgraph(
+                    <span class="kw-2">&amp;</span>arrange_handler_inner,
+                    data,
+                    <span class="kw-2">&amp;</span>mfp_plan,
+                    <span class="kw-2">*</span>now.borrow(),
+                    <span class="kw-2">&amp;</span>err_collector,
+                    <span class="kw-2">&amp;</span>scheduler_inner,
+                    send,
+                );
+            },
+        );
+
+        <span class="comment">// register current subgraph in scheduler for future scheduling
+        </span>scheduler.set_cur_subgraph(subgraph);
+
+        <span class="kw">let </span>arranged = BTreeMap::from([(
+            (<span class="number">0</span>..output_arity).map(ScalarExpr::Column).collect_vec(),
+            Arranged::new(arrange_handler),
+        )]);
+
+        <span class="kw">let </span>bundle = CollectionBundle {
+            collection: Collection::from_port(out_recv_port),
+            arranged,
+        };
+        <span class="prelude-val">Ok</span>(bundle)
+    }
+}
+
+<span class="kw">fn </span>mfp_subgraph(
+    arrange: <span class="kw-2">&amp;</span>ArrangeHandler,
+    input: <span class="kw">impl </span>IntoIterator&lt;Item = DiffRow&gt;,
+    mfp_plan: <span class="kw-2">&amp;</span>MfpPlan,
+    now: repr::Timestamp,
+    err_collector: <span class="kw-2">&amp;</span>ErrCollector,
+    scheduler: <span class="kw-2">&amp;</span>Scheduler,
+    send: <span class="kw-2">&amp;</span>PortCtx&lt;SEND, Toff&gt;,
+) {
+    <span class="comment">// all updates that should be send immediately
+    </span><span class="kw">let </span><span class="kw-2">mut </span>output_now = <span class="macro">vec!</span>[];
+    <span class="kw">let </span>run_mfp = || {
+        <span class="kw">let </span><span class="kw-2">mut </span>all_updates = eval_mfp_core(input, mfp_plan, now, err_collector);
+        all_updates.retain(|(kv, ts, d)| {
+            <span class="kw">if </span><span class="kw-2">*</span>ts &gt; now {
+                <span class="bool-val">true
+            </span>} <span class="kw">else </span>{
+                output_now.push((kv.clone(), <span class="kw-2">*</span>ts, <span class="kw-2">*</span>d));
+                <span class="bool-val">false
+            </span>}
+        });
+        <span class="kw">let </span>future_updates = all_updates;
+
+        arrange.write().apply_updates(now, future_updates)<span class="question-mark">?</span>;
+        <span class="prelude-val">Ok</span>(())
+    };
+    err_collector.run(run_mfp);
+
+    <span class="comment">// Deal with output:
+    // 1. Read all updates that were emitted between the last time this arrangement had updates and the current time.
+    // 2. Output the updates.
+    // 3. Truncate all updates within that range.
+    </span><span class="kw">let </span>from = arrange.read().last_compaction_time();
+    <span class="kw">let </span>from = from.unwrap_or(repr::Timestamp::MIN);
+    <span class="kw">let </span>range = (
+        std::ops::Bound::Excluded(from),
+        std::ops::Bound::Included(now),
+    );
+
+    <span class="comment">// find all updates that need to be send from arrangement
+    </span><span class="kw">let </span>output_kv = arrange.read().get_updates_in_range(range);
+
+    err_collector.run(|| {
+        <span class="macro">snafu::ensure!</span>(
+            mfp_plan.is_temporal() || output_kv.is_empty(),
+            <span class="kw">crate</span>::expr::error::InternalSnafu {
+                reason: <span class="string">"Output from future should be empty since temporal filter is not applied"
+            </span>}
+        );
+        <span class="prelude-val">Ok</span>(())
+    });
+
+    <span class="comment">// the output is expected to be key -&gt; empty val
+    </span><span class="kw">let </span>output = output_kv
+        .into_iter()
+        .chain(output_now) <span class="comment">// chain previous immediately send updates
+        </span>.map(|((key, _v), ts, diff)| (key, ts, diff))
+        .collect_vec();
+    <span class="comment">// send output
+    </span>send.give(output);
+
+    <span class="kw">let </span>run_compaction = || {
+        arrange.write().compact_to(now)<span class="question-mark">?</span>;
+        <span class="prelude-val">Ok</span>(())
+    };
+    err_collector.run(run_compaction);
+
+    <span class="comment">// schedule next time this subgraph should run
+    </span>scheduler.schedule_for_arrange(<span class="kw-2">&amp;</span>arrange.read(), now);
+}
+
+<span class="doccomment">/// The core of evaluating MFP operator, given a MFP and a input, evaluate the MFP operator,
+/// return the output updates **And** possibly any number of errors that occurred during the evaluation
+</span><span class="kw">fn </span>eval_mfp_core(
+    input: <span class="kw">impl </span>IntoIterator&lt;Item = DiffRow&gt;,
+    mfp_plan: <span class="kw-2">&amp;</span>MfpPlan,
+    now: repr::Timestamp,
+    err_collector: <span class="kw-2">&amp;</span>ErrCollector,
+) -&gt; Vec&lt;KeyValDiffRow&gt; {
+    <span class="kw">let </span><span class="kw-2">mut </span>all_updates = Vec::new();
+    <span class="kw">for </span>(<span class="kw-2">mut </span>row, _sys_time, diff) <span class="kw">in </span>input.into_iter() {
+        <span class="comment">// this updates is expected to be only zero, one or two rows
+        </span><span class="kw">let </span>updates = mfp_plan.evaluate::&lt;EvalError&gt;(<span class="kw-2">&amp;mut </span>row.inner, now, diff);
+        <span class="comment">// TODO(discord9): refactor error handling
+        // Expect error in a single row to not interrupt the whole evaluation
+        </span><span class="kw">let </span>updates = updates
+            .filter_map(|r| <span class="kw">match </span>r {
+                <span class="prelude-val">Ok</span>((key, ts, diff)) =&gt; <span class="prelude-val">Some</span>(((key, Row::empty()), ts, diff)),
+                <span class="prelude-val">Err</span>((err, _ts, _diff)) =&gt; {
+                    err_collector.push_err(err);
+                    <span class="prelude-val">None
+                </span>}
+            })
+            .collect_vec();
+
+        all_updates.extend(updates);
+    }
+    all_updates
+}
+
+<span class="attr">#[cfg(test)]
+</span><span class="kw">mod </span>test {
+
+    <span class="kw">use </span>datatypes::data_type::ConcreteDataType;
+    <span class="kw">use </span>hydroflow::scheduled::graph::Hydroflow;
+
+    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+    <span class="kw">use </span><span class="kw">crate</span>::compute::render::test::{get_output_handle, harness_test_ctx, run_and_check};
+    <span class="kw">use </span><span class="kw">crate</span>::compute::state::DataflowState;
+    <span class="kw">use </span><span class="kw">crate</span>::expr::{<span class="self">self</span>, BinaryFunc, GlobalId};
+    <span class="kw">use </span><span class="kw">crate</span>::plan::Plan;
+    <span class="kw">use </span><span class="kw">crate</span>::repr::{ColumnType, RelationType};
+
+    <span class="doccomment">/// test if temporal filter works properly
+    /// namely: if mfp operator can schedule a delete at the correct time
+    </span><span class="attr">#[test]
+    </span><span class="kw">fn </span>test_render_mfp_with_temporal() {
+        <span class="kw">let </span><span class="kw-2">mut </span>df = Hydroflow::new();
+        <span class="kw">let </span><span class="kw-2">mut </span>state = DataflowState::default();
+        <span class="kw">let </span><span class="kw-2">mut </span>ctx = harness_test_ctx(<span class="kw-2">&amp;mut </span>df, <span class="kw-2">&amp;mut </span>state);
+
+        <span class="kw">let </span>rows = <span class="macro">vec!</span>[
+            (Row::new(<span class="macro">vec!</span>[<span class="number">1i64</span>.into()]), <span class="number">0</span>, <span class="number">1</span>),
+            (Row::new(<span class="macro">vec!</span>[<span class="number">2i64</span>.into()]), <span class="number">0</span>, <span class="number">1</span>),
+            (Row::new(<span class="macro">vec!</span>[<span class="number">3i64</span>.into()]), <span class="number">0</span>, <span class="number">1</span>),
+        ];
+        <span class="kw">let </span>collection = ctx.render_constant(rows.clone());
+        ctx.insert_global(GlobalId::User(<span class="number">1</span>), collection);
+        <span class="kw">let </span>input_plan = Plan::Get {
+            id: expr::Id::Global(GlobalId::User(<span class="number">1</span>)),
+        };
+        <span class="kw">let </span>typ = RelationType::new(<span class="macro">vec!</span>[ColumnType::new_nullable(
+            ConcreteDataType::int64_datatype(),
+        )]);
+        <span class="comment">// temporal filter: now &lt;= col(0) &lt; now + 4
+        </span><span class="kw">let </span>mfp = MapFilterProject::new(<span class="number">1</span>)
+            .filter(<span class="macro">vec!</span>[
+                ScalarExpr::Column(<span class="number">0</span>)
+                    .call_unary(expr::UnaryFunc::Cast(ConcreteDataType::datetime_datatype()))
+                    .call_binary(
+                        ScalarExpr::CallUnmaterializable(expr::UnmaterializableFunc::Now),
+                        BinaryFunc::Gte,
+                    ),
+                ScalarExpr::Column(<span class="number">0</span>)
+                    .call_binary(
+                        ScalarExpr::literal(<span class="number">4i64</span>.into(), ConcreteDataType::int64_datatype()),
+                        BinaryFunc::SubInt64,
+                    )
+                    .call_unary(expr::UnaryFunc::Cast(ConcreteDataType::datetime_datatype()))
+                    .call_binary(
+                        ScalarExpr::CallUnmaterializable(expr::UnmaterializableFunc::Now),
+                        BinaryFunc::Lt,
+                    ),
+            ])
+            .unwrap();
+
+        <span class="kw">let </span>bundle = ctx
+            .render_mfp(Box::new(input_plan.with_types(typ.into_unnamed())), mfp)
+            .unwrap();
+        <span class="kw">let </span>output = get_output_handle(<span class="kw-2">&amp;mut </span>ctx, bundle);
+        <span class="comment">// drop ctx here to simulate actual process of compile first, run later scenario
+        </span>drop(ctx);
+        <span class="comment">// expected output at given time
+        </span><span class="kw">let </span>expected_output = BTreeMap::from([
+            (
+                <span class="number">0</span>, <span class="comment">// time
+                </span><span class="macro">vec!</span>[
+                    (Row::new(<span class="macro">vec!</span>[<span class="number">1i64</span>.into()]), <span class="number">0</span>, <span class="number">1</span>),
+                    (Row::new(<span class="macro">vec!</span>[<span class="number">2i64</span>.into()]), <span class="number">0</span>, <span class="number">1</span>),
+                    (Row::new(<span class="macro">vec!</span>[<span class="number">3i64</span>.into()]), <span class="number">0</span>, <span class="number">1</span>),
+                ],
+            ),
+            (
+                <span class="number">2</span>, <span class="comment">// time
+                </span><span class="macro">vec!</span>[(Row::new(<span class="macro">vec!</span>[<span class="number">1i64</span>.into()]), <span class="number">2</span>, -<span class="number">1</span>)],
+            ),
+            (
+                <span class="number">3</span>, <span class="comment">// time
+                </span><span class="macro">vec!</span>[(Row::new(<span class="macro">vec!</span>[<span class="number">2i64</span>.into()]), <span class="number">3</span>, -<span class="number">1</span>)],
+            ),
+            (
+                <span class="number">4</span>, <span class="comment">// time
+                </span><span class="macro">vec!</span>[(Row::new(<span class="macro">vec!</span>[<span class="number">3i64</span>.into()]), <span class="number">4</span>, -<span class="number">1</span>)],
+            ),
+        ]);
+        run_and_check(<span class="kw-2">&amp;mut </span>state, <span class="kw-2">&amp;mut </span>df, <span class="number">0</span>..<span class="number">5</span>, expected_output, output);
+    }
+
+    <span class="doccomment">/// test if mfp operator without temporal filter works properly
+    /// that is it filter the rows correctly
+    </span><span class="attr">#[test]
+    </span><span class="kw">fn </span>test_render_mfp() {
+        <span class="kw">let </span><span class="kw-2">mut </span>df = Hydroflow::new();
+        <span class="kw">let </span><span class="kw-2">mut </span>state = DataflowState::default();
+        <span class="kw">let </span><span class="kw-2">mut </span>ctx = harness_test_ctx(<span class="kw-2">&amp;mut </span>df, <span class="kw-2">&amp;mut </span>state);
+
+        <span class="kw">let </span>rows = <span class="macro">vec!</span>[
+            (Row::new(<span class="macro">vec!</span>[<span class="number">1</span>.into()]), <span class="number">1</span>, <span class="number">1</span>),
+            (Row::new(<span class="macro">vec!</span>[<span class="number">2</span>.into()]), <span class="number">2</span>, <span class="number">1</span>),
+            (Row::new(<span class="macro">vec!</span>[<span class="number">3</span>.into()]), <span class="number">3</span>, <span class="number">1</span>),
+        ];
+        <span class="kw">let </span>collection = ctx.render_constant(rows.clone());
+        ctx.insert_global(GlobalId::User(<span class="number">1</span>), collection);
+        <span class="kw">let </span>input_plan = Plan::Get {
+            id: expr::Id::Global(GlobalId::User(<span class="number">1</span>)),
+        };
+        <span class="kw">let </span>typ = RelationType::new(<span class="macro">vec!</span>[ColumnType::new_nullable(
+            ConcreteDataType::int64_datatype(),
+        )]);
+        <span class="comment">// filter: col(0)&gt;1
+        </span><span class="kw">let </span>mfp = MapFilterProject::new(<span class="number">1</span>)
+            .filter(<span class="macro">vec!</span>[ScalarExpr::Column(<span class="number">0</span>).call_binary(
+                ScalarExpr::literal(<span class="number">1</span>.into(), ConcreteDataType::int32_datatype()),
+                BinaryFunc::Gt,
+            )])
+            .unwrap();
+        <span class="kw">let </span>bundle = ctx
+            .render_mfp(Box::new(input_plan.with_types(typ.into_unnamed())), mfp)
+            .unwrap();
+
+        <span class="kw">let </span>output = get_output_handle(<span class="kw-2">&amp;mut </span>ctx, bundle);
+        drop(ctx);
+        <span class="kw">let </span>expected = BTreeMap::from([
+            (<span class="number">2</span>, <span class="macro">vec!</span>[(Row::new(<span class="macro">vec!</span>[<span class="number">2</span>.into()]), <span class="number">2</span>, <span class="number">1</span>)]),
+            (<span class="number">3</span>, <span class="macro">vec!</span>[(Row::new(<span class="macro">vec!</span>[<span class="number">3</span>.into()]), <span class="number">3</span>, <span class="number">1</span>)]),
+        ]);
+        run_and_check(<span class="kw-2">&amp;mut </span>state, <span class="kw-2">&amp;mut </span>df, <span class="number">1</span>..<span class="number">5</span>, expected, output);
+    }
+
+    <span class="doccomment">/// test if mfp operator can run multiple times within same tick
+    </span><span class="attr">#[test]
+    </span><span class="kw">fn </span>test_render_mfp_multiple_times() {
+        <span class="kw">let </span><span class="kw-2">mut </span>df = Hydroflow::new();
+        <span class="kw">let </span><span class="kw-2">mut </span>state = DataflowState::default();
+        <span class="kw">let </span><span class="kw-2">mut </span>ctx = harness_test_ctx(<span class="kw-2">&amp;mut </span>df, <span class="kw-2">&amp;mut </span>state);
+
+        <span class="kw">let </span>(sender, recv) = tokio::sync::broadcast::channel(<span class="number">1000</span>);
+        <span class="kw">let </span>collection = ctx.render_source(recv).unwrap();
+        ctx.insert_global(GlobalId::User(<span class="number">1</span>), collection);
+        <span class="kw">let </span>input_plan = Plan::Get {
+            id: expr::Id::Global(GlobalId::User(<span class="number">1</span>)),
+        };
+        <span class="kw">let </span>typ = RelationType::new(<span class="macro">vec!</span>[ColumnType::new_nullable(
+            ConcreteDataType::int64_datatype(),
+        )]);
+        <span class="comment">// filter: col(0)&gt;1
+        </span><span class="kw">let </span>mfp = MapFilterProject::new(<span class="number">1</span>)
+            .filter(<span class="macro">vec!</span>[ScalarExpr::Column(<span class="number">0</span>).call_binary(
+                ScalarExpr::literal(<span class="number">1</span>.into(), ConcreteDataType::int32_datatype()),
+                BinaryFunc::Gt,
+            )])
+            .unwrap();
+        <span class="kw">let </span>bundle = ctx
+            .render_mfp(Box::new(input_plan.with_types(typ.into_unnamed())), mfp)
+            .unwrap();
+
+        <span class="kw">let </span>output = get_output_handle(<span class="kw-2">&amp;mut </span>ctx, bundle);
+        drop(ctx);
+        sender.send((Row::new(<span class="macro">vec!</span>[<span class="number">2</span>.into()]), <span class="number">0</span>, <span class="number">1</span>)).unwrap();
+        state.run_available_with_schedule(<span class="kw-2">&amp;mut </span>df);
+        <span class="macro">assert_eq!</span>(output.borrow().len(), <span class="number">1</span>);
+        output.borrow_mut().clear();
+        sender.send((Row::new(<span class="macro">vec!</span>[<span class="number">3</span>.into()]), <span class="number">0</span>, <span class="number">1</span>)).unwrap();
+        state.run_available_with_schedule(<span class="kw-2">&amp;mut </span>df);
+        <span class="macro">assert_eq!</span>(output.borrow().len(), <span class="number">1</span>);
+    }
+}
+</code></pre></div></section></main></body></html>
