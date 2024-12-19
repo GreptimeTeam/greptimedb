@@ -16,9 +16,9 @@ use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_telemetry::warn;
 use futures::{AsyncRead, AsyncWrite};
-use index::inverted_index::create::sort::external_provider::ExternalTempFileProvider;
-use index::inverted_index::error as index_error;
-use index::inverted_index::error::Result as IndexResult;
+use index::error as index_error;
+use index::error::Result as IndexResult;
+use index::external_provider::ExternalTempFileProvider;
 use snafu::ResultExt;
 
 use crate::error::Result;
@@ -42,10 +42,10 @@ pub(crate) struct TempFileProvider {
 impl ExternalTempFileProvider for TempFileProvider {
     async fn create(
         &self,
-        column_id: &str,
+        file_group: &str,
         file_id: &str,
     ) -> IndexResult<Box<dyn AsyncWrite + Unpin + Send>> {
-        let path = self.location.file_path(column_id, file_id);
+        let path = self.location.file_path(file_group, file_id);
         let writer = self
             .manager
             .store()
@@ -63,13 +63,13 @@ impl ExternalTempFileProvider for TempFileProvider {
 
     async fn read_all(
         &self,
-        column_id: &str,
-    ) -> IndexResult<Vec<Box<dyn AsyncRead + Unpin + Send>>> {
-        let column_path = self.location.column_path(column_id);
+        file_group: &str,
+    ) -> IndexResult<Vec<(String, Box<dyn AsyncRead + Unpin + Send>)>> {
+        let file_group_path = self.location.file_group_path(file_group);
         let entries = self
             .manager
             .store()
-            .list(&column_path)
+            .list(&file_group_path)
             .await
             .map_err(BoxedError::new)
             .context(index_error::ExternalSnafu)?;
@@ -80,6 +80,8 @@ impl ExternalTempFileProvider for TempFileProvider {
                 warn!("Unexpected entry in index creation dir: {:?}", entry.path());
                 continue;
             }
+
+            let im_file_id = self.location.im_file_id_from_path(entry.path());
 
             let reader = self
                 .manager
@@ -93,7 +95,7 @@ impl ExternalTempFileProvider for TempFileProvider {
                 .await
                 .map_err(BoxedError::new)
                 .context(index_error::ExternalSnafu)?;
-            readers.push(Box::new(reader) as _);
+            readers.push((im_file_id, Box::new(reader) as _));
         }
 
         Ok(readers)
@@ -133,36 +135,36 @@ mod tests {
         let store = IntermediateManager::init_fs(path).await.unwrap();
         let provider = TempFileProvider::new(location.clone(), store);
 
-        let column_name = "tag0";
+        let file_group = "tag0";
         let file_id = "0000000010";
-        let mut writer = provider.create(column_name, file_id).await.unwrap();
+        let mut writer = provider.create(file_group, file_id).await.unwrap();
         writer.write_all(b"hello").await.unwrap();
         writer.flush().await.unwrap();
         writer.close().await.unwrap();
 
         let file_id = "0000000100";
-        let mut writer = provider.create(column_name, file_id).await.unwrap();
+        let mut writer = provider.create(file_group, file_id).await.unwrap();
         writer.write_all(b"world").await.unwrap();
         writer.flush().await.unwrap();
         writer.close().await.unwrap();
 
-        let column_name = "tag1";
+        let file_group = "tag1";
         let file_id = "0000000010";
-        let mut writer = provider.create(column_name, file_id).await.unwrap();
+        let mut writer = provider.create(file_group, file_id).await.unwrap();
         writer.write_all(b"foo").await.unwrap();
         writer.flush().await.unwrap();
         writer.close().await.unwrap();
 
         let readers = provider.read_all("tag0").await.unwrap();
         assert_eq!(readers.len(), 2);
-        for mut reader in readers {
+        for (_, mut reader) in readers {
             let mut buf = Vec::new();
             reader.read_to_end(&mut buf).await.unwrap();
             assert!(matches!(buf.as_slice(), b"hello" | b"world"));
         }
         let readers = provider.read_all("tag1").await.unwrap();
         assert_eq!(readers.len(), 1);
-        let mut reader = readers.into_iter().next().unwrap();
+        let mut reader = readers.into_iter().map(|x| x.1).next().unwrap();
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, b"foo");

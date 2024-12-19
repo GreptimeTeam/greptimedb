@@ -104,16 +104,28 @@ impl IntermediateLocation {
         &self.files_dir
     }
 
-    /// Returns the path of the directory for intermediate files associated with a column:
-    /// `__intm/{region_id}/{sst_file_id}/{uuid}/{column_id}/`
-    pub fn column_path(&self, column_id: &str) -> String {
-        util::join_path(&self.files_dir, &format!("{column_id}/"))
+    /// Returns the path of the directory for intermediate files associated with the `file_group`:
+    /// `__intm/{region_id}/{sst_file_id}/{uuid}/{file_group}/`
+    pub fn file_group_path(&self, file_group: &str) -> String {
+        util::join_path(&self.files_dir, &format!("{file_group}/"))
     }
 
-    /// Returns the path of the intermediate file with the given id for a column:
-    /// `__intm/{region_id}/{sst_file_id}/{uuid}/{column_id}/{im_file_id}.im`
-    pub fn file_path(&self, column_id: &str, im_file_id: &str) -> String {
-        util::join_path(&self.column_path(column_id), &format!("{im_file_id}.im"))
+    /// Returns the path of the intermediate file with the given `file_group` and `im_file_id`:
+    /// `__intm/{region_id}/{sst_file_id}/{uuid}/{file_group}/{im_file_id}.im`
+    pub fn file_path(&self, file_group: &str, im_file_id: &str) -> String {
+        util::join_path(
+            &self.file_group_path(file_group),
+            &format!("{im_file_id}.im"),
+        )
+    }
+
+    /// Returns the intermediate file id from the path.
+    pub fn im_file_id_from_path(&self, path: &str) -> String {
+        path.rsplit('/')
+            .next()
+            .and_then(|s| s.strip_suffix(".im"))
+            .unwrap_or_default()
+            .to_string()
     }
 }
 
@@ -161,17 +173,20 @@ mod tests {
 
         let uuid = location.files_dir.split('/').nth(3).unwrap();
 
-        let column_id = "1";
+        let file_group = "1";
         assert_eq!(
-            location.column_path(column_id),
-            format!("{INTERMEDIATE_DIR}/0/{sst_file_id}/{uuid}/{column_id}/")
+            location.file_group_path(file_group),
+            format!("{INTERMEDIATE_DIR}/0/{sst_file_id}/{uuid}/{file_group}/")
         );
 
         let im_file_id = "000000000010";
+        let file_path = location.file_path(file_group, im_file_id);
         assert_eq!(
-            location.file_path(column_id, im_file_id),
-            format!("{INTERMEDIATE_DIR}/0/{sst_file_id}/{uuid}/{column_id}/{im_file_id}.im")
+            file_path,
+            format!("{INTERMEDIATE_DIR}/0/{sst_file_id}/{uuid}/{file_group}/{im_file_id}.im")
         );
+
+        assert_eq!(location.im_file_id_from_path(&file_path), im_file_id);
     }
 
     #[tokio::test]
