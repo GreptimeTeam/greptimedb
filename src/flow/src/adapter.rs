@@ -60,6 +60,7 @@ use crate::repr::{self, DiffRow, Row, BATCH_SIZE};
 
 mod flownode_impl;
 mod parse_expr;
+mod stat;
 #[cfg(test)]
 mod tests;
 mod util;
@@ -69,6 +70,7 @@ pub(crate) mod node_context;
 mod table_source;
 
 use crate::error::Error;
+use crate::utils::StateReportHandler;
 use crate::FrontendInvoker;
 
 // `GREPTIME_TIMESTAMP` is not used to distinguish when table is created automatically by flow
@@ -137,6 +139,8 @@ pub struct FlowWorkerManager {
     ///
     /// So that a series of event like `inserts -> flush` can be handled correctly
     flush_lock: RwLock<()>,
+    /// receive a oneshot sender to send state size report
+    state_report_handler: RwLock<Option<StateReportHandler>>,
 }
 
 /// Building FlownodeManager
@@ -170,7 +174,13 @@ impl FlowWorkerManager {
             tick_manager,
             node_id,
             flush_lock: RwLock::new(()),
+            state_report_handler: RwLock::new(None),
         }
+    }
+
+    pub async fn with_state_report_handler(self, handler: StateReportHandler) -> Self {
+        *self.state_report_handler.write().await = Some(handler);
+        self
     }
 
     /// Create a flownode manager with one worker
@@ -500,6 +510,27 @@ impl FlowWorkerManager {
 
 /// Flow Runtime related methods
 impl FlowWorkerManager {
+    /// Start state report handler, which will receive a sender from HeartbeatTask to send state size report back
+    ///
+    /// if heartbeat task is shutdown, this future will exit too
+    async fn start_state_report_handler(self: Arc<Self>) -> Option<JoinHandle<()>> {
+        let state_report_handler = self.state_report_handler.write().await.take();
+        if let Some(mut handler) = state_report_handler {
+            let zelf = self.clone();
+            let handler = common_runtime::spawn_global(async move {
+                while let Some(ret_handler) = handler.recv().await {
+                    let state_report = zelf.gen_state_report().await;
+                    ret_handler.send(state_report).unwrap_or_else(|err| {
+                        common_telemetry::error!(err; "Send state size report error");
+                    });
+                }
+            });
+            Some(handler)
+        } else {
+            None
+        }
+    }
+
     /// run in common_runtime background runtime
     pub fn run_background(
         self: Arc<Self>,
@@ -507,6 +538,7 @@ impl FlowWorkerManager {
     ) -> JoinHandle<()> {
         info!("Starting flownode manager's background task");
         common_runtime::spawn_global(async move {
+            let _state_report_handler = self.clone().start_state_report_handler().await;
             self.run(shutdown).await;
         })
     }

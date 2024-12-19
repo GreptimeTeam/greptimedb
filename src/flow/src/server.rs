@@ -55,6 +55,7 @@ use crate::error::{
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::transform::register_function_to_query_engine;
+use crate::utils::{SizeReportSender, StateReportHandler};
 use crate::{Error, FlowWorkerManager, FlownodeOptions};
 
 pub const FLOW_NODE_SERVER_NAME: &str = "FLOW_NODE_SERVER";
@@ -236,6 +237,8 @@ pub struct FlownodeBuilder {
     catalog_manager: CatalogManagerRef,
     flow_metadata_manager: FlowMetadataManagerRef,
     heartbeat_task: Option<HeartbeatTask>,
+    /// receive a oneshot sender to send state size report
+    state_report_handler: Option<StateReportHandler>,
 }
 
 impl FlownodeBuilder {
@@ -254,17 +257,20 @@ impl FlownodeBuilder {
             catalog_manager,
             flow_metadata_manager,
             heartbeat_task: None,
+            state_report_handler: None,
         }
     }
 
     pub fn with_heartbeat_task(self, heartbeat_task: HeartbeatTask) -> Self {
+        let (sender, receiver) = SizeReportSender::new();
         Self {
-            heartbeat_task: Some(heartbeat_task),
+            heartbeat_task: Some(heartbeat_task.with_query_stat_size(sender)),
+            state_report_handler: Some(receiver),
             ..self
         }
     }
 
-    pub async fn build(self) -> Result<FlownodeInstance, Error> {
+    pub async fn build(mut self) -> Result<FlownodeInstance, Error> {
         // TODO(discord9): does this query engine need those?
         let query_engine_factory = QueryEngineFactory::new_with_plugins(
             // query engine in flownode is only used for translate plan with resolved table source.
@@ -383,7 +389,7 @@ impl FlownodeBuilder {
     /// build [`FlowWorkerManager`], note this doesn't take ownership of `self`,
     /// nor does it actually start running the worker.
     async fn build_manager(
-        &self,
+        &mut self,
         query_engine: Arc<dyn QueryEngine>,
     ) -> Result<FlowWorkerManager, Error> {
         let table_meta = self.table_meta.clone();
@@ -402,12 +408,15 @@ impl FlownodeBuilder {
                 info!("Flow Worker started in new thread");
                 worker.run();
             });
-        let man = rx.await.map_err(|_e| {
+        let mut man = rx.await.map_err(|_e| {
             UnexpectedSnafu {
                 reason: "sender is dropped, failed to create flow node manager",
             }
             .build()
         })?;
+        if let Some(handler) = self.state_report_handler.take() {
+            man = man.with_state_report_handler(handler).await;
+        }
         info!("Flow Node Manager started");
         Ok(man)
     }

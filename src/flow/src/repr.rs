@@ -22,12 +22,14 @@ use api::v1::Row as ProtoRow;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::types::cast;
 use datatypes::value::Value;
+use get_size2::GetSize;
 use itertools::Itertools;
 pub(crate) use relation::{ColumnType, Key, RelationDesc, RelationType};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
 use crate::expr::error::{CastValueSnafu, EvalError, InvalidArgumentSnafu};
+use crate::utils::get_value_heap_size;
 
 /// System-wide Record count difference type. Useful for capture data change
 ///
@@ -103,6 +105,12 @@ pub fn value_to_internal_ts(value: Value) -> Result<i64, EvalError> {
 pub struct Row {
     /// The inner vector of values
     pub inner: Vec<Value>,
+}
+
+impl GetSize for Row {
+    fn get_heap_size(&self) -> usize {
+        self.inner.iter().map(get_value_heap_size).sum()
+    }
 }
 
 impl Row {
