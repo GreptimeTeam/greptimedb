@@ -51,6 +51,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::{oneshot, Notify, RwLock};
 
 use crate::error::{self, DeserializeFromJsonSnafu, Result, UnexpectedInstructionReplySnafu};
+use crate::handler::flow_state_handler::FlowStateHandler;
 use crate::metasrv::Context;
 use crate::metrics::{METRIC_META_HANDLER_EXECUTE, METRIC_META_HEARTBEAT_CONNECTION_NUM};
 use crate::pubsub::PublisherRef;
@@ -64,6 +65,7 @@ pub mod collect_stats_handler;
 pub mod extract_stat_handler;
 pub mod failure_handler;
 pub mod filter_inactive_region_stats;
+pub mod flow_state_handler;
 pub mod keep_lease_handler;
 pub mod mailbox_handler;
 pub mod on_leader_start_handler;
@@ -482,6 +484,8 @@ pub struct HeartbeatHandlerGroupBuilder {
     /// based on the number of received heartbeats. When the number of heartbeats
     /// reaches this factor, a flush operation is triggered.
     flush_stats_factor: Option<usize>,
+    /// A simple handler for flow internal state report
+    flow_state_handler: Option<FlowStateHandler>,
 
     /// The plugins.
     plugins: Option<Plugins>,
@@ -499,10 +503,16 @@ impl HeartbeatHandlerGroupBuilder {
             region_failure_handler: None,
             region_lease_handler: None,
             flush_stats_factor: None,
+            flow_state_handler: None,
             plugins: None,
             pushers,
             handlers: vec![],
         }
+    }
+
+    pub fn with_flow_state_handler(mut self, handler: Option<FlowStateHandler>) -> Self {
+        self.flow_state_handler = handler;
+        self
     }
 
     pub fn with_region_lease_handler(mut self, handler: Option<RegionLeaseHandler>) -> Self {
@@ -563,6 +573,10 @@ impl HeartbeatHandlerGroupBuilder {
             self.add_handler_last(publish_heartbeat_handler);
         }
         self.add_handler_last(CollectStatsHandler::new(self.flush_stats_factor));
+
+        if let Some(flow_state_handler) = self.flow_state_handler.take() {
+            self.add_handler_last(flow_state_handler);
+        }
 
         self
     }
