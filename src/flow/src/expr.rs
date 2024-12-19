@@ -24,7 +24,7 @@ mod scalar;
 mod signature;
 
 use arrow::compute::FilterBuilder;
-use datatypes::prelude::DataType;
+use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::value::Value;
 use datatypes::vectors::{BooleanVector, Helper, VectorRef};
 pub(crate) use df_func::{DfScalarFunction, RawDfScalarFn};
@@ -85,16 +85,18 @@ impl Default for Batch {
 }
 
 impl Batch {
-    pub fn try_from_rows(rows: Vec<crate::repr::Row>) -> Result<Self, EvalError> {
+    /// Get batch from rows, will try best to determine data type
+    pub fn try_from_rows_with_types(
+        rows: Vec<crate::repr::Row>,
+        batch_datatypes: &[ConcreteDataType],
+    ) -> Result<Self, EvalError> {
         if rows.is_empty() {
             return Ok(Self::empty());
         }
         let len = rows.len();
-        let mut builder = rows
-            .first()
-            .unwrap()
+        let mut builder = batch_datatypes
             .iter()
-            .map(|v| v.data_type().create_mutable_vector(len))
+            .map(|ty| ty.create_mutable_vector(len))
             .collect_vec();
         for row in rows {
             ensure!(
@@ -221,10 +223,25 @@ impl Batch {
             return Ok(());
         }
 
-        let dts = if self.batch.is_empty() {
-            other.batch.iter().map(|v| v.data_type()).collect_vec()
-        } else {
-            self.batch.iter().map(|v| v.data_type()).collect_vec()
+        let dts = {
+            let max_len = self.batch.len().max(other.batch.len());
+            let mut dts = Vec::with_capacity(max_len);
+            for i in 0..max_len {
+                if let Some(v) = self.batch().get(i)
+                    && !v.data_type().is_null()
+                {
+                    dts.push(v.data_type())
+                } else if let Some(v) = other.batch().get(i)
+                    && !v.data_type().is_null()
+                {
+                    dts.push(v.data_type())
+                } else {
+                    // both are null, so we will push null type
+                    dts.push(datatypes::prelude::ConcreteDataType::null_datatype())
+                }
+            }
+
+            dts
         };
 
         let batch_builders = dts

@@ -36,7 +36,7 @@ pub mod postgres;
 pub mod test;
 pub mod txn;
 
-pub type KvBackendRef = Arc<dyn KvBackend<Error = Error> + Send + Sync>;
+pub type KvBackendRef<E = Error> = Arc<dyn KvBackend<Error = E> + Send + Sync>;
 
 #[async_trait]
 pub trait KvBackend: TxnService
@@ -161,6 +161,9 @@ where
     Self::Error: ErrorExt,
 {
     fn reset(&self);
+
+    /// Upcast as `KvBackendRef`. Since https://github.com/rust-lang/rust/issues/65991 is not yet stable.
+    fn as_kv_backend_ref(self: Arc<Self>) -> KvBackendRef<Self::Error>;
 }
 
-pub type ResettableKvBackendRef = Arc<dyn ResettableKvBackend<Error = Error> + Send + Sync>;
+pub type ResettableKvBackendRef<E = Error> = Arc<dyn ResettableKvBackend<Error = E> + Send + Sync>;

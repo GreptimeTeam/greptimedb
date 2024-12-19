@@ -908,20 +908,33 @@ mod test {
             .unwrap()
             .unwrap();
         assert_eq!(ret, Row::pack(vec![Value::from(false), Value::from(true)]));
-
+        let ty = [
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::int32_datatype(),
+        ];
         // batch mode
-        let mut batch = Batch::try_from_rows(vec![Row::from(vec![
-            Value::from(4),
-            Value::from(2),
-            Value::from(3),
-        ])])
+        let mut batch = Batch::try_from_rows_with_types(
+            vec![Row::from(vec![
+                Value::from(4),
+                Value::from(2),
+                Value::from(3),
+            ])],
+            &ty,
+        )
         .unwrap();
         let ret = safe_mfp.eval_batch_into(&mut batch).unwrap();
 
         assert_eq!(
             ret,
-            Batch::try_from_rows(vec![Row::from(vec![Value::from(false), Value::from(true)])])
-                .unwrap()
+            Batch::try_from_rows_with_types(
+                vec![Row::from(vec![Value::from(false), Value::from(true)])],
+                &[
+                    ConcreteDataType::boolean_datatype(),
+                    ConcreteDataType::boolean_datatype(),
+                ],
+            )
+            .unwrap()
         );
     }
 
@@ -956,7 +969,15 @@ mod test {
             .unwrap();
         assert_eq!(ret, None);
 
-        let mut input1_batch = Batch::try_from_rows(vec![Row::new(input1)]).unwrap();
+        let input_type = [
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::string_datatype(),
+        ];
+
+        let mut input1_batch =
+            Batch::try_from_rows_with_types(vec![Row::new(input1)], &input_type).unwrap();
         let ret_batch = safe_mfp.eval_batch_into(&mut input1_batch).unwrap();
         assert_eq!(
             ret_batch,
@@ -974,7 +995,8 @@ mod test {
             .unwrap();
         assert_eq!(ret, Some(Row::pack(vec![Value::from(11)])));
 
-        let mut input2_batch = Batch::try_from_rows(vec![Row::new(input2)]).unwrap();
+        let mut input2_batch =
+            Batch::try_from_rows_with_types(vec![Row::new(input2)], &input_type).unwrap();
         let ret_batch = safe_mfp.eval_batch_into(&mut input2_batch).unwrap();
         assert_eq!(
             ret_batch,
@@ -1027,7 +1049,14 @@ mod test {
         let ret = safe_mfp.evaluate_into(&mut input1.clone(), &mut Row::empty());
         assert!(matches!(ret, Err(EvalError::InvalidArgument { .. })));
 
-        let mut input1_batch = Batch::try_from_rows(vec![Row::new(input1)]).unwrap();
+        let input_type = [
+            ConcreteDataType::int64_datatype(),
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::int32_datatype(),
+        ];
+        let mut input1_batch =
+            Batch::try_from_rows_with_types(vec![Row::new(input1)], &input_type).unwrap();
         let ret_batch = safe_mfp.eval_batch_into(&mut input1_batch);
         assert!(matches!(ret_batch, Err(EvalError::InvalidArgument { .. })));
 
@@ -1037,7 +1066,13 @@ mod test {
             .unwrap();
         assert_eq!(ret, Some(Row::new(input2.clone())));
 
-        let input2_batch = Batch::try_from_rows(vec![Row::new(input2)]).unwrap();
+        let input_type = [
+            ConcreteDataType::int64_datatype(),
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::int32_datatype(),
+        ];
+        let input2_batch =
+            Batch::try_from_rows_with_types(vec![Row::new(input2)], &input_type).unwrap();
         let ret_batch = safe_mfp.eval_batch_into(&mut input2_batch.clone()).unwrap();
         assert_eq!(ret_batch, input2_batch);
 
@@ -1047,7 +1082,8 @@ mod test {
             .unwrap();
         assert_eq!(ret, None);
 
-        let input3_batch = Batch::try_from_rows(vec![Row::new(input3)]).unwrap();
+        let input3_batch =
+            Batch::try_from_rows_with_types(vec![Row::new(input3)], &input_type).unwrap();
         let ret_batch = safe_mfp.eval_batch_into(&mut input3_batch.clone()).unwrap();
         assert_eq!(
             ret_batch,
@@ -1083,7 +1119,13 @@ mod test {
         let ret = safe_mfp.evaluate_into(&mut input1.clone(), &mut Row::empty());
         assert_eq!(ret.unwrap(), Some(Row::new(vec![Value::from(false)])));
 
-        let mut input1_batch = Batch::try_from_rows(vec![Row::new(input1)]).unwrap();
+        let input_type = [
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::int32_datatype(),
+        ];
+        let mut input1_batch =
+            Batch::try_from_rows_with_types(vec![Row::new(input1)], &input_type).unwrap();
         let ret_batch = safe_mfp.eval_batch_into(&mut input1_batch).unwrap();
 
         assert_eq!(

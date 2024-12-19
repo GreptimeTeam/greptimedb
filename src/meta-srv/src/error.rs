@@ -720,12 +720,21 @@ pub enum Error {
         location: Location,
     },
 
+
     #[snafu(display("Failed to send leader change message"))]
     SendLeaderChange {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: tokio::sync::broadcast::error::SendError<LeaderChangeMessage>,
+    },
+
+    #[snafu(display("Flow state handler error"))]
+    FlowStateHandler {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+
     },
 }
 
@@ -773,7 +782,8 @@ impl ErrorExt for Error {
             | Error::Join { .. }
             | Error::PeerUnavailable { .. }
             | Error::ExceededDeadline { .. }
-            | Error::ChooseItems { .. } => StatusCode::Internal,
+            | Error::ChooseItems { .. }
+            | Error::FlowStateHandler { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 
