@@ -16,11 +16,13 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use asynchronous_codec::{FramedRead, FramedWrite};
 use fastbloom::BloomFilter;
 use futures::stream::StreamExt;
-use futures::{stream, AsyncReadExt, AsyncWriteExt, Stream};
+use futures::{stream, AsyncWriteExt, Stream};
 use snafu::ResultExt;
 
+use super::intermediate_codec::IntermediateBloomFilterCodecV1;
 use crate::bloom_filter::creator::{FALSE_POSITIVE_RATE, SEED};
 use crate::bloom_filter::error::{IntermediateSnafu, IoSnafu, Result};
 use crate::bloom_filter::Bytes;
@@ -131,7 +133,7 @@ impl FinalizedBloomFilterStorage {
     pub async fn drain(
         &mut self,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<FinalizedBloomFilterSegment>> + '_>>> {
-        // FAST PATH: only memory
+        // FAST PATH: memory only
         if self.intermediate_file_id_counter == 0 {
             return Ok(Box::pin(stream::iter(self.in_memory.drain(..).map(Ok))));
         }
@@ -144,26 +146,9 @@ impl FinalizedBloomFilterStorage {
             .context(IntermediateSnafu)?;
         on_disk.sort_unstable_by(|x, y| x.0.cmp(&y.0));
 
-        let streams = on_disk.into_iter().map(|(_, mut reader)| {
-            async_stream::try_stream! {
-                let mut size_buf = [0u8; 16];
-                let mut bloom_filter_buf = vec![];
-
-                while reader.read_exact(&mut size_buf).await.is_ok() {
-                    let element_count = u64::from_le_bytes(size_buf[..8].try_into().unwrap()) as usize;
-                    let size = u64::from_le_bytes(size_buf[8..].try_into().unwrap()) as usize;
-
-                    bloom_filter_buf.clear();
-                    bloom_filter_buf.resize(size, 0);
-                    reader.read_exact(&mut bloom_filter_buf).await.context(IoSnafu)?;
-
-                    yield FinalizedBloomFilterSegment {
-                        bloom_filter_bytes: bloom_filter_buf.clone(),
-                        element_count,
-                    };
-                }
-            }
-        });
+        let streams = on_disk
+            .into_iter()
+            .map(|(_, reader)| FramedRead::new(reader, IntermediateBloomFilterCodecV1::default()));
 
         let in_memory_stream = stream::iter(self.in_memory.drain(..)).map(Ok);
         Ok(Box::pin(
@@ -172,11 +157,6 @@ impl FinalizedBloomFilterStorage {
     }
 
     /// Flushes the in-memory Bloom filters to disk.
-    ///
-    /// # Format
-    ///
-    /// [ elem count ][    size    ][ bloom filter ][ elem count ][    size    ][ bloom filter ]...
-    /// |<- u64 LE ->||<- u64 LE ->||<- bf bytes ->||<- u64 LE ->||<- u64 LE ->||<- bf bytes ->|...
     async fn flush_in_memory_to_disk(&mut self) -> Result<()> {
         let file_id = self.intermediate_file_id_counter;
         self.intermediate_file_id_counter += 1;
@@ -188,30 +168,23 @@ impl FinalizedBloomFilterStorage {
             .await
             .context(IntermediateSnafu)?;
 
-        for segment in self.in_memory.drain(..) {
-            writer
-                .write_all(&(segment.element_count as u64).to_le_bytes())
-                .await
-                .context(IoSnafu)?;
-            writer
-                .write_all(&(segment.bloom_filter_bytes.len() as u64).to_le_bytes())
-                .await
-                .context(IoSnafu)?;
-            writer
-                .write_all(&segment.bloom_filter_bytes)
-                .await
-                .context(IoSnafu)?;
+        let fw = FramedWrite::new(&mut writer, IntermediateBloomFilterCodecV1::default());
+        // `forward()` will flush and close the writer when the stream ends
+        if let Err(e) = stream::iter(self.in_memory.drain(..).map(Ok))
+            .forward(fw)
+            .await
+        {
+            writer.close().await.context(IoSnafu)?;
+            writer.flush().await.context(IoSnafu)?;
+            return Err(e);
         }
-
-        writer.flush().await.context(IoSnafu)?;
-        writer.close().await.context(IoSnafu)?;
 
         Ok(())
     }
 }
 
 /// A finalized Bloom filter segment.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalizedBloomFilterSegment {
     /// The underlying Bloom filter bytes.
     pub bloom_filter_bytes: Vec<u8>,

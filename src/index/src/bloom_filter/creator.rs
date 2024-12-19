@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod finalize_segment;
+mod intermediate_codec;
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -222,7 +223,7 @@ mod tests {
             .await
             .unwrap();
         // Finalize the first segment
-        assert!(creator.cur_seg_distinct_elems_mem_usage == 0);
+        assert_eq!(creator.cur_seg_distinct_elems_mem_usage, 0);
         assert!(creator.memory_usage() > 0);
 
         creator

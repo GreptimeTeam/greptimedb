@@ -46,6 +46,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid intermediate magic"))]
+    InvalidIntermediateMagic {
+        invalid: Vec<u8>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("External error"))]
     External {
         source: BoxedError,
@@ -59,7 +66,9 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            Io { .. } | SerdeJson { .. } => StatusCode::Unexpected,
+            Io { .. } | SerdeJson { .. } | InvalidIntermediateMagic { .. } => {
+                StatusCode::Unexpected
+            }
 
             Intermediate { source, .. } => source.status_code(),
             External { source, .. } => source.status_code(),
