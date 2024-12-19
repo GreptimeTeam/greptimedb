@@ -45,9 +45,9 @@ const METADKV_CREATION: &str =
 
 const FULL_TABLE_SCAN: &str = "SELECT k, v FROM greptime_metakv $1 ORDER BY K";
 
-const POINT_GET: &str = "SELECT k, v FROM greptime_metakv WHERE k = $1";
+pub const POINT_GET: &str = "SELECT k, v FROM greptime_metakv WHERE k = $1";
 
-const PREFIX_SCAN: &str = "SELECT k, v FROM greptime_metakv WHERE k LIKE $1 ORDER BY K";
+pub const PREFIX_SCAN: &str = "SELECT k, v FROM greptime_metakv WHERE k LIKE $1 ORDER BY K";
 
 const RANGE_SCAN_LEFT_BOUNDED: &str = "SELECT k, v FROM greptime_metakv WHERE k >= $1 ORDER BY K";
 
@@ -65,7 +65,7 @@ const RANGE_DELETE_LEFT_BOUNDED: &str = "DELETE FROM greptime_metakv WHERE k >= 
 const RANGE_DELETE_FULL_RANGE: &str =
     "DELETE FROM greptime_metakv WHERE k >= $1 AND K < $2 RETURNING k,v;";
 
-const CAS: &str = r#"
+pub const CAS: &str = r#"
 WITH prev AS (
     SELECT k,v FROM greptime_metakv WHERE k = $1 AND v = $2
 ), update AS (
@@ -79,7 +79,7 @@ WHERE
 SELECT k, v FROM prev;
 "#;
 
-const PUT_IF_NOT_EXISTS: &str = r#"    
+pub const PUT_IF_NOT_EXISTS: &str = r#"    
 WITH prev AS (
     select k,v from greptime_metakv where k = $1
 ), insert AS (
