@@ -142,22 +142,18 @@ impl LogQueryPlanner {
                         "%{}%",
                         escape_pattern(pattern)
                     )))))),
-                log_query::ContentFilter::Regex(..) => {
-                    return Err::<Expr, _>(
-                        UnimplementedSnafu {
-                            feature: format!("regex filter"),
-                        }
-                        .build(),
-                    );
-                }
-                log_query::ContentFilter::Compound(..) => {
-                    return Err::<Expr, _>(
-                        UnimplementedSnafu {
-                            feature: format!("compound filter"),
-                        }
-                        .build(),
-                    );
-                }
+                log_query::ContentFilter::Regex(..) => Err::<Expr, _>(
+                    UnimplementedSnafu {
+                        feature: "regex filter",
+                    }
+                    .build(),
+                ),
+                log_query::ContentFilter::Compound(..) => Err::<Expr, _>(
+                    UnimplementedSnafu {
+                        feature: "compound filter",
+                    }
+                    .build(),
+                ),
             })
             .try_collect::<Vec<_>>()?;
 
@@ -173,4 +169,178 @@ fn escape_pattern(pattern: &str) -> String {
             _ => vec![c],
         })
         .collect::<String>()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use catalog::memory::MemoryCatalogManager;
+    use catalog::RegisterTableRequest;
+    use common_catalog::consts::DEFAULT_CATALOG_NAME;
+    use common_query::test_util::DummyDecoder;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, SchemaRef};
+    use log_query::{ContentFilter, Context};
+    use session::context::QueryContext;
+    use table::metadata::{TableInfoBuilder, TableMetaBuilder};
+    use table::table_name::TableName;
+    use table::test_util::EmptyTable;
+
+    use super::*;
+
+    fn mock_schema() -> SchemaRef {
+        let columns = vec![
+            ColumnSchema::new(
+                "message".to_string(),
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                "timestamp".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new(
+                "host".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+        ];
+
+        Arc::new(Schema::new(columns))
+    }
+
+    /// Registers table under `greptime`, with `message` and `timestamp` and `host` columns.
+    async fn build_test_table_provider(
+        table_name_tuples: &[(String, String)],
+    ) -> DfTableSourceProvider {
+        let catalog_list = MemoryCatalogManager::with_default_setup();
+        for (schema_name, table_name) in table_name_tuples {
+            let schema = mock_schema();
+            let table_meta = TableMetaBuilder::default()
+                .schema(schema)
+                .primary_key_indices(vec![2])
+                .value_indices(vec![0])
+                .next_column_id(1024)
+                .build()
+                .unwrap();
+            let table_info = TableInfoBuilder::default()
+                .name(table_name.to_string())
+                .meta(table_meta)
+                .build()
+                .unwrap();
+            let table = EmptyTable::from_table_info(&table_info);
+
+            catalog_list
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: schema_name.to_string(),
+                    table_name: table_name.to_string(),
+                    table_id: 1024,
+                    table,
+                })
+                .unwrap();
+        }
+
+        DfTableSourceProvider::new(
+            catalog_list,
+            false,
+            QueryContext::arc(),
+            DummyDecoder::arc(),
+            false,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_query_to_plan() {
+        let table_provider =
+            build_test_table_provider(&[("public".to_string(), "test_table".to_string())]).await;
+        let mut planner = LogQueryPlanner::new(table_provider);
+
+        let log_query = LogQuery {
+            table: TableName::new(DEFAULT_CATALOG_NAME, "public", "test_table"),
+            time_filter: TimeFilter {
+                start: Some("2021-01-01T00:00:00Z".to_string()),
+                end: Some("2021-01-02T00:00:00Z".to_string()),
+                span: None,
+            },
+            columns: vec![ColumnFilters {
+                column_name: "message".to_string(),
+                filters: vec![ContentFilter::Contains("error".to_string())],
+            }],
+            limit: Some(100),
+            context: Context::None,
+        };
+
+        let plan = planner.query_to_plan(log_query).await.unwrap();
+        let expected = "Limit: skip=0, fetch=100 [message:Utf8]\
+\n  Projection: greptime.public.test_table.message [message:Utf8]\
+\n    Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp <= Utf8(\"2021-01-02T00:00:00Z\") AND greptime.public.test_table.message LIKE Utf8(\"%error%\") [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]\
+\n      TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]";
+
+        assert_eq!(plan.display_indent_schema().to_string(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_build_time_filter() {
+        let table_provider =
+            build_test_table_provider(&[("public".to_string(), "test_table".to_string())]).await;
+        let planner = LogQueryPlanner::new(table_provider);
+
+        let time_filter = TimeFilter {
+            start: Some("2021-01-01T00:00:00Z".to_string()),
+            end: Some("2021-01-02T00:00:00Z".to_string()),
+            span: None,
+        };
+
+        let expr = planner
+            .build_time_filter(&time_filter, &mock_schema())
+            .unwrap();
+
+        let expected_expr = col("timestamp")
+            .gt_eq(lit(ScalarValue::Utf8(Some(
+                "2021-01-01T00:00:00Z".to_string(),
+            ))))
+            .and(col("timestamp").lt_eq(lit(ScalarValue::Utf8(Some(
+                "2021-01-02T00:00:00Z".to_string(),
+            )))));
+
+        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
+    }
+
+    #[tokio::test]
+    async fn test_build_column_filter() {
+        let table_provider =
+            build_test_table_provider(&[("public".to_string(), "test_table".to_string())]).await;
+        let planner = LogQueryPlanner::new(table_provider);
+
+        let column_filter = ColumnFilters {
+            column_name: "message".to_string(),
+            filters: vec![
+                ContentFilter::Contains("error".to_string()),
+                ContentFilter::Prefix("WARN".to_string()),
+            ],
+        };
+
+        let expr_option = planner.build_column_filter(&column_filter).unwrap();
+        assert!(expr_option.is_some());
+
+        let expr = expr_option.unwrap();
+
+        let expected_expr = col("message")
+            .like(lit(ScalarValue::Utf8(Some("%error%".to_string()))))
+            .and(col("message").like(lit(ScalarValue::Utf8(Some("WARN%".to_string())))));
+
+        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
+    }
+
+    #[test]
+    fn test_escape_pattern() {
+        assert_eq!(escape_pattern("test"), "test");
+        assert_eq!(escape_pattern("te%st"), "te\\%st");
+        assert_eq!(escape_pattern("te_st"), "te\\_st");
+        assert_eq!(escape_pattern("te\\st"), "te\\\\st");
+    }
 }
