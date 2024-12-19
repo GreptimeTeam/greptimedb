@@ -328,6 +328,28 @@ impl Election for PgElection {
                         }
                     }
                 } else {
+                    let res = self
+                        .client
+                        .query(UNLOCK, &[])
+                        .await
+                        .context(PostgresExecutionSnafu)?;
+                    match res.first() {
+                        Some(row) => {
+                            let unlocked: bool = row.get(0);
+                            if !unlocked {
+                                return UnexpectedSnafu {
+                                    violated: "Failed to unlock the advisory lock".to_string(),
+                                }
+                                .fail();
+                            }
+                        }
+                        None => {
+                            return UnexpectedSnafu {
+                                violated: "Failed to unlock the advisory lock".to_string(),
+                            }
+                            .fail();
+                        }
+                    }
                     // Failed to put the leader value, we fall back to the candidate and check the leadership
                     self.check_leadership(&key).await?;
                 }
