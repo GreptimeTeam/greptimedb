@@ -22,6 +22,8 @@ TQL EVAL (0, 10, '5s') {__name__="test", __field__="i"};
 -- NOT SUPPORTED: `__name__` matcher without equal condition
 TQL EVAL (0, 10, '5s') {__name__!="test"};
 
+TQL EVAL (0, 10, '5s') {__name__=~"test"};
+
 -- the point at 1ms will be shadowed by the point at 2ms
 TQL EVAL (0, 10, '5s') test{k="a"};
 

@@ -18,7 +18,6 @@ async-stream.workspace = true
 async-trait = "0.1"
 bytes.workspace = true
 common-catalog.workspace = true
-common-config.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
@@ -58,7 +57,5 @@ catalog = { workspace = true, features = ["testing"] }
 chrono.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
 common-query = { workspace = true, features = ["testing"] }
-common-test-util.workspace = true
-log-store.workspace = true
 object-store.workspace = true
 tokio.workspace = true

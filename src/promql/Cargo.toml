@@ -22,11 +22,8 @@ futures = "0.3"
 greptime-proto.workspace = true
 lazy_static.workspace = true
 prometheus.workspace = true
-promql-parser.workspace = true
 prost.workspace = true
 snafu.workspace = true
 
 [dev-dependencies]
-query.workspace = true
-session = { workspace = true, features = ["testing"] }
 tokio.workspace = true

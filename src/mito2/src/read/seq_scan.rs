@@ -403,7 +403,6 @@ fn build_sources(
                 part_metrics.clone(),
                 *index,
                 range_meta.time_range,
-                range_builder_list.clone(),
             );
             Box::pin(stream) as _
         } else {

@@ -304,6 +304,9 @@ pub struct IndexConfig {
 
     /// Write buffer size for creating the index.
     pub write_buffer_size: ReadableSize,
+
+    /// Cache size for metadata of puffin files. Setting it to 0 to disable the cache.
+    pub metadata_cache_size: ReadableSize,
 }
 
 impl Default for IndexConfig {
@@ -312,6 +315,7 @@ impl Default for IndexConfig {
             aux_path: String::new(),
             staging_size: ReadableSize::gb(2),
             write_buffer_size: ReadableSize::mb(8),
+            metadata_cache_size: ReadableSize::mb(64),
         }
     }
 }
@@ -412,6 +416,8 @@ pub struct InvertedIndexConfig {
     pub metadata_cache_size: ReadableSize,
     /// Cache size for inverted index content. Setting it to 0 to disable the cache.
     pub content_cache_size: ReadableSize,
+    /// Page size for inverted index content.
+    pub content_cache_page_size: ReadableSize,
 }
 
 impl InvertedIndexConfig {
@@ -437,6 +443,7 @@ impl Default for InvertedIndexConfig {
             intermediate_path: String::new(),
             metadata_cache_size: ReadableSize::mb(64),
             content_cache_size: ReadableSize::mb(128),
+            content_cache_page_size: ReadableSize::mb(8),
         };
 
         if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {

@@ -19,7 +19,7 @@ use pipeline::{parse, Content, GreptimeTransformer, Pipeline};
 pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
     let input_value = serde_json::from_str::<serde_json::Value>(input_str).unwrap();
 
-    let yaml_content = Content::Yaml(pipeline_yaml.into());
+    let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline<GreptimeTransformer> =
         parse(&yaml_content).expect("failed to parse pipeline");
     let mut result = pipeline.init_intermediate_state();

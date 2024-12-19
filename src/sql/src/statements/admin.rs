@@ -14,12 +14,13 @@
 
 use std::fmt::Display;
 
+use serde::Serialize;
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::Function;
 
 /// `ADMIN` statement to execute some administration commands.
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum Admin {
     /// Run a admin function.
     Func(Function),

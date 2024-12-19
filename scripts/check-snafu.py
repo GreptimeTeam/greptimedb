@@ -58,8 +58,10 @@ def main():
         if not check_snafu_in_files(branch_name, other_rust_files)
     ]
 
-    for name in unused_snafu:
-        print(name)
+    if unused_snafu:
+        print("Unused error variants:")
+        for name in unused_snafu:
+            print(name)
 
     if unused_snafu:
         raise SystemExit(1)

@@ -756,13 +756,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to build time range filters for value: {:?}", timestamp))]
-    BuildTimeRangeFilter {
-        timestamp: Timestamp,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to open region"))]
     OpenRegion {
         #[snafu(implicit)]
@@ -893,6 +886,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to read file metadata"))]
+    Metadata {
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -965,7 +966,8 @@ impl ErrorExt for Error {
             | CreateDir { .. }
             | ReadDataPart { .. }
             | CorruptedEntry { .. }
-            | BuildEntry { .. } => StatusCode::Internal,
+            | BuildEntry { .. }
+            | Metadata { .. } => StatusCode::Internal,
 
             OpenRegion { source, .. } => source.status_code(),
 
@@ -1014,7 +1016,6 @@ impl ErrorExt for Error {
             ChecksumMismatch { .. } => StatusCode::Unexpected,
             RegionStopped { .. } => StatusCode::RegionNotReady,
             TimeRangePredicateOverflow { .. } => StatusCode::InvalidArguments,
-            BuildTimeRangeFilter { .. } => StatusCode::Unexpected,
             UnsupportedOperation { .. } => StatusCode::Unsupported,
             RemoteCompaction { .. } => StatusCode::Unexpected,
 

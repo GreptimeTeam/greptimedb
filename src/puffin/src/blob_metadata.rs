@@ -68,6 +68,20 @@ pub struct BlobMetadata {
     pub properties: HashMap<String, String>,
 }
 
+impl BlobMetadata {
+    /// Calculates the memory usage of the blob metadata in bytes.
+    pub fn memory_usage(&self) -> usize {
+        self.blob_type.len()
+            + self.input_fields.len() * std::mem::size_of::<i32>()
+            + self
+                .properties
+                .iter()
+                .map(|(k, v)| k.len() + v.len())
+                .sum::<usize>()
+            + std::mem::size_of::<Self>()
+    }
+}
+
 /// Compression codec used to compress the blob
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

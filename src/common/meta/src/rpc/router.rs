@@ -89,39 +89,6 @@ pub fn convert_to_region_leader_map(region_routes: &[RegionRoute]) -> HashMap<Re
         .collect::<HashMap<_, _>>()
 }
 
-/// Returns the HashMap<[RegionNumber], HashSet<DatanodeId>>
-pub fn convert_to_region_peer_map(
-    region_routes: &[RegionRoute],
-) -> HashMap<RegionNumber, HashSet<u64>> {
-    region_routes
-        .iter()
-        .map(|x| {
-            let set = x
-                .follower_peers
-                .iter()
-                .map(|p| p.id)
-                .chain(x.leader_peer.as_ref().map(|p| p.id))
-                .collect::<HashSet<_>>();
-
-            (x.region.id.region_number(), set)
-        })
-        .collect::<HashMap<_, _>>()
-}
-
-/// Returns the HashMap<[RegionNumber], [LeaderState]>;
-pub fn convert_to_region_leader_state_map(
-    region_routes: &[RegionRoute],
-) -> HashMap<RegionNumber, LeaderState> {
-    region_routes
-        .iter()
-        .filter_map(|x| {
-            x.leader_state
-                .as_ref()
-                .map(|state| (x.region.id.region_number(), *state))
-        })
-        .collect::<HashMap<_, _>>()
-}
-
 pub fn find_region_leader(
     region_routes: &[RegionRoute],
     region_number: RegionNumber,
@@ -145,19 +112,6 @@ pub fn find_leader_regions(region_routes: &[RegionRoute], datanode: &Peer) -> Ve
             None
         })
         .collect()
-}
-
-pub fn extract_all_peers(region_routes: &[RegionRoute]) -> Vec<Peer> {
-    let mut peers = region_routes
-        .iter()
-        .flat_map(|x| x.leader_peer.iter().chain(x.follower_peers.iter()))
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .cloned()
-        .collect::<Vec<_>>();
-    peers.sort_by_key(|x| x.id);
-
-    peers
 }
 
 impl TableRoute {

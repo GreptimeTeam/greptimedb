@@ -543,6 +543,15 @@ mem_threshold_on_create = "auto"
 ## Deprecated, use `region_engine.mito.index.aux_path` instead.
 intermediate_path = ""
 
+## Cache size for inverted index metadata.
+metadata_cache_size = "64MiB"
+
+## Cache size for inverted index content.
+content_cache_size = "128MiB"
+
+## Page size for inverted index content cache.
+content_cache_page_size = "8MiB"
+
 ## The options for full-text index in Mito engine.
 [region_engine.mito.fulltext_index]
 
