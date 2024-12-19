@@ -38,6 +38,7 @@ use crate::error::{
 };
 use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
 
+// TODO: make key id configurable
 const CAMPAIGN: &str = "SELECT pg_try_advisory_lock(1)";
 const UNLOCK: &str = "SELECT pg_advisory_unlock(1)";
 
