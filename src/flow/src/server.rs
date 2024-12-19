@@ -50,8 +50,8 @@ use tonic::{Request, Response, Status};
 
 use crate::adapter::{CreateFlowArgs, FlowWorkerManagerRef};
 use crate::error::{
-    CacheRequiredSnafu, ExternalSnafu, FlowNotFoundSnafu, ListFlowsSnafu, ParseAddrSnafu,
-    ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
+    to_status_with_last_err, CacheRequiredSnafu, ExternalSnafu, FlowNotFoundSnafu, ListFlowsSnafu,
+    ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::transform::register_function_to_query_engine;
@@ -82,10 +82,7 @@ impl flow_server::Flow for FlowService {
             .handle(request)
             .await
             .map(Response::new)
-            .map_err(|e| {
-                let msg = format!("failed to handle request: {:?}", e);
-                Status::internal(msg)
-            })
+            .map_err(to_status_with_last_err)
     }
 
     async fn handle_mirror_request(
@@ -108,10 +105,7 @@ impl flow_server::Flow for FlowService {
             .handle_inserts(request)
             .await
             .map(Response::new)
-            .map_err(|e| {
-                let msg = format!("failed to handle request: {:?}", e);
-                Status::internal(msg)
-            })
+            .map_err(to_status_with_last_err)
     }
 }
 
@@ -517,5 +511,9 @@ impl FrontendInvoker {
             .await
             .map_err(BoxedError::new)
             .context(common_frontend::error::ExternalSnafu)
+    }
+
+    pub fn statement_executor(&self) -> Arc<StatementExecutor> {
+        self.statement_executor.clone()
     }
 }

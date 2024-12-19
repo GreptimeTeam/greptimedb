@@ -1,0 +1,161 @@
+CREATE TABLE numbers_input_basic (
+    number INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(number),
+    TIME INDEX(ts)
+);
+
+Affected Rows: 0
+
+CREATE FLOW test_numbers_basic SINK TO out_num_cnt_basic AS
+SELECT
+    sum(number)
+FROM
+    numbers_input_basic
+GROUP BY
+    tumble(ts, '1 second', '2021-07-01 00:00:00');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE out_num_cnt_basic;
+
++-------------------+--------------------------------------------------+
+| Table             | Create Table                                     |
++-------------------+--------------------------------------------------+
+| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
+|                   |   "SUM(numbers_input_basic.number)" BIGINT NULL, |
+|                   |   "window_start" TIMESTAMP(3) NOT NULL,          |
+|                   |   "window_end" TIMESTAMP(3) NULL,                |
+|                   |   "update_at" TIMESTAMP(3) NULL,                 |
+|                   |   TIME INDEX ("window_start"),                   |
+|                   |   PRIMARY KEY ("window_end")                     |
+|                   | )                                                |
+|                   |                                                  |
+|                   | ENGINE=mito                                      |
+|                   |                                                  |
++-------------------+--------------------------------------------------+
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('test_numbers_basic');
+
++----------------------------------------+
+| ADMIN FLUSH_FLOW('test_numbers_basic') |
++----------------------------------------+
+|  FLOW_FLUSHED  |
++----------------------------------------+
+
+-- SQLNESS ARG restart=true
+SHOW CREATE TABLE out_num_cnt_basic;
+
++-------------------+--------------------------------------------------+
+| Table             | Create Table                                     |
++-------------------+--------------------------------------------------+
+| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
+|                   |   "SUM(numbers_input_basic.number)" BIGINT NULL, |
+|                   |   "window_start" TIMESTAMP(3) NOT NULL,          |
+|                   |   "window_end" TIMESTAMP(3) NULL,                |
+|                   |   "update_at" TIMESTAMP(3) NULL,                 |
+|                   |   TIME INDEX ("window_start"),                   |
+|                   |   PRIMARY KEY ("window_end")                     |
+|                   | )                                                |
+|                   |                                                  |
+|                   | ENGINE=mito                                      |
+|                   |                                                  |
++-------------------+--------------------------------------------------+
+
+SHOW CREATE FLOW test_numbers_basic;
+
++--------------------+-------------------------------------------------------------------------------------------------------+
+| Flow               | Create Flow                                                                                           |
++--------------------+-------------------------------------------------------------------------------------------------------+
+| test_numbers_basic | CREATE FLOW IF NOT EXISTS test_numbers_basic                                                          |
+|                    | SINK TO out_num_cnt_basic                                                                             |
+|                    | AS SELECT sum(number) FROM numbers_input_basic GROUP BY tumble(ts, '1 second', '2021-07-01 00:00:00') |
++--------------------+-------------------------------------------------------------------------------------------------------+
+
+DROP FLOW test_numbers_basic;
+
+Affected Rows: 0
+
+DROP TABLE numbers_input_basic;
+
+Affected Rows: 0
+
+DROP TABLE out_num_cnt_basic;
+
+Affected Rows: 0
+
+CREATE TABLE numbers_input_basic (
+    number INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(number),
+    TIME INDEX(ts)
+);
+
+Affected Rows: 0
+
+CREATE FLOW test_numbers_basic SINK TO out_num_cnt_basic AS
+SELECT
+    sum(number) as sumup, ts as event_time
+FROM
+    numbers_input_basic
+GROUP BY
+    ts;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE out_num_cnt_basic;
+
++-------------------+--------------------------------------------------+
+| Table             | Create Table                                     |
++-------------------+--------------------------------------------------+
+| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
+|                   |   "sumup" BIGINT NULL,                           |
+|                   |   "event_time" TIMESTAMP(3) NOT NULL,            |
+|                   |   "update_at" TIMESTAMP(3) NULL,                 |
+|                   |   TIME INDEX ("event_time")                      |
+|                   | )                                                |
+|                   |                                                  |
+|                   | ENGINE=mito                                      |
+|                   |                                                  |
++-------------------+--------------------------------------------------+
+
+-- SQLNESS ARG restart=true
+SHOW CREATE FLOW test_numbers_basic;
+
++--------------------+---------------------------------------------------------------------------------------+
+| Flow               | Create Flow                                                                           |
++--------------------+---------------------------------------------------------------------------------------+
+| test_numbers_basic | CREATE FLOW IF NOT EXISTS test_numbers_basic                                          |
+|                    | SINK TO out_num_cnt_basic                                                             |
+|                    | AS SELECT sum(number) AS sumup, ts AS event_time FROM numbers_input_basic GROUP BY ts |
++--------------------+---------------------------------------------------------------------------------------+
+
+SHOW CREATE TABLE out_num_cnt_basic;
+
++-------------------+--------------------------------------------------+
+| Table             | Create Table                                     |
++-------------------+--------------------------------------------------+
+| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
+|                   |   "sumup" BIGINT NULL,                           |
+|                   |   "event_time" TIMESTAMP(3) NOT NULL,            |
+|                   |   "update_at" TIMESTAMP(3) NULL,                 |
+|                   |   TIME INDEX ("event_time")                      |
+|                   | )                                                |
+|                   |                                                  |
+|                   | ENGINE=mito                                      |
+|                   |                                                  |
++-------------------+--------------------------------------------------+
+
+DROP FLOW test_numbers_basic;
+
+Affected Rows: 0
+
+DROP TABLE numbers_input_basic;
+
+Affected Rows: 0
+
+DROP TABLE out_num_cnt_basic;
+
+Affected Rows: 0
+

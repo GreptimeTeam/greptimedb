@@ -212,6 +212,8 @@ impl RelationType {
         for key in &mut self.keys {
             key.remove_col(time_index.unwrap_or(usize::MAX));
         }
+        // remove empty keys
+        self.keys.retain(|key| !key.is_empty());
         self
     }
 
