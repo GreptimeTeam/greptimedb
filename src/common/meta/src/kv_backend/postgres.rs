@@ -56,7 +56,7 @@ const RANGE_SCAN_FULL_RANGE: &str =
 
 const FULL_TABLE_DELETE: &str = "DELETE FROM greptime_metakv RETURNING k,v";
 
-const POINT_DELETE: &str = "DELETE FROM greptime_metakv WHERE K = $1 RETURNING k,v;";
+pub const POINT_DELETE: &str = "DELETE FROM greptime_metakv WHERE K = $1 RETURNING k,v;";
 
 const PREFIX_DELETE: &str = "DELETE FROM greptime_metakv WHERE k LIKE $1 RETURNING k,v;";
 
