@@ -46,6 +46,8 @@ use tonic::transport::server::{Router, TcpIncoming};
 
 use crate::election::etcd::EtcdElection;
 #[cfg(feature = "pg_kvbackend")]
+use crate::election::postgres::PgElection;
+#[cfg(feature = "pg_kvbackend")]
 use crate::error::InvalidArgumentsSnafu;
 use crate::error::{InitExportMetricsTaskSnafu, TomlFormatSnafu};
 use crate::metasrv::builder::MetasrvBuilder;
@@ -224,9 +226,17 @@ pub async fn metasrv_builder(
         #[cfg(feature = "pg_kvbackend")]
         (None, BackendImpl::PostgresStore) => {
             let pg_client = create_postgres_client(opts).await?;
-            let kv_backend = PgStore::with_pg_client(pg_client).await.unwrap();
-            // TODO(jeremy, weny): implement election for postgres
-            (kv_backend, None)
+            let kv_backend = PgStore::with_pg_client(pg_client)
+                .await
+                .context(error::KvBackendSnafu)?;
+            let election_client = create_postgres_client(opts).await?;
+            let election = PgElection::with_pg_client(
+                opts.server_addr.clone(),
+                election_client,
+                opts.store_key_prefix.clone(),
+            )
+            .await?;
+            (kv_backend, Some(election))
         }
     };
 
