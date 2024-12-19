@@ -38,5 +38,4 @@ tokio.workspace = true
 
 [dev-dependencies]
 api.workspace = true
-common-procedure-test.workspace = true
 common-test-util.workspace = true

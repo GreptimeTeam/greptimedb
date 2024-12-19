@@ -217,6 +217,36 @@ GROUP BY
 INSERT INTO
     bytes_log
 VALUES
+    (NULL, '2023-01-01 00:00:01'),
+    (300, '2023-01-01 00:00:29');
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('find_approx_rate');
+
+SELECT
+    rate,
+    time_window
+FROM
+    approx_rate;
+
+INSERT INTO
+    bytes_log
+VALUES
+    (NULL, '2022-01-01 00:00:01'),
+    (NULL, '2022-01-01 00:00:29');
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('find_approx_rate');
+
+SELECT
+    rate,
+    time_window
+FROM
+    approx_rate;
+
+INSERT INTO
+    bytes_log
+VALUES
     (101, '2025-01-01 00:00:01'),
     (300, '2025-01-01 00:00:29');
 
@@ -539,6 +569,7 @@ CREATE TABLE requests_without_ip (
     service_name STRING,
     val INT,
     ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY(service_name)
 );
 
 CREATE FLOW requests_long_term SINK TO requests_without_ip AS
@@ -552,14 +583,60 @@ FROM
 INSERT INTO
     requests
 VALUES
-    ("svc1", "10.0.0.1", 100, "2024-10-18 19:00:00"),
+    (NULL, "10.0.0.1", 100, "2024-10-18 19:00:00"),
     ("svc1", "10.0.0.2", 100, "2024-10-18 19:00:00"),
-    ("svc1", "10.0.0.1", 200, "2024-10-18 19:00:30"),
+    (NULL, "10.0.0.1", 200, "2024-10-18 19:00:30"),
     ("svc1", "10.0.0.2", 200, "2024-10-18 19:00:30"),
-    ("svc1", "10.0.0.1", 300, "2024-10-18 19:01:00"),
-    ("svc1", "10.0.0.2", 100, "2024-10-18 19:01:01"),
+    (NULL, "10.0.0.1", 300, "2024-10-18 19:01:00"),
+    (NULL, "10.0.0.2", 100, "2024-10-18 19:01:01"),
     ("svc1", "10.0.0.1", 400, "2024-10-18 19:01:30"),
     ("svc1", "10.0.0.2", 200, "2024-10-18 19:01:31");
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('requests_long_term');
+
+SELECT
+    *
+FROM
+    requests_without_ip;
+
+-- Test if FLOWS table works, but don't care about the result since it vary from runs
+SELECT
+    count(CASE WHEN state_size > 0 THEN 1 ELSE 0 END) as active_flows,
+FROM
+    INFORMATION_SCHEMA.FLOWS;
+
+INSERT INTO
+    requests
+VALUES
+    (null, "10.0.0.1", 100, "2024-10-19 19:00:00"),
+    (null, "10.0.0.2", 100, "2024-10-19 19:00:00"),
+    (null, "10.0.0.1", 200, "2024-10-19 19:00:30"),
+    (null, "10.0.0.2", 200, "2024-10-19 19:00:30"),
+    (null, "10.0.0.1", 300, "2024-10-19 19:01:00"),
+    (null, "10.0.0.2", 100, "2024-10-19 19:01:01"),
+    (null, "10.0.0.1", 400, "2024-10-19 19:01:30"),
+    (null, "10.0.0.2", 200, "2024-10-19 19:01:31");
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('requests_long_term');
+
+SELECT
+    *
+FROM
+    requests_without_ip;
+
+INSERT INTO
+    requests
+VALUES
+    ("svc2", "10.0.0.1", 100, "2024-10-18 19:00:00"),
+    ("svc2", "10.0.0.2", 100, "2024-10-18 19:00:00"),
+    ("svc2", "10.0.0.1", 200, "2024-10-18 19:00:30"),
+    ("svc2", "10.0.0.2", 200, "2024-10-18 19:00:30"),
+    ("svc2", "10.0.0.1", 300, "2024-10-18 19:01:00"),
+    ("svc2", "10.0.0.2", 100, "2024-10-18 19:01:01"),
+    ("svc2", "10.0.0.1", 400, "2024-10-18 19:01:30"),
+    ("svc2", "10.0.0.2", 200, "2024-10-18 19:01:31");
 
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('requests_long_term');

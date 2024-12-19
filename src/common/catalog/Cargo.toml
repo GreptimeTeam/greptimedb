@@ -8,10 +8,5 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-common-error.workspace = true
-common-macro.workspace = true
-snafu.workspace = true
 
 [dev-dependencies]
-chrono.workspace = true
-tokio.workspace = true

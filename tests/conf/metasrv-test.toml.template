@@ -1,4 +1,14 @@
 flush_stats_factor = 1
+{{ if use_etcd }}
+## Store server address default to etcd store.
+store_addrs = [{store_addrs | unescaped}]
+
+## Store data in memory.
+use_memory_store = false
+
+## The datastore for meta server.
+backend = "EtcdStore"
+{{ endif }}
 [wal]
 {{ if is_raft_engine }}
 provider = "raft_engine"

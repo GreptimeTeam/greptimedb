@@ -72,11 +72,21 @@ impl PruneReader {
         self.source = source;
     }
 
-    pub(crate) fn metrics(&mut self) -> &ReaderMetrics {
+    /// Merge metrics with the inner reader and return the merged metrics.
+    pub(crate) fn metrics(&self) -> ReaderMetrics {
+        let mut metrics = self.metrics.clone();
         match &self.source {
-            Source::RowGroup(r) => r.metrics(),
-            Source::LastRow(_) => &self.metrics,
+            Source::RowGroup(r) => {
+                metrics.merge_from(r.metrics());
+            }
+            Source::LastRow(r) => {
+                if let Some(inner_metrics) = r.metrics() {
+                    metrics.merge_from(inner_metrics);
+                }
+            }
         }
+
+        metrics
     }
 
     pub(crate) async fn next_batch(&mut self) -> Result<Option<Batch>> {

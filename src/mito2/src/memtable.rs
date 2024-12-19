@@ -110,6 +110,15 @@ impl MemtableStats {
 
 pub type BoxedBatchIterator = Box<dyn Iterator<Item = Result<Batch>> + Send>;
 
+/// Ranges in a memtable.
+#[derive(Default)]
+pub struct MemtableRanges {
+    /// Range IDs and ranges.
+    pub ranges: BTreeMap<usize, MemtableRange>,
+    /// Statistics of the memtable at the query time.
+    pub stats: MemtableStats,
+}
+
 /// In memory write buffer.
 pub trait Memtable: Send + Sync + fmt::Debug {
     /// Returns the id of this memtable.
@@ -139,7 +148,7 @@ pub trait Memtable: Send + Sync + fmt::Debug {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-    ) -> BTreeMap<usize, MemtableRange>;
+    ) -> MemtableRanges;
 
     /// Returns true if the memtable is empty.
     fn is_empty(&self) -> bool;

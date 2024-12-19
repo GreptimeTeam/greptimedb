@@ -82,22 +82,6 @@ impl Arranged {
                 writer: self.writer.clone(),
             })
     }
-
-    /// Copy the full arrangement, including the future and the current updates.
-    ///
-    /// Internally `Rc-ed` so it's cheap to copy
-    pub fn try_copy_full(&self) -> Option<Self> {
-        self.arrangement
-            .clone_full_arrange()
-            .map(|arrangement| Arranged {
-                arrangement,
-                readers: self.readers.clone(),
-                writer: self.writer.clone(),
-            })
-    }
-    pub fn add_reader(&self, id: SubgraphId) {
-        self.readers.borrow_mut().push(id)
-    }
 }
 
 /// A bundle of the various ways a collection can be represented.

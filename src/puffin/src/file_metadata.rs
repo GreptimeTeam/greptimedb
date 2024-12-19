@@ -33,6 +33,22 @@ pub struct FileMetadata {
     pub properties: HashMap<String, String>,
 }
 
+impl FileMetadata {
+    /// Calculates the memory usage of the file metadata in bytes.
+    pub fn memory_usage(&self) -> usize {
+        self.blobs
+            .iter()
+            .map(|blob| blob.memory_usage())
+            .sum::<usize>()
+            + self
+                .properties
+                .iter()
+                .map(|(k, v)| k.len() + v.len())
+                .sum::<usize>()
+            + std::mem::size_of::<Self>()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;

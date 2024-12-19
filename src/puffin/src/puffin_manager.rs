@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod cache;
 pub mod file_accessor;
 pub mod fs_puffin_manager;
 pub mod stager;
@@ -72,10 +73,11 @@ pub struct PutOptions {
 
 /// The `PuffinReader` trait provides methods for reading blobs and directories from a Puffin file.
 #[async_trait]
-#[auto_impl::auto_impl(Arc)]
 pub trait PuffinReader {
     type Blob: BlobGuard;
     type Dir: DirGuard;
+
+    fn with_file_size_hint(self, file_size_hint: Option<u64>) -> Self;
 
     /// Reads a blob from the Puffin file.
     ///

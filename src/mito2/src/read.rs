@@ -861,6 +861,18 @@ impl BatchBuilder {
     }
 }
 
+impl From<Batch> for BatchBuilder {
+    fn from(batch: Batch) -> Self {
+        Self {
+            primary_key: batch.primary_key,
+            timestamps: Some(batch.timestamps),
+            sequences: Some(batch.sequences),
+            op_types: Some(batch.op_types),
+            fields: batch.fields,
+        }
+    }
+}
+
 /// Async [Batch] reader and iterator wrapper.
 ///
 /// This is the data source for SST writers or internal readers.

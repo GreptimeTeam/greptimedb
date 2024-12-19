@@ -21,11 +21,6 @@ use datafusion_common::DataFusionError;
 use datatypes::data_type::ConcreteDataType;
 use snafu::{Location, Snafu};
 
-fn is_send_sync() {
-    fn check<T: Send + Sync>() {}
-    check::<EvalError>();
-}
-
 /// EvalError is about errors happen on columnar evaluation
 ///
 /// TODO(discord9): add detailed location of column/operator(instead of code) to errors tp help identify related column

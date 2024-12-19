@@ -48,5 +48,4 @@ url = "2.3"
 [dev-dependencies]
 common-telemetry.workspace = true
 common-test-util.workspace = true
-dotenv.workspace = true
 uuid.workspace = true

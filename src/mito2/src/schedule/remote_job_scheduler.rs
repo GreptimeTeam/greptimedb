@@ -27,7 +27,7 @@ use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::PickerOutput;
 use crate::error::{CompactRegionSnafu, Error, ParseJobIdSnafu, Result};
 use crate::manifest::action::RegionEdit;
-use crate::metrics::COMPACTION_FAILURE_COUNT;
+use crate::metrics::{COMPACTION_FAILURE_COUNT, INFLIGHT_COMPACTION_COUNT};
 use crate::request::{
     BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, WorkerRequest,
 };
@@ -145,6 +145,7 @@ impl DefaultNotifier {
 #[async_trait::async_trait]
 impl Notifier for DefaultNotifier {
     async fn notify(&self, result: RemoteJobResult, waiters: Vec<OutputTx>) {
+        INFLIGHT_COMPACTION_COUNT.dec();
         match result {
             RemoteJobResult::CompactionJobResult(result) => {
                 let notify = {

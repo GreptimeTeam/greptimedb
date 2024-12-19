@@ -75,6 +75,12 @@ lazy_static! {
     /// Histogram of flushed bytes.
     pub static ref FLUSH_BYTES_TOTAL: IntCounter =
         register_int_counter!("greptime_mito_flush_bytes_total", "mito flush bytes total").unwrap();
+    /// Gauge for inflight compaction tasks.
+    pub static ref INFLIGHT_FLUSH_COUNT: IntGauge =
+        register_int_gauge!(
+            "greptime_mito_inflight_flush_count",
+            "inflight flush count",
+        ).unwrap();
     // ------ End of flush related metrics
 
 
@@ -124,6 +130,13 @@ lazy_static! {
     /// Counter of failed compaction task.
     pub static ref COMPACTION_FAILURE_COUNT: IntCounter =
         register_int_counter!("greptime_mito_compaction_failure_total", "mito compaction failure total").unwrap();
+
+    /// Gauge for inflight compaction tasks.
+    pub static ref INFLIGHT_COMPACTION_COUNT: IntGauge =
+        register_int_gauge!(
+            "greptime_mito_inflight_compaction_count",
+            "inflight compaction count",
+        ).unwrap();
     // ------- End of compaction metrics.
 
     // Query metrics.

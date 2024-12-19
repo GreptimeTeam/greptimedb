@@ -24,6 +24,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
 use datafusion_expr::utils::expr_to_columns;
+use smallvec::SmallVec;
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{ScanRequest, TimeSeriesRowSelector};
 use table::predicate::{build_time_range_predicate, Predicate};
@@ -35,7 +36,7 @@ use crate::cache::file_cache::FileCacheRef;
 use crate::cache::CacheManagerRef;
 use crate::config::DEFAULT_SCAN_CHANNEL_SIZE;
 use crate::error::Result;
-use crate::memtable::MemtableRef;
+use crate::memtable::MemtableRange;
 use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::{self, CompatBatch};
 use crate::read::projection::ProjectionMapper;
@@ -167,7 +168,7 @@ pub(crate) struct ScanRegion {
     /// Scan request.
     request: ScanRequest,
     /// Cache.
-    cache_manager: CacheManagerRef,
+    cache_manager: Option<CacheManagerRef>,
     /// Capacity of the channel to send data from parallel scan tasks to the main task.
     parallel_scan_channel_size: usize,
     /// Whether to ignore inverted index.
@@ -184,7 +185,7 @@ impl ScanRegion {
         version: VersionRef,
         access_layer: AccessLayerRef,
         request: ScanRequest,
-        cache_manager: CacheManagerRef,
+        cache_manager: Option<CacheManagerRef>,
     ) -> ScanRegion {
         ScanRegion {
             version,
@@ -328,6 +329,14 @@ impl ScanRegion {
             Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied())?,
             None => ProjectionMapper::all(&self.version.metadata)?,
         };
+        // Get memtable ranges to scan.
+        let memtables = memtables
+            .into_iter()
+            .map(|mem| {
+                let ranges = mem.ranges(Some(mapper.column_ids()), Some(predicate.clone()));
+                MemRangeBuilder::new(ranges)
+            })
+            .collect();
 
         let input = ScanInput::new(self.access_layer, mapper)
             .with_time_range(Some(time_range))
@@ -346,8 +355,8 @@ impl ScanRegion {
         Ok(input)
     }
 
-    /// Build time range predicate from filters, also remove time filters from request.
-    fn build_time_range_predicate(&mut self) -> TimestampRange {
+    /// Build time range predicate from filters.
+    fn build_time_range_predicate(&self) -> TimestampRange {
         let time_index = self.version.metadata.time_index_column();
         let unit = time_index
             .column_schema
@@ -355,11 +364,7 @@ impl ScanRegion {
             .as_timestamp()
             .expect("Time index must have timestamp-compatible type")
             .unit();
-        build_time_range_predicate(
-            &time_index.column_schema.name,
-            unit,
-            &mut self.request.filters,
-        )
+        build_time_range_predicate(&time_index.column_schema.name, unit, &self.request.filters)
     }
 
     /// Remove field filters if the merge mode is [MergeMode::LastNonNull].
@@ -401,18 +406,27 @@ impl ScanRegion {
         }
 
         let file_cache = || -> Option<FileCacheRef> {
-            let write_cache = self.cache_manager.write_cache()?;
+            let cache_manager = self.cache_manager.as_ref()?;
+            let write_cache = cache_manager.write_cache()?;
             let file_cache = write_cache.file_cache();
             Some(file_cache)
         }();
 
-        let index_cache = self.cache_manager.index_cache().cloned();
+        let index_cache = self
+            .cache_manager
+            .as_ref()
+            .and_then(|c| c.index_cache())
+            .cloned();
+
+        let puffin_metadata_cache = self
+            .cache_manager
+            .as_ref()
+            .and_then(|c| c.puffin_metadata_cache())
+            .cloned();
 
         InvertedIndexApplierBuilder::new(
             self.access_layer.region_dir().to_string(),
             self.access_layer.object_store().clone(),
-            file_cache,
-            index_cache,
             self.version.metadata.as_ref(),
             self.version.metadata.inverted_indexed_column_ids(
                 self.version
@@ -424,6 +438,9 @@ impl ScanRegion {
             ),
             self.access_layer.puffin_manager_factory().clone(),
         )
+        .with_file_cache(file_cache)
+        .with_index_cache(index_cache)
+        .with_puffin_metadata_cache(puffin_metadata_cache)
         .build(&self.request.filters)
         .inspect_err(|err| warn!(err; "Failed to build invereted index applier"))
         .ok()
@@ -472,12 +489,12 @@ pub(crate) struct ScanInput {
     time_range: Option<TimestampRange>,
     /// Predicate to push down.
     pub(crate) predicate: Option<Predicate>,
-    /// Memtables to scan.
-    pub(crate) memtables: Vec<MemtableRef>,
+    /// Memtable range builders for memtables in the time range..
+    pub(crate) memtables: Vec<MemRangeBuilder>,
     /// Handles to SST files to scan.
     pub(crate) files: Vec<FileHandle>,
     /// Cache.
-    pub(crate) cache_manager: CacheManagerRef,
+    pub(crate) cache_manager: Option<CacheManagerRef>,
     /// Ignores file not found error.
     ignore_file_not_found: bool,
     /// Capacity of the channel to send data from parallel scan tasks to the main task.
@@ -508,7 +525,7 @@ impl ScanInput {
             predicate: None,
             memtables: Vec::new(),
             files: Vec::new(),
-            cache_manager: CacheManagerRef::default(),
+            cache_manager: None,
             ignore_file_not_found: false,
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             inverted_index_applier: None,
@@ -535,9 +552,9 @@ impl ScanInput {
         self
     }
 
-    /// Sets memtables to read.
+    /// Sets memtable range builders.
     #[must_use]
-    pub(crate) fn with_memtables(mut self, memtables: Vec<MemtableRef>) -> Self {
+    pub(crate) fn with_memtables(mut self, memtables: Vec<MemRangeBuilder>) -> Self {
         self.memtables = memtables;
         self
     }
@@ -551,7 +568,7 @@ impl ScanInput {
 
     /// Sets cache for this query.
     #[must_use]
-    pub(crate) fn with_cache(mut self, cache: CacheManagerRef) -> Self {
+    pub(crate) fn with_cache(mut self, cache: Option<CacheManagerRef>) -> Self {
         self.cache_manager = cache;
         self
     }
@@ -655,11 +672,12 @@ impl ScanInput {
         Ok(sources)
     }
 
-    /// Prunes a memtable to scan and returns the builder to build readers.
-    pub(crate) fn prune_memtable(&self, mem_index: usize) -> MemRangeBuilder {
-        let memtable = &self.memtables[mem_index];
-        let row_groups = memtable.ranges(Some(self.mapper.column_ids()), self.predicate.clone());
-        MemRangeBuilder::new(row_groups)
+    /// Builds memtable ranges to scan by `index`.
+    pub(crate) fn build_mem_ranges(&self, index: RowGroupIndex) -> SmallVec<[MemtableRange; 2]> {
+        let memtable = &self.memtables[index.index];
+        let mut ranges = SmallVec::new();
+        memtable.build_ranges(index.row_group_index, &mut ranges);
+        ranges
     }
 
     /// Prunes a file to scan and returns the builder to build readers.
@@ -673,7 +691,6 @@ impl ScanInput {
             .access_layer
             .read_sst(file.clone())
             .predicate(self.predicate.clone())
-            .time_range(self.time_range)
             .projection(Some(self.mapper.column_ids().to_vec()))
             .cache(self.cache_manager.clone())
             .inverted_index_applier(self.inverted_index_applier.clone())

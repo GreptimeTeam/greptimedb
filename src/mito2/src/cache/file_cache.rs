@@ -286,7 +286,7 @@ impl FileCache {
     }
 
     async fn get_reader(&self, file_path: &str) -> object_store::Result<Option<Reader>> {
-        if self.local_store.is_exist(file_path).await? {
+        if self.local_store.exists(file_path).await? {
             Ok(Some(self.local_store.reader(file_path).await?))
         } else {
             Ok(None)
@@ -480,7 +480,7 @@ mod tests {
         cache.memory_index.run_pending_tasks().await;
 
         // The file also not exists.
-        assert!(!local_store.is_exist(&file_path).await.unwrap());
+        assert!(!local_store.exists(&file_path).await.unwrap());
         assert_eq!(0, cache.memory_index.weighted_size());
     }
 

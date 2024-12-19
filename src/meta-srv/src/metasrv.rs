@@ -204,10 +204,6 @@ impl Context {
     pub fn reset_in_memory(&self) {
         self.in_memory.reset();
     }
-
-    pub fn reset_leader_cached_kv_backend(&self) {
-        self.leader_cached_kv_backend.reset();
-    }
 }
 
 /// The value of the leader. It is used to store the leader's address.
@@ -470,6 +466,10 @@ impl Metasrv {
                 });
             }
         } else {
+            warn!(
+                "Ensure only one instance of Metasrv is running, as there is no election service."
+            );
+
             if let Err(e) = self.wal_options_allocator.start().await {
                 error!(e; "Failed to start wal options allocator");
             }

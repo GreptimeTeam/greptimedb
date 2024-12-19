@@ -20,6 +20,8 @@ WITH(
 
 SHOW CREATE TABLE system_metrics;
 
+SHOW CREATE TABLE system_metrics FOR POSTGRES_FOREIGN_TABLE;
+
 DROP TABLE system_metrics;
 
 create table table_without_partition (
@@ -56,6 +58,8 @@ CREATE TABLE t1 (ts timestamp time index, val double, host string primary key) e
 show create table phy;
 
 show create table t1;
+
+SHOW CREATE TABLE t1 FOR POSTGRES_FOREIGN_TABLE;
 
 drop table t1;
 

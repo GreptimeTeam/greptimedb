@@ -92,6 +92,71 @@ DROP TABLE last_row_table;
 
 Affected Rows: 0
 
+CREATE TABLE IF NOT EXISTS `delete_between` (
+  `time` TIMESTAMP(0) NOT NULL,
+  `code` STRING NULL,
+  `name` STRING NULL,
+  `status` TINYINT NULL,
+  TIME INDEX (`time`),
+  PRIMARY KEY (`code`)
+) ENGINE=mito WITH(
+  merge_mode = 'last_non_null'
+);
+
+Affected Rows: 0
+
+INSERT INTO `delete_between` (`time`, `code`, `name`, `status`) VALUES ('2024-11-26 10:00:00', 'achn', '1.png', 0);
+
+Affected Rows: 1
+
+INSERT INTO `delete_between` (`time`, `code`, `name`, `status`) VALUES ('2024-11-26 10:01:00', 'achn', '2.png', 0);
+
+Affected Rows: 1
+
+INSERT INTO `delete_between` (`time`, `code`, `name`, `status`) VALUES ('2024-11-26 10:02:00', 'achn', '3.png', 1);
+
+Affected Rows: 1
+
+SELECT * FROM `delete_between`;
+
++---------------------+------+-------+--------+
+| time                | code | name  | status |
++---------------------+------+-------+--------+
+| 2024-11-26T10:00:00 | achn | 1.png | 0      |
+| 2024-11-26T10:01:00 | achn | 2.png | 0      |
+| 2024-11-26T10:02:00 | achn | 3.png | 1      |
++---------------------+------+-------+--------+
+
+DELETE FROM `delete_between`;
+
+Affected Rows: 3
+
+INSERT INTO `delete_between` (`time`, `code`, `name`) VALUES ('2024-11-26 10:00:00', 'achn', '1.png');
+
+Affected Rows: 1
+
+INSERT INTO `delete_between` (`time`, `code`, `name`) VALUES ('2024-11-26 10:01:00', 'achn', '2.png');
+
+Affected Rows: 1
+
+INSERT INTO `delete_between` (`time`, `code`, `name`) VALUES ('2024-11-26 10:02:00', 'achn', '3.png');
+
+Affected Rows: 1
+
+SELECT * FROM `delete_between`;
+
++---------------------+------+-------+--------+
+| time                | code | name  | status |
++---------------------+------+-------+--------+
+| 2024-11-26T10:00:00 | achn | 1.png |        |
+| 2024-11-26T10:01:00 | achn | 2.png |        |
+| 2024-11-26T10:02:00 | achn | 3.png |        |
++---------------------+------+-------+--------+
+
+DROP TABLE `delete_between`;
+
+Affected Rows: 0
+
 create table if not exists invalid_merge_mode(
     host string,
     ts timestamp,

@@ -257,7 +257,7 @@ impl SeqScan {
                         .await
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?;
-                let cache = &stream_ctx.input.cache_manager;
+                let cache = stream_ctx.input.cache_manager.as_deref();
                 let mut metrics = ScannerMetrics::default();
                 let mut fetch_start = Instant::now();
                 #[cfg(debug_assertions)]
@@ -403,7 +403,6 @@ fn build_sources(
                 part_metrics.clone(),
                 *index,
                 range_meta.time_range,
-                range_builder_list.clone(),
             );
             Box::pin(stream) as _
         } else {

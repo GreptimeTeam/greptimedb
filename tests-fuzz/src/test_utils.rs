@@ -55,5 +55,6 @@ pub fn new_test_ctx() -> TableContext {
         ],
         partition: None,
         primary_keys: vec![],
+        table_options: vec![],
     }
 }

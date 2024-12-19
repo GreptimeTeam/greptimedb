@@ -16,13 +16,13 @@ use std::any::Any;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::marker::PhantomData;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use serde::Serializer;
 
-use super::ResettableKvBackend;
+use super::{KvBackendRef, ResettableKvBackend};
 use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnResponse};
 use crate::kv_backend::{KvBackend, TxnService};
 use crate::metrics::METRIC_META_TXN_REQUEST;
@@ -310,6 +310,10 @@ impl<T: ErrorExt + Send + Sync> TxnService for MemoryKvBackend<T> {
 impl<T: ErrorExt + Send + Sync + 'static> ResettableKvBackend for MemoryKvBackend<T> {
     fn reset(&self) {
         self.clear();
+    }
+
+    fn as_kv_backend_ref(self: Arc<Self>) -> KvBackendRef<T> {
+        self
     }
 }
 

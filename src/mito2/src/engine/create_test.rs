@@ -192,12 +192,12 @@ async fn test_engine_create_with_custom_store() {
     assert!(object_store_manager
         .find("Gcs")
         .unwrap()
-        .is_exist(region_dir)
+        .exists(region_dir)
         .await
         .unwrap());
     assert!(!object_store_manager
         .default_object_store()
-        .is_exist(region_dir)
+        .exists(region_dir)
         .await
         .unwrap());
 }

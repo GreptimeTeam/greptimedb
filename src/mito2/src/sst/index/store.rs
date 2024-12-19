@@ -68,6 +68,7 @@ impl InstrumentedStore {
             path: path.to_string(),
             read_byte_count,
             read_count,
+            file_size_hint: None,
         })
     }
 
@@ -262,15 +263,27 @@ pub(crate) struct InstrumentedRangeReader<'a> {
     path: String,
     read_byte_count: &'a IntCounter,
     read_count: &'a IntCounter,
+    file_size_hint: Option<u64>,
 }
 
 #[async_trait]
 impl RangeReader for InstrumentedRangeReader<'_> {
+    fn with_file_size_hint(&mut self, file_size_hint: u64) {
+        self.file_size_hint = Some(file_size_hint);
+    }
+
     async fn metadata(&mut self) -> io::Result<Metadata> {
-        let stat = self.store.stat(&self.path).await?;
-        Ok(Metadata {
-            content_length: stat.content_length(),
-        })
+        match self.file_size_hint {
+            Some(file_size_hint) => Ok(Metadata {
+                content_length: file_size_hint,
+            }),
+            None => {
+                let stat = self.store.stat(&self.path).await?;
+                Ok(Metadata {
+                    content_length: stat.content_length(),
+                })
+            }
+        }
     }
 
     async fn read(&mut self, range: Range<u64>) -> io::Result<Bytes> {

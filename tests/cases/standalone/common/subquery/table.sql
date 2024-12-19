@@ -24,7 +24,7 @@ DROP TABLE test;
 
 -- subquery union, from:
 -- https://github.com/duckdb/duckdb/blob/9196dd9b0a163e6c8aada26218803d04be30c562/test/sql/subquery/table/test_subquery_union.test
-SELECT * FROM (SELECT 42) UNION ALL SELECT * FROM (SELECT 43);
+SELECT * FROM (SELECT 42) UNION ALL SELECT * FROM (SELECT 43) ORDER BY 1;
 
 -- table subquery, from:
 -- https://github.com/duckdb/duckdb/blob/8704c7d0807d6ce1e2ebcdf6398e1b6cc050e507/test/sql/subquery/table/test_table_subquery.test

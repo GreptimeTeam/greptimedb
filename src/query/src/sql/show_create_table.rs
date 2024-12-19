@@ -19,7 +19,8 @@ use std::collections::HashMap;
 use common_meta::SchemaOptions;
 use datatypes::schema::{
     ColumnDefaultConstraint, ColumnSchema, SchemaRef, COLUMN_FULLTEXT_OPT_KEY_ANALYZER,
-    COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COMMENT_KEY,
+    COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY,
+    COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE, COMMENT_KEY,
 };
 use snafu::ResultExt;
 use sql::ast::{ColumnDef, ColumnOption, ColumnOptionDef, Expr, Ident, ObjectName};
@@ -32,7 +33,8 @@ use table::metadata::{TableInfoRef, TableMeta};
 use table::requests::{FILE_TABLE_META_KEY, TTL_KEY, WRITE_BUFFER_SIZE_KEY};
 
 use crate::error::{
-    ConvertSqlTypeSnafu, ConvertSqlValueSnafu, GetFulltextOptionsSnafu, Result, SqlSnafu,
+    ConvertSqlTypeSnafu, ConvertSqlValueSnafu, GetFulltextOptionsSnafu,
+    GetSkippingIndexOptionsSnafu, Result, SqlSnafu,
 };
 
 /// Generates CREATE TABLE options from given table metadata and schema-level options.
@@ -113,6 +115,23 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
             ),
         ]);
         extensions.fulltext_options = Some(map.into());
+    }
+
+    if let Some(opt) = column_schema
+        .skipping_index_options()
+        .context(GetSkippingIndexOptionsSnafu)?
+    {
+        let map = HashMap::from([
+            (
+                COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY.to_string(),
+                opt.granularity.to_string(),
+            ),
+            (
+                COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE.to_string(),
+                opt.index_type.to_string(),
+            ),
+        ]);
+        extensions.skipping_index_options = Some(map.into());
     }
 
     Ok(Column {
@@ -219,7 +238,7 @@ mod tests {
 
     use common_time::timestamp::TimeUnit;
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{FulltextOptions, Schema, SchemaRef};
+    use datatypes::schema::{FulltextOptions, Schema, SchemaRef, SkippingIndexOptions};
     use table::metadata::*;
     use table::requests::{
         TableOptions, FILE_TABLE_FORMAT_KEY, FILE_TABLE_LOCATION_KEY, FILE_TABLE_META_KEY,
@@ -230,7 +249,12 @@ mod tests {
     #[test]
     fn test_show_create_table_sql() {
         let schema = vec![
-            ColumnSchema::new("id", ConcreteDataType::uint32_datatype(), true),
+            ColumnSchema::new("id", ConcreteDataType::uint32_datatype(), true)
+                .with_skipping_options(SkippingIndexOptions {
+                    granularity: 4096,
+                    ..Default::default()
+                })
+                .unwrap(),
             ColumnSchema::new("host", ConcreteDataType::string_datatype(), true)
                 .set_inverted_index(true),
             ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
@@ -300,7 +324,7 @@ mod tests {
         assert_eq!(
             r#"
 CREATE TABLE IF NOT EXISTS "system_metrics" (
-  "id" INT UNSIGNED NULL,
+  "id" INT UNSIGNED NULL SKIPPING INDEX WITH(granularity = '4096', type = 'BLOOM'),
   "host" STRING NULL,
   "cpu" DOUBLE NULL,
   "disk" FLOAT NULL,

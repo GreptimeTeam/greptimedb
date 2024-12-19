@@ -24,7 +24,7 @@ use store_api::region_engine::PartitionRange;
 
 use crate::cache::CacheManager;
 use crate::error::Result;
-use crate::memtable::{MemtableRange, MemtableRef};
+use crate::memtable::{MemtableRange, MemtableRanges, MemtableStats};
 use crate::read::scan_region::ScanInput;
 use crate::sst::file::{overlaps, FileHandle, FileTimeRange};
 use crate::sst::parquet::file_range::{FileRange, FileRangeContextRef};
@@ -112,7 +112,7 @@ impl RangeMeta {
         Self::push_unordered_file_ranges(
             input.memtables.len(),
             &input.files,
-            &input.cache_manager,
+            input.cache_manager.as_deref(),
             &mut ranges,
         );
 
@@ -175,7 +175,7 @@ impl RangeMeta {
         }
     }
 
-    fn push_unordered_mem_ranges(memtables: &[MemtableRef], ranges: &mut Vec<RangeMeta>) {
+    fn push_unordered_mem_ranges(memtables: &[MemRangeBuilder], ranges: &mut Vec<RangeMeta>) {
         // For append mode, we can parallelize reading memtables.
         for (memtable_index, memtable) in memtables.iter().enumerate() {
             let stats = memtable.stats();
@@ -203,15 +203,16 @@ impl RangeMeta {
     fn push_unordered_file_ranges(
         num_memtables: usize,
         files: &[FileHandle],
-        cache: &CacheManager,
+        cache: Option<&CacheManager>,
         ranges: &mut Vec<RangeMeta>,
     ) {
         // For append mode, we can parallelize reading row groups.
         for (i, file) in files.iter().enumerate() {
             let file_index = num_memtables + i;
             // Get parquet meta from the cache.
-            let parquet_meta =
-                cache.get_parquet_meta_data_from_mem_cache(file.region_id(), file.file_id());
+            let parquet_meta = cache.and_then(|c| {
+                c.get_parquet_meta_data_from_mem_cache(file.region_id(), file.file_id())
+            });
             if let Some(parquet_meta) = parquet_meta {
                 // Scans each row group.
                 for row_group_index in 0..file.meta_ref().num_row_groups {
@@ -269,7 +270,7 @@ impl RangeMeta {
         }
     }
 
-    fn push_seq_mem_ranges(memtables: &[MemtableRef], ranges: &mut Vec<RangeMeta>) {
+    fn push_seq_mem_ranges(memtables: &[MemRangeBuilder], ranges: &mut Vec<RangeMeta>) {
         // For non append-only mode, each range only contains one memtable by default.
         for (i, memtable) in memtables.iter().enumerate() {
             let stats = memtable.stats();
@@ -420,28 +421,37 @@ impl FileRangeBuilder {
 /// Builder to create mem ranges.
 pub(crate) struct MemRangeBuilder {
     /// Ranges of a memtable.
-    row_groups: BTreeMap<usize, MemtableRange>,
+    ranges: MemtableRanges,
 }
 
 impl MemRangeBuilder {
     /// Builds a mem range builder from row groups.
-    pub(crate) fn new(row_groups: BTreeMap<usize, MemtableRange>) -> Self {
-        Self { row_groups }
+    pub(crate) fn new(ranges: MemtableRanges) -> Self {
+        Self { ranges }
     }
 
     /// Builds mem ranges to read in the memtable.
     /// Negative `row_group_index` indicates all row groups.
-    fn build_ranges(&self, row_group_index: i64, ranges: &mut SmallVec<[MemtableRange; 2]>) {
+    pub(crate) fn build_ranges(
+        &self,
+        row_group_index: i64,
+        ranges: &mut SmallVec<[MemtableRange; 2]>,
+    ) {
         if row_group_index >= 0 {
             let row_group_index = row_group_index as usize;
             // Scans one row group.
-            let Some(range) = self.row_groups.get(&row_group_index) else {
+            let Some(range) = self.ranges.ranges.get(&row_group_index) else {
                 return;
             };
             ranges.push(range.clone());
         } else {
-            ranges.extend(self.row_groups.values().cloned());
+            ranges.extend(self.ranges.ranges.values().cloned());
         }
+    }
+
+    /// Returns the statistics of the memtable.
+    pub(crate) fn stats(&self) -> &MemtableStats {
+        &self.ranges.stats
     }
 }
 
@@ -450,18 +460,15 @@ impl MemRangeBuilder {
 /// the list to different streams in the same partition.
 pub(crate) struct RangeBuilderList {
     num_memtables: usize,
-    mem_builders: Mutex<Vec<Option<MemRangeBuilder>>>,
     file_builders: Mutex<Vec<Option<Arc<FileRangeBuilder>>>>,
 }
 
 impl RangeBuilderList {
     /// Creates a new [ReaderBuilderList] with the given number of memtables and files.
     pub(crate) fn new(num_memtables: usize, num_files: usize) -> Self {
-        let mem_builders = (0..num_memtables).map(|_| None).collect();
         let file_builders = (0..num_files).map(|_| None).collect();
         Self {
             num_memtables,
-            mem_builders: Mutex::new(mem_builders),
             file_builders: Mutex::new(file_builders),
         }
     }
@@ -485,26 +492,6 @@ impl RangeBuilderList {
             }
         }
         Ok(ranges)
-    }
-
-    /// Builds mem ranges to read the row group at `index`.
-    pub(crate) fn build_mem_ranges(
-        &self,
-        input: &ScanInput,
-        index: RowGroupIndex,
-    ) -> SmallVec<[MemtableRange; 2]> {
-        let mut ranges = SmallVec::new();
-        let mut mem_builders = self.mem_builders.lock().unwrap();
-        match &mut mem_builders[index.index] {
-            Some(builder) => builder.build_ranges(index.row_group_index, &mut ranges),
-            None => {
-                let builder = input.prune_memtable(index.index);
-                builder.build_ranges(index.row_group_index, &mut ranges);
-                mem_builders[index.index] = Some(builder);
-            }
-        }
-
-        ranges
     }
 
     fn get_file_builder(&self, index: usize) -> Option<Arc<FileRangeBuilder>> {

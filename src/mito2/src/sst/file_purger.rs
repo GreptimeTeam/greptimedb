@@ -185,7 +185,7 @@ mod tests {
 
         scheduler.stop(true).await.unwrap();
 
-        assert!(!object_store.is_exist(&path).await.unwrap());
+        assert!(!object_store.exists(&path).await.unwrap());
     }
 
     #[tokio::test]
@@ -247,7 +247,7 @@ mod tests {
 
         scheduler.stop(true).await.unwrap();
 
-        assert!(!object_store.is_exist(&path).await.unwrap());
-        assert!(!object_store.is_exist(&index_path).await.unwrap());
+        assert!(!object_store.exists(&path).await.unwrap());
+        assert!(!object_store.exists(&index_path).await.unwrap());
     }
 }

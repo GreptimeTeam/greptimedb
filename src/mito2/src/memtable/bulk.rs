@@ -14,7 +14,6 @@
 
 //! Memtable implementation for bulk load
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use store_api::metadata::RegionMetadataRef;
@@ -25,7 +24,7 @@ use crate::error::Result;
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::{
-    BoxedBatchIterator, KeyValues, Memtable, MemtableId, MemtableRange, MemtableRef, MemtableStats,
+    BoxedBatchIterator, KeyValues, Memtable, MemtableId, MemtableRanges, MemtableRef, MemtableStats,
 };
 
 #[allow(unused)]
@@ -68,7 +67,7 @@ impl Memtable for BulkMemtable {
         &self,
         _projection: Option<&[ColumnId]>,
         _predicate: Option<Predicate>,
-    ) -> BTreeMap<usize, MemtableRange> {
+    ) -> MemtableRanges {
         todo!()
     }
 

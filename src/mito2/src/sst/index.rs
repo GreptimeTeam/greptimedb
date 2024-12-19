@@ -18,7 +18,7 @@ pub(crate) mod intermediate;
 pub(crate) mod inverted_index;
 pub(crate) mod puffin_manager;
 mod statistics;
-mod store;
+pub(crate) mod store;
 
 use std::num::NonZeroUsize;
 

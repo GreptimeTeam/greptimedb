@@ -229,6 +229,29 @@ async fn create_logical_table_and_insert_values(
     Ok(())
 }
 
+async fn wait_for_migration(ctx: &FuzzContext, migration: &Migration, procedure_id: &str) {
+    info!("Waits for migration: {migration:?}");
+    let region_id = migration.region_id.as_u64();
+    wait_condition_fn(
+        Duration::from_secs(120),
+        || {
+            let greptime = ctx.greptime.clone();
+            let procedure_id = procedure_id.to_string();
+            Box::pin(async move {
+                let output = procedure_state(&greptime, &procedure_id).await;
+                info!("Checking procedure: {procedure_id}, output: {output}");
+                (fetch_partition(&greptime, region_id).await.unwrap(), output)
+            })
+        },
+        |(partition, output)| {
+            info!("Region: {region_id},  datanode: {}", partition.datanode_id);
+            partition.datanode_id == migration.to_peer && output.contains("Done")
+        },
+        Duration::from_secs(1),
+    )
+    .await;
+}
+
 async fn execute_migration(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     let mut rng = ChaCha20Rng::seed_from_u64(input.seed);
     // Creates a physical table.
@@ -297,28 +320,7 @@ async fn execute_migration(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     }
     info!("Excepted new region distribution: {new_distribution:?}");
     for (migration, procedure_id) in migrations.clone().into_iter().zip(procedure_ids) {
-        info!("Waits for migration: {migration:?}");
-        let region_id = migration.region_id.as_u64();
-        wait_condition_fn(
-            Duration::from_secs(120),
-            || {
-                let greptime = ctx.greptime.clone();
-                let procedure_id = procedure_id.to_string();
-                Box::pin(async move {
-                    {
-                        let output = procedure_state(&greptime, &procedure_id).await;
-                        info!("Checking procedure: {procedure_id}, output: {output}");
-                        fetch_partition(&greptime, region_id).await.unwrap()
-                    }
-                })
-            },
-            |partition| {
-                info!("Region: {region_id},  datanode: {}", partition.datanode_id);
-                partition.datanode_id == migration.to_peer
-            },
-            Duration::from_secs(1),
-        )
-        .await;
+        wait_for_migration(&ctx, &migration, &procedure_id).await;
     }
 
     // Validates value rows
@@ -388,29 +390,8 @@ async fn execute_migration(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         procedure_ids.push(procedure_id);
     }
     info!("Excepted new region distribution: {new_distribution:?}");
-    for (migration, procedure_id) in migrations.into_iter().zip(procedure_ids) {
-        info!("Waits for migration: {migration:?}");
-        let region_id = migration.region_id.as_u64();
-        wait_condition_fn(
-            Duration::from_secs(120),
-            || {
-                let greptime = ctx.greptime.clone();
-                let procedure_id = procedure_id.to_string();
-                Box::pin(async move {
-                    {
-                        let output = procedure_state(&greptime, &procedure_id).await;
-                        info!("Checking procedure: {procedure_id}, output: {output}");
-                        fetch_partition(&greptime, region_id).await.unwrap()
-                    }
-                })
-            },
-            |partition| {
-                info!("Region: {region_id},  datanode: {}", partition.datanode_id);
-                partition.datanode_id == migration.to_peer
-            },
-            Duration::from_secs(1),
-        )
-        .await;
+    for (migration, procedure_id) in migrations.clone().into_iter().zip(procedure_ids) {
+        wait_for_migration(&ctx, &migration, &procedure_id).await;
     }
 
     // Creates more logical tables and inserts values

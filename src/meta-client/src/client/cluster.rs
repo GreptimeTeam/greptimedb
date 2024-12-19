@@ -40,8 +40,8 @@ use tonic::Status;
 use crate::client::ask_leader::AskLeader;
 use crate::client::{util, Id};
 use crate::error::{
-    ConvertMetaResponseSnafu, CreateChannelSnafu, Error, IllegalGrpcClientStateSnafu, Result,
-    RetryTimesExceededSnafu,
+    ConvertMetaResponseSnafu, CreateChannelSnafu, Error, IllegalGrpcClientStateSnafu,
+    ReadOnlyKvBackendSnafu, Result, RetryTimesExceededSnafu,
 };
 
 #[derive(Clone, Debug)]
@@ -306,5 +306,77 @@ impl Inner {
         )
         .await
         .map(|res| (res.leader, res.followers))
+    }
+}
+
+/// A client for the cluster info. Read only and corresponding to
+/// `in_memory` kvbackend in the meta-srv.
+#[derive(Clone, Debug)]
+pub struct ClusterKvBackend {
+    inner: Arc<Client>,
+}
+
+impl ClusterKvBackend {
+    pub fn new(client: Arc<Client>) -> Self {
+        Self { inner: client }
+    }
+
+    fn unimpl(&self) -> common_meta::error::Error {
+        let ret: common_meta::error::Result<()> = ReadOnlyKvBackendSnafu {
+            name: self.name().to_string(),
+        }
+        .fail()
+        .map_err(BoxedError::new)
+        .context(common_meta::error::ExternalSnafu);
+        ret.unwrap_err()
+    }
+}
+
+impl TxnService for ClusterKvBackend {
+    type Error = common_meta::error::Error;
+}
+
+#[async_trait::async_trait]
+impl KvBackend for ClusterKvBackend {
+    fn name(&self) -> &str {
+        "ClusterKvBackend"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    async fn range(&self, req: RangeRequest) -> common_meta::error::Result<RangeResponse> {
+        self.inner
+            .range(req)
+            .await
+            .map_err(BoxedError::new)
+            .context(common_meta::error::ExternalSnafu)
+    }
+
+    async fn batch_get(&self, _: BatchGetRequest) -> common_meta::error::Result<BatchGetResponse> {
+        Err(self.unimpl())
+    }
+
+    async fn put(&self, _: PutRequest) -> common_meta::error::Result<PutResponse> {
+        Err(self.unimpl())
+    }
+
+    async fn batch_put(&self, _: BatchPutRequest) -> common_meta::error::Result<BatchPutResponse> {
+        Err(self.unimpl())
+    }
+
+    async fn delete_range(
+        &self,
+        _: DeleteRangeRequest,
+    ) -> common_meta::error::Result<DeleteRangeResponse> {
+        Err(self.unimpl())
+    }
+
+    async fn batch_delete(
+        &self,
+        _: BatchDeleteRequest,
+    ) -> common_meta::error::Result<BatchDeleteResponse> {
+        Err(self.unimpl())
     }
 }

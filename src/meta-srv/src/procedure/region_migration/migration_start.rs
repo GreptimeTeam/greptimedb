@@ -21,11 +21,11 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
-use super::migration_abort::RegionMigrationAbort;
-use super::migration_end::RegionMigrationEnd;
-use super::open_candidate_region::OpenCandidateRegion;
-use super::update_metadata::UpdateMetadata;
 use crate::error::{self, Result};
+use crate::procedure::region_migration::migration_abort::RegionMigrationAbort;
+use crate::procedure::region_migration::migration_end::RegionMigrationEnd;
+use crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion;
+use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 use crate::procedure::region_migration::{Context, State};
 
 /// The behaviors:

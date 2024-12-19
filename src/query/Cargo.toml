@@ -67,13 +67,11 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-approx_eq = "0.1"
 arrow.workspace = true
 catalog = { workspace = true, features = ["testing"] }
 common-macro.workspace = true
 common-query = { workspace = true, features = ["testing"] }
 fastrand = "2.0"
-format_num = "0.1"
 num = "0.4"
 num-traits = "0.2"
 paste = "1.0"
@@ -83,8 +81,6 @@ serde.workspace = true
 serde_json.workspace = true
 session = { workspace = true, features = ["testing"] }
 statrs = "0.16"
-stats-cli = "3.0"
 store-api.workspace = true
-streaming-stats = "0.2"
 table = { workspace = true, features = ["testing"] }
 tokio-stream.workspace = true

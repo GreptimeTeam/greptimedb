@@ -16,8 +16,8 @@
 
 use std::sync::Arc;
 
-use common_telemetry::info;
 use common_telemetry::tracing::warn;
+use common_telemetry::{debug, info};
 use snafu::ensure;
 use store_api::logstore::LogStore;
 use store_api::region_engine::RegionRole;
@@ -40,6 +40,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
 
         if region.is_writable() {
+            debug!("Region {region_id} is writable, skip catchup");
             return Ok(0);
         }
         // Note: Currently, We protect the split brain by ensuring the mutable table is empty.

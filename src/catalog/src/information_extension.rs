@@ -17,6 +17,7 @@ use common_error::ext::BoxedError;
 use common_meta::cluster::{ClusterInfo, NodeInfo};
 use common_meta::datanode::RegionStat;
 use common_meta::ddl::{ExecutorContext, ProcedureExecutor};
+use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::rpc::procedure;
 use common_procedure::{ProcedureInfo, ProcedureState};
 use meta_client::MetaClientRef;
@@ -88,5 +89,13 @@ impl InformationExtension for DistributedInformationExtension {
             .await
             .map_err(BoxedError::new)
             .context(error::ListRegionStatsSnafu)
+    }
+
+    async fn flow_stats(&self) -> std::result::Result<Option<FlowStat>, Self::Error> {
+        self.meta_client
+            .list_flow_stats()
+            .await
+            .map_err(BoxedError::new)
+            .context(crate::error::ListFlowStatsSnafu)
     }
 }

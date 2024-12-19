@@ -37,9 +37,9 @@ const PROCESSORS: &str = "processors";
 const TRANSFORM: &str = "transform";
 const TRANSFORMS: &str = "transforms";
 
-pub enum Content {
-    Json(String),
-    Yaml(String),
+pub enum Content<'a> {
+    Json(&'a str),
+    Yaml(&'a str),
 }
 
 pub fn parse<T>(input: &Content) -> Result<Pipeline<T>>
@@ -379,8 +379,7 @@ transform:
   - field: field2
     type: uint32
 "#;
-        let pipeline: Pipeline<GreptimeTransformer> =
-            parse(&Content::Yaml(pipeline_yaml.into())).unwrap();
+        let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_yaml)).unwrap();
         let mut payload = pipeline.init_intermediate_state();
         pipeline.prepare(input_value, &mut payload).unwrap();
         assert_eq!(&["my_field"].to_vec(), pipeline.required_keys());
@@ -432,8 +431,7 @@ transform:
   - field: ts
     type: timestamp, ns
     index: time"#;
-        let pipeline: Pipeline<GreptimeTransformer> =
-            parse(&Content::Yaml(pipeline_str.into())).unwrap();
+        let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_str)).unwrap();
         let mut payload = pipeline.init_intermediate_state();
         pipeline
             .prepare(serde_json::Value::String(message), &mut payload)
@@ -509,8 +507,7 @@ transform:
     type: uint32
 "#;
 
-        let pipeline: Pipeline<GreptimeTransformer> =
-            parse(&Content::Yaml(pipeline_yaml.into())).unwrap();
+        let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_yaml)).unwrap();
         let mut payload = pipeline.init_intermediate_state();
         pipeline.prepare(input_value, &mut payload).unwrap();
         assert_eq!(&["my_field"].to_vec(), pipeline.required_keys());
@@ -554,8 +551,7 @@ transform:
     index: time
 "#;
 
-        let pipeline: Pipeline<GreptimeTransformer> =
-            parse(&Content::Yaml(pipeline_yaml.into())).unwrap();
+        let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_yaml)).unwrap();
         let schema = pipeline.schemas().clone();
         let mut result = pipeline.init_intermediate_state();
         pipeline.prepare(input_value, &mut result).unwrap();

@@ -14,7 +14,7 @@
 
 //! Source and Sink for the dataflow
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 
 use common_telemetry::{debug, trace};
 use hydroflow::scheduled::graph_ext::GraphExt;
@@ -28,7 +28,7 @@ use crate::compute::types::{Arranged, Collection, CollectionBundle, Toff};
 use crate::error::{Error, PlanSnafu};
 use crate::expr::error::InternalSnafu;
 use crate::expr::{Batch, EvalError};
-use crate::repr::{DiffRow, Row, BROADCAST_CAP};
+use crate::repr::{DiffRow, Row};
 
 #[allow(clippy::mutable_key_type)]
 impl Context<'_, '_> {
@@ -241,45 +241,5 @@ impl Context<'_, '_> {
                 }
             },
         );
-    }
-
-    /// Render a sink which send updates to broadcast channel, have internal buffer in case broadcast channel is full
-    pub fn render_sink(&mut self, bundle: CollectionBundle, sender: broadcast::Sender<DiffRow>) {
-        let CollectionBundle {
-            collection,
-            arranged: _,
-        } = bundle;
-        let mut buf = VecDeque::with_capacity(1000);
-
-        let schd = self.compute_state.get_scheduler();
-        let inner_schd = schd.clone();
-        let now = self.compute_state.current_time_ref();
-
-        let sink = self
-            .df
-            .add_subgraph_sink("Sink", collection.into_inner(), move |_ctx, recv| {
-                let data = recv.take_inner();
-                buf.extend(data.into_iter().flat_map(|i| i.into_iter()));
-                if sender.len() >= BROADCAST_CAP {
-                    return;
-                } else {
-                    while let Some(row) = buf.pop_front() {
-                        // if the sender is full, stop sending
-                        if sender.len() >= BROADCAST_CAP {
-                            break;
-                        }
-                        // TODO(discord9): handling tokio broadcast error
-                        let _ = sender.send(row);
-                    }
-                }
-
-                // if buffer is not empty, schedule the next run at next tick
-                // so the buffer can be drained as soon as possible
-                if !buf.is_empty() {
-                    inner_schd.schedule_at(*now.borrow() + 1);
-                }
-            });
-
-        schd.set_cur_subgraph(sink);
     }
 }

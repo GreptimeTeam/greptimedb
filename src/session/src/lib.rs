@@ -97,10 +97,6 @@ impl Session {
         &self.conn_info
     }
 
-    pub fn mut_conn_info(&mut self) -> &mut ConnInfo {
-        &mut self.conn_info
-    }
-
     pub fn timezone(&self) -> Timezone {
         self.mutable_inner.read().unwrap().timezone.clone()
     }

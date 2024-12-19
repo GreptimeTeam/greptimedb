@@ -25,7 +25,7 @@ use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector
 use crate::error::{Error, PlanSnafu};
 use crate::expr::{Batch, EvalError, MapFilterProject, MfpPlan, ScalarExpr};
 use crate::plan::TypedPlan;
-use crate::repr::{self, DiffRow, KeyValDiffRow, Row};
+use crate::repr::{self, DiffRow, KeyValDiffRow, RelationType, Row};
 use crate::utils::ArrangeHandler;
 
 impl Context<'_, '_> {
@@ -34,6 +34,7 @@ impl Context<'_, '_> {
         &mut self,
         input: Box<TypedPlan>,
         mfp: MapFilterProject,
+        _output_type: &RelationType,
     ) -> Result<CollectionBundle<Batch>, Error> {
         let input = self.render_plan_batch(*input)?;
 

@@ -18,10 +18,8 @@
 mod join;
 mod reduce;
 
-use std::collections::BTreeSet;
-
 use crate::error::Error;
-use crate::expr::{GlobalId, Id, LocalId, MapFilterProject, SafeMfpPlan, TypedExpr};
+use crate::expr::{Id, LocalId, MapFilterProject, SafeMfpPlan, TypedExpr};
 use crate::plan::join::JoinPlan;
 pub(crate) use crate::plan::reduce::{AccumulablePlan, AggrWithIndex, KeyValPlan, ReducePlan};
 use crate::repr::{DiffRow, RelationDesc};
@@ -184,48 +182,6 @@ pub enum Plan {
         /// Whether to consolidate the output, e.g., cancel negated records.
         consolidate_output: bool,
     },
-}
-
-impl Plan {
-    /// Find all the used collection in the plan
-    pub fn find_used_collection(&self) -> BTreeSet<GlobalId> {
-        fn recur_find_use(plan: &Plan, used: &mut BTreeSet<GlobalId>) {
-            match plan {
-                Plan::Get { id } => {
-                    match id {
-                        Id::Local(_) => (),
-                        Id::Global(g) => {
-                            used.insert(*g);
-                        }
-                    };
-                }
-                Plan::Let { value, body, .. } => {
-                    recur_find_use(&value.plan, used);
-                    recur_find_use(&body.plan, used);
-                }
-                Plan::Mfp { input, .. } => {
-                    recur_find_use(&input.plan, used);
-                }
-                Plan::Reduce { input, .. } => {
-                    recur_find_use(&input.plan, used);
-                }
-                Plan::Join { inputs, .. } => {
-                    for input in inputs {
-                        recur_find_use(&input.plan, used);
-                    }
-                }
-                Plan::Union { inputs, .. } => {
-                    for input in inputs {
-                        recur_find_use(&input.plan, used);
-                    }
-                }
-                _ => {}
-            }
-        }
-        let mut ret = Default::default();
-        recur_find_use(self, &mut ret);
-        ret
-    }
 }
 
 impl Plan {

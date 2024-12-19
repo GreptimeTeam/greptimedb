@@ -63,10 +63,6 @@ impl Instance {
         }
     }
 
-    pub fn flownode_mut(&mut self) -> &mut FlownodeInstance {
-        &mut self.flownode
-    }
-
     pub fn flownode(&self) -> &FlownodeInstance {
         &self.flownode
     }

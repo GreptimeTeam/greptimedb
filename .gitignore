@@ -47,6 +47,10 @@ benchmarks/data
 
 venv/
 
-# Fuzz tests 
+# Fuzz tests
 tests-fuzz/artifacts/
 tests-fuzz/corpus/
+
+# Nix
+.direnv
+.envrc

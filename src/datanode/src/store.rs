@@ -32,7 +32,7 @@ use object_store::{Access, Error, HttpClient, ObjectStore, ObjectStoreBuilder, O
 use snafu::prelude::*;
 
 use crate::config::{HttpClientConfig, ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
-use crate::error::{self, CreateDirSnafu, Result};
+use crate::error::{self, BuildHttpClientSnafu, CreateDirSnafu, Result};
 
 pub(crate) async fn new_raw_object_store(
     store: &ObjectStoreConfig,
@@ -236,7 +236,8 @@ pub(crate) fn build_http_client(config: &HttpClientConfig) -> Result<HttpClient>
         builder.timeout(config.timeout)
     };
 
-    HttpClient::build(http_builder).context(error::InitBackendSnafu)
+    let client = http_builder.build().context(BuildHttpClientSnafu)?;
+    Ok(HttpClient::with(client))
 }
 struct PrintDetailedError;
 

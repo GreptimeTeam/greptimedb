@@ -14,11 +14,12 @@
 
 use std::fmt::Display;
 
+use serde::Serialize;
 use sqlparser::ast::ObjectName;
 use sqlparser_derive::{Visit, VisitMut};
 
 /// DROP TABLE statement.
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct DropTable {
     table_names: Vec<ObjectName>,
 
@@ -62,7 +63,7 @@ impl Display for DropTable {
 }
 
 /// DROP DATABASE statement.
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct DropDatabase {
     name: ObjectName,
     /// drop table if exists
@@ -99,7 +100,7 @@ impl Display for DropDatabase {
 }
 
 /// DROP FLOW statement.
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct DropFlow {
     flow_name: ObjectName,
     /// drop flow if exists
@@ -138,7 +139,7 @@ impl Display for DropFlow {
 }
 
 /// `DROP VIEW` statement.
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct DropView {
     // The view name
     pub view_name: ObjectName,

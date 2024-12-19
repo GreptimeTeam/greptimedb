@@ -195,7 +195,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use crate::error::Error;
-    use crate::procedure::region_migration::migration_end::RegionMigrationEnd;
+    use crate::procedure::region_migration::close_downgraded_region::CloseDowngradedRegion;
     use crate::procedure::region_migration::test_util::{self, TestingEnv};
     use crate::procedure::region_migration::update_metadata::UpdateMetadata;
     use crate::procedure::region_migration::{ContextFactory, PersistentContext, State};
@@ -443,7 +443,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_next_migration_end_state() {
+    async fn test_next_close_downgraded_region_state() {
         let mut state = Box::new(UpdateMetadata::Upgrade);
         let env = TestingEnv::new();
         let persistent_context = new_persistent_context();
@@ -471,7 +471,10 @@ mod tests {
 
         let (next, _) = state.next(&mut ctx).await.unwrap();
 
-        let _ = next.as_any().downcast_ref::<RegionMigrationEnd>().unwrap();
+        let _ = next
+            .as_any()
+            .downcast_ref::<CloseDowngradedRegion>()
+            .unwrap();
 
         let table_route = table_metadata_manager
             .table_route_manager()

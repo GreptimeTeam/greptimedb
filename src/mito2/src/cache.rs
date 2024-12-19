@@ -32,6 +32,7 @@ use moka::notification::RemovalCause;
 use moka::sync::Cache;
 use parquet::column::page::Page;
 use parquet::file::metadata::ParquetMetaData;
+use puffin::puffin_manager::cache::{PuffinMetadataCache, PuffinMetadataCacheRef};
 use store_api::storage::{ConcreteDataType, RegionId, TimeSeriesRowSelector};
 
 use crate::cache::cache_size::parquet_meta_size;
@@ -68,6 +69,8 @@ pub struct CacheManager {
     write_cache: Option<WriteCacheRef>,
     /// Cache for inverted index.
     index_cache: Option<InvertedIndexCacheRef>,
+    /// Puffin metadata cache.
+    puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
     /// Cache for time series selectors.
     selector_result_cache: Option<SelectorResultCache>,
 }
@@ -217,6 +220,10 @@ impl CacheManager {
     pub(crate) fn index_cache(&self) -> Option<&InvertedIndexCacheRef> {
         self.index_cache.as_ref()
     }
+
+    pub(crate) fn puffin_metadata_cache(&self) -> Option<&PuffinMetadataCacheRef> {
+        self.puffin_metadata_cache.as_ref()
+    }
 }
 
 /// Increases selector cache miss metrics.
@@ -237,6 +244,8 @@ pub struct CacheManagerBuilder {
     page_cache_size: u64,
     index_metadata_size: u64,
     index_content_size: u64,
+    index_content_page_size: u64,
+    puffin_metadata_size: u64,
     write_cache: Option<WriteCacheRef>,
     selector_result_cache_size: u64,
 }
@@ -275,6 +284,18 @@ impl CacheManagerBuilder {
     /// Sets cache size for index content.
     pub fn index_content_size(mut self, bytes: u64) -> Self {
         self.index_content_size = bytes;
+        self
+    }
+
+    /// Sets page size for index content.
+    pub fn index_content_page_size(mut self, bytes: u64) -> Self {
+        self.index_content_page_size = bytes;
+        self
+    }
+
+    /// Sets cache size for puffin metadata.
+    pub fn puffin_metadata_size(mut self, bytes: u64) -> Self {
+        self.puffin_metadata_size = bytes;
         self
     }
 
@@ -338,8 +359,13 @@ impl CacheManagerBuilder {
                 })
                 .build()
         });
-        let inverted_index_cache =
-            InvertedIndexCache::new(self.index_metadata_size, self.index_content_size);
+        let inverted_index_cache = InvertedIndexCache::new(
+            self.index_metadata_size,
+            self.index_content_size,
+            self.index_content_page_size,
+        );
+        let puffin_metadata_cache =
+            PuffinMetadataCache::new(self.puffin_metadata_size, &CACHE_BYTES);
         let selector_result_cache = (self.selector_result_cache_size != 0).then(|| {
             Cache::builder()
                 .max_capacity(self.selector_result_cache_size)
@@ -361,6 +387,7 @@ impl CacheManagerBuilder {
             page_cache,
             write_cache: self.write_cache,
             index_cache: Some(Arc::new(inverted_index_cache)),
+            puffin_metadata_cache: Some(Arc::new(puffin_metadata_cache)),
             selector_result_cache,
         }
     }

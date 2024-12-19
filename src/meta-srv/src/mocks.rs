@@ -52,11 +52,6 @@ pub async fn mock_with_etcdstore(addr: &str) -> MockInfo {
     mock(Default::default(), kv_backend, None, None, None).await
 }
 
-pub async fn mock_with_memstore_and_selector(selector: SelectorRef) -> MockInfo {
-    let kv_backend = Arc::new(MemoryKvBackend::new());
-    mock(Default::default(), kv_backend, Some(selector), None, None).await
-}
-
 pub async fn mock(
     opts: MetasrvOptions,
     kv_backend: KvBackendRef,

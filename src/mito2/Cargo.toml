@@ -17,6 +17,7 @@ aquamarine.workspace = true
 async-channel = "1.9"
 async-stream.workspace = true
 async-trait = "0.1"
+bytemuck.workspace = true
 bytes.workspace = true
 common-base.workspace = true
 common-config.workspace = true
@@ -76,7 +77,6 @@ uuid.workspace = true
 [dev-dependencies]
 common-function.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
-common-procedure-test.workspace = true
 common-test-util.workspace = true
 criterion = "0.4"
 dotenv.workspace = true

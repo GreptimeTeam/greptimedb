@@ -92,6 +92,7 @@ mod timeout;
 
 pub(crate) use timeout::DynamicTimeoutLayer;
 
+mod hints;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_helpers;
 
@@ -638,10 +639,15 @@ impl HttpServer {
             router.clone()
         };
 
-        router = router.route(
-            "/health",
-            routing::get(handler::health).post(handler::health),
-        );
+        router = router
+            .route(
+                "/health",
+                routing::get(handler::health).post(handler::health),
+            )
+            .route(
+                "/ready",
+                routing::get(handler::health).post(handler::health),
+            );
 
         router = router.route("/status", routing::get(handler::status));
 
@@ -698,7 +704,8 @@ impl HttpServer {
                     .layer(middleware::from_fn_with_state(
                         AuthState::new(self.user_provider.clone()),
                         authorize::check_http_auth,
-                    )),
+                    ))
+                    .layer(middleware::from_fn(hints::extract_hints)),
             )
             // Handlers for debug, we don't expect a timeout.
             .nest(
@@ -750,6 +757,10 @@ impl HttpServer {
     fn route_sql<S>(api_state: ApiState) -> Router<S> {
         Router::new()
             .route("/sql", routing::get(handler::sql).post(handler::sql))
+            .route(
+                "/sql/parse",
+                routing::get(handler::sql_parse).post(handler::sql_parse),
+            )
             .route(
                 "/promql",
                 routing::get(handler::promql).post(handler::promql),

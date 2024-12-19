@@ -16,14 +16,15 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 
 use common_catalog::consts::FILE_ENGINE;
-use datatypes::schema::FulltextOptions;
+use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use itertools::Itertools;
+use serde::Serialize;
 use snafu::ResultExt;
 use sqlparser::ast::{ColumnOptionDef, DataType, Expr, Query};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, Value as SqlValue};
-use crate::error::{Result, SetFulltextOptionSnafu};
+use crate::error::{Result, SetFulltextOptionSnafu, SetSkippingIndexOptionSnafu};
 use crate::statements::statement::Statement;
 use crate::statements::OptionMap;
 
@@ -58,7 +59,7 @@ fn format_table_constraint(constraints: &[TableConstraint]) -> String {
 }
 
 /// Table constraint for create table statement.
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub enum TableConstraint {
     /// Primary key constraint.
     PrimaryKey { columns: Vec<Ident> },
@@ -84,7 +85,7 @@ impl Display for TableConstraint {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub struct CreateTable {
     /// Create if not exists
     pub if_not_exists: bool,
@@ -100,7 +101,7 @@ pub struct CreateTable {
 }
 
 /// Column definition in `CREATE TABLE` statement.
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub struct Column {
     /// `ColumnDef` from `sqlparser::ast`
     pub column_def: ColumnDef,
@@ -109,12 +110,14 @@ pub struct Column {
 }
 
 /// Column extensions for greptimedb dialect.
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Default)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Default, Serialize)]
 pub struct ColumnExtensions {
     /// Fulltext options.
     pub fulltext_options: Option<OptionMap>,
     /// Vector options.
     pub vector_options: Option<OptionMap>,
+    /// Skipping index options.
+    pub skipping_index_options: Option<OptionMap>,
 }
 
 impl Column {
@@ -157,6 +160,15 @@ impl Display for Column {
                 write!(f, " FULLTEXT")?;
             }
         }
+
+        if let Some(skipping_index_options) = &self.extensions.skipping_index_options {
+            if !skipping_index_options.is_empty() {
+                let options = skipping_index_options.kv_pairs();
+                write!(f, " SKIPPING INDEX WITH({})", format_list_comma!(options))?;
+            } else {
+                write!(f, " SKIPPING INDEX")?;
+            }
+        }
         Ok(())
     }
 }
@@ -170,9 +182,20 @@ impl ColumnExtensions {
         let options: HashMap<String, String> = options.clone().into_map();
         Ok(Some(options.try_into().context(SetFulltextOptionSnafu)?))
     }
+
+    pub fn build_skipping_index_options(&self) -> Result<Option<SkippingIndexOptions>> {
+        let Some(options) = self.skipping_index_options.as_ref() else {
+            return Ok(None);
+        };
+
+        let options: HashMap<String, String> = options.clone().into_map();
+        Ok(Some(
+            options.try_into().context(SetSkippingIndexOptionSnafu)?,
+        ))
+    }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub struct Partitions {
     pub column_list: Vec<Ident>,
     pub exprs: Vec<Expr>,
@@ -244,7 +267,7 @@ impl Display for CreateTable {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub struct CreateDatabase {
     pub name: ObjectName,
     /// Create if not exists
@@ -278,7 +301,7 @@ impl Display for CreateDatabase {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub struct CreateExternalTable {
     /// Table name
     pub name: ObjectName,
@@ -309,7 +332,7 @@ impl Display for CreateExternalTable {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub struct CreateTableLike {
     /// Table name
     pub table_name: ObjectName,
@@ -325,7 +348,7 @@ impl Display for CreateTableLike {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub struct CreateFlow {
     /// Flow name
     pub flow_name: ObjectName,
@@ -367,7 +390,7 @@ impl Display for CreateFlow {
 }
 
 /// Create SQL view statement.
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub struct CreateView {
     /// View name
     pub name: ObjectName,

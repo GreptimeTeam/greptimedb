@@ -45,7 +45,7 @@ use crate::memtable::key_values::KeyValue;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, BulkPart, IterBuilder, KeyValues, Memtable, MemtableBuilder,
-    MemtableId, MemtableRange, MemtableRangeContext, MemtableRef, MemtableStats,
+    MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
 };
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::dedup::LastNonNullIter;
@@ -250,7 +250,7 @@ impl Memtable for TimeSeriesMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-    ) -> BTreeMap<usize, MemtableRange> {
+    ) -> MemtableRanges {
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
         } else {
@@ -268,7 +268,10 @@ impl Memtable for TimeSeriesMemtable {
         });
         let context = Arc::new(MemtableRangeContext::new(self.id, builder));
 
-        [(0, MemtableRange::new(context))].into()
+        MemtableRanges {
+            ranges: [(0, MemtableRange::new(context))].into(),
+            stats: self.stats(),
+        }
     }
 
     fn is_empty(&self) -> bool {

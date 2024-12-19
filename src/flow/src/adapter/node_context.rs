@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_telemetry::trace;
+use datatypes::prelude::ConcreteDataType;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
@@ -131,7 +132,11 @@ impl SourceSender {
     }
 
     /// return number of rows it actual send(including what's in the buffer)
-    pub async fn send_rows(&self, rows: Vec<DiffRow>) -> Result<usize, Error> {
+    pub async fn send_rows(
+        &self,
+        rows: Vec<DiffRow>,
+        batch_datatypes: &[ConcreteDataType],
+    ) -> Result<usize, Error> {
         METRIC_FLOW_INPUT_BUF_SIZE.add(rows.len() as _);
         while self.send_buf_row_cnt.load(Ordering::SeqCst) >= BATCH_SIZE * 4 {
             tokio::task::yield_now().await;
@@ -139,8 +144,11 @@ impl SourceSender {
         // row count metrics is approx so relaxed order is ok
         self.send_buf_row_cnt
             .fetch_add(rows.len(), Ordering::SeqCst);
-        let batch = Batch::try_from_rows(rows.into_iter().map(|(row, _, _)| row).collect())
-            .context(EvalSnafu)?;
+        let batch = Batch::try_from_rows_with_types(
+            rows.into_iter().map(|(row, _, _)| row).collect(),
+            batch_datatypes,
+        )
+        .context(EvalSnafu)?;
         common_telemetry::trace!("Send one batch to worker with {} rows", batch.row_count());
         self.send_buf_tx.send(batch).await.map_err(|e| {
             crate::error::InternalSnafu {
@@ -157,14 +165,19 @@ impl FlownodeContext {
     /// return number of rows it actual send(including what's in the buffer)
     ///
     /// TODO(discord9): make this concurrent
-    pub async fn send(&self, table_id: TableId, rows: Vec<DiffRow>) -> Result<usize, Error> {
+    pub async fn send(
+        &self,
+        table_id: TableId,
+        rows: Vec<DiffRow>,
+        batch_datatypes: &[ConcreteDataType],
+    ) -> Result<usize, Error> {
         let sender = self
             .source_sender
             .get(&table_id)
             .with_context(|| TableNotFoundSnafu {
                 name: table_id.to_string(),
             })?;
-        sender.send_rows(rows).await
+        sender.send_rows(rows, batch_datatypes).await
     }
 
     /// flush all sender's buf

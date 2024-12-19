@@ -26,14 +26,6 @@ use crate::inverted_index::search::predicate::Predicate;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Failed to seek"))]
-    Seek {
-        #[snafu(source)]
-        error: IoError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to read"))]
     Read {
         #[snafu(source)]
@@ -72,6 +64,18 @@ pub enum Error {
     UnexpectedBlobSize {
         min_blob_size: u64,
         actual_blob_size: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Blob size too small"))]
+    BlobSizeTooSmall {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid footer payload size"))]
+    InvalidFooterPayloadSize {
         #[snafu(implicit)]
         location: Location,
     },
@@ -215,8 +219,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            Seek { .. }
-            | Read { .. }
+            Read { .. }
             | Write { .. }
             | Flush { .. }
             | Close { .. }
@@ -229,7 +232,9 @@ impl ErrorExt for Error {
             | KeysApplierUnexpectedPredicates { .. }
             | CommonIo { .. }
             | UnknownIntermediateCodecMagic { .. }
-            | FstCompile { .. } => StatusCode::Unexpected,
+            | FstCompile { .. }
+            | InvalidFooterPayloadSize { .. }
+            | BlobSizeTooSmall { .. } => StatusCode::Unexpected,
 
             ParseRegex { .. }
             | ParseDFA { .. }
