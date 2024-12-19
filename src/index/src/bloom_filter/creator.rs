@@ -18,12 +18,8 @@ use fastbloom::BloomFilter;
 use futures::{AsyncWrite, AsyncWriteExt};
 use snafu::ResultExt;
 
-use super::error::{IoSnafu, SerdeJsonSnafu};
-use crate::bloom_filter::error::Result;
-use crate::bloom_filter::{BloomFilterMeta, BloomFilterSegmentLocation, Bytes};
-
-/// The seed used for the Bloom filter.
-const SEED: u128 = 42;
+use crate::bloom_filter::error::{IoSnafu, Result, SerdeJsonSnafu};
+use crate::bloom_filter::{BloomFilterMeta, BloomFilterSegmentLocation, Bytes, SEED};
 
 /// The false positive rate of the Bloom filter.
 const FALSE_POSITIVE_RATE: f64 = 0.01;
