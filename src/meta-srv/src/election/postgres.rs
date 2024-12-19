@@ -760,3 +760,176 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+
+    use tokio_postgres::{Client, NoTls};
+
+    use super::*;
+    use crate::error::PostgresExecutionSnafu;
+
+    async fn create_postgres_client() -> Result<Client> {
+        let endpoint = env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
+        if endpoint.is_empty() {
+            return UnexpectedSnafu {
+                violated: "Postgres endpoint is empty".to_string(),
+            }
+            .fail();
+        }
+        let (client, connection) = tokio_postgres::connect(&endpoint, NoTls)
+            .await
+            .context(PostgresExecutionSnafu)?;
+        tokio::spawn(async move {
+            connection.await.context(PostgresExecutionSnafu).unwrap();
+        });
+        Ok(client)
+    }
+
+    #[tokio::test]
+    async fn test_postgres_crud() {
+        let client = create_postgres_client().await.unwrap();
+
+        let key = "test_key".to_string();
+        let value = "test_value".to_string();
+
+        let (tx, _) = broadcast::channel(100);
+        let pg_election = PgElection {
+            leader_value: "test_leader".to_string(),
+            client,
+            is_leader: AtomicBool::new(false),
+            leader_infancy: AtomicBool::new(true),
+            leader_watcher: tx,
+            store_key_prefix: "test_prefix".to_string(),
+            candidate_lease_ttl_secs: 10,
+        };
+
+        let res = pg_election
+            .put_value_with_lease(&key, &value, 10)
+            .await
+            .unwrap();
+        assert!(res);
+
+        let (value, _, _, prev) = pg_election
+            .get_value_with_lease(&key, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(value, value);
+
+        let prev = prev.unwrap();
+        pg_election
+            .update_value_with_lease(&key, &prev, &value)
+            .await
+            .unwrap();
+
+        let res = pg_election.delete_value(&key).await.unwrap();
+        assert!(res);
+
+        let res = pg_election.get_value_with_lease(&key, false).await.unwrap();
+        assert!(res.is_none());
+
+        for i in 0..10 {
+            let key = format!("test_key_{}", i);
+            let value = format!("test_value_{}", i);
+            pg_election
+                .put_value_with_lease(&key, &value, 10)
+                .await
+                .unwrap();
+        }
+
+        let key_prefix = "test_key".to_string();
+        let (res, _) = pg_election
+            .get_value_with_lease_by_prefix(&key_prefix)
+            .await
+            .unwrap();
+        assert_eq!(res.len(), 10);
+
+        for i in 0..10 {
+            let key = format!("test_key_{}", i);
+            let res = pg_election.delete_value(&key).await.unwrap();
+            assert!(res);
+        }
+
+        let (res, current) = pg_election
+            .get_value_with_lease_by_prefix(&key_prefix)
+            .await
+            .unwrap();
+        assert!(res.is_empty());
+        assert!(current == Timestamp::default());
+    }
+
+    async fn candidate(leader_value: String, candidate_lease_ttl_secs: u64) {
+        let client = create_postgres_client().await.unwrap();
+
+        let (tx, _) = broadcast::channel(100);
+        let pg_election = PgElection {
+            leader_value,
+            client,
+            is_leader: AtomicBool::new(false),
+            leader_infancy: AtomicBool::new(true),
+            leader_watcher: tx,
+            store_key_prefix: "test_prefix".to_string(),
+            candidate_lease_ttl_secs,
+        };
+
+        let node_info = MetasrvNodeInfo {
+            addr: "test_addr".to_string(),
+            version: "test_version".to_string(),
+            git_commit: "test_git_commit".to_string(),
+            start_time_ms: 0,
+        };
+        pg_election.register_candidate(&node_info).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_candidate_registration() {
+        let leader_value_prefix = "test_leader".to_string();
+        let candidate_lease_ttl_secs = 5;
+        let mut handles = vec![];
+        for i in 0..10 {
+            let leader_value = format!("{}{}", leader_value_prefix, i);
+            let handle = tokio::spawn(candidate(leader_value, candidate_lease_ttl_secs));
+            handles.push(handle);
+        }
+        // Wait for candidates to registrate themselves and renew their leases at least once.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        let client = create_postgres_client().await.unwrap();
+
+        let (tx, _) = broadcast::channel(100);
+        let leader_value = "test_leader".to_string();
+        let pg_election = PgElection {
+            leader_value,
+            client,
+            is_leader: AtomicBool::new(false),
+            leader_infancy: AtomicBool::new(true),
+            leader_watcher: tx,
+            store_key_prefix: "test_prefix".to_string(),
+            candidate_lease_ttl_secs,
+        };
+
+        let candidates = pg_election.all_candidates().await.unwrap();
+        assert_eq!(candidates.len(), 10);
+
+        for handle in handles {
+            handle.abort();
+        }
+
+        // Wait for the candidate leases to expire.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let candidates = pg_election.all_candidates().await.unwrap();
+        assert!(candidates.is_empty());
+
+        // Garbage collection
+        for i in 0..10 {
+            let key = format!(
+                "{}{}{}{}",
+                "test_prefix", CANDIDATES_ROOT, leader_value_prefix, i
+            );
+            let res = pg_election.delete_value(&key).await.unwrap();
+            assert!(res);
+        }
+    }
+}
