@@ -1585,7 +1585,11 @@ mod test {
 
                     if let Some(expected) = expected.get(&now) {
                         let batch = expected.iter().map(|v| Value::from(*v)).collect_vec();
-                        let batch = Batch::try_from_rows(vec![batch.into()]).unwrap();
+                        let batch = Batch::try_from_rows_with_types(
+                            vec![batch.into()],
+                            &[CDT::int64_datatype()],
+                        )
+                        .unwrap();
                         assert_eq!(res.first(), Some(&batch));
                     }
                 });

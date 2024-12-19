@@ -123,63 +123,6 @@ impl Batch {
         Ok(batch)
     }
 
-    /// Get batch from rows, will try best to determine data type
-    ///
-    /// for test purposes only
-    #[cfg(test)]
-    pub fn try_from_rows(rows: Vec<crate::repr::Row>) -> Result<Self, EvalError> {
-        if rows.is_empty() {
-            return Ok(Self::empty());
-        }
-        let len = rows.len();
-        let mut builder = rows
-            .first()
-            .unwrap()
-            .iter()
-            .enumerate()
-            .map(|(i, v)| {
-                let mut ty = None;
-                if v.data_type().is_null() {
-                    for row in rows.iter() {
-                        if let Some(t) = row.get(i)
-                            && !t.data_type().is_null()
-                        {
-                            ty = Some(t.data_type().clone());
-                            break;
-                        }
-                    }
-                }
-                // if all rows are null, use null type
-                let ty = ty.unwrap_or(datatypes::prelude::ConcreteDataType::null_datatype());
-
-                ty.create_mutable_vector(len)
-            })
-            .collect_vec();
-        for row in rows {
-            ensure!(
-                row.len() == builder.len(),
-                InvalidArgumentSnafu {
-                    reason: format!(
-                        "row length not match, expect {}, found {}",
-                        builder.len(),
-                        row.len()
-                    )
-                }
-            );
-            for (idx, value) in row.iter().enumerate() {
-                builder[idx]
-                    .try_push_value_ref(value.as_value_ref())
-                    .context(DataTypeSnafu {
-                        msg: "Failed to convert rows to columns",
-                    })?;
-            }
-        }
-
-        let columns = builder.into_iter().map(|mut b| b.to_vector()).collect_vec();
-        let batch = Self::try_new(columns, len)?;
-        Ok(batch)
-    }
-
     pub fn empty() -> Self {
         Self {
             batch: vec![],
