@@ -24,6 +24,7 @@ use table::metadata::TableId;
 use tokio::sync::mpsc::error::SendError;
 use tonic::codegen::http;
 
+use crate::election::LeaderChangeMessage;
 use crate::metasrv::SelectTarget;
 use crate::pubsub::Message;
 
@@ -718,6 +719,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to send leader change message"))]
+    SendLeaderChange {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: tokio::sync::broadcast::error::SendError<LeaderChangeMessage>,
+    },
 }
 
 impl Error {
@@ -760,6 +769,7 @@ impl ErrorExt for Error {
             | Error::StartGrpc { .. }
             | Error::NoEnoughAvailableNode { .. }
             | Error::PublishMessage { .. }
+            | Error::SendLeaderChange { .. }
             | Error::Join { .. }
             | Error::PeerUnavailable { .. }
             | Error::ExceededDeadline { .. }

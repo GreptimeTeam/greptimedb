@@ -282,12 +282,9 @@ impl Election for EtcdElection {
                 .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
             {
-                if let Err(e) = self
-                    .leader_watcher
+                self.leader_watcher
                     .send(LeaderChangeMessage::StepDown(Arc::new(leader.clone())))
-                {
-                    error!(e; "Failed to send leader change message");
-                }
+                    .context(error::SendLeaderChangeSnafu)?;
             }
         }
 
@@ -342,12 +339,9 @@ impl EtcdElection {
             {
                 self.infancy.store(true, Ordering::Relaxed);
 
-                if let Err(e) = self
-                    .leader_watcher
+                self.leader_watcher
                     .send(LeaderChangeMessage::Elected(Arc::new(leader)))
-                {
-                    error!(e; "Failed to send leader change message");
-                }
+                    .context(error::SendLeaderChangeSnafu)?;
             }
         }
 
