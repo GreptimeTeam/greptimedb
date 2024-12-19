@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod close_downgraded_region;
 pub(crate) mod downgrade_leader_region;
 pub(crate) mod manager;
 pub(crate) mod migration_abort;
@@ -43,6 +44,7 @@ use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status, StringKey};
+use common_telemetry::info;
 use manager::RegionMigrationProcedureGuard;
 pub use manager::{
     RegionMigrationManagerRef, RegionMigrationProcedureTask, RegionMigrationProcedureTracker,
@@ -91,7 +93,9 @@ impl PersistentContext {
         let lock_key = vec![
             CatalogLock::Read(&self.catalog).into(),
             SchemaLock::read(&self.catalog, &self.schema).into(),
-            TableLock::Read(region_id.table_id()).into(),
+            // The optimistic updating of table route is not working very well,
+            // so we need to use the write lock here.
+            TableLock::Write(region_id.table_id()).into(),
             RegionLock::Write(region_id).into(),
         ];
 
@@ -253,7 +257,7 @@ impl Context {
                 .await
                 .context(error::TableMetadataManagerSnafu)
                 .map_err(BoxedError::new)
-                .context(error::RetryLaterWithSourceSnafu {
+                .with_context(|_| error::RetryLaterWithSourceSnafu {
                     reason: format!("Failed to get TableRoute: {table_id}"),
                 })?
                 .context(error::TableRouteNotFoundSnafu { table_id })?;
@@ -317,7 +321,7 @@ impl Context {
                 .await
                 .context(error::TableMetadataManagerSnafu)
                 .map_err(BoxedError::new)
-                .context(error::RetryLaterWithSourceSnafu {
+                .with_context(|_| error::RetryLaterWithSourceSnafu {
                     reason: format!("Failed to get TableInfo: {table_id}"),
                 })?
                 .context(error::TableInfoNotFoundSnafu { table_id })?;
@@ -350,7 +354,7 @@ impl Context {
                 .await
                 .context(error::TableMetadataManagerSnafu)
                 .map_err(BoxedError::new)
-                .context(error::RetryLaterWithSourceSnafu {
+                .with_context(|_| error::RetryLaterWithSourceSnafu {
                     reason: format!("Failed to get DatanodeTable: ({datanode_id},{table_id})"),
                 })?
                 .context(error::DatanodeTableNotFoundSnafu {
@@ -468,12 +472,64 @@ impl RegionMigrationProcedure {
             _guard: guard,
         })
     }
+
+    async fn rollback_inner(&mut self) -> Result<()> {
+        let _timer = METRIC_META_REGION_MIGRATION_EXECUTE
+            .with_label_values(&["rollback"])
+            .start_timer();
+
+        let table_id = self.context.region_id().table_id();
+        let region_id = self.context.region_id();
+        self.context.remove_table_route_value();
+        let table_metadata_manager = self.context.table_metadata_manager.clone();
+        let table_route = self.context.get_table_route_value().await?;
+
+        // Safety: It must be a physical table route.
+        let downgraded = table_route
+            .region_routes()
+            .unwrap()
+            .iter()
+            .filter(|route| route.region.id == region_id)
+            .any(|route| route.is_leader_downgrading());
+
+        if downgraded {
+            info!("Rollbacking downgraded region leader table route, region: {region_id}");
+            table_metadata_manager
+                    .update_leader_region_status(table_id, table_route, |route| {
+                        if route.region.id == region_id {
+                            Some(None)
+                        } else {
+                            None
+                        }
+                    })
+                    .await
+                    .context(error::TableMetadataManagerSnafu)
+                    .map_err(BoxedError::new)
+                    .with_context(|_| error::RetryLaterWithSourceSnafu {
+                        reason: format!("Failed to update the table route during the rollback downgraded leader region: {region_id}"),
+                    })?;
+        }
+
+        self.context.register_failure_detectors().await;
+
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
 impl Procedure for RegionMigrationProcedure {
     fn type_name(&self) -> &str {
         Self::TYPE_NAME
+    }
+
+    async fn rollback(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<()> {
+        self.rollback_inner()
+            .await
+            .map_err(ProcedureError::external)
+    }
+
+    fn rollback_supported(&self) -> bool {
+        true
     }
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
@@ -701,6 +757,12 @@ mod tests {
                 Assertion::simple(assert_update_metadata_upgrade, assert_no_persist),
             ),
             // UpdateMetadata::Upgrade
+            Step::next(
+                "Should be the close downgraded region",
+                None,
+                Assertion::simple(assert_close_downgraded_region, assert_no_persist),
+            ),
+            // CloseDowngradedRegion
             Step::next(
                 "Should be the region migration end",
                 None,
@@ -1071,6 +1133,12 @@ mod tests {
                 Assertion::simple(assert_update_metadata_upgrade, assert_no_persist),
             ),
             // UpdateMetadata::Upgrade
+            Step::next(
+                "Should be the close downgraded region",
+                None,
+                Assertion::simple(assert_close_downgraded_region, assert_no_persist),
+            ),
+            // CloseDowngradedRegion
             Step::next(
                 "Should be the region migration end",
                 None,

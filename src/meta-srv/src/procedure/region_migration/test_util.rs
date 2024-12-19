@@ -44,19 +44,21 @@ use store_api::storage::RegionId;
 use table::metadata::RawTableInfo;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-use super::manager::RegionMigrationProcedureTracker;
-use super::migration_abort::RegionMigrationAbort;
-use super::upgrade_candidate_region::UpgradeCandidateRegion;
-use super::{Context, ContextFactory, DefaultContextFactory, State, VolatileContext};
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::error::{self, Error, Result};
 use crate::handler::{HeartbeatMailbox, Pusher, Pushers};
 use crate::metasrv::MetasrvInfo;
+use crate::procedure::region_migration::close_downgraded_region::CloseDowngradedRegion;
 use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
+use crate::procedure::region_migration::manager::RegionMigrationProcedureTracker;
+use crate::procedure::region_migration::migration_abort::RegionMigrationAbort;
 use crate::procedure::region_migration::migration_end::RegionMigrationEnd;
 use crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion;
 use crate::procedure::region_migration::update_metadata::UpdateMetadata;
-use crate::procedure::region_migration::PersistentContext;
+use crate::procedure::region_migration::upgrade_candidate_region::UpgradeCandidateRegion;
+use crate::procedure::region_migration::{
+    Context, ContextFactory, DefaultContextFactory, PersistentContext, State, VolatileContext,
+};
 use crate::service::mailbox::{Channel, MailboxRef};
 
 pub type MockHeartbeatReceiver = Receiver<std::result::Result<HeartbeatResponse, tonic::Status>>;
@@ -567,6 +569,14 @@ pub(crate) fn assert_update_metadata_rollback(next: &dyn State) {
 /// Asserts the [State] should be [RegionMigrationEnd].
 pub(crate) fn assert_region_migration_end(next: &dyn State) {
     let _ = next.as_any().downcast_ref::<RegionMigrationEnd>().unwrap();
+}
+
+/// Asserts the [State] should be [CloseDowngradedRegion].
+pub(crate) fn assert_close_downgraded_region(next: &dyn State) {
+    let _ = next
+        .as_any()
+        .downcast_ref::<CloseDowngradedRegion>()
+        .unwrap();
 }
 
 /// Asserts the [State] should be [RegionMigrationAbort].
