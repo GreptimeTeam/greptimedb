@@ -14,7 +14,6 @@
 
 //! Memtable test utilities.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
@@ -34,8 +33,8 @@ use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::data::{timestamp_array_to_i64_slice, DataBatch, DataBuffer};
 use crate::memtable::{
-    BoxedBatchIterator, BulkPart, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRange,
-    MemtableRanges, MemtableRef, MemtableStats,
+    BoxedBatchIterator, BulkPart, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRanges,
+    MemtableRef, MemtableStats,
 };
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 

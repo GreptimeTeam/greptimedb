@@ -168,8 +168,11 @@ impl TimePartitions {
         Ok(())
     }
 
-    /// Forks latest partition and updates the partition duration.
+    /// Forks latest partition and updates the partition duration if `part_duration` is Some.
     pub fn fork(&self, metadata: &RegionMetadataRef, part_duration: Option<Duration>) -> Self {
+        // Fall back to the existing partition duration.
+        let part_duration = part_duration.or(self.part_duration);
+
         let mut inner = self.inner.lock().unwrap();
         let latest_part = inner
             .parts
@@ -204,12 +207,13 @@ impl TimePartitions {
             memtable,
             time_range: new_time_range,
         };
+
         Self {
             inner: Mutex::new(PartitionsInner::with_partition(
                 new_part,
                 inner.next_memtable_id,
             )),
-            part_duration: self.part_duration,
+            part_duration,
             metadata: metadata.clone(),
             builder: self.builder.clone(),
         }
