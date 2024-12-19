@@ -110,7 +110,7 @@ impl LogQueryPlanner {
 
         let expr = col(timestamp_col.clone())
             .gt_eq(lit(ScalarValue::Utf8(time_filter.start.clone())))
-            .and(col(timestamp_col).lt_eq(lit(ScalarValue::Utf8(time_filter.end.clone()))));
+            .and(col(timestamp_col).lt_eq(lit(ScalarValue::Utf8(time_filter.end.clone().unwrap_or_else(|| "9999-12-31T23:59:59Z".to_string())))));
 
         Ok(expr)
     }
