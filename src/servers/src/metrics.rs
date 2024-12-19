@@ -166,7 +166,7 @@ lazy_static! {
         register_histogram_vec!(
             "greptime_servers_http_logs_ingestion_elapsed",
             "servers http logs ingestion elapsed",
-            &[METRIC_DB_LABEL]
+            &[METRIC_DB_LABEL, METRIC_RESULT_LABEL]
         )
         .unwrap();
     pub static ref METRIC_LOKI_LOGS_INGESTION_COUNTER: IntCounterVec = register_int_counter_vec!(
