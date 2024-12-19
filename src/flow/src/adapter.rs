@@ -565,6 +565,8 @@ impl FlowWorkerManager {
         let default_interval = Duration::from_secs(1);
         let mut avg_spd = 0; // rows/sec
         let mut since_last_run = tokio::time::Instant::now();
+        let run_per_trace = 10;
+        let mut run_cnt = 0;
         loop {
             // TODO(discord9): only run when new inputs arrive or scheduled to
             let row_cnt = self.run_available(true).await.unwrap_or_else(|err| {
@@ -607,10 +609,19 @@ impl FlowWorkerManager {
             } else {
                 (9 * avg_spd + cur_spd) / 10
             };
-            trace!("avg_spd={} r/s, cur_spd={} r/s", avg_spd, cur_spd);
             let new_wait = BATCH_SIZE * 1000 / avg_spd.max(1); //in ms
             let new_wait = Duration::from_millis(new_wait as u64).min(default_interval);
-            trace!("Wait for {} ms, row_cnt={}", new_wait.as_millis(), row_cnt);
+
+            // print trace every `run_per_trace` times so that we can see if there is something wrong
+            // but also not get flooded with trace
+            if run_cnt >= run_per_trace {
+                trace!("avg_spd={} r/s, cur_spd={} r/s", avg_spd, cur_spd);
+                trace!("Wait for {} ms, row_cnt={}", new_wait.as_millis(), row_cnt);
+                run_cnt = 0;
+            } else {
+                run_cnt += 1;
+            }
+
             METRIC_FLOW_RUN_INTERVAL_MS.set(new_wait.as_millis() as i64);
             since_last_run = tokio::time::Instant::now();
             tokio::time::sleep(new_wait).await;
@@ -670,13 +681,18 @@ impl FlowWorkerManager {
         &self,
         region_id: RegionId,
         rows: Vec<DiffRow>,
+        batch_datatypes: &[ConcreteDataType],
     ) -> Result<(), Error> {
         let rows_len = rows.len();
         let table_id = region_id.table_id();
         let _timer = METRIC_FLOW_INSERT_ELAPSED
             .with_label_values(&[table_id.to_string().as_str()])
             .start_timer();
-        self.node_context.read().await.send(table_id, rows).await?;
+        self.node_context
+            .read()
+            .await
+            .send(table_id, rows, batch_datatypes)
+            .await?;
         trace!(
             "Handling write request for table_id={} with {} rows",
             table_id,
