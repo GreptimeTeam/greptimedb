@@ -5,7 +5,7 @@ meta:
     
     [datanode]
     [datanode.client]
-    timeout = "60s"
+    timeout = "120s"
 datanode:
   configData: |-
     [runtime]
@@ -17,7 +17,7 @@ frontend:
     global_rt_size = 4
 
     [meta_client]
-    ddl_timeout = "60s"
+    ddl_timeout = "120s"
 objectStorage:
   s3:
     bucket: default
