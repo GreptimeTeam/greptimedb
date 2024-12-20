@@ -720,7 +720,6 @@ pub enum Error {
         location: Location,
     },
 
-
     #[snafu(display("Failed to send leader change message"))]
     SendLeaderChange {
         #[snafu(implicit)]
@@ -734,7 +733,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
-
     },
 }
 

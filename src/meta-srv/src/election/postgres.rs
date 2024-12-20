@@ -504,6 +504,7 @@ impl PgElection {
             key: key.clone(),
             ..Default::default()
         };
+        self.delete_value(&key).await?;
         self.put_value_with_lease(
             &key,
             &ValueWithLease {
