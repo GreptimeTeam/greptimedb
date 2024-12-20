@@ -71,6 +71,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
                 param: "query_context",
             })?
             .into();
+
         let task: DdlTask = task
             .context(error::MissingRequiredParameterSnafu { param: "task" })?
             .try_into()
