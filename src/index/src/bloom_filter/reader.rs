@@ -20,10 +20,10 @@ use common_base::range_read::RangeReader;
 use fastbloom::BloomFilter;
 use snafu::{ensure, ResultExt};
 
-use super::error::{DeserializeJsonSnafu, IoSnafu};
-use super::{BloomFilterSegmentLocation, SEED};
-use crate::bloom_filter::error::{FileSizeTooSmallSnafu, Result, UnexpectedMetaSizeSnafu};
-use crate::bloom_filter::BloomFilterMeta;
+use crate::bloom_filter::error::{
+    DeserializeJsonSnafu, FileSizeTooSmallSnafu, IoSnafu, Result, UnexpectedMetaSizeSnafu,
+};
+use crate::bloom_filter::{BloomFilterMeta, BloomFilterSegmentLocation, SEED};
 
 /// Minimum size of the bloom filter, which is the size of the length of the bloom filter.
 const BLOOM_META_LEN_SIZE: u64 = 4;
@@ -35,7 +35,7 @@ pub const DEFAULT_PREFETCH_SIZE: u64 = 1024; // 1KiB
 #[async_trait]
 pub trait BloomFilterReader {
     /// Reads range of bytes from the file.
-    async fn range_read(&mut self, offset: u64, size: u32) -> Result<Vec<u8>>;
+    async fn range_read(&mut self, offset: u64, size: u32) -> Result<Bytes>;
 
     /// Reads bunch of ranges from the file.
     async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>>;
@@ -72,13 +72,11 @@ impl<R: RangeReader> BloomFilterReaderImpl<R> {
 
 #[async_trait]
 impl<R: RangeReader> BloomFilterReader for BloomFilterReaderImpl<R> {
-    async fn range_read(&mut self, offset: u64, size: u32) -> Result<Vec<u8>> {
-        let buf = self
-            .reader
+    async fn range_read(&mut self, offset: u64, size: u32) -> Result<Bytes> {
+        self.reader
             .read(offset..offset + size as u64)
             .await
-            .context(IoSnafu)?;
-        Ok(buf.into())
+            .context(IoSnafu)
     }
 
     async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
