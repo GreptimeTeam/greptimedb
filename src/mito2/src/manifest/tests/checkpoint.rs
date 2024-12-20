@@ -84,7 +84,6 @@ async fn manager_without_checkpoint() {
 
     // check files
     let mut expected = vec![
-        "/",
         "00000000000000000010.json",
         "00000000000000000009.json",
         "00000000000000000008.json",
@@ -131,7 +130,6 @@ async fn manager_with_checkpoint_distance_1() {
 
     // check files
     let mut expected = vec![
-        "/",
         "00000000000000000009.checkpoint",
         "00000000000000000010.checkpoint",
         "00000000000000000010.json",

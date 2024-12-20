@@ -544,7 +544,7 @@ mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use futures_util::future::BoxFuture;
     use futures_util::FutureExt;
-    use object_store::{EntryMode, ObjectStore};
+    use object_store::ObjectStore;
     use tokio::sync::mpsc;
 
     use super::*;
@@ -578,11 +578,7 @@ mod tests {
     ) {
         let dir = proc_path!(procedure_store, "{procedure_id}/");
         let lister = object_store.list(&dir).await.unwrap();
-        let mut files_in_dir: Vec<_> = lister
-            .into_iter()
-            .filter(|x| x.metadata().mode() == EntryMode::FILE)
-            .map(|de| de.name().to_string())
-            .collect();
+        let mut files_in_dir: Vec<_> = lister.into_iter().map(|de| de.name().to_string()).collect();
         files_in_dir.sort_unstable();
         assert_eq!(files, files_in_dir);
     }

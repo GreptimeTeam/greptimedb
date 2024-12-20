@@ -193,14 +193,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to build http client"))]
-    BuildHttpClient {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: reqwest::Error,
-    },
-
     #[snafu(display("Missing required field: {}", name))]
     MissingRequiredField {
         name: String,
@@ -414,10 +406,9 @@ impl ErrorExt for Error {
             | MissingKvBackend { .. }
             | TomlFormat { .. } => StatusCode::InvalidArguments,
 
-            PayloadNotExist { .. }
-            | Unexpected { .. }
-            | WatchAsyncTaskChange { .. }
-            | BuildHttpClient { .. } => StatusCode::Unexpected,
+            PayloadNotExist { .. } | Unexpected { .. } | WatchAsyncTaskChange { .. } => {
+                StatusCode::Unexpected
+            }
 
             AsyncTaskExecute { source, .. } => source.status_code(),
 

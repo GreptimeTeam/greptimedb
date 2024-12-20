@@ -51,7 +51,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Check if this region is pending drop. And clean the entire dir if so.
         if !self.dropping_regions.is_region_exists(region_id)
             && object_store
-                .exists(&join_path(&request.region_dir, DROPPING_MARKER_FILE))
+                .is_exist(&join_path(&request.region_dir, DROPPING_MARKER_FILE))
                 .await
                 .context(OpenDalSnafu)?
         {
