@@ -154,13 +154,13 @@ impl SourceSender {
         rows: Vec<DiffRow>,
         batch_datatypes: &[ConcreteDataType],
     ) -> Result<usize, Error> {
-        METRIC_FLOW_INPUT_BUF_SIZE.add(rows.len() as _);
+        let rows_len = rows.len();
+        METRIC_FLOW_INPUT_BUF_SIZE.add(rows_len as _);
         while self.send_buf_row_cnt.load(Ordering::SeqCst) >= BATCH_SIZE * 4 {
             tokio::task::yield_now().await;
         }
         // row count metrics is approx so relaxed order is ok
-        self.send_buf_row_cnt
-            .fetch_add(rows.len(), Ordering::SeqCst);
+        self.send_buf_row_cnt.fetch_add(rows_len, Ordering::SeqCst);
         let batch = Batch::try_from_rows_with_types(
             rows.into_iter().map(|(row, _, _)| row).collect(),
             batch_datatypes,
@@ -174,11 +174,21 @@ impl SourceSender {
             .build()
         })?;
 
-        Ok(0)
+        Ok(rows_len)
     }
 
-    pub async fn send_record_batchs(&self, batch: RecordBatch) -> Result<usize, Error> {
-        todo!()
+    /// send record batch
+    pub async fn send_record_batch(&self, batch: RecordBatch) -> Result<usize, Error> {
+        let row_cnt = batch.num_rows();
+        let batch = Batch::from(batch);
+
+        self.send_buf_tx.send(batch).await.map_err(|e| {
+            crate::error::InternalSnafu {
+                reason: format!("Failed to send batch, error = {:?}", e),
+            }
+            .build()
+        })?;
+        Ok(row_cnt)
     }
 }
 
@@ -199,6 +209,16 @@ impl FlownodeContext {
                 name: table_id.to_string(),
             })?;
         sender.send_rows(rows, batch_datatypes).await
+    }
+
+    pub async fn send_rb(&self, table_id: TableId, batch: RecordBatch) -> Result<usize, Error> {
+        let sender = self
+            .source_sender
+            .get(&table_id)
+            .with_context(|| TableNotFoundSnafu {
+                name: table_id.to_string(),
+            })?;
+        sender.send_record_batch(batch).await
     }
 
     /// flush all sender's buf

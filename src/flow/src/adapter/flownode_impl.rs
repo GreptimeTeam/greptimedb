@@ -29,7 +29,6 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
 use super::util::from_proto_to_data_type;
-use super::FlownodeContext;
 use crate::adapter::{CreateFlowArgs, FlowWorkerManager};
 use crate::error::InternalSnafu;
 use crate::metrics::METRIC_FLOW_TASK_COUNT;

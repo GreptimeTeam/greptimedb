@@ -55,6 +55,16 @@ pub struct Batch {
     diffs: Option<VectorRef>,
 }
 
+impl From<common_recordbatch::RecordBatch> for Batch {
+    fn from(value: common_recordbatch::RecordBatch) -> Self {
+        Self {
+            batch: value.columns().to_vec(),
+            row_count: value.num_rows(),
+            diffs: None,
+        }
+    }
+}
+
 impl PartialEq for Batch {
     fn eq(&self, other: &Self) -> bool {
         let mut batch_eq = true;

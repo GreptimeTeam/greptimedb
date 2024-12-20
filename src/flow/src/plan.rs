@@ -18,6 +18,8 @@
 mod join;
 mod reduce;
 
+use std::collections::BTreeSet;
+
 use crate::error::Error;
 use crate::expr::{GlobalId, Id, LocalId, MapFilterProject, SafeMfpPlan, ScalarExpr, TypedExpr};
 use crate::plan::join::JoinPlan;

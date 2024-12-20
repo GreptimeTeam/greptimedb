@@ -273,6 +273,18 @@ impl FlownodeBuilder {
         }
     }
 
+    pub fn table_meta(&self) -> TableMetadataManagerRef {
+        self.table_meta.clone()
+    }
+
+    pub fn catalog_manager(&self) -> CatalogManagerRef {
+        self.catalog_manager.clone()
+    }
+
+    pub fn flow_metadata_manager(&self) -> FlowMetadataManagerRef {
+        self.flow_metadata_manager.clone()
+    }
+
     pub fn with_heartbeat_task(self, heartbeat_task: HeartbeatTask) -> Self {
         let (sender, receiver) = SizeReportSender::new();
         Self {
@@ -316,22 +328,16 @@ impl FlownodeBuilder {
         Ok(instance)
     }
 
-    /// recover all flow tasks in this flownode in distributed mode(nodeid is Some(<num>))
-    ///
-    /// or recover all existing flow tasks if in standalone mode(nodeid is None)
-    ///
-    /// TODO(discord9): persistent flow tasks with internal state
-    async fn recover_flows(&self, manager: &FlowWorkerManagerRef) -> Result<usize, Error> {
-        let nodeid = self.opts.node_id;
-        let to_be_recovered: Vec<_> = if let Some(nodeid) = nodeid {
-            let to_be_recover = self
+    pub(crate) async fn get_all_flow_ids(&self, nodeid: Option<u64>) -> Result<Vec<u32>, Error> {
+        let ret = if let Some(nodeid) = nodeid {
+            let flow_ids_one_node = self
                 .flow_metadata_manager
                 .flownode_flow_manager()
                 .flows(nodeid)
                 .try_collect::<Vec<_>>()
                 .await
                 .context(ListFlowsSnafu { id: Some(nodeid) })?;
-            to_be_recover.into_iter().map(|(id, _)| id).collect()
+            flow_ids_one_node.into_iter().map(|(id, _)| id).collect()
         } else {
             let all_catalogs = self
                 .catalog_manager
@@ -355,6 +361,21 @@ impl FlownodeBuilder {
             }
             all_flow_ids
         };
+
+        Ok(ret)
+    }
+
+    /// recover all flow tasks in this flownode in distributed mode(nodeid is Some(<num>))
+    ///
+    /// or recover all existing flow tasks if in standalone mode(nodeid is None)
+    ///
+    /// TODO(discord9): persistent flow tasks with internal state
+    pub(crate) async fn recover_flows(
+        &self,
+        manager: &FlowWorkerManagerRef,
+    ) -> Result<usize, Error> {
+        let nodeid = self.opts.node_id;
+        let to_be_recovered = self.get_all_flow_ids(nodeid).await?;
         let cnt = to_be_recovered.len();
 
         // TODO(discord9): recover in parallel
