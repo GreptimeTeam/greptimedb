@@ -444,7 +444,7 @@ mod tests {
             let handle = tokio::spawn(candidate(leader_value.clone()));
             handles.push(handle);
         }
-        // Wait for candidates registrating themselves.
+        // Wait for candidates to registrate themselves.
         tokio::time::sleep(Duration::from_secs(3)).await;
 
         let endpoint = env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();

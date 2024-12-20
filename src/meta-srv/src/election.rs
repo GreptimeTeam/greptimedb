@@ -38,7 +38,7 @@ pub enum LeaderChangeMessage {
 }
 
 /// LeaderKey is a key that represents the leader of metasrv.
-/// The structure is correponding to [etcd_client::LeaderKey].
+/// The structure is corresponding to [etcd_client::LeaderKey].
 pub trait LeaderKey: Send + Sync + Debug {
     /// The name in byte. name is the election identifier that corresponds to the leadership key.
     fn name(&self) -> &[u8];
