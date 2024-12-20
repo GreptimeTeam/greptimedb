@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use common_recordbatch::RecordBatch;
 use common_telemetry::trace;
 use datatypes::prelude::ConcreteDataType;
 use session::context::QueryContext;
@@ -174,6 +175,10 @@ impl SourceSender {
         })?;
 
         Ok(0)
+    }
+
+    pub async fn send_record_batchs(&self, batch: RecordBatch) -> Result<usize, Error> {
+        todo!()
     }
 }
 

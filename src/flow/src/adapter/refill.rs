@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 
 use common_error::ext::BoxedError;
-use common_query::OutputData;
+use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use datatypes::value::Value;
 use query::parser::QueryLanguageParser;
 use session::context::QueryContext;
@@ -40,7 +40,38 @@ impl FlownodeBuilder {
 /// Task to refill flow with given table id and a time range
 pub struct RefillTask {
     table_id: TableId,
-    output_data: common_query::Output,
+    output_stream: SendableRecordBatchStream,
+}
+
+/// Query stream of RefillTask, simply wrap RecordBatches and RecordBatchStream and check output is not `AffectedRows`
+enum QueryStream {
+    Batches { batches: RecordBatches },
+    Stream { stream: SendableRecordBatchStream },
+}
+
+impl TryFrom<common_query::Output> for QueryStream {
+    type Error = Error;
+    fn try_from(value: common_query::Output) -> Result<Self, Self::Error> {
+        match value.data {
+            common_query::OutputData::Stream(stream) => Ok(QueryStream::Stream { stream }),
+            common_query::OutputData::RecordBatches(batches) => {
+                Ok(QueryStream::Batches { batches })
+            }
+            _ => UnexpectedSnafu {
+                reason: format!("Unexpected output data type: {:?}", value.data),
+            }
+            .fail(),
+        }
+    }
+}
+
+impl QueryStream {
+    fn try_into_stream(self) -> Result<SendableRecordBatchStream, Error> {
+        match self {
+            Self::Batches { batches } => Ok(batches.as_stream()),
+            Self::Stream { stream } => Ok(stream),
+        }
+    }
 }
 
 impl RefillTask {
@@ -96,9 +127,12 @@ impl RefillTask {
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 
+        let output_stream = QueryStream::try_from(output_data)?;
+        let output_stream = output_stream.try_into_stream()?;
+
         Ok(RefillTask {
             table_id,
-            output_data,
+            output_stream,
         })
     }
 }
