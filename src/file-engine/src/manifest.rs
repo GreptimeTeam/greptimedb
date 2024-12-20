@@ -46,7 +46,7 @@ impl FileRegionManifest {
     pub async fn store(&self, region_dir: &str, object_store: &ObjectStore) -> Result<()> {
         let path = &region_manifest_path(region_dir);
         let exist = object_store
-            .exists(path)
+            .is_exist(path)
             .await
             .context(CheckObjectSnafu { path })?;
         ensure!(!exist, ManifestExistsSnafu { path });

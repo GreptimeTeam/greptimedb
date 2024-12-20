@@ -71,7 +71,7 @@ async fn test_engine_drop_region() {
     assert!(!env
         .get_object_store()
         .unwrap()
-        .exists(&join_path(&region_dir, DROPPING_MARKER_FILE))
+        .is_exist(&join_path(&region_dir, DROPPING_MARKER_FILE))
         .await
         .unwrap());
 
@@ -93,7 +93,7 @@ async fn test_engine_drop_region() {
     listener.wait().await;
 
     let object_store = env.get_object_store().unwrap();
-    assert!(!object_store.exists(&region_dir).await.unwrap());
+    assert!(!object_store.is_exist(&region_dir).await.unwrap());
 }
 
 #[tokio::test]
@@ -167,13 +167,13 @@ async fn test_engine_drop_region_for_custom_store() {
     assert!(object_store_manager
         .find("Gcs")
         .unwrap()
-        .exists(&custom_region_dir)
+        .is_exist(&custom_region_dir)
         .await
         .unwrap());
     assert!(object_store_manager
         .find("default")
         .unwrap()
-        .exists(&global_region_dir)
+        .is_exist(&global_region_dir)
         .await
         .unwrap());
 
@@ -190,13 +190,13 @@ async fn test_engine_drop_region_for_custom_store() {
     assert!(!object_store_manager
         .find("Gcs")
         .unwrap()
-        .exists(&custom_region_dir)
+        .is_exist(&custom_region_dir)
         .await
         .unwrap());
     assert!(object_store_manager
         .find("default")
         .unwrap()
-        .exists(&global_region_dir)
+        .is_exist(&global_region_dir)
         .await
         .unwrap());
 }

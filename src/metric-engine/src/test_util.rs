@@ -313,12 +313,12 @@ mod test {
         let region_dir = "test_metric_region";
         // assert metadata region's dir
         let metadata_region_dir = join_dir(region_dir, METADATA_REGION_SUBDIR);
-        let exist = object_store.exists(&metadata_region_dir).await.unwrap();
+        let exist = object_store.is_exist(&metadata_region_dir).await.unwrap();
         assert!(exist);
 
         // assert data region's dir
         let data_region_dir = join_dir(region_dir, DATA_REGION_SUBDIR);
-        let exist = object_store.exists(&data_region_dir).await.unwrap();
+        let exist = object_store.is_exist(&data_region_dir).await.unwrap();
         assert!(exist);
 
         // check mito engine

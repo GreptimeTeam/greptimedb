@@ -13,37 +13,8 @@
 // limitations under the License.
 
 mod lru_cache;
+mod prometheus;
 
 pub use lru_cache::*;
 pub use opendal::layers::*;
-pub use prometheus::build_prometheus_metrics_layer;
-
-mod prometheus {
-    use std::sync::{Mutex, OnceLock};
-
-    use opendal::layers::PrometheusLayer;
-
-    static PROMETHEUS_LAYER: OnceLock<Mutex<PrometheusLayer>> = OnceLock::new();
-
-    pub fn build_prometheus_metrics_layer(with_path_label: bool) -> PrometheusLayer {
-        PROMETHEUS_LAYER
-            .get_or_init(|| {
-                // This logical tries to extract parent path from the object storage operation
-                // the function also relies on assumption that the region path is built from
-                // pattern `<data|index>/catalog/schema/table_id/....`
-                //
-                // We'll get the data/catalog/schema from path.
-                let path_level = if with_path_label { 3 } else { 0 };
-
-                let layer = PrometheusLayer::builder()
-                    .path_label(path_level)
-                    .register_default()
-                    .unwrap();
-
-                Mutex::new(layer)
-            })
-            .lock()
-            .unwrap()
-            .clone()
-    }
-}
+pub use prometheus::PrometheusMetricsLayer;
