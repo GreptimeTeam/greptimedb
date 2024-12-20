@@ -70,7 +70,7 @@ Our core developers have been building time-series data platforms for years. Bas
 
 * **Unified Processing of Metrics, Logs, and Events**
 
-GreptimeDB unifies time series data processing by treating all data - whether metrics, logs, or events - as timestamped events with context. Users can analyze this data using either [SQL](https://docs.greptime.com/user-guide/query-data/sql) or [PromQL](https://docs.greptime.com/user-guide/query-data/promql) and leverage stream processing ([Flow](https://docs.greptime.com/user-guide/continuous-aggregation/overview)) to enable continuous aggregation. [Read more](https://docs.greptime.com/user-guide/concepts/data-model).
+GreptimeDB unifies time series data processing by treating all data - whether metrics, logs, or events - as timestamped events with context. Users can analyze this data using either [SQL](https://docs.greptime.com/user-guide/query-data/sql) or [PromQL](https://docs.greptime.com/user-guide/query-data/promql) and leverage stream processing ([Flow](https://docs.greptime.com/user-guide/flow-computation/overview)) to enable continuous aggregation. [Read more](https://docs.greptime.com/user-guide/concepts/data-model).
 
 * **Cloud-native Distributed Database**
 
@@ -173,7 +173,7 @@ Our official Grafana dashboard for monitoring GreptimeDB is available at [grafan
 
 ## Project Status
 
-GreptimeDB is currently in Beta. We are targeting GA (General Availability) with v1.0 release by Early 2025. 
+GreptimeDB is currently in Beta. We are targeting GA (General Availability) with v1.0 release by Early 2025.
 
 While in Beta, GreptimeDB is already:
 
