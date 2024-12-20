@@ -5270,6 +5270,7 @@ dependencies = [
 name = "index"
 version = "0.11.1"
 dependencies = [
+ "async-stream",
  "async-trait",
  "asynchronous-codec",
  "bytemuck",

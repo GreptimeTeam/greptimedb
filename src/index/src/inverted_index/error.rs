@@ -213,6 +213,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Intermediate error"))]
+    Intermediate {
+        source: crate::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -245,6 +252,7 @@ impl ErrorExt for Error {
             | InconsistentRowCount { .. }
             | IndexNotFound { .. } => StatusCode::InvalidArguments,
 
+            Intermediate { source, .. } => source.status_code(),
             External { source, .. } => source.status_code(),
         }
     }
