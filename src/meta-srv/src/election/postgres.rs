@@ -308,9 +308,7 @@ mod tests {
             .await
             .context(PostgresExecutionSnafu)?;
         tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("connection error: {}", e);
-            }
+            connection.await.context(PostgresExecutionSnafu).unwrap();
         });
         Ok(client)
     }
