@@ -48,6 +48,8 @@ use crate::election::etcd::EtcdElection;
 #[cfg(feature = "pg_kvbackend")]
 use crate::election::postgres::PgElection;
 #[cfg(feature = "pg_kvbackend")]
+use crate::election::CANDIDATE_LEASE_SECS;
+#[cfg(feature = "pg_kvbackend")]
 use crate::error::InvalidArgumentsSnafu;
 use crate::error::{InitExportMetricsTaskSnafu, TomlFormatSnafu};
 use crate::metasrv::builder::MetasrvBuilder;
@@ -57,8 +59,6 @@ use crate::selector::load_based::LoadBasedSelector;
 use crate::selector::round_robin::RoundRobinSelector;
 use crate::selector::SelectorType;
 use crate::service::admin;
-#[cfg(feature = "pg_kvbackend")]
-use crate::election::CANDIDATE_LEASE_SECS;
 use crate::{error, Result};
 
 pub struct MetasrvInstance {

@@ -317,7 +317,7 @@ mod tests {
 
     #[tokio::test]
     async fn temp_test() {
-        let endpoint = env::var("GT_PG_ADDR").unwrap_or_default();
+        let endpoint = env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
         let client = create_postgres_client(&endpoint).await.unwrap();
         client
             .execute(
@@ -335,7 +335,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_postgres_crud() {
-        let endpoint = env::var("GT_PG_ADDR").unwrap_or_default();
+        let endpoint = env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
         let client = create_postgres_client(&endpoint).await.unwrap();
         client
             .execute(
@@ -414,7 +414,7 @@ mod tests {
     }
 
     async fn candidate(leader_value: String) {
-        let endpoint = env::var("GT_PG_ADDR").unwrap_or_default();
+        let endpoint = env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
         let client = create_postgres_client(&endpoint).await.unwrap();
 
         let (tx, _) = broadcast::channel(100);
@@ -449,7 +449,7 @@ mod tests {
         // Wait for candidates registrating themselves.
         tokio::time::sleep(Duration::from_secs(3)).await;
 
-        let endpoint = env::var("GT_PG_ADDR").unwrap_or_default();
+        let endpoint = env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
         let client = create_postgres_client(&endpoint).await.unwrap();
 
         let (tx, _) = broadcast::channel(100);
