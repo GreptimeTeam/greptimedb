@@ -689,6 +689,13 @@ impl PromPlanner {
             let mut matches = label_matchers.find_matchers(METRIC_NAME);
             ensure!(!matches.is_empty(), NoMetricMatcherSnafu);
             ensure!(matches.len() == 1, MultipleMetricMatchersSnafu);
+            ensure!(
+                matches[0].op == MatchOp::Equal,
+                UnsupportedMatcherOpSnafu {
+                    matcher_op: matches[0].op.to_string(),
+                    matcher: METRIC_NAME
+                }
+            );
             metric_name = matches.pop().map(|m| m.value);
         }
 

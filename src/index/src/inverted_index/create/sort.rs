@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod external_provider;
 pub mod external_sort;
 mod intermediate_rw;
 mod merge_stream;

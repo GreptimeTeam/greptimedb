@@ -47,6 +47,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Intermediate error"))]
+    Intermediate {
+        source: crate::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("File size too small for bloom filter"))]
     FileSizeTooSmall {
         size: u64,
@@ -58,6 +65,13 @@ pub enum Error {
     UnexpectedMetaSize {
         max_meta_size: u64,
         actual_meta_size: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid intermediate magic"))]
+    InvalidIntermediateMagic {
+        invalid: Vec<u8>,
         #[snafu(implicit)]
         location: Location,
     },
@@ -79,8 +93,10 @@ impl ErrorExt for Error {
             | SerdeJson { .. }
             | FileSizeTooSmall { .. }
             | UnexpectedMetaSize { .. }
-            | DeserializeJson { .. } => StatusCode::Unexpected,
+            | DeserializeJson { .. }
+            | InvalidIntermediateMagic { .. } => StatusCode::Unexpected,
 
+            Intermediate { source, .. } => source.status_code(),
             External { source, .. } => source.status_code(),
         }
     }

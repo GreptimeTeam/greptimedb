@@ -45,6 +45,7 @@ use datafusion_expr::{case, col, lit, Expr};
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema, Schema};
 use datatypes::vectors::StringVector;
+use itertools::Itertools;
 use object_store::ObjectStore;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -61,6 +62,7 @@ use sql::statements::show::{
 use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
 use sqlparser::ast::ObjectName;
+use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
 use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 use table::TableRef;
 
@@ -753,6 +755,52 @@ pub fn show_create_table(
         p
     });
     let sql = format!("{}", stmt);
+    let columns = vec![
+        Arc::new(StringVector::from(vec![table_name.clone()])) as _,
+        Arc::new(StringVector::from(vec![sql])) as _,
+    ];
+    let records = RecordBatches::try_from_columns(SHOW_CREATE_TABLE_OUTPUT_SCHEMA.clone(), columns)
+        .context(error::CreateRecordBatchSnafu)?;
+
+    Ok(Output::new_with_record_batches(records))
+}
+
+pub fn show_create_foreign_table_for_pg(
+    table: TableRef,
+    _query_ctx: QueryContextRef,
+) -> Result<Output> {
+    let table_info = table.table_info();
+
+    let table_meta = &table_info.meta;
+    let table_name = &table_info.name;
+    let schema = &table_info.meta.schema;
+    let is_metric_engine = is_metric_engine(&table_meta.engine);
+
+    let columns = schema
+        .column_schemas()
+        .iter()
+        .filter_map(|c| {
+            if is_metric_engine && is_metric_engine_internal_column(&c.name) {
+                None
+            } else {
+                Some(format!(
+                    "\"{}\" {}",
+                    c.name,
+                    c.data_type.postgres_datatype_name()
+                ))
+            }
+        })
+        .join(",\n  ");
+
+    let sql = format!(
+        r#"CREATE FOREIGN TABLE ft_{} (
+  {}
+)
+SERVER greptimedb
+OPTIONS (table_name '{}')"#,
+        table_name, columns, table_name
+    );
+
     let columns = vec![
         Arc::new(StringVector::from(vec![table_name.clone()])) as _,
         Arc::new(StringVector::from(vec![sql])) as _,

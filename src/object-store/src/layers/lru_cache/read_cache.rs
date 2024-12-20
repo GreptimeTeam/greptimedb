@@ -156,9 +156,12 @@ impl<C: Access> ReadCache<C> {
             let size = entry.metadata().content_length();
             OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
             OBJECT_STORE_LRU_CACHE_BYTES.add(size as i64);
-            self.mem_cache
-                .insert(read_key.to_string(), ReadResult::Success(size as u32))
-                .await;
+            // ignore root path
+            if entry.path() != "/" {
+                self.mem_cache
+                    .insert(read_key.to_string(), ReadResult::Success(size as u32))
+                    .await;
+            }
         }
 
         Ok(self.cache_stat().await)
