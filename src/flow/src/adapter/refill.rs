@@ -86,8 +86,8 @@ impl RefillTask {
         time_col_name: &str,
         table_src: &TableSource,
     ) -> Result<RefillTask, Error> {
-        let (table_name, table_schmea) = table_src.get_table_name_schema(&table_id).await?;
-        let all_col_names: BTreeSet<_> = table_schmea
+        let (table_name, table_schema) = table_src.get_table_name_schema(&table_id).await?;
+        let all_col_names: BTreeSet<_> = table_schema
             .iter_names()
             .flatten()
             .map(|s| s.as_str())
