@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::ops::Range;
-use std::sync::Arc;
-use std::time::Instant;
 
 use async_trait::async_trait;
 use fastbloom::BloomFilter;
@@ -62,51 +60,47 @@ impl BloomFilterApplier {
         }
 
         // 1. Compute prefix sum for row counts
+        let mut sum = 0usize;
         let mut prefix_sum = Vec::with_capacity(row_group_metas.len() + 1);
-        prefix_sum.push(0);
+        prefix_sum.push(0usize);
         for meta in row_group_metas {
-            prefix_sum.push(prefix_sum.last().unwrap() + meta.num_rows());
+            sum += meta.num_rows() as usize;
+            prefix_sum.push(sum);
         }
 
         // 2. Calculate bloom filter segment locations
         let mut segment_locations = Vec::new();
         for (&row_group_idx, _) in basement {
-            if row_group_idx >= row_group_metas.len() {
-                continue;
-            }
+            // TODO(ruihang): support further filter over row selection
 
-            segment_locations.push(BloomFilterSegmentLocation {
-                start_row: prefix_sum[row_group_idx],
-                end_row: prefix_sum[row_group_idx + 1],
-            });
-        }
+            // todo: dedup & overlap
+            let rows_range_start = prefix_sum[row_group_idx] / self.meta.rows_per_segment;
+            let rows_range_end = prefix_sum[row_group_idx + 1] / self.meta.rows_per_segment;
 
-        // 3. Probe each bloom filter segment
-        let mut matched_locations = Vec::new();
-        let mut unique_segments = HashSet::new();
+            for i in rows_range_start..rows_range_end {
+                // 3. Probe each bloom filter segment
+                let loc = BloomFilterSegmentLocation {
+                    offset: self.meta.bloom_filter_segments[i].offset,
+                    size: self.meta.bloom_filter_segments[i].size,
+                    elem_count: self.meta.bloom_filter_segments[i].elem_count,
+                };
+                let bloom = self.reader.bloom_filter(&loc).await?;
 
-        for loc in segment_locations {
-            // Skip if we've already checked this segment
-            if !unique_segments.insert((loc.start_row, loc.end_row)) {
-                continue;
-            }
+                // Check if all probes exist in bloom filter
+                let mut matches = true;
+                for probe in probes {
+                    if !bloom.contains(probe) {
+                        matches = false;
+                        break;
+                    }
+                }
 
-            let bloom = self.reader.bloom_filter(&loc).await?;
-            let mut matches = true;
-
-            // Check if all probes exist in bloom filter
-            for probe in probes {
-                if !bloom.contains(probe) {
-                    matches = false;
-                    break;
+                if matches {
+                    segment_locations.push(loc);
                 }
             }
-
-            if matches {
-                matched_locations.push(loc);
-            }
         }
 
-        Ok(matched_locations)
+        Ok(segment_locations)
     }
 }
