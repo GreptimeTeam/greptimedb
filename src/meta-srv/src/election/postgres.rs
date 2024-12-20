@@ -304,7 +304,7 @@ mod tests {
             }
             .fail();
         }
-        let (client, connection) = tokio_postgres::connect(&addr, NoTls)
+        let (client, connection) = tokio_postgres::connect(addr, NoTls)
             .await
             .context(PostgresExecutionSnafu)?;
         tokio::spawn(async move {
