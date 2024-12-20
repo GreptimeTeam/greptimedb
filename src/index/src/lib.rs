@@ -16,5 +16,7 @@
 #![feature(assert_matches)]
 
 pub mod bloom_filter;
+pub mod error;
+pub mod external_provider;
 pub mod fulltext_index;
 pub mod inverted_index;
