@@ -45,7 +45,9 @@ use tonic::codec::CompressionEncoding;
 use tonic::transport::server::{Router, TcpIncoming};
 
 use crate::election::etcd::EtcdElection;
-use crate::error::{InitExportMetricsTaskSnafu, InvalidArgumentsSnafu, TomlFormatSnafu};
+#[cfg(feature = "pg_kvbackend")]
+use crate::error::InvalidArgumentsSnafu;
+use crate::error::{InitExportMetricsTaskSnafu, TomlFormatSnafu};
 use crate::metasrv::builder::MetasrvBuilder;
 use crate::metasrv::{BackendImpl, Metasrv, MetasrvOptions, SelectorRef};
 use crate::selector::lease_based::LeaseBasedSelector;
