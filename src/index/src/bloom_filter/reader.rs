@@ -179,18 +179,36 @@ impl<R: RangeReader> BloomFilterMetaReader<R> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+
     use futures::io::Cursor;
 
     use super::*;
     use crate::bloom_filter::creator::BloomFilterCreator;
+    use crate::external_provider::MockExternalTempFileProvider;
 
     async fn mock_bloom_filter_bytes() -> Vec<u8> {
         let mut writer = Cursor::new(vec![]);
-        let mut creator = BloomFilterCreator::new(2);
+        let mut creator = BloomFilterCreator::new(
+            2,
+            Box::new(MockExternalTempFileProvider::new()),
+            Arc::new(AtomicUsize::new(0)),
+            None,
+        );
 
-        creator.push_row_elems(vec![b"a".to_vec(), b"b".to_vec()]);
-        creator.push_row_elems(vec![b"c".to_vec(), b"d".to_vec()]);
-        creator.push_row_elems(vec![b"e".to_vec(), b"f".to_vec()]);
+        creator
+            .push_row_elems(vec![b"a".to_vec(), b"b".to_vec()])
+            .await
+            .unwrap();
+        creator
+            .push_row_elems(vec![b"c".to_vec(), b"d".to_vec()])
+            .await
+            .unwrap();
+        creator
+            .push_row_elems(vec![b"e".to_vec(), b"f".to_vec()])
+            .await
+            .unwrap();
 
         creator.finish(&mut writer).await.unwrap();
 
