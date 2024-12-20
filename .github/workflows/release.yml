@@ -31,7 +31,7 @@ on:
       linux_arm64_runner:
         type: choice
         description: The runner uses to build linux-arm64 artifacts
-        default: ec2-c6g.4xlarge-arm64
+        default: ec2-c6g.8xlarge-arm64
         options:
           - ubuntu-2204-32-cores-arm
           - ec2-c6g.xlarge-arm64 # 4C8G
