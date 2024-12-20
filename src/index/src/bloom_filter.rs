@@ -15,10 +15,14 @@
 use serde::{Deserialize, Serialize};
 
 pub mod creator;
-mod error;
+pub mod error;
+pub mod reader;
 
 pub type Bytes = Vec<u8>;
 pub type BytesRef<'a> = &'a [u8];
+
+/// The seed used for the Bloom filter.
+pub const SEED: u128 = 42;
 
 /// The Meta information of the bloom filter stored in the file.
 #[derive(Debug, Default, Serialize, Deserialize)]
