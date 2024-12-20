@@ -299,3 +299,168 @@ impl PgElection {
         Ok(res.len() == 1)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+
+    use tokio_postgres::NoTls;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_postgres_crud() {
+        let endpoint = env::var("GT_PG_ENDPOINTS").unwrap_or_default();
+        let (client, connection) = tokio_postgres::connect(&endpoint, NoTls)
+            .await
+            .expect("Failed to connect to Postgres");
+
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("connection error: {}", e);
+            }
+        });
+
+        let key = b"test_key".to_vec();
+        let value = ValueWithLease {
+            value: "test_value".to_string(),
+            expire_time: 0.0,
+        };
+
+        let (tx, _) = broadcast::channel(100);
+        let pg_election = PgElection {
+            leader_value: "test_leader".to_string(),
+            client,
+            is_leader: AtomicBool::new(false),
+            infancy: AtomicBool::new(true),
+            leader_watcher: tx,
+            store_key_prefix: "test_prefix".to_string(),
+        };
+
+        let res = pg_election
+            .put_value_with_lease(&key, &value)
+            .await
+            .unwrap();
+        assert!(res);
+
+        let res = pg_election
+            .get_value_with_lease(&key)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(res.value, value.value);
+
+        let res = pg_election.delete_value(&key).await.unwrap();
+        assert!(res);
+
+        let res = pg_election.get_value_with_lease(&key).await.unwrap();
+        assert!(res.is_none());
+
+        for i in 0..10 {
+            let key = format!("test_key_{}", i).into_bytes();
+            let value = ValueWithLease {
+                value: format!("test_value_{}", i),
+                expire_time: 0.0,
+            };
+            pg_election
+                .put_value_with_lease(&key, &value)
+                .await
+                .unwrap();
+        }
+
+        let key_prefix = "test_key".to_string().into_bytes();
+        let res = pg_election
+            .get_value_with_lease_by_prefix(&key_prefix)
+            .await
+            .unwrap();
+        assert_eq!(res.len(), 10);
+
+        for i in 0..10 {
+            let key = format!("test_key_{}", i).into_bytes();
+            let res = pg_election.delete_value(&key).await.unwrap();
+            assert!(res);
+        }
+
+        let res = pg_election
+            .get_value_with_lease_by_prefix(&key_prefix)
+            .await
+            .unwrap();
+        assert!(res.is_empty());
+    }
+
+    async fn candidate(leader_value: String) {
+        let endpoint = env::var("GT_PG_ENDPOINTS").unwrap_or_default();
+        let (client, connection) = tokio_postgres::connect(&endpoint, NoTls)
+            .await
+            .expect("Failed to connect to Postgres");
+
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("connection error: {}", e);
+            }
+        });
+
+        let (tx, _) = broadcast::channel(100);
+        let pg_election = PgElection {
+            leader_value,
+            client,
+            is_leader: AtomicBool::new(false),
+            infancy: AtomicBool::new(true),
+            leader_watcher: tx,
+            store_key_prefix: "test_prefix".to_string(),
+        };
+
+        let node_info = MetasrvNodeInfo {
+            addr: "test_addr".to_string(),
+            version: "test_version".to_string(),
+            git_commit: "test_git_commit".to_string(),
+            start_time_ms: 0,
+        };
+        pg_election.register_candidate(&node_info).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_candidate_registration() {
+        let leader_value = "test_leader".to_string();
+        let mut handles = vec![];
+        for _ in 0..10 {
+            let handle = tokio::spawn(candidate(leader_value.clone()));
+            handles.push(handle);
+        }
+        // TODO: Reduce the sleep time by make the lease time configurable.
+        tokio::time::sleep(Duration::from_secs(10)).await;
+
+        let endpoint = env::var("GT_PG_ENDPOINTS").unwrap_or_default();
+        let (client, connection) = tokio_postgres::connect(&endpoint, NoTls)
+            .await
+            .expect("Failed to connect to Postgres");
+
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("connection error: {}", e);
+            }
+        });
+
+        let (tx, _) = broadcast::channel(100);
+        let pg_election = PgElection {
+            leader_value,
+            client,
+            is_leader: AtomicBool::new(false),
+            infancy: AtomicBool::new(true),
+            leader_watcher: tx,
+            store_key_prefix: "test_prefix".to_string(),
+        };
+
+        let candidates = pg_election.all_candidates().await.unwrap();
+        assert_eq!(candidates.len(), 10);
+
+        for handle in handles {
+            handle.abort();
+        }
+
+        // Wait for the candidate lease to expire.
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let candidates = pg_election.all_candidates().await.unwrap();
+        assert!(candidates.is_empty());
+    }
+}
