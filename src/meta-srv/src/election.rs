@@ -27,19 +27,30 @@ use crate::metasrv::MetasrvNodeInfo;
 pub const ELECTION_KEY: &str = "__metasrv_election";
 pub const CANDIDATES_ROOT: &str = "__metasrv_election_candidates/";
 
-const CANDIDATE_LEASE_SECS: u64 = 600;
+pub(crate) const CANDIDATE_LEASE_SECS: u64 = 600;
 const KEEP_ALIVE_INTERVAL_SECS: u64 = CANDIDATE_LEASE_SECS / 2;
 
+/// Messages sent when the leader changes.
 #[derive(Debug, Clone)]
 pub enum LeaderChangeMessage {
     Elected(Arc<dyn LeaderKey>),
     StepDown(Arc<dyn LeaderKey>),
 }
 
+/// LeaderKey is a key that represents the leader of metasrv.
+/// The structure is correponding to [etcd_client::LeaderKey].
 pub trait LeaderKey: Send + Sync + Debug {
+    /// The name in byte. name is the election identifier that corresponds to the leadership key.
     fn name(&self) -> &[u8];
+
+    /// The key in byte. key is an opaque key representing the ownership of the election. If the key
+    /// is deleted, then leadership is lost.
     fn key(&self) -> &[u8];
+
+    /// The creation revision of the key.
     fn rev(&self) -> i64;
+
+    /// The lease ID of the election leader.
     fn lease(&self) -> i64;
 }
 

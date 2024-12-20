@@ -57,6 +57,8 @@ use crate::selector::load_based::LoadBasedSelector;
 use crate::selector::round_robin::RoundRobinSelector;
 use crate::selector::SelectorType;
 use crate::service::admin;
+#[cfg(feature = "pg_kvbackend")]
+use crate::election::CANDIDATE_LEASE_SECS;
 use crate::{error, Result};
 
 pub struct MetasrvInstance {
@@ -234,6 +236,7 @@ pub async fn metasrv_builder(
                 opts.server_addr.clone(),
                 election_client,
                 opts.store_key_prefix.clone(),
+                CANDIDATE_LEASE_SECS,
             )
             .await?;
             (kv_backend, Some(election))

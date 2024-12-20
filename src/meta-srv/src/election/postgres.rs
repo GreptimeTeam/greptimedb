@@ -26,7 +26,6 @@ use tokio_postgres::Client;
 
 use crate::election::{
     Election, LeaderChangeMessage, CANDIDATES_ROOT, CANDIDATE_LEASE_SECS, ELECTION_KEY,
-    KEEP_ALIVE_INTERVAL_SECS,
 };
 use crate::error::{
     DeserializeFromJsonSnafu, PostgresExecutionSnafu, Result, SerializeToJsonSnafu, UnexpectedSnafu,
@@ -48,6 +47,7 @@ pub struct PgElection {
     infancy: AtomicBool,
     leader_watcher: broadcast::Sender<LeaderChangeMessage>,
     store_key_prefix: String,
+    candidate_lease_ttl: u64,
 }
 
 impl PgElection {
@@ -55,6 +55,7 @@ impl PgElection {
         leader_value: String,
         client: Client,
         store_key_prefix: String,
+        candidate_lease_ttl: u64,
     ) -> Result<ElectionRef> {
         let (tx, _) = broadcast::channel(100);
         Ok(Arc::new(Self {
@@ -64,6 +65,7 @@ impl PgElection {
             infancy: AtomicBool::new(true),
             leader_watcher: tx,
             store_key_prefix,
+            candidate_lease_ttl,
         }))
     }
 
@@ -99,7 +101,7 @@ impl Election for PgElection {
     }
 
     async fn register_candidate(&self, node_info: &MetasrvNodeInfo) -> Result<()> {
-        let key = self.candidate_key().into_bytes();
+        let key = self.candidate_key();
         let node_info =
             serde_json::to_string(node_info).with_context(|_| SerializeToJsonSnafu {
                 input: format!("{node_info:?}"),
@@ -110,26 +112,18 @@ impl Election for PgElection {
                 .duration_since(time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs_f64()
-                + CANDIDATE_LEASE_SECS as f64,
+                + self.candidate_lease_ttl as f64,
         };
         let res = self.put_value_with_lease(&key, &value_with_lease).await?;
-        // May registered before, check if the lease expired. If so, delete and re-register.
+        // May registered before, just update the lease.
         if !res {
-            let prev = self.get_value_with_lease(&key).await?.unwrap_or_default();
-            if prev.expire_time
-                <= time::SystemTime::now()
-                    .duration_since(time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs_f64()
-            {
-                self.delete_value(&key).await?;
-                self.put_value_with_lease(&key, &value_with_lease).await?;
-            }
+            self.delete_value(&key).await?;
+            self.put_value_with_lease(&key, &value_with_lease).await?;
         }
 
         // Check if the current lease has expired and renew the lease.
         let mut keep_alive_interval =
-            tokio::time::interval(Duration::from_secs(KEEP_ALIVE_INTERVAL_SECS));
+            tokio::time::interval(Duration::from_secs(self.candidate_lease_ttl / 2));
         loop {
             let _ = keep_alive_interval.tick().await;
 
@@ -144,7 +138,7 @@ impl Election for PgElection {
                 UnexpectedSnafu {
                     violated: format!(
                         "Candidate lease expired, key: {:?}",
-                        String::from_utf8_lossy(&key)
+                        String::from_utf8_lossy(&key.into_bytes())
                     ),
                 }
             );
@@ -158,7 +152,7 @@ impl Election for PgElection {
     }
 
     async fn all_candidates(&self) -> Result<Vec<MetasrvNodeInfo>> {
-        let key_prefix = self.candidate_root().into_bytes();
+        let key_prefix = self.candidate_root();
         let mut candidates = self.get_value_with_lease_by_prefix(&key_prefix).await?;
         let now = time::SystemTime::now()
             .duration_since(time::UNIX_EPOCH)
@@ -191,15 +185,15 @@ impl Election for PgElection {
 }
 
 impl PgElection {
-    async fn get_value_with_lease(&self, key: &Vec<u8>) -> Result<Option<ValueWithLease>> {
+    async fn get_value_with_lease(&self, key: &String) -> Result<Option<ValueWithLease>> {
         let prev = self
             .client
-            .query(POINT_GET, &[&key])
+            .query(POINT_GET, &[key])
             .await
             .context(PostgresExecutionSnafu)?;
 
         if let Some(row) = prev.first() {
-            let value: String = row.get(0);
+            let value: String = row.get(1);
             let value_with_lease: ValueWithLease =
                 serde_json::from_str(&value).with_context(|_| DeserializeFromJsonSnafu {
                     input: format!("{value:?}"),
@@ -212,17 +206,18 @@ impl PgElection {
 
     async fn get_value_with_lease_by_prefix(
         &self,
-        key_prefix: &Vec<u8>,
+        key_prefix: &String,
     ) -> Result<Vec<ValueWithLease>> {
+        let key_prefix = format!("{}%", key_prefix);
         let prev = self
             .client
-            .query(PREFIX_SCAN, &[key_prefix])
+            .query(PREFIX_SCAN, &[&key_prefix])
             .await
             .context(PostgresExecutionSnafu)?;
 
         let mut res = Vec::new();
         for row in prev {
-            let value: String = row.get(0);
+            let value: String = row.get(1);
             let value_with_lease: ValueWithLease =
                 serde_json::from_str(&value).with_context(|_| DeserializeFromJsonSnafu {
                     input: format!("{value:?}"),
@@ -235,21 +230,17 @@ impl PgElection {
 
     async fn update_value_with_lease(
         &self,
-        key: &Vec<u8>,
+        key: &String,
         prev: &ValueWithLease,
         updated: &ValueWithLease,
     ) -> Result<()> {
-        let prev = serde_json::to_string(prev)
-            .with_context(|_| SerializeToJsonSnafu {
-                input: format!("{prev:?}"),
-            })?
-            .into_bytes();
+        let prev = serde_json::to_string(prev).with_context(|_| SerializeToJsonSnafu {
+            input: format!("{prev:?}"),
+        })?;
 
-        let updated = serde_json::to_string(updated)
-            .with_context(|_| SerializeToJsonSnafu {
-                input: format!("{updated:?}"),
-            })?
-            .into_bytes();
+        let updated = serde_json::to_string(updated).with_context(|_| SerializeToJsonSnafu {
+            input: format!("{updated:?}"),
+        })?;
 
         let res = self
             .client
@@ -262,8 +253,8 @@ impl PgElection {
             false => Ok(()),
             true => UnexpectedSnafu {
                 violated: format!(
-                    "Failed to update value from key: {:?}",
-                    String::from_utf8_lossy(key)
+                    "CAS operation failed, key: {:?}",
+                    String::from_utf8_lossy(&key.clone().into_bytes())
                 ),
             }
             .fail(),
@@ -271,12 +262,10 @@ impl PgElection {
     }
 
     /// Returns `true` if the insertion is successful
-    async fn put_value_with_lease(&self, key: &Vec<u8>, value: &ValueWithLease) -> Result<bool> {
-        let value = serde_json::to_string(value)
-            .with_context(|_| SerializeToJsonSnafu {
-                input: format!("{value:?}"),
-            })?
-            .into_bytes();
+    async fn put_value_with_lease(&self, key: &String, value: &ValueWithLease) -> Result<bool> {
+        let value = serde_json::to_string(value).with_context(|_| SerializeToJsonSnafu {
+            input: format!("{value:?}"),
+        })?;
 
         let res = self
             .client
@@ -289,7 +278,7 @@ impl PgElection {
 
     /// Returns `true` if the deletion is successful.
     /// Caution: Should only delete the key if the lease is expired.
-    async fn delete_value(&self, key: &Vec<u8>) -> Result<bool> {
+    async fn delete_value(&self, key: &String) -> Result<bool> {
         let res = self
             .client
             .query(POINT_DELETE, &[key])
@@ -308,20 +297,55 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
-    async fn test_postgres_crud() {
-        let endpoint = env::var("GT_PG_ENDPOINTS").unwrap_or_default();
-        let (client, connection) = tokio_postgres::connect(&endpoint, NoTls)
+    async fn create_postgres_client(addr: &str) -> Result<Client> {
+        if addr.is_empty() {
+            return UnexpectedSnafu {
+                violated: "Postgres address is empty".to_string(),
+            }
+            .fail();
+        }
+        let (client, connection) = tokio_postgres::connect(&addr, NoTls)
             .await
-            .expect("Failed to connect to Postgres");
-
+            .context(PostgresExecutionSnafu)?;
         tokio::spawn(async move {
             if let Err(e) = connection.await {
                 eprintln!("connection error: {}", e);
             }
         });
+        Ok(client)
+    }
 
-        let key = b"test_key".to_vec();
+    #[tokio::test]
+    async fn temp_test() {
+        let endpoint = env::var("GT_PG_ADDR").unwrap_or_default();
+        let client = create_postgres_client(&endpoint).await.unwrap();
+        client
+            .execute(
+                "CREATE TABLE IF NOT EXISTS greptime_metakv(k varchar PRIMARY KEY, v varchar)",
+                &[],
+            )
+            .await
+            .expect("Failed to create metadkv table");
+
+        client
+            .execute("DELETE FROM greptime_metakv", &[])
+            .await
+            .expect("Failed to delete metakv table");
+    }
+
+    #[tokio::test]
+    async fn test_postgres_crud() {
+        let endpoint = env::var("GT_PG_ADDR").unwrap_or_default();
+        let client = create_postgres_client(&endpoint).await.unwrap();
+        client
+            .execute(
+                "CREATE TABLE IF NOT EXISTS greptime_metakv(k varchar PRIMARY KEY, v varchar)",
+                &[],
+            )
+            .await
+            .expect("Failed to create metadkv table");
+
+        let key = "test_key".to_string();
         let value = ValueWithLease {
             value: "test_value".to_string(),
             expire_time: 0.0,
@@ -335,6 +359,7 @@ mod tests {
             infancy: AtomicBool::new(true),
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
+            candidate_lease_ttl: 10,
         };
 
         let res = pg_election
@@ -357,7 +382,7 @@ mod tests {
         assert!(res.is_none());
 
         for i in 0..10 {
-            let key = format!("test_key_{}", i).into_bytes();
+            let key = format!("test_key_{}", i);
             let value = ValueWithLease {
                 value: format!("test_value_{}", i),
                 expire_time: 0.0,
@@ -368,7 +393,7 @@ mod tests {
                 .unwrap();
         }
 
-        let key_prefix = "test_key".to_string().into_bytes();
+        let key_prefix = "test_key".to_string();
         let res = pg_election
             .get_value_with_lease_by_prefix(&key_prefix)
             .await
@@ -376,7 +401,7 @@ mod tests {
         assert_eq!(res.len(), 10);
 
         for i in 0..10 {
-            let key = format!("test_key_{}", i).into_bytes();
+            let key = format!("test_key_{}", i);
             let res = pg_election.delete_value(&key).await.unwrap();
             assert!(res);
         }
@@ -389,16 +414,8 @@ mod tests {
     }
 
     async fn candidate(leader_value: String) {
-        let endpoint = env::var("GT_PG_ENDPOINTS").unwrap_or_default();
-        let (client, connection) = tokio_postgres::connect(&endpoint, NoTls)
-            .await
-            .expect("Failed to connect to Postgres");
-
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("connection error: {}", e);
-            }
-        });
+        let endpoint = env::var("GT_PG_ADDR").unwrap_or_default();
+        let client = create_postgres_client(&endpoint).await.unwrap();
 
         let (tx, _) = broadcast::channel(100);
         let pg_election = PgElection {
@@ -408,6 +425,7 @@ mod tests {
             infancy: AtomicBool::new(true),
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
+            candidate_lease_ttl: 10,
         };
 
         let node_info = MetasrvNodeInfo {
@@ -421,27 +439,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_candidate_registration() {
-        let leader_value = "test_leader".to_string();
+        let leader_value_prefix = "test_leader".to_string();
         let mut handles = vec![];
-        for _ in 0..10 {
+        for i in 0..10 {
+            let leader_value = format!("{}{}", leader_value_prefix, i);
             let handle = tokio::spawn(candidate(leader_value.clone()));
             handles.push(handle);
         }
-        // TODO: Reduce the sleep time by make the lease time configurable.
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        // Wait for candidates registrating themselves.
+        tokio::time::sleep(Duration::from_secs(3)).await;
 
-        let endpoint = env::var("GT_PG_ENDPOINTS").unwrap_or_default();
-        let (client, connection) = tokio_postgres::connect(&endpoint, NoTls)
-            .await
-            .expect("Failed to connect to Postgres");
-
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("connection error: {}", e);
-            }
-        });
+        let endpoint = env::var("GT_PG_ADDR").unwrap_or_default();
+        let client = create_postgres_client(&endpoint).await.unwrap();
 
         let (tx, _) = broadcast::channel(100);
+        let leader_value = "test_leader".to_string();
         let pg_election = PgElection {
             leader_value,
             client,
@@ -449,6 +461,7 @@ mod tests {
             infancy: AtomicBool::new(true),
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
+            candidate_lease_ttl: 5,
         };
 
         let candidates = pg_election.all_candidates().await.unwrap();
@@ -458,9 +471,19 @@ mod tests {
             handle.abort();
         }
 
-        // Wait for the candidate lease to expire.
+        // Wait for the candidate leases to expire.
         tokio::time::sleep(Duration::from_secs(10)).await;
         let candidates = pg_election.all_candidates().await.unwrap();
         assert!(candidates.is_empty());
+
+        // Garbage collection
+        for i in 0..10 {
+            let key = format!(
+                "{}{}{}{}",
+                "test_prefix", CANDIDATES_ROOT, leader_value_prefix, i
+            );
+            let res = pg_election.delete_value(&key).await.unwrap();
+            assert!(res);
+        }
     }
 }
