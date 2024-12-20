@@ -260,7 +260,6 @@ impl Election for PgElection {
     ///     - If the lease expired, delete the key and return, try to initiate a new campaign.
     /// Caution: The leader may still hold the advisory lock while the lease is expired. The leader should step down in this case.
     async fn campaign(&self) -> Result<()> {
-        let key = self.election_key().into_bytes();
         let mut keep_alive_interval =
             tokio::time::interval(Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS));
         loop {
@@ -271,56 +270,14 @@ impl Election for PgElection {
                 .await
                 .context(PostgresExecutionSnafu)?;
             if let Some(row) = res.first() {
-                // Successfully acquired the advisory lock, leader branch:
-                if row.get(0) {
-                    let now = time::SystemTime::now()
-                        .duration_since(time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs_f64();
-                    let new_leader_value_with_lease = ValueWithLease {
-                        value: self.leader_value.clone(),
-                        expire_time: now + META_LEASE_SECS as f64,
-                    };
-                    if self.is_leader() {
-                        // Old leader, renew the lease
-                        match self.get_value_with_lease(&key).await? {
-                            Some(prev) => {
-                                if prev.expire_time <= now {
-                                    self.step_down().await?;
-                                }
-                                self.update_value_with_lease(
-                                    &key,
-                                    &prev,
-                                    &new_leader_value_with_lease,
-                                )
-                                .await?;
-                            }
-                            // Deleted by other followers since the lease expired, but still hold the lock. Just step down.
-                            None => {
-                                warn!("Leader lease expired, but still hold the lock. Now stepping down.");
-                                self.step_down().await?;
-                            }
+                match row.try_get(0) {
+                    Ok(true) => self.leader_action().await?,
+                    Ok(false) => self.follower_action().await?,
+                    Err(_) => {
+                        return UnexpectedSnafu {
+                            violated: "Failed to acquire the advisory lock".to_string(),
                         }
-                    } else {
-                        // Newly elected
-                        self.elected().await?;
-                    }
-                // Follower branch
-                } else {
-                    let prev = self.get_value_with_lease(&key).await?.ok_or_else(|| {
-                        UnexpectedSnafu {
-                            violated: "Advisory lock held but leader key not found",
-                        }
-                        .build()
-                    })?;
-                    if prev.expire_time
-                        <= time::SystemTime::now()
-                            .duration_since(time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs_f64()
-                    {
-                        self.delete_value(&key).await?;
-                        return Ok(());
+                        .fail();
                     }
                 }
             } else {
@@ -520,6 +477,82 @@ impl PgElection {
         self.leader_watcher
             .send(LeaderChangeMessage::Elected(Arc::new(leader_key)))
             .context(SendLeaderChangeSnafu)?;
+        Ok(())
+    }
+
+    /// Leader failed to acquire the advisory lock, just step down and tell the leader watcher.
+    async fn step_down_without_lock(&self) -> Result<()> {
+        let key = self.election_key().into_bytes();
+        let leader_key = PgLeaderKey {
+            name: self.leader_value.clone().into_bytes(),
+            key: key.clone(),
+            ..Default::default()
+        };
+        if self
+            .is_leader
+            .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.leader_watcher
+                .send(LeaderChangeMessage::StepDown(Arc::new(leader_key)))
+                .context(SendLeaderChangeSnafu)?;
+        }
+        Ok(())
+    }
+
+    async fn leader_action(&self) -> Result<()> {
+        let key = self.election_key().into_bytes();
+        let now = time::SystemTime::now()
+            .duration_since(time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let new_leader_value_with_lease = ValueWithLease {
+            value: self.leader_value.clone(),
+            expire_time: now + META_LEASE_SECS as f64,
+        };
+        if self.is_leader() {
+            // Old leader, renew the lease
+            match self.get_value_with_lease(&key).await? {
+                Some(prev) => {
+                    if prev.value != self.leader_value || prev.expire_time <= now {
+                        self.step_down().await?;
+                    }
+                    self.update_value_with_lease(&key, &prev, &new_leader_value_with_lease)
+                        .await?;
+                }
+                None => {
+                    warn!("Leader lease not found, but still hold the lock. Now stepping down.");
+                    self.step_down().await?;
+                }
+            }
+        } else {
+            // Newly elected
+            self.elected().await?;
+        }
+        Ok(())
+    }
+
+    async fn follower_action(&self) -> Result<()> {
+        let key = self.election_key().into_bytes();
+        // Previously held the advisory lock, but failed to acquire it. Step down.
+        if self.is_leader() {
+            self.step_down_without_lock().await?;
+        }
+        let prev = self.get_value_with_lease(&key).await?.ok_or_else(|| {
+            UnexpectedSnafu {
+                violated: "Advisory lock held by others but leader key not found",
+            }
+            .build()
+        })?;
+        if prev.expire_time
+            <= time::SystemTime::now()
+                .duration_since(time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64()
+        {
+            warn!("Leader lease expired, now re-init campaign.");
+            return Err(NoLeaderSnafu {}.build());
+        }
         Ok(())
     }
 }
