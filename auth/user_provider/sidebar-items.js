@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["authenticate_with_credential","load_credential_from_file"],"mod":["static_user_provider","watch_file_user_provider"],"trait":["UserProvider"]};

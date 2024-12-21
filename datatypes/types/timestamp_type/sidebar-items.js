@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MICROSECOND_VARIATION","MILLISECOND_VARIATION","NANOSECOND_VARIATION","SECOND_VARIATION"],"enum":["TimestampType"],"macro":["impl_data_type_for_timestamp"],"struct":["TimestampMicrosecondType","TimestampMillisecondType","TimestampNanosecondType","TimestampSecondType"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["bloom_filter","error","external_provider","fulltext_index","inverted_index"]};

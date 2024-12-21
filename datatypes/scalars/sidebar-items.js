@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["get_iter_capacity"],"macro":["impl_scalar_for_native"],"trait":["Scalar","ScalarRef","ScalarVector","ScalarVectorBuilder"]};

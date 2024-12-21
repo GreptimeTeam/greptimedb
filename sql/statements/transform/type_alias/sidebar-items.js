@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["get_data_type_by_alias_name","replace_type_alias"],"struct":["TypeAliasTransformRule"]};

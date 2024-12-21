@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["scalar_pow"],"struct":["PowFunction"]};

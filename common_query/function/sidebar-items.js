@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["make_scalar_function","to_df_return_type"],"type":["AccumulatorCreatorFunction","AccumulatorFunctionImpl","ReturnTypeFunction","ScalarFunctionImplementation","StateTypeFunction"]};

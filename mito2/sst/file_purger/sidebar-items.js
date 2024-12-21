@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["LocalFilePurger","PurgeRequest"],"trait":["FilePurger"],"type":["FilePurgerRef"]};
