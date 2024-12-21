@@ -117,7 +117,6 @@ jobs:
   cleanbuild-linux-nix:
     runs-on: ubuntu-latest-8-cores
     timeout-minutes: 60
-    needs: [coverage, fmt, clippy, check]
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v27
