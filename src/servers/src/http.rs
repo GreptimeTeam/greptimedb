@@ -66,8 +66,8 @@ use crate::metrics_handler::MetricsHandler;
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
-    InfluxdbLineProtocolHandlerRef, OpenTelemetryProtocolHandlerRef, OpentsdbProtocolHandlerRef,
-    PipelineHandlerRef, PromStoreProtocolHandlerRef, ScriptHandlerRef,
+    InfluxdbLineProtocolHandlerRef, LogQueryHandlerRef, OpenTelemetryProtocolHandlerRef,
+    OpentsdbProtocolHandlerRef, PipelineHandlerRef, PromStoreProtocolHandlerRef, ScriptHandlerRef,
 };
 use crate::server::Server;
 
@@ -80,6 +80,7 @@ mod extractor;
 pub mod handler;
 pub mod header;
 pub mod influxdb;
+pub mod logs;
 pub mod mem_prof;
 pub mod opentsdb;
 pub mod otlp;
@@ -506,6 +507,17 @@ impl HttpServerBuilder {
         }
     }
 
+    pub fn with_logs_handler(self, logs_handler: LogQueryHandlerRef) -> Self {
+        let logs_router = HttpServer::route_logs(logs_handler);
+
+        Self {
+            router: self
+                .router
+                .nest(&format!("/{HTTP_API_VERSION}"), logs_router),
+            ..self
+        }
+    }
+
     pub fn with_opentsdb_handler(self, handler: OpentsdbProtocolHandlerRef) -> Self {
         Self {
             router: self.router.nest(
@@ -768,6 +780,12 @@ impl HttpServer {
             .route("/scripts", routing::post(script::scripts))
             .route("/run-script", routing::post(script::run_script))
             .with_state(api_state)
+    }
+
+    fn route_logs<S>(log_handler: LogQueryHandlerRef) -> Router<S> {
+        Router::new()
+            .route("/logs", routing::get(logs::logs).post(logs::logs))
+            .with_state(log_handler)
     }
 
     /// Route Prometheus [HTTP API].

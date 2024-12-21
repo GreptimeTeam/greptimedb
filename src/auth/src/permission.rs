@@ -25,6 +25,7 @@ pub enum PermissionReq<'a> {
     GrpcRequest(&'a Request),
     SqlStatement(&'a Statement),
     PromQuery,
+    LogQuery,
     Opentsdb,
     LineProtocol,
     PromStoreWrite,

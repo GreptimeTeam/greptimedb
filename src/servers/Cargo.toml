@@ -66,6 +66,7 @@ itertools.workspace = true
 json5 = "0.4"
 jsonb.workspace = true
 lazy_static.workspace = true
+log-query.workspace = true
 loki-api = "0.1"
 mime_guess = "2.0"
 notify.workspace = true
