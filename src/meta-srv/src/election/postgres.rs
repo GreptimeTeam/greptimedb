@@ -40,6 +40,7 @@ struct ValueWithLease {
 }
 
 /// PostgreSql implementation of Election.
+/// TODO: Currently only support candidate registration. Add election logic.
 pub struct PgElection {
     leader_value: String,
     client: Client,
@@ -47,7 +48,7 @@ pub struct PgElection {
     infancy: AtomicBool,
     leader_watcher: broadcast::Sender<LeaderChangeMessage>,
     store_key_prefix: String,
-    candidate_lease_ttl: u64,
+    candidate_lease_ttl_secs: u64,
 }
 
 impl PgElection {
@@ -55,7 +56,7 @@ impl PgElection {
         leader_value: String,
         client: Client,
         store_key_prefix: String,
-        candidate_lease_ttl: u64,
+        candidate_lease_ttl_secs: u64,
     ) -> Result<ElectionRef> {
         let (tx, _) = broadcast::channel(100);
         Ok(Arc::new(Self {
@@ -65,7 +66,7 @@ impl PgElection {
             infancy: AtomicBool::new(true),
             leader_watcher: tx,
             store_key_prefix,
-            candidate_lease_ttl,
+            candidate_lease_ttl_secs,
         }))
     }
 
@@ -112,7 +113,7 @@ impl Election for PgElection {
                 .duration_since(time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs_f64()
-                + self.candidate_lease_ttl as f64,
+                + self.candidate_lease_ttl_secs as f64,
         };
         let res = self.put_value_with_lease(&key, &value_with_lease).await?;
         // May registered before, just update the lease.
@@ -123,7 +124,7 @@ impl Election for PgElection {
 
         // Check if the current lease has expired and renew the lease.
         let mut keep_alive_interval =
-            tokio::time::interval(Duration::from_secs(self.candidate_lease_ttl / 2));
+            tokio::time::interval(Duration::from_secs(self.candidate_lease_ttl_secs / 2));
         loop {
             let _ = keep_alive_interval.tick().await;
 
@@ -357,7 +358,7 @@ mod tests {
             infancy: AtomicBool::new(true),
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
-            candidate_lease_ttl: 10,
+            candidate_lease_ttl_secs: 10,
         };
 
         let res = pg_election
@@ -423,7 +424,7 @@ mod tests {
             infancy: AtomicBool::new(true),
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
-            candidate_lease_ttl: 10,
+            candidate_lease_ttl_secs: 10,
         };
 
         let node_info = MetasrvNodeInfo {
@@ -459,7 +460,7 @@ mod tests {
             infancy: AtomicBool::new(true),
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
-            candidate_lease_ttl: 5,
+            candidate_lease_ttl_secs: 5,
         };
 
         let candidates = pg_election.all_candidates().await.unwrap();
