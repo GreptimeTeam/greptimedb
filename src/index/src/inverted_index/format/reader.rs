@@ -31,7 +31,7 @@ mod footer;
 /// InvertedIndexReader defines an asynchronous reader of inverted index data
 #[mockall::automock]
 #[async_trait]
-pub trait InvertedIndexReader: Send {
+pub trait InvertedIndexReader: Send + Sync {
     /// Seeks to given offset and reads data with exact size as provided.
     async fn range_read(&mut self, offset: u64, size: u32) -> Result<Vec<u8>>;
 

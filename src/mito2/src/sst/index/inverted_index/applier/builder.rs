@@ -34,7 +34,7 @@ use store_api::metadata::RegionMetadata;
 use store_api::storage::ColumnId;
 
 use crate::cache::file_cache::FileCacheRef;
-use crate::cache::index::InvertedIndexCacheRef;
+use crate::cache::index::inverted_index::InvertedIndexCacheRef;
 use crate::error::{BuildIndexApplierSnafu, ColumnNotFoundSnafu, ConvertValueSnafu, Result};
 use crate::row_converter::SortField;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplier;
