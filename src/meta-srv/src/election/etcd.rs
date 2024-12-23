@@ -44,7 +44,7 @@ impl LeaderKey for EtcdLeaderKey {
         self.key()
     }
 
-    fn rev_id(&self) -> i64 {
+    fn revision(&self) -> i64 {
         self.rev()
     }
 
