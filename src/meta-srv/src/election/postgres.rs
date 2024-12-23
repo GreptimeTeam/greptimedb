@@ -205,9 +205,9 @@ impl PgElection {
 
     async fn get_value_with_lease_by_prefix(
         &self,
-        key_prefix: &String,
+        key_prefix: &str,
     ) -> Result<Vec<ValueWithLease>> {
-        let range_request = RangeRequest::new().with_prefix(key_prefix.clone());
+        let range_request = RangeRequest::new().with_prefix(key_prefix);
         let res = self
             .kv_backend
             .range(range_request)
@@ -229,7 +229,7 @@ impl PgElection {
 
     async fn update_value_with_lease(
         &self,
-        key: &String,
+        key: &str,
         prev: &ValueWithLease,
         updated: &ValueWithLease,
     ) -> Result<()> {
@@ -241,7 +241,7 @@ impl PgElection {
         })?;
 
         let cas_request = CompareAndPutRequest::new()
-            .with_key(key.clone())
+            .with_key(key)
             .with_expect(updated)
             .with_value(prev);
         let res = self
@@ -255,7 +255,7 @@ impl PgElection {
             false => UnexpectedSnafu {
                 violated: format!(
                     "CAS operation failed, key: {:?}",
-                    String::from_utf8_lossy(&key.clone().into_bytes())
+                    String::from_utf8_lossy(key.as_bytes())
                 ),
             }
             .fail(),
@@ -263,12 +263,12 @@ impl PgElection {
     }
 
     /// Returns `true` if the insertion is successful
-    async fn put_value_with_lease(&self, key: &String, value: &ValueWithLease) -> Result<bool> {
+    async fn put_value_with_lease(&self, key: &str, value: &ValueWithLease) -> Result<bool> {
         let value = serde_json::to_string(value).with_context(|_| SerializeToJsonSnafu {
             input: format!("{value:?}"),
         })?;
 
-        let put_request = PutRequest::new().with_key(key.clone()).with_value(value);
+        let put_request = PutRequest::new().with_key(key).with_value(value);
         let res = self
             .kv_backend
             .put(put_request)
