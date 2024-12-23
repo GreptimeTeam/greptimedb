@@ -56,6 +56,7 @@ pub(crate) const PRI_CONSTRAINT_NAME: &str = "PRIMARY";
 pub(crate) const TIME_INDEX_CONSTRAINT_NAME: &str = "TIME INDEX";
 
 /// The virtual table implementation for `information_schema.KEY_COLUMN_USAGE`.
+#[derive(Debug)]
 pub(super) struct InformationSchemaKeyColumnUsage {
     schema: SchemaRef,
     catalog_name: String,

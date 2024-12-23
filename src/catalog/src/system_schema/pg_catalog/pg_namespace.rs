@@ -46,6 +46,7 @@ use crate::CatalogManager;
 const NSPNAME: &str = "nspname";
 const INIT_CAPACITY: usize = 42;
 
+#[derive(Debug)]
 pub(super) struct PGNamespace {
     schema: SchemaRef,
     catalog_name: String,

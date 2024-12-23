@@ -57,6 +57,7 @@ const INIT_CAPACITY: usize = 42;
 const DUMMY_OWNER_ID: u32 = 0;
 
 /// The `pg_catalog.pg_class` table implementation.
+#[derive(Debug)]
 pub(super) struct PGClass {
     schema: SchemaRef,
     catalog_name: String,

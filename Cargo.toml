@@ -121,7 +121,7 @@ datafusion-sql = { git = "https://github.com/apache/datafusion.git", rev = "2464
 datafusion-substrait = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
 derive_builder = "0.12"
 dotenv = "0.15"
-etcd-client = "0.13"
+etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
@@ -139,7 +139,7 @@ moka = "0.12"
 notify = "6.1"
 num_cpus = "1.16"
 once_cell = "1.18"
-opentelemetry-proto = { version = "0.5", features = [
+opentelemetry-proto = { version = "0.27", features = [
     "gen-tonic",
     "metrics",
     "trace",

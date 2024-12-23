@@ -56,7 +56,7 @@ const INIT_CAPACITY: usize = 42;
 /// - `end_time`: the ending execution time of the procedure.
 /// - `status`: the status of the procedure.
 /// - `lock_keys`: the lock keys of the procedure.
-///
+#[derive(Debug)]
 pub(super) struct InformationSchemaProcedureInfo {
     schema: SchemaRef,
     catalog_manager: Weak<dyn CatalogManager>,

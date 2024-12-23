@@ -59,6 +59,7 @@ const INIT_CAPACITY: usize = 42;
 /// The `PARTITIONS` table provides information about partitioned tables.
 /// See https://dev.mysql.com/doc/refman/8.0/en/information-schema-partitions-table.html
 /// We provide an extral column `greptime_partition_id` for GreptimeDB region id.
+#[derive(Debug)]
 pub(super) struct InformationSchemaPartitions {
     schema: SchemaRef,
     catalog_name: String,

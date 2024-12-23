@@ -19,8 +19,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_catalog::format_full_table_name;
-use datafusion::catalog::schema::SchemaProvider;
-use datafusion::catalog::{CatalogProvider, CatalogProviderList};
+use datafusion::catalog::{CatalogProvider, CatalogProviderList, SchemaProvider};
 use datafusion::datasource::TableProvider;
 use snafu::OptionExt;
 use table::table::adapter::DfTableProviderAdapter;
@@ -29,7 +28,7 @@ use crate::error::TableNotExistSnafu;
 use crate::CatalogManagerRef;
 
 /// Delegate the resolving requests to the `[CatalogManager]` unconditionally.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DummyCatalogList {
     catalog_manager: CatalogManagerRef,
 }
@@ -67,7 +66,7 @@ impl CatalogProviderList for DummyCatalogList {
 }
 
 /// A dummy catalog provider for [DummyCatalogList].
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct DummyCatalogProvider {
     catalog_name: String,
     catalog_manager: CatalogManagerRef,
@@ -92,7 +91,7 @@ impl CatalogProvider for DummyCatalogProvider {
 }
 
 /// A dummy schema provider for [DummyCatalogList].
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct DummySchemaProvider {
     catalog_name: String,
     schema_name: String,

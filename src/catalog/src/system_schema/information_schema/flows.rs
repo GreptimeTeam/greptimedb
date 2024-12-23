@@ -55,6 +55,7 @@ pub const FLOWNODE_IDS: &str = "flownode_ids";
 pub const OPTIONS: &str = "options";
 
 /// The `information_schema.flows` to provides information about flows in databases.
+#[derive(Debug)]
 pub(super) struct InformationSchemaFlows {
     schema: SchemaRef,
     catalog_name: String,
