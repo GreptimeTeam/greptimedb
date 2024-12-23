@@ -50,12 +50,12 @@ impl InvertedIndexCache {
     }
 }
 
-/// Calculates weight for inveretd index metadata.
+/// Calculates weight for inverted index metadata.
 fn inverted_index_metadata_weight(k: &FileId, v: &Arc<InvertedIndexMetas>) -> u32 {
     (k.as_bytes().len() + v.encoded_len()) as u32
 }
 
-/// Calculates weight for inveretd index content.
+/// Calculates weight for inverted index content.
 fn inverted_index_content_weight((k, _): &(FileId, PageKey), v: &Bytes) -> u32 {
     (k.as_bytes().len() + v.len()) as u32
 }
