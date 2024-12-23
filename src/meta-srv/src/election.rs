@@ -48,10 +48,10 @@ pub trait LeaderKey: Send + Sync + Debug {
     fn key(&self) -> &[u8];
 
     /// The creation revision of the key.
-    fn rev(&self) -> i64;
+    fn rev_id(&self) -> i64;
 
     /// The lease ID of the election leader.
-    fn lease(&self) -> i64;
+    fn lease_id(&self) -> i64;
 }
 
 impl fmt::Display for LeaderChangeMessage {
@@ -69,8 +69,8 @@ impl fmt::Display for LeaderChangeMessage {
         write!(f, "LeaderKey {{ ")?;
         write!(f, "name: {}", String::from_utf8_lossy(leader_key.name()))?;
         write!(f, ", key: {}", String::from_utf8_lossy(leader_key.key()))?;
-        write!(f, ", rev: {}", leader_key.rev())?;
-        write!(f, ", lease: {}", leader_key.lease())?;
+        write!(f, ", rev: {}", leader_key.rev_id())?;
+        write!(f, ", lease: {}", leader_key.lease_id())?;
         write!(f, " }})")
     }
 }

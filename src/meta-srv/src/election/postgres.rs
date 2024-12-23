@@ -40,7 +40,7 @@ struct ValueWithLease {
 }
 
 /// PostgreSql implementation of Election.
-/// TODO: Currently only support candidate registration. Add election logic.
+/// TODO(CookiePie): Currently only support candidate registration. Add election logic.
 pub struct PgElection {
     leader_value: String,
     client: Client,

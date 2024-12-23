@@ -44,11 +44,11 @@ impl LeaderKey for EtcdLeaderKey {
         self.key()
     }
 
-    fn rev(&self) -> i64 {
+    fn rev_id(&self) -> i64 {
         self.rev()
     }
 
-    fn lease(&self) -> i64 {
+    fn lease_id(&self) -> i64 {
         self.lease()
     }
 }
@@ -99,14 +99,14 @@ impl EtcdElection {
                             info!(
                                 "[{leader_ident}] is elected as leader: {:?}, lease: {}",
                                 String::from_utf8_lossy(key.name()),
-                                key.lease()
+                                key.lease_id()
                             );
                         }
                         LeaderChangeMessage::StepDown(key) => {
                             warn!(
                                 "[{leader_ident}] is stepping down: {:?}, lease: {}",
                                 String::from_utf8_lossy(key.name()),
-                                key.lease()
+                                key.lease_id()
                             );
                         }
                     },
@@ -282,9 +282,12 @@ impl Election for EtcdElection {
                 .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
             {
-                self.leader_watcher
+                if let Err(e) = self
+                    .leader_watcher
                     .send(LeaderChangeMessage::StepDown(Arc::new(leader.clone())))
-                    .context(error::SendLeaderChangeSnafu)?;
+                {
+                    error!(e; "Failed to send leader change message");
+                }
             }
         }
 
@@ -339,9 +342,12 @@ impl EtcdElection {
             {
                 self.infancy.store(true, Ordering::Relaxed);
 
-                self.leader_watcher
-                    .send(LeaderChangeMessage::Elected(Arc::new(leader)))
-                    .context(error::SendLeaderChangeSnafu)?;
+                if let Err(e) = self
+                    .leader_watcher
+                    .send(LeaderChangeMessage::Elected(Arc::new(leader.clone())))
+                {
+                    error!(e; "Failed to send leader change message");
+                }
             }
         }
 
