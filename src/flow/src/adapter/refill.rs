@@ -16,34 +16,42 @@ use std::collections::BTreeSet;
 
 use common_error::ext::BoxedError;
 use common_recordbatch::{RecordBatch, RecordBatches, SendableRecordBatchStream};
+use common_runtime::JoinHandle;
 use datatypes::value::Value;
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use query::parser::QueryLanguageParser;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
 
+use super::FlowId;
 use crate::adapter::table_source::TableSource;
-use crate::adapter::FlowWorkerManagerRef;
+use crate::adapter::{CreateFlowArgs, FlowWorkerManagerRef};
 use crate::error::{FlowNotFoundSnafu, UnexpectedSnafu};
 use crate::expr::error::ExternalSnafu;
 use crate::repr::RelationDesc;
 use crate::{Error, FlownodeBuilder, FrontendInvoker};
 
 impl FlownodeBuilder {
-    /// Create a series of tasks to refill flow, will be transfer to flownode if
-    ///
-    /// tasks havn't completed, and will show up in `flows` table
-    async fn start_refill_flows(&self, manager: &FlowWorkerManagerRef) -> Result<(), Error> {
-        let Some(nodeid) = manager.node_id else {
-            UnexpectedSnafu {
-                reason: "node id is not set",
-            }
-            .fail()?
-        };
-        let nodeid = nodeid as u64;
+    /// Create a series of tasks to refill flow
+    async fn create_refill_flow_tasks(
+        &self,
+        manager: &FlowWorkerManagerRef,
+    ) -> Result<Vec<RefillTask>, Error> {
+        let nodeid = manager.node_id.map(|c| c as u64);
 
-        let flow_ids = self.get_all_flow_ids(Some(nodeid)).await?;
+        let frontend_invoker =
+            manager
+                .frontend_invoker
+                .read()
+                .await
+                .clone()
+                .context(UnexpectedSnafu {
+                    reason: "frontend invoker is not set",
+                })?;
+
+        let flow_ids = self.get_all_flow_ids(nodeid).await?;
+        let mut refill_tasks = Vec::new();
         for flow_id in flow_ids {
             let info = self
                 .flow_metadata_manager()
@@ -62,13 +70,74 @@ impl FlownodeBuilder {
                     common_time::Timestamp::new_millisecond(now),
                 )
             });
+            for src_table in info.source_table_ids() {
+                let time_index_col = manager
+                    .table_info_source
+                    .get_time_index_column_from_table_id(src_table)
+                    .await?;
+                let time_index_name = time_index_col.name;
+                let task = RefillTask::create(
+                    &frontend_invoker,
+                    flow_id as u64,
+                    *src_table,
+                    time_range,
+                    &time_index_name,
+                    &manager.table_info_source,
+                )
+                .await?;
+                refill_tasks.push(task);
+            }
         }
-        todo!()
+        Ok(refill_tasks)
+    }
+
+    /// Starting to refill flows, if any error occurs, will rebuild the flow and retry
+    pub(crate) async fn starting_refill_flows(
+        &self,
+        manager: &FlowWorkerManagerRef,
+    ) -> Result<Vec<JoinHandle<Result<(), Error>>>, Error> {
+        let tasks = self.create_refill_flow_tasks(manager).await?;
+        // TODO(discord9): add a back pressure mechanism
+        let mut handles = Vec::new();
+        for mut task in tasks {
+            let flow_metadata_manager = self.flow_metadata_manager();
+            let manager = manager.clone();
+            let handle: JoinHandle<Result<(), Error>> = common_runtime::spawn_global(async move {
+                // if failed to refill, will rebuild the flow without refill
+                match task.handle_refill_inserts(manager.clone()).await {
+                    Ok(()) => {
+                        common_telemetry::info!(
+                            "Successfully refill flow: flow_id={}",
+                            task.flow_id
+                        );
+                    }
+                    Err(err) => {
+                        common_telemetry::error!(err; "Failed to refill flow(id={}), will rebuild the flow with clean state", task.flow_id);
+
+                        let flow_id = task.flow_id;
+                        manager.remove_flow(flow_id).await?;
+                        let info = flow_metadata_manager
+                            .flow_info_manager()
+                            .get(flow_id as u32)
+                            .await
+                            .map_err(BoxedError::new)
+                            .context(ExternalSnafu)?
+                            .context(FlowNotFoundSnafu { id: flow_id })?;
+                        let args = CreateFlowArgs::from_flow_info(flow_id, info, true, true);
+                        manager.create_flow(args).await?;
+                    }
+                }
+                Ok(())
+            });
+            handles.push(handle);
+        }
+        Ok(handles)
     }
 }
 
 /// Task to refill flow with given table id and a time range
 pub struct RefillTask {
+    flow_id: FlowId,
     table_id: TableId,
     table_schema: RelationDesc,
     output_stream: SendableRecordBatchStream,
@@ -109,6 +178,7 @@ impl RefillTask {
     /// Query with "select * from table WHERE time >= range_start and time < range_end"
     pub async fn create(
         invoker: &FrontendInvoker,
+        flow_id: FlowId,
         table_id: TableId,
         time_range: Option<(common_time::Timestamp, common_time::Timestamp)>,
         time_col_name: &str,
@@ -163,6 +233,7 @@ impl RefillTask {
         let output_stream = output_stream.try_into_stream()?;
 
         Ok(RefillTask {
+            flow_id,
             table_id,
             table_schema,
             output_stream,
@@ -179,7 +250,7 @@ impl RefillTask {
         while let Some(rb) = self.output_stream.next().await {
             let rb = match rb {
                 Ok(rb) => rb,
-                Err(err) => Err(err).map_err(BoxedError::new).context(ExternalSnafu)?,
+                Err(err) => Err(BoxedError::new(err)).context(ExternalSnafu)?,
             };
             self.validate_schema(&rb)?;
 

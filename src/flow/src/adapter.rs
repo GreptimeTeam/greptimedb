@@ -23,6 +23,7 @@ use std::time::{Duration, Instant, SystemTime};
 use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRequests};
 use common_config::Configurable;
 use common_error::ext::BoxedError;
+use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_meta::key::TableMetadataManagerRef;
 use common_runtime::JoinHandle;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
@@ -37,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::Mode;
-use session::context::QueryContext;
+use session::context::{QueryContext, QueryContextBuilder};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{ConcreteDataType, RegionId};
 use table::metadata::TableId;
@@ -692,6 +693,38 @@ pub struct CreateFlowArgs {
     pub sql: String,
     pub flow_options: HashMap<String, String>,
     pub query_ctx: Option<QueryContext>,
+}
+
+impl CreateFlowArgs {
+    pub fn from_flow_info(
+        flow_id: FlowId,
+        info: FlowInfoValue,
+        create_if_not_exists: bool,
+        or_replace: bool,
+    ) -> Self {
+        let sink_table_name = [
+            info.sink_table_name().catalog_name.clone(),
+            info.sink_table_name().schema_name.clone(),
+            info.sink_table_name().table_name.clone(),
+        ];
+        let args = CreateFlowArgs {
+            flow_id: flow_id as _,
+            sink_table_name,
+            source_table_ids: info.source_table_ids().to_vec(),
+            create_if_not_exists,
+            or_replace,
+            expire_after: info.expire_after(),
+            comment: Some(info.comment().clone()),
+            sql: info.raw_sql().clone(),
+            flow_options: info.options().clone(),
+            query_ctx: Some(
+                QueryContextBuilder::default()
+                    .current_catalog(info.catalog_name().clone())
+                    .build(),
+            ),
+        };
+        args
+    }
 }
 
 /// Create&Remove flow

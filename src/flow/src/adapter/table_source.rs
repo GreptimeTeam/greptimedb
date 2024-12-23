@@ -82,6 +82,30 @@ impl ManagedTableSource {
         }
     }
 
+    pub async fn get_time_index_column_from_table_id(
+        &self,
+        table_id: &TableId,
+    ) -> Result<datatypes::schema::ColumnSchema, Error> {
+        let info = self
+            .table_info_manager
+            .get(*table_id)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?
+            .context(UnexpectedSnafu {
+                reason: format!("Table id = {:?}, couldn't found table info", table_id),
+            })?;
+        let raw_schema = &info.table_info.meta.schema;
+        let Some(ts_index) = raw_schema.timestamp_index else {
+            UnexpectedSnafu {
+                reason: format!("Table id = {:?}, couldn't found timestamp index", table_id),
+            }
+            .fail()?
+        };
+        let col_schema = raw_schema.column_schemas[ts_index].clone();
+        Ok(col_schema)
+    }
+
     pub async fn get_table_id_from_proto_name(
         &self,
         name: &greptime_proto::v1::TableName,
