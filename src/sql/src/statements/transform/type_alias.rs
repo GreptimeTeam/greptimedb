@@ -16,7 +16,8 @@ use std::ops::ControlFlow;
 
 use datatypes::data_type::DataType as GreptimeDataType;
 use sqlparser::ast::{
-    DataType, Expr, Function, FunctionArg, FunctionArgExpr, Ident, ObjectName, Value,
+    DataType, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList, Ident,
+    ObjectName, Value,
 };
 
 use crate::error::Result;
@@ -69,18 +70,21 @@ impl TransformRule for TypeAliasTransformRule {
         fn cast_expr_to_arrow_cast_func(expr: Expr, cast_type: String) -> Function {
             Function {
                 name: ObjectName(vec![Ident::new("arrow_cast")]),
-                args: vec![
-                    FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)),
-                    FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                        Value::SingleQuotedString(cast_type),
-                    ))),
-                ],
+                args: sqlparser::ast::FunctionArguments::List(FunctionArgumentList {
+                    args: vec![
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)),
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                            Value::SingleQuotedString(cast_type),
+                        ))),
+                    ],
+                    duplicate_treatment: None,
+                    clauses: vec![],
+                }),
                 filter: None,
                 null_treatment: None,
                 over: None,
-                distinct: false,
-                special: false,
-                order_by: vec![],
+                parameters: sqlparser::ast::FunctionArguments::None,
+                within_group: vec![],
             }
         }
 

@@ -317,7 +317,7 @@ impl<'a> ParserContext<'a> {
             .expect_keyword(Keyword::AS)
             .context(SyntaxSnafu)?;
 
-        let query = Box::new(self.parser.parse_query().context(error::SyntaxSnafu)?);
+        let query = self.parser.parse_query().context(error::SyntaxSnafu)?;
 
         Ok(Statement::CreateFlow(CreateFlow {
             flow_name,

@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use sqlparser::ast::{ObjectName, Query, SetExpr, Statement, UnaryOperator, Values};
+use sqlparser::ast::{
+    Insert as SpInsert, ObjectName, Query, SetExpr, Statement, UnaryOperator, Values,
+};
 use sqlparser::parser::ParserError;
 use sqlparser_derive::{Visit, VisitMut};
 
@@ -38,14 +40,14 @@ macro_rules! parse_fail {
 impl Insert {
     pub fn table_name(&self) -> &ObjectName {
         match &self.inner {
-            Statement::Insert { table_name, .. } => table_name,
+            Statement::Insert(insert) => &insert.table_name,
             _ => unreachable!(),
         }
     }
 
     pub fn columns(&self) -> Vec<&String> {
         match &self.inner {
-            Statement::Insert { columns, .. } => columns.iter().map(|ident| &ident.value).collect(),
+            Statement::Insert(insert) => insert.columns.iter().map(|ident| &ident.value).collect(),
             _ => unreachable!(),
         }
     }
@@ -53,14 +55,18 @@ impl Insert {
     /// Extracts the literal insert statement body if possible
     pub fn values_body(&self) -> Result<Vec<Vec<Value>>> {
         match &self.inner {
-            Statement::Insert {
-                source:
-                    Some(box Query {
-                        body: box SetExpr::Values(Values { rows, .. }),
-                        ..
-                    }),
-                ..
-            } => sql_exprs_to_values(rows),
+            Statement::Insert(insert)
+                if let SpInsert {
+                    source:
+                        Some(box Query {
+                            body: box SetExpr::Values(Values { rows, .. }),
+                            ..
+                        }),
+                    ..
+                } = insert =>
+            {
+                sql_exprs_to_values(rows)
+            }
             _ => unreachable!(),
         }
     }
@@ -69,40 +75,48 @@ impl Insert {
     /// The rules is the same as function `values_body()`.
     pub fn can_extract_values(&self) -> bool {
         match &self.inner {
-            Statement::Insert {
-                source:
-                    Some(box Query {
-                        body: box SetExpr::Values(Values { rows, .. }),
-                        ..
-                    }),
-                ..
-            } => rows.iter().all(|es| {
-                es.iter().all(|expr| match expr {
-                    Expr::Value(_) => true,
-                    Expr::Identifier(ident) => {
-                        if ident.quote_style.is_none() {
-                            ident.value.to_lowercase() == "default"
-                        } else {
-                            ident.quote_style == Some('"')
+            Statement::Insert(insert)
+                if let SpInsert {
+                    source:
+                        Some(box Query {
+                            body: box SetExpr::Values(Values { rows, .. }),
+                            ..
+                        }),
+                    ..
+                } = insert =>
+            {
+                rows.iter().all(|es| {
+                    es.iter().all(|expr| match expr {
+                        Expr::Value(_) => true,
+                        Expr::Identifier(ident) => {
+                            if ident.quote_style.is_none() {
+                                ident.value.to_lowercase() == "default"
+                            } else {
+                                ident.quote_style == Some('"')
+                            }
                         }
-                    }
-                    Expr::UnaryOp { op, expr } => {
-                        matches!(op, UnaryOperator::Minus | UnaryOperator::Plus)
-                            && matches!(&**expr, Expr::Value(Value::Number(_, _)))
-                    }
-                    _ => false,
+                        Expr::UnaryOp { op, expr } => {
+                            matches!(op, UnaryOperator::Minus | UnaryOperator::Plus)
+                                && matches!(&**expr, Expr::Value(Value::Number(_, _)))
+                        }
+                        _ => false,
+                    })
                 })
-            }),
+            }
             _ => false,
         }
     }
 
     pub fn query_body(&self) -> Result<Option<GtQuery>> {
         Ok(match &self.inner {
-            Statement::Insert {
-                source: Some(box query),
-                ..
-            } => Some(query.clone().try_into()?),
+            Statement::Insert(insert)
+                if let SpInsert {
+                    source: Some(box query),
+                    ..
+                } = insert =>
+            {
+                Some(query.clone().try_into()?)
+            }
             _ => None,
         })
     }

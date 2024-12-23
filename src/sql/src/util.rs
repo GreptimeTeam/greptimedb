@@ -41,7 +41,9 @@ pub fn format_raw_object_name(name: &ObjectName) -> String {
 }
 
 pub fn parse_option_string(option: SqlOption) -> Result<(String, String)> {
-    let (key, value) = (option.name, option.value);
+    let SqlOption::KeyValue { key, value } = option else {
+        unreachable!()
+    };
     let v = match value {
         Expr::Value(Value::SingleQuotedString(v)) | Expr::Value(Value::DoubleQuotedString(v)) => v,
         Expr::Identifier(v) => v.value,
