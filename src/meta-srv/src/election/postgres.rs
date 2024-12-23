@@ -16,19 +16,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{self, Duration};
 
-use common_meta::kv_backend::postgres::{
-    CAS, POINT_DELETE, POINT_GET, PREFIX_SCAN, PUT_IF_NOT_EXISTS,
-};
+use common_meta::kv_backend::KvBackendRef;
+use common_meta::rpc::store::{CompareAndPutRequest, PutRequest, RangeRequest};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use tokio::sync::broadcast;
-use tokio_postgres::Client;
 
 use crate::election::{
     Election, LeaderChangeMessage, CANDIDATES_ROOT, CANDIDATE_LEASE_SECS, ELECTION_KEY,
 };
 use crate::error::{
-    DeserializeFromJsonSnafu, PostgresExecutionSnafu, Result, SerializeToJsonSnafu, UnexpectedSnafu,
+    DeserializeFromJsonSnafu, KvBackendSnafu, Result, SerializeToJsonSnafu, UnexpectedSnafu,
 };
 use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
 
@@ -43,7 +41,7 @@ struct ValueWithLease {
 /// TODO(CookiePie): Currently only support candidate registration. Add election logic.
 pub struct PgElection {
     leader_value: String,
-    client: Client,
+    kv_backend: KvBackendRef,
     is_leader: AtomicBool,
     infancy: AtomicBool,
     leader_watcher: broadcast::Sender<LeaderChangeMessage>,
@@ -54,14 +52,14 @@ pub struct PgElection {
 impl PgElection {
     pub async fn with_pg_client(
         leader_value: String,
-        client: Client,
+        kv_backend: KvBackendRef,
         store_key_prefix: String,
         candidate_lease_ttl_secs: u64,
     ) -> Result<ElectionRef> {
         let (tx, _) = broadcast::channel(100);
         Ok(Arc::new(Self {
             leader_value,
-            client,
+            kv_backend,
             is_leader: AtomicBool::new(false),
             infancy: AtomicBool::new(true),
             leader_watcher: tx,
@@ -188,13 +186,13 @@ impl Election for PgElection {
 impl PgElection {
     async fn get_value_with_lease(&self, key: &String) -> Result<Option<ValueWithLease>> {
         let prev = self
-            .client
-            .query(POINT_GET, &[key])
+            .kv_backend
+            .get(key.as_bytes())
             .await
-            .context(PostgresExecutionSnafu)?;
+            .context(KvBackendSnafu)?;
 
-        if let Some(row) = prev.first() {
-            let value: String = row.get(1);
+        if let Some(kv) = prev {
+            let value: String = String::from_utf8_lossy(kv.value()).to_string();
             let value_with_lease: ValueWithLease =
                 serde_json::from_str(&value).with_context(|_| DeserializeFromJsonSnafu {
                     input: format!("{value:?}"),
@@ -209,24 +207,24 @@ impl PgElection {
         &self,
         key_prefix: &String,
     ) -> Result<Vec<ValueWithLease>> {
-        let key_prefix = format!("{}%", key_prefix);
-        let prev = self
-            .client
-            .query(PREFIX_SCAN, &[&key_prefix])
+        let range_request = RangeRequest::new().with_prefix(key_prefix.clone());
+        let res = self
+            .kv_backend
+            .range(range_request)
             .await
-            .context(PostgresExecutionSnafu)?;
+            .context(KvBackendSnafu)?;
 
-        let mut res = Vec::new();
-        for row in prev {
-            let value: String = row.get(1);
+        let mut value_with_leases = Vec::with_capacity(res.kvs.len());
+        for kv in res.kvs {
+            let value: String = String::from_utf8_lossy(kv.value()).to_string();
             let value_with_lease: ValueWithLease =
                 serde_json::from_str(&value).with_context(|_| DeserializeFromJsonSnafu {
                     input: format!("{value:?}"),
                 })?;
-            res.push(value_with_lease);
+            value_with_leases.push(value_with_lease);
         }
 
-        Ok(res)
+        Ok(value_with_leases)
     }
 
     async fn update_value_with_lease(
@@ -238,21 +236,23 @@ impl PgElection {
         let prev = serde_json::to_string(prev).with_context(|_| SerializeToJsonSnafu {
             input: format!("{prev:?}"),
         })?;
-
         let updated = serde_json::to_string(updated).with_context(|_| SerializeToJsonSnafu {
             input: format!("{updated:?}"),
         })?;
 
+        let cas_request = CompareAndPutRequest::new()
+            .with_key(key.clone())
+            .with_expect(updated)
+            .with_value(prev);
         let res = self
-            .client
-            .query(CAS, &[key, &prev, &updated])
+            .kv_backend
+            .compare_and_put(cas_request)
             .await
-            .context(PostgresExecutionSnafu)?;
+            .context(KvBackendSnafu)?;
 
-        // CAS operation will return the updated value if the operation is successful
-        match res.is_empty() {
-            false => Ok(()),
-            true => UnexpectedSnafu {
+        match res.success {
+            true => Ok(()),
+            false => UnexpectedSnafu {
                 violated: format!(
                     "CAS operation failed, key: {:?}",
                     String::from_utf8_lossy(&key.clone().into_bytes())
@@ -268,25 +268,26 @@ impl PgElection {
             input: format!("{value:?}"),
         })?;
 
+        let put_request = PutRequest::new().with_key(key.clone()).with_value(value);
         let res = self
-            .client
-            .query(PUT_IF_NOT_EXISTS, &[key, &value])
+            .kv_backend
+            .put(put_request)
             .await
-            .context(PostgresExecutionSnafu)?;
+            .context(KvBackendSnafu)?;
 
-        Ok(res.is_empty())
+        Ok(res.prev_kv.is_none())
     }
 
     /// Returns `true` if the deletion is successful.
     /// Caution: Should only delete the key if the lease is expired.
     async fn delete_value(&self, key: &String) -> Result<bool> {
         let res = self
-            .client
-            .query(POINT_DELETE, &[key])
+            .kv_backend
+            .delete(key.as_bytes(), false)
             .await
-            .context(PostgresExecutionSnafu)?;
+            .context(KvBackendSnafu)?;
 
-        Ok(res.len() == 1)
+        Ok(res.is_none())
     }
 }
 
@@ -294,18 +295,20 @@ impl PgElection {
 mod tests {
     use std::env;
 
-    use tokio_postgres::NoTls;
+    use common_meta::kv_backend::postgres::PgStore;
+    use tokio_postgres::{Client, NoTls};
 
     use super::*;
+    use crate::error::PostgresExecutionSnafu;
 
-    async fn create_postgres_client(addr: &str) -> Result<Client> {
-        if addr.is_empty() {
+    async fn create_postgres_client(endpoint: &str) -> Result<Client> {
+        if endpoint.is_empty() {
             return UnexpectedSnafu {
-                violated: "Postgres address is empty".to_string(),
+                violated: "Postgres endpoint is empty".to_string(),
             }
             .fail();
         }
-        let (client, connection) = tokio_postgres::connect(addr, NoTls)
+        let (client, connection) = tokio_postgres::connect(endpoint, NoTls)
             .await
             .context(PostgresExecutionSnafu)?;
         tokio::spawn(async move {
@@ -314,35 +317,18 @@ mod tests {
         Ok(client)
     }
 
-    #[tokio::test]
-    async fn temp_test() {
+    async fn create_pg_kvbackend() -> Result<KvBackendRef> {
         let endpoint = env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
-        let client = create_postgres_client(&endpoint).await.unwrap();
-        client
-            .execute(
-                "CREATE TABLE IF NOT EXISTS greptime_metakv(k varchar PRIMARY KEY, v varchar)",
-                &[],
-            )
+        let client = create_postgres_client(&endpoint).await?;
+        let kv_backend = PgStore::with_pg_client(client)
             .await
-            .expect("Failed to create metadkv table");
-
-        client
-            .execute("DELETE FROM greptime_metakv", &[])
-            .await
-            .expect("Failed to delete metakv table");
+            .context(KvBackendSnafu)?;
+        Ok(kv_backend)
     }
 
     #[tokio::test]
     async fn test_postgres_crud() {
-        let endpoint = env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
-        let client = create_postgres_client(&endpoint).await.unwrap();
-        client
-            .execute(
-                "CREATE TABLE IF NOT EXISTS greptime_metakv(k varchar PRIMARY KEY, v varchar)",
-                &[],
-            )
-            .await
-            .expect("Failed to create metadkv table");
+        let kv_backend = create_pg_kvbackend().await.unwrap();
 
         let key = "test_key".to_string();
         let value = ValueWithLease {
@@ -353,7 +339,7 @@ mod tests {
         let (tx, _) = broadcast::channel(100);
         let pg_election = PgElection {
             leader_value: "test_leader".to_string(),
-            client,
+            kv_backend,
             is_leader: AtomicBool::new(false),
             infancy: AtomicBool::new(true),
             leader_watcher: tx,
@@ -413,13 +399,12 @@ mod tests {
     }
 
     async fn candidate(leader_value: String) {
-        let endpoint = env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
-        let client = create_postgres_client(&endpoint).await.unwrap();
+        let kv_backend = create_pg_kvbackend().await.unwrap();
 
         let (tx, _) = broadcast::channel(100);
         let pg_election = PgElection {
             leader_value,
-            client,
+            kv_backend,
             is_leader: AtomicBool::new(false),
             infancy: AtomicBool::new(true),
             leader_watcher: tx,
@@ -448,14 +433,13 @@ mod tests {
         // Wait for candidates to registrate themselves.
         tokio::time::sleep(Duration::from_secs(3)).await;
 
-        let endpoint = env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
-        let client = create_postgres_client(&endpoint).await.unwrap();
+        let kv_backend = create_pg_kvbackend().await.unwrap();
 
         let (tx, _) = broadcast::channel(100);
         let leader_value = "test_leader".to_string();
         let pg_election = PgElection {
             leader_value,
-            client,
+            kv_backend,
             is_leader: AtomicBool::new(false),
             infancy: AtomicBool::new(true),
             leader_watcher: tx,
