@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use api::v1::meta::ProcedureDetailResponse;
+use api::v1::QueryContext;
 use common_procedure::{
     watcher, BoxedProcedureLoader, Output, ProcedureId, ProcedureManagerRef, ProcedureWithId,
 };
@@ -54,7 +55,7 @@ use crate::rpc::ddl::DdlTask::{
 };
 use crate::rpc::ddl::{
     AlterDatabaseTask, AlterTableTask, CreateDatabaseTask, CreateFlowTask, CreateTableTask,
-    CreateViewTask, DropDatabaseTask, DropFlowTask, DropTableTask, DropViewTask, QueryContext,
+    CreateViewTask, DropDatabaseTask, DropFlowTask, DropTableTask, DropViewTask,
     SubmitDdlTaskRequest, SubmitDdlTaskResponse, TruncateTableTask,
 };
 use crate::rpc::procedure;
@@ -824,7 +825,7 @@ impl ProcedureExecutor for DdlManager {
                         self,
                         cluster_id,
                         create_flow_task,
-                        request.query_context.into(),
+                        (*request.query_context).clone().into(),
                     )
                     .await
                 }
