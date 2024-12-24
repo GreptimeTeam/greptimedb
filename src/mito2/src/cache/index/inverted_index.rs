@@ -12,18 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::ops::Range;
 use std::sync::Arc;
 
 use api::v1::index::InvertedIndexMetas;
 use async_trait::async_trait;
 use bytes::Bytes;
-use common_base::BitVec;
-use index::inverted_index::error::DecodeFstSnafu;
+use index::inverted_index::error::Result;
 use index::inverted_index::format::reader::InvertedIndexReader;
-use index::inverted_index::FstMap;
 use prost::Message;
-use snafu::ResultExt;
 
 use crate::cache::index::{IndexCache, PageKey, INDEX_METADATA_TYPE};
 use crate::metrics::{CACHE_HIT, CACHE_MISS};
@@ -81,22 +77,20 @@ impl<R> CachedInvertedIndexBlobReader<R> {
 
 #[async_trait]
 impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobReader<R> {
-    async fn range_read(
-        &mut self,
-        offset: u64,
-        size: u32,
-    ) -> index::inverted_index::error::Result<Vec<u8>> {
-        self.inner.range_read(offset, size).await
+    async fn range_read(&mut self, offset: u64, size: u32) -> Result<Vec<u8>> {
+        let inner = &mut self.inner;
+        self.cache
+            .get_or_load(
+                self.file_id,
+                self.file_size,
+                offset,
+                size,
+                move |ranges| async move { inner.read_vec(&ranges).await },
+            )
+            .await
     }
 
-    async fn read_vec(
-        &mut self,
-        ranges: &[Range<u64>],
-    ) -> index::inverted_index::error::Result<Vec<Bytes>> {
-        self.inner.read_vec(ranges).await
-    }
-
-    async fn metadata(&mut self) -> index::inverted_index::error::Result<Arc<InvertedIndexMetas>> {
+    async fn metadata(&mut self) -> Result<Arc<InvertedIndexMetas>> {
         if let Some(cached) = self.cache.get_index_metadata(self.file_id) {
             CACHE_HIT.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             Ok(cached)
@@ -106,42 +100,6 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
             CACHE_MISS.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             Ok(meta)
         }
-    }
-
-    async fn fst(
-        &mut self,
-        offset: u64,
-        size: u32,
-    ) -> index::inverted_index::error::Result<FstMap> {
-        let inner = &mut self.inner;
-        self.cache
-            .get_or_load(
-                self.file_id,
-                self.file_size,
-                offset,
-                size,
-                move |ranges| async move { inner.read_vec(&ranges).await },
-            )
-            .await
-            .and_then(|r| FstMap::new(r).context(DecodeFstSnafu))
-    }
-
-    async fn bitmap(
-        &mut self,
-        offset: u64,
-        size: u32,
-    ) -> index::inverted_index::error::Result<BitVec> {
-        let inner = &mut self.inner;
-        self.cache
-            .get_or_load(
-                self.file_id,
-                self.file_size,
-                offset,
-                size,
-                move |ranges| async move { inner.read_vec(&ranges).await },
-            )
-            .await
-            .map(BitVec::from_vec)
     }
 }
 
