@@ -32,6 +32,7 @@ use crate::error::{Error, EvalSnafu, TableNotFoundSnafu};
 use crate::expr::error::InternalSnafu;
 use crate::expr::{Batch, GlobalId};
 use crate::metrics::METRIC_FLOW_INPUT_BUF_SIZE;
+use crate::plan::TypedPlan;
 use crate::repr::{DiffRow, RelationDesc, BATCH_SIZE, BROADCAST_CAP, SEND_BUF_CAP};
 
 /// A context that holds the information of the dataflow
@@ -41,6 +42,7 @@ pub struct FlownodeContext {
     pub source_to_tasks: BTreeMap<TableId, BTreeSet<FlowId>>,
     /// mapping from task to sink table, useful for sending data back to the client when a task is done running
     pub flow_to_sink: BTreeMap<FlowId, TableName>,
+    pub flow_plans: BTreeMap<FlowId, TypedPlan>,
     pub sink_to_flow: BTreeMap<TableName, FlowId>,
     /// broadcast sender for source table, any incoming write request will be sent to the source table's corresponding sender
     ///
@@ -256,6 +258,14 @@ impl FlownodeContext {
         self.sink_to_flow.insert(sink_table_name, task_id);
     }
 
+    pub fn add_flow_plan(&mut self, task_id: FlowId, plan: TypedPlan) {
+        self.flow_plans.insert(task_id, plan);
+    }
+
+    pub fn get_flow_plan(&self, task_id: &FlowId) -> Option<TypedPlan> {
+        self.flow_plans.get(task_id).cloned()
+    }
+
     /// remove flow from worker context
     pub fn remove_flow(&mut self, task_id: FlowId) {
         if let Some(sink_table_name) = self.flow_to_sink.remove(&task_id) {
@@ -267,6 +277,7 @@ impl FlownodeContext {
                 self.source_sender.remove(source_table_id);
             }
         }
+        self.flow_plans.remove(&task_id);
     }
 
     /// try add source sender, if already exist, do nothing

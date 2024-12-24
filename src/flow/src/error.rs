@@ -46,6 +46,21 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to query"))]
+    RequestQuery {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to find table route for table id {}", table_id))]
+    FindTableRoute {
+        table_id: u32,
+        #[snafu(implicit)]
+        location: Location,
+        source: partition::error::Error,
+    },
+
     /// TODO(discord9): add detailed location of column
     #[snafu(display("Failed to eval stream"))]
     Eval {
@@ -221,6 +236,11 @@ impl ErrorExt for Error {
             Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
                 StatusCode::Unsupported
             }
+
+            Self::FindTableRoute { source, .. } => source.status_code(),
+
+            Self::RequestQuery { source, .. } => source.status_code(),
+
             Self::External { source, .. } => source.status_code(),
             Self::Internal { .. } | Self::CacheRequired { .. } => StatusCode::Internal,
             Self::StartServer { source, .. } | Self::ShutdownServer { source, .. } => {

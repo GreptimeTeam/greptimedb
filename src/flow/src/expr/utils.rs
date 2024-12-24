@@ -23,10 +23,13 @@ use crate::expr::ScalarExpr;
 use crate::plan::TypedPlan;
 use crate::Result;
 
-/// Find lower bound for time `current` in given `plan`
+/// Find lower bound for time `current` in given `plan` for the time window expr.
+///
+/// i.e. for time window expr being `date_bin(INTERVAL '5 minutes', ts) as time_window` and `current="2021-07-01 00:01:01.000"`,
+/// return `Some("2021-07-01 00:00:00.000")`
 ///
 /// if `plan` doesn't contain a `TIME INDEX` column, return `None`
-pub fn find_plan_time_lower_bound(
+pub fn find_plan_time_window_expr_lower_bound(
     plan: &TypedPlan,
     current: common_time::Timestamp,
 ) -> Result<Option<common_time::Timestamp>> {
@@ -251,7 +254,7 @@ mod test {
                 expected.map(|expected| common_time::Timestamp::from_str(expected, None).unwrap());
 
             assert_eq!(
-                find_plan_time_lower_bound(&flow_plan, current).unwrap(),
+                find_plan_time_window_expr_lower_bound(&flow_plan, current).unwrap(),
                 expected
             );
         }

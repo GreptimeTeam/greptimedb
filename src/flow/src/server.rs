@@ -28,16 +28,21 @@ use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::{Flownode, NodeManagerRef};
+use common_query::request::QueryRequest;
 use common_query::Output;
+use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::tracing::info;
 use futures::{FutureExt, TryStreamExt};
 use greptime_proto::v1::flow::{flow_server, FlowRequest, FlowResponse, InsertRequests};
 use itertools::Itertools;
 use operator::delete::Deleter;
 use operator::insert::Inserter;
+use operator::request::Requester;
 use operator::statement::StatementExecutor;
-use partition::manager::PartitionRuleManager;
-use query::{QueryEngine, QueryEngineFactory};
+use operator::table::TableMutationOperator;
+use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
+use query::region_query::RegionQueryHandler;
+use query::{QueryEngine, QueryEngineFactory, QueryEngineRef};
 use servers::error::{AlreadyStartedSnafu, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu};
 use servers::server::Server;
 use session::context::{QueryContextBuilder, QueryContextRef};
@@ -52,6 +57,8 @@ use crate::adapter::{CreateFlowArgs, FlowWorkerManagerRef};
 use crate::error::{
     to_status_with_last_err, CacheRequiredSnafu, ExternalSnafu, FlowNotFoundSnafu, ListFlowsSnafu,
     ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
+    FindTableRouteSnafu, 
+    RequestQuerySnafu,
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::metrics::{METRIC_FLOW_PROCESSING_TIME, METRIC_FLOW_ROWS};
@@ -328,43 +335,6 @@ impl FlownodeBuilder {
         Ok(instance)
     }
 
-    pub(crate) async fn get_all_flow_ids(&self, nodeid: Option<u64>) -> Result<Vec<u32>, Error> {
-        let ret = if let Some(nodeid) = nodeid {
-            let flow_ids_one_node = self
-                .flow_metadata_manager
-                .flownode_flow_manager()
-                .flows(nodeid)
-                .try_collect::<Vec<_>>()
-                .await
-                .context(ListFlowsSnafu { id: Some(nodeid) })?;
-            flow_ids_one_node.into_iter().map(|(id, _)| id).collect()
-        } else {
-            let all_catalogs = self
-                .catalog_manager
-                .catalog_names()
-                .await
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
-            let mut all_flow_ids = vec![];
-            for catalog in all_catalogs {
-                let flows = self
-                    .flow_metadata_manager
-                    .flow_name_manager()
-                    .flow_names(&catalog)
-                    .await
-                    .try_collect::<Vec<_>>()
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(ExternalSnafu)?;
-
-                all_flow_ids.extend(flows.into_iter().map(|(_, id)| id.flow_id()));
-            }
-            all_flow_ids
-        };
-
-        Ok(ret)
-    }
-
     /// recover all flow tasks in this flownode in distributed mode(nodeid is Some(<num>))
     ///
     /// or recover all existing flow tasks if in standalone mode(nodeid is None)
@@ -375,7 +345,8 @@ impl FlownodeBuilder {
         manager: &FlowWorkerManagerRef,
     ) -> Result<usize, Error> {
         let nodeid = self.opts.node_id;
-        let to_be_recovered = self.get_all_flow_ids(nodeid).await?;
+        let to_be_recovered =
+            get_all_flow_ids(&self.flow_metadata_manager, &self.catalog_manager, nodeid).await?;
         let cnt = to_be_recovered.len();
 
         // TODO(discord9): recover in parallel
@@ -455,6 +426,7 @@ impl FlownodeBuilder {
     }
 }
 
+#[derive(Clone)]
 pub struct FrontendInvoker {
     inserter: Arc<Inserter>,
     deleter: Arc<Deleter>,
@@ -474,8 +446,11 @@ impl FrontendInvoker {
         }
     }
 
+    /// Build a frontend invoker,
+    ///
+    /// if `query_engine` is not specified, will build one without ability to execute ddl or flow, only insert/delete and query
     pub async fn build_from(
-        flow_worker_manager: FlowWorkerManagerRef,
+        query_engine: Option<QueryEngineRef>,
         catalog_manager: CatalogManagerRef,
         kv_backend: KvBackendRef,
         layered_cache_registry: LayeredCacheRegistryRef,
@@ -510,7 +485,35 @@ impl FrontendInvoker {
             node_manager.clone(),
         ));
 
-        let query_engine = flow_worker_manager.query_engine.clone();
+        let query_engine = if let Some(query_engine) = query_engine {
+            query_engine
+        } else {
+            // make frontend like query engine
+            let region_query_handler =
+                FlownodeRegionQueryHandler::arc(partition_manager.clone(), node_manager.clone());
+
+            let requester = Arc::new(Requester::new(
+                catalog_manager.clone(),
+                partition_manager.clone(),
+                node_manager.clone(),
+            ));
+
+            let table_mutation_handler = Arc::new(TableMutationOperator::new(
+                inserter.clone(),
+                deleter.clone(),
+                requester,
+            ));
+
+            QueryEngineFactory::new(
+                catalog_manager.clone(),
+                Some(region_query_handler.clone()),
+                Some(table_mutation_handler),
+                None,
+                None,
+                true,
+            )
+            .query_engine()
+        };
 
         let statement_executor = Arc::new(StatementExecutor::new(
             catalog_manager.clone(),
@@ -566,5 +569,100 @@ impl FrontendInvoker {
 
     pub fn statement_executor(&self) -> Arc<StatementExecutor> {
         self.statement_executor.clone()
+    }
+}
+
+/// get all flow ids in this flownode
+pub(crate) async fn get_all_flow_ids(
+    flow_metadata_manager: &FlowMetadataManagerRef,
+    catalog_manager: &CatalogManagerRef,
+    nodeid: Option<u64>,
+) -> Result<Vec<u32>, Error> {
+    let ret = if let Some(nodeid) = nodeid {
+        let flow_ids_one_node = flow_metadata_manager
+            .flownode_flow_manager()
+            .flows(nodeid)
+            .try_collect::<Vec<_>>()
+            .await
+            .context(ListFlowsSnafu { id: Some(nodeid) })?;
+        flow_ids_one_node.into_iter().map(|(id, _)| id).collect()
+    } else {
+        let all_catalogs = catalog_manager
+            .catalog_names()
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        let mut all_flow_ids = vec![];
+        for catalog in all_catalogs {
+            let flows = flow_metadata_manager
+                .flow_name_manager()
+                .flow_names(&catalog)
+                .await
+                .try_collect::<Vec<_>>()
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
+
+            all_flow_ids.extend(flows.into_iter().map(|(_, id)| id.flow_id()));
+        }
+        all_flow_ids
+    };
+
+    Ok(ret)
+}
+
+/// a makeshift region query handler so that flownode can proactively query for
+/// data it want
+pub(crate) struct FlownodeRegionQueryHandler {
+    partition_manager: PartitionRuleManagerRef,
+    node_manager: NodeManagerRef,
+}
+
+impl FlownodeRegionQueryHandler {
+    pub fn arc(
+        partition_manager: PartitionRuleManagerRef,
+        node_manager: NodeManagerRef,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            partition_manager,
+            node_manager,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl RegionQueryHandler for FlownodeRegionQueryHandler {
+    async fn do_get(
+        &self,
+        request: QueryRequest,
+    ) -> query::error::Result<SendableRecordBatchStream> {
+        self.do_get_inner(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(query::error::RegionQuerySnafu)
+    }
+}
+
+impl FlownodeRegionQueryHandler {
+    async fn do_get_inner(
+        &self,
+        request: QueryRequest,
+    ) -> Result<SendableRecordBatchStream, Error> {
+        let region_id = request.region_id;
+
+        let peer = &self
+            .partition_manager
+            .find_region_leader(region_id)
+            .await
+            .context(FindTableRouteSnafu {
+                table_id: region_id.table_id(),
+            })?;
+
+        let client = self.node_manager.datanode(peer).await;
+
+        client
+            .handle_query(request)
+            .await
+            .context(RequestQuerySnafu)
     }
 }

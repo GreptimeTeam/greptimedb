@@ -47,7 +47,10 @@ use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 pub(crate) use crate::adapter::node_context::FlownodeContext;
 use crate::adapter::table_source::ManagedTableSource;
-use crate::adapter::util::relation_desc_to_column_schemas_with_fallback;
+use crate::adapter::refill::RefillTask;
+use crate::adapter::util::{
+    relation_desc_to_column_schemas_with_fallback, table_info_value_to_relation_desc,
+};
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
 use crate::df_optimizer::sql_to_flow_plan;
@@ -134,6 +137,7 @@ pub struct FlowWorkerManager {
     frontend_invoker: RwLock<Option<FrontendInvoker>>,
     /// contains mapping from table name to global id, and table schema
     node_context: RwLock<FlownodeContext>,
+    refill_tasks: RwLock<BTreeMap<FlowId, RefillTask>>,
     flow_err_collectors: RwLock<BTreeMap<FlowId, ErrCollector>>,
     src_send_buf_lens: RwLock<BTreeMap<TableId, watch::Receiver<usize>>>,
     tick_manager: FlowTickManager,
@@ -172,6 +176,7 @@ impl FlowWorkerManager {
             table_info_source: srv_map,
             frontend_invoker: RwLock::new(None),
             node_context: RwLock::new(node_context),
+            refill_tasks: Default::default(),
             flow_err_collectors: Default::default(),
             src_send_buf_lens: Default::default(),
             tick_manager,
@@ -815,6 +820,8 @@ impl FlowWorkerManager {
         node_ctx.query_context = query_ctx.map(Arc::new);
         // construct a active dataflow state with it
         let flow_plan = sql_to_flow_plan(&mut node_ctx, &self.query_engine, &sql).await?;
+
+        node_ctx.add_flow_plan(flow_id, flow_plan.clone());
 
         debug!("Flow {:?}'s Plan is {:?}", flow_id, flow_plan);
 

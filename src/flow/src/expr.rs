@@ -37,6 +37,7 @@ pub(crate) use linear::{MapFilterProject, MfpPlan, SafeMfpPlan};
 pub(crate) use relation::{Accum, Accumulator, AggregateExpr, AggregateFunc};
 pub(crate) use scalar::{ScalarExpr, TypedExpr};
 use snafu::{ensure, ResultExt};
+pub(crate) use utils::find_plan_time_window_expr_lower_bound;
 
 use crate::expr::error::{ArrowSnafu, DataTypeSnafu};
 use crate::repr::Diff;

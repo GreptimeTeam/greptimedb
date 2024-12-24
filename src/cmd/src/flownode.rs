@@ -21,6 +21,7 @@ use clap::Parser;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
 use common_config::Configurable;
+use common_error::ext::BoxedError;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
@@ -38,8 +39,8 @@ use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
-    BuildCacheRegistrySnafu, InitMetadataSnafu, LoadLayeredConfigSnafu, MetaClientInitSnafu,
-    MissingConfigSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
+    BuildCacheRegistrySnafu, BuildCliSnafu, InitMetadataSnafu, LoadLayeredConfigSnafu,
+    MetaClientInitSnafu, MissingConfigSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{log_versions, App};
@@ -301,7 +302,7 @@ impl StartCommand {
             Plugins::new(),
             table_metadata_manager,
             catalog_manager.clone(),
-            flow_metadata_manager,
+            flow_metadata_manager.clone(),
         )
         .with_heartbeat_task(heartbeat_task);
 
@@ -316,7 +317,7 @@ impl StartCommand {
         let client = Arc::new(NodeClients::new(channel_config));
 
         let invoker = FrontendInvoker::build_from(
-            flownode.flow_worker_manager().clone(),
+            None,
             catalog_manager.clone(),
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
@@ -329,6 +330,13 @@ impl StartCommand {
             .flow_worker_manager()
             .set_frontend_invoker(invoker)
             .await;
+
+        flownode
+            .flow_worker_manager()
+            .create_and_start_refill_flow_tasks(&flow_metadata_manager, &(catalog_manager as _))
+            .await
+            .map_err(BoxedError::new)
+            .context(BuildCliSnafu)?;
 
         Ok(Instance::new(flownode, guard))
     }

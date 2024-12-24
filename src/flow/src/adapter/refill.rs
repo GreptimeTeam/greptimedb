@@ -13,48 +13,56 @@
 // limitations under the License.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
+use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
+use common_meta::key::flow::FlowMetadataManagerRef;
 use common_recordbatch::{RecordBatch, RecordBatches, SendableRecordBatchStream};
 use common_runtime::JoinHandle;
 use datatypes::value::Value;
 use futures::StreamExt;
 use query::parser::QueryLanguageParser;
-use session::context::QueryContext;
+use session::context::QueryContextBuilder;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
 
-use super::FlowId;
+use super::{FlowId, FlowWorkerManager};
 use crate::adapter::table_source::TableSource;
-use crate::adapter::{CreateFlowArgs, FlowWorkerManagerRef};
-use crate::error::{FlowNotFoundSnafu, UnexpectedSnafu};
+use crate::adapter::FlowWorkerManagerRef;
+use crate::error::{FlowNotFoundSnafu, JoinTaskSnafu, UnexpectedSnafu};
 use crate::expr::error::ExternalSnafu;
+use crate::expr::find_plan_time_window_expr_lower_bound;
 use crate::repr::RelationDesc;
-use crate::{Error, FlownodeBuilder, FrontendInvoker};
+use crate::server::get_all_flow_ids;
+use crate::{Error, FrontendInvoker};
 
-impl FlownodeBuilder {
+impl FlowWorkerManager {
+    /// Create and start refill flow tasks in background
+    pub async fn create_and_start_refill_flow_tasks(
+        self: &FlowWorkerManagerRef,
+        flow_metadata_manager: &FlowMetadataManagerRef,
+        catalog_manager: &CatalogManagerRef,
+    ) -> Result<(), Error> {
+        let tasks = self
+            .create_refill_flow_tasks(flow_metadata_manager, catalog_manager)
+            .await?;
+        self.starting_refill_flows(tasks).await?;
+        Ok(())
+    }
+
     /// Create a series of tasks to refill flow
-    async fn create_refill_flow_tasks(
+    pub async fn create_refill_flow_tasks(
         &self,
-        manager: &FlowWorkerManagerRef,
+        flow_metadata_manager: &FlowMetadataManagerRef,
+        catalog_manager: &CatalogManagerRef,
     ) -> Result<Vec<RefillTask>, Error> {
-        let nodeid = manager.node_id.map(|c| c as u64);
+        let nodeid = self.node_id.map(|c| c as u64);
 
-        let frontend_invoker =
-            manager
-                .frontend_invoker
-                .read()
-                .await
-                .clone()
-                .context(UnexpectedSnafu {
-                    reason: "frontend invoker is not set",
-                })?;
-
-        let flow_ids = self.get_all_flow_ids(nodeid).await?;
+        let flow_ids = get_all_flow_ids(flow_metadata_manager, catalog_manager, nodeid).await?;
         let mut refill_tasks = Vec::new();
         for flow_id in flow_ids {
-            let info = self
-                .flow_metadata_manager()
+            let info = flow_metadata_manager
                 .flow_info_manager()
                 .get(flow_id)
                 .await
@@ -63,26 +71,32 @@ impl FlownodeBuilder {
                 .context(FlowNotFoundSnafu { id: flow_id })?;
             let expire_after = info.expire_after();
             // TODO(discord9): better way to get last point
-            let now = manager.tick_manager.tick();
-            let time_range = expire_after.map(|e| {
-                (
-                    common_time::Timestamp::new_millisecond(now - e),
-                    common_time::Timestamp::new_millisecond(now),
-                )
-            });
+            let now = self.tick_manager.tick();
+            let plan = self
+                .node_context
+                .read()
+                .await
+                .get_flow_plan(&FlowId::from(flow_id))
+                .context(FlowNotFoundSnafu { id: flow_id })?;
+            let time_range = if let Some(expire_after) = expire_after {
+                let low_bound = common_time::Timestamp::new_millisecond(now - expire_after);
+                let real_low_bound = find_plan_time_window_expr_lower_bound(&plan, low_bound)?;
+                real_low_bound.map(|l| (l, common_time::Timestamp::new_millisecond(now)))
+            } else {
+                None
+            };
             for src_table in info.source_table_ids() {
-                let time_index_col = manager
+                let time_index_col = self
                     .table_info_source
                     .get_time_index_column_from_table_id(src_table)
                     .await?;
                 let time_index_name = time_index_col.name;
                 let task = RefillTask::create(
-                    &frontend_invoker,
                     flow_id as u64,
                     *src_table,
                     time_range,
                     &time_index_name,
-                    &manager.table_info_source,
+                    &self.table_info_source,
                 )
                 .await?;
                 refill_tasks.push(task);
@@ -93,54 +107,169 @@ impl FlownodeBuilder {
 
     /// Starting to refill flows, if any error occurs, will rebuild the flow and retry
     pub(crate) async fn starting_refill_flows(
-        &self,
-        manager: &FlowWorkerManagerRef,
-    ) -> Result<Vec<JoinHandle<Result<(), Error>>>, Error> {
-        let tasks = self.create_refill_flow_tasks(manager).await?;
+        self: &FlowWorkerManagerRef,
+        tasks: Vec<RefillTask>,
+    ) -> Result<(), Error> {
         // TODO(discord9): add a back pressure mechanism
-        let mut handles = Vec::new();
-        for mut task in tasks {
-            let flow_metadata_manager = self.flow_metadata_manager();
-            let manager = manager.clone();
-            let handle: JoinHandle<Result<(), Error>> = common_runtime::spawn_global(async move {
-                // if failed to refill, will rebuild the flow without refill
-                match task.handle_refill_inserts(manager.clone()).await {
-                    Ok(()) => {
-                        common_telemetry::info!(
-                            "Successfully refill flow: flow_id={}",
-                            task.flow_id
-                        );
-                    }
-                    Err(err) => {
-                        common_telemetry::error!(err; "Failed to refill flow(id={}), will rebuild the flow with clean state", task.flow_id);
+        let frontend_invoker =
+            self.frontend_invoker
+                .read()
+                .await
+                .clone()
+                .context(UnexpectedSnafu {
+                    reason: "frontend invoker is not set",
+                })?;
 
-                        let flow_id = task.flow_id;
-                        manager.remove_flow(flow_id).await?;
-                        let info = flow_metadata_manager
-                            .flow_info_manager()
-                            .get(flow_id as u32)
-                            .await
-                            .map_err(BoxedError::new)
-                            .context(ExternalSnafu)?
-                            .context(FlowNotFoundSnafu { id: flow_id })?;
-                        let args = CreateFlowArgs::from_flow_info(flow_id, info, true, true);
-                        manager.create_flow(args).await?;
-                    }
-                }
-                Ok(())
-            });
-            handles.push(handle);
+        for mut task in tasks {
+            task.start_running(self.clone(), &frontend_invoker).await?;
+            // TODO(discord9): save refill tasks to a map and check if it's finished when necessary
+            // i.e. when system table need query it's state
+            self.refill_tasks
+                .write()
+                .await
+                .insert(task.data.flow_id, task);
         }
-        Ok(handles)
+        Ok(())
     }
 }
 
 /// Task to refill flow with given table id and a time range
 pub struct RefillTask {
+    data: TaskData,
+    state: TaskState<()>,
+}
+
+#[derive(Clone)]
+struct TaskData {
     flow_id: FlowId,
     table_id: TableId,
     table_schema: RelationDesc,
-    output_stream: SendableRecordBatchStream,
+}
+
+impl TaskData {
+    /// validate that incoming batch's schema is the same as table schema(by comparing types&names)
+    fn validate_schema(table_schema: &RelationDesc, rb: &RecordBatch) -> Result<(), Error> {
+        let rb_schema = &rb.schema;
+        if rb_schema.column_schemas().len() != table_schema.len()? {
+            UnexpectedSnafu {
+                reason: "rb schema len != table schema len",
+            }
+            .fail()?;
+        }
+        for (i, rb_col) in rb_schema.column_schemas().iter().enumerate() {
+            let (rb_name, rb_ty) = (rb_col.name.as_str(), &rb_col.data_type);
+            let (table_name, table_ty) = (
+                table_schema.names[i].as_ref(),
+                &table_schema.typ().column_types[i].scalar_type,
+            );
+            if Some(rb_name) != table_name.map(|c| c.as_str()) {
+                UnexpectedSnafu {
+                    reason: format!(
+                        "incoming batch's schema name {} != expected table schema name {:?}",
+                        rb_name, table_name
+                    ),
+                }
+                .fail()?;
+            }
+
+            if rb_ty != table_ty {
+                UnexpectedSnafu {
+                    reason: format!(
+                        "incoming batch's schema type {:?} != expected table schema type {:?}",
+                        rb_ty, table_ty
+                    ),
+                }
+                .fail()?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Refill task state
+enum TaskState<T> {
+    /// Task is not started
+    Prepared { sql: String },
+    /// Task is running
+    Running {
+        handle: JoinHandle<Result<T, Error>>,
+    },
+    /// Task is finished
+    Finished { res: Result<T, Error> },
+}
+
+impl<T> TaskState<T> {
+    fn new(sql: String) -> Self {
+        Self::Prepared { sql }
+    }
+}
+
+mod test_send {
+    use std::collections::BTreeMap;
+
+    use tokio::sync::RwLock;
+
+    use super::*;
+    fn is_send<T: Send + Sync>() {}
+    fn foo() {
+        is_send::<TaskState<()>>();
+        is_send::<RefillTask>();
+        is_send::<BTreeMap<FlowId, RefillTask>>();
+        is_send::<RwLock<BTreeMap<FlowId, RefillTask>>>();
+    }
+}
+
+impl TaskState<()> {
+    /// check if task is finished
+    async fn is_finished(&mut self) -> Result<bool, Error> {
+        match self {
+            Self::Finished { .. } => Ok(true),
+            Self::Running { handle } => Ok(if handle.is_finished() {
+                *self = Self::Finished {
+                    res: handle.await.context(JoinTaskSnafu)?,
+                };
+                true
+            } else {
+                false
+            }),
+            _ => Ok(false),
+        }
+    }
+
+    fn start_running(
+        &mut self,
+        task_data: &TaskData,
+        manager: FlowWorkerManagerRef,
+        mut output_stream: SendableRecordBatchStream,
+    ) -> Result<(), Error> {
+        let data = (*task_data).clone();
+        let handle: JoinHandle<Result<(), Error>> = common_runtime::spawn_global(async move {
+            while let Some(rb) = output_stream.next().await {
+                let rb = match rb {
+                    Ok(rb) => rb,
+                    Err(err) => Err(BoxedError::new(err)).context(ExternalSnafu)?,
+                };
+                TaskData::validate_schema(&data.table_schema, &rb)?;
+
+                // send rb into flow node
+                manager
+                    .node_context
+                    .read()
+                    .await
+                    .send_rb(data.table_id, rb)
+                    .await?;
+            }
+            common_telemetry::info!(
+                "Refill successful for source table_id={}, flow_id={}",
+                data.table_id,
+                data.flow_id
+            );
+            Ok(())
+        });
+        *self = Self::Running { handle };
+
+        Ok(())
+    }
 }
 
 /// Query stream of RefillTask, simply wrap RecordBatches and RecordBatchStream and check output is not `AffectedRows`
@@ -177,7 +306,6 @@ impl QueryStream {
 impl RefillTask {
     /// Query with "select * from table WHERE time >= range_start and time < range_end"
     pub async fn create(
-        invoker: &FrontendInvoker,
         flow_id: FlowId,
         table_id: TableId,
         time_range: Option<(common_time::Timestamp, common_time::Timestamp)>,
@@ -214,17 +342,50 @@ impl RefillTask {
             format!("select * from {0}", table_name.join("."))
         };
 
-        // we don't need information from query context in this query so a default query context is enough
-        let query_ctx = QueryContext::arc();
+        Ok(RefillTask {
+            data: TaskData {
+                flow_id,
+                table_id,
+                table_schema,
+            },
+            state: TaskState::new(sql),
+        })
+    }
 
-        let stmt = QueryLanguageParser::parse_sql(&sql, &query_ctx)
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
+    /// Start running the task in background, non-blocking
+    pub async fn start_running(
+        &mut self,
+        manager: FlowWorkerManagerRef,
+        invoker: &FrontendInvoker,
+    ) -> Result<(), Error> {
+        let TaskState::Prepared { sql } = &mut self.state else {
+            UnexpectedSnafu {
+                reason: "task is not prepared",
+            }
+            .fail()?
+        };
+
+        // we don't need information from query context in this query so a default query context is enough
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .current_catalog("greptime".to_string())
+                .current_schema("public".to_string())
+                .build(),
+        );
 
         let stmt_exec = invoker.statement_executor();
 
+        let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        let plan = stmt_exec
+            .plan(&stmt, query_ctx.clone())
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
         let output_data = stmt_exec
-            .execute_stmt(stmt, query_ctx)
+            .exec_plan(plan, query_ctx)
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
@@ -232,75 +393,12 @@ impl RefillTask {
         let output_stream = QueryStream::try_from(output_data)?;
         let output_stream = output_stream.try_into_stream()?;
 
-        Ok(RefillTask {
-            flow_id,
-            table_id,
-            table_schema,
-            output_stream,
-        })
-    }
-
-    /// handle refill insert requests
-    ///
-    /// TODO(discord9): add a back pressure mechanism
-    pub async fn handle_refill_inserts(
-        &mut self,
-        manager: FlowWorkerManagerRef,
-    ) -> Result<(), Error> {
-        while let Some(rb) = self.output_stream.next().await {
-            let rb = match rb {
-                Ok(rb) => rb,
-                Err(err) => Err(BoxedError::new(err)).context(ExternalSnafu)?,
-            };
-            self.validate_schema(&rb)?;
-
-            // send rb into flow node
-            manager
-                .node_context
-                .read()
-                .await
-                .send_rb(self.table_id, rb)
-                .await?;
-        }
+        self.state
+            .start_running(&self.data, manager, output_stream)?;
         Ok(())
     }
 
-    /// validate that incoming batch's schema is the same as table schema(by comparing types&names)
-    fn validate_schema(&self, rb: &RecordBatch) -> Result<(), Error> {
-        let rb_schema = &rb.schema;
-        let table_schema = &self.table_schema;
-        if rb_schema.column_schemas().len() != table_schema.len()? {
-            UnexpectedSnafu {
-                reason: "rb schema len != table schema len",
-            }
-            .fail()?;
-        }
-        for (i, rb_col) in rb_schema.column_schemas().iter().enumerate() {
-            let (rb_name, rb_ty) = (rb_col.name.as_str(), &rb_col.data_type);
-            let (table_name, table_ty) = (
-                table_schema.names[i].as_ref(),
-                &table_schema.typ().column_types[i].scalar_type,
-            );
-            if Some(rb_name) != table_name.map(|c| c.as_str()) {
-                UnexpectedSnafu {
-                    reason: format!(
-                        "incoming batch's schema name {} != expected table schema name {:?}",
-                        rb_name, table_name
-                    ),
-                }
-                .fail()?;
-            }
-
-            if rb_ty != table_ty {
-                UnexpectedSnafu {
-                    reason: format!(
-                        "incoming batch's schema type {:?} != expected table schema type {:?}",
-                        rb_ty, table_ty
-                    ),
-                }
-                .fail()?;
-            }
-        }
-        Ok(())
+    pub async fn is_finished(&mut self) -> Result<bool, Error> {
+        self.state.is_finished().await
     }
 }

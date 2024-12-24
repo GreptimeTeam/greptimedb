@@ -209,7 +209,7 @@ impl GreptimeDbStandaloneBuilder {
                     memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
                     table_metadata_manager,
                     table_metadata_allocator,
-                    flow_metadata_manager,
+                    flow_metadata_manager: flow_metadata_manager.clone(),
                     flow_metadata_allocator,
                     region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
                 },
@@ -235,7 +235,7 @@ impl GreptimeDbStandaloneBuilder {
 
         let flow_worker_manager = flownode.flow_worker_manager();
         let invoker = flow::FrontendInvoker::build_from(
-            flow_worker_manager.clone(),
+            Some(instance.query_engine()),
             catalog_manager.clone(),
             kv_backend.clone(),
             cache_registry.clone(),
@@ -247,6 +247,11 @@ impl GreptimeDbStandaloneBuilder {
         .unwrap();
 
         flow_worker_manager.set_frontend_invoker(invoker).await;
+
+        flow_worker_manager
+            .create_and_start_refill_flow_tasks(&flow_metadata_manager, &(catalog_manager as _))
+            .await
+            .unwrap();
 
         procedure_manager.start().await.unwrap();
         wal_options_allocator.start().await.unwrap();
