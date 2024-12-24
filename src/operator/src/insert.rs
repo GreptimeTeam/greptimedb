@@ -576,6 +576,9 @@ impl Inserter {
 
                     for table in tables {
                         let table_info = table.table_info();
+                        if table_info.is_ttl_instant_table() {
+                            instant_table_ids.insert(table_info.table_id());
+                        }
                         table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
                     }
                 }
@@ -596,6 +599,9 @@ impl Inserter {
                         .create_physical_table(create_table, ctx, statement_executor)
                         .await?;
                     let table_info = table.table_info();
+                    if table_info.is_ttl_instant_table() {
+                        instant_table_ids.insert(table_info.table_id());
+                    }
                     table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
                 }
                 for alter_expr in alter_tables.into_iter() {

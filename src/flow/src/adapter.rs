@@ -60,6 +60,7 @@ use crate::repr::{self, DiffRow, Row, BATCH_SIZE};
 
 mod flownode_impl;
 mod parse_expr;
+mod stat;
 #[cfg(test)]
 mod tests;
 mod util;
@@ -69,6 +70,7 @@ pub(crate) mod node_context;
 mod table_source;
 
 use crate::error::Error;
+use crate::utils::StateReportHandler;
 use crate::FrontendInvoker;
 
 // `GREPTIME_TIMESTAMP` is not used to distinguish when table is created automatically by flow
@@ -137,6 +139,8 @@ pub struct FlowWorkerManager {
     ///
     /// So that a series of event like `inserts -> flush` can be handled correctly
     flush_lock: RwLock<()>,
+    /// receive a oneshot sender to send state size report
+    state_report_handler: RwLock<Option<StateReportHandler>>,
 }
 
 /// Building FlownodeManager
@@ -170,7 +174,13 @@ impl FlowWorkerManager {
             tick_manager,
             node_id,
             flush_lock: RwLock::new(()),
+            state_report_handler: RwLock::new(None),
         }
+    }
+
+    pub async fn with_state_report_handler(self, handler: StateReportHandler) -> Self {
+        *self.state_report_handler.write().await = Some(handler);
+        self
     }
 
     /// Create a flownode manager with one worker
@@ -500,6 +510,27 @@ impl FlowWorkerManager {
 
 /// Flow Runtime related methods
 impl FlowWorkerManager {
+    /// Start state report handler, which will receive a sender from HeartbeatTask to send state size report back
+    ///
+    /// if heartbeat task is shutdown, this future will exit too
+    async fn start_state_report_handler(self: Arc<Self>) -> Option<JoinHandle<()>> {
+        let state_report_handler = self.state_report_handler.write().await.take();
+        if let Some(mut handler) = state_report_handler {
+            let zelf = self.clone();
+            let handler = common_runtime::spawn_global(async move {
+                while let Some(ret_handler) = handler.recv().await {
+                    let state_report = zelf.gen_state_report().await;
+                    ret_handler.send(state_report).unwrap_or_else(|err| {
+                        common_telemetry::error!(err; "Send state size report error");
+                    });
+                }
+            });
+            Some(handler)
+        } else {
+            None
+        }
+    }
+
     /// run in common_runtime background runtime
     pub fn run_background(
         self: Arc<Self>,
@@ -507,6 +538,7 @@ impl FlowWorkerManager {
     ) -> JoinHandle<()> {
         info!("Starting flownode manager's background task");
         common_runtime::spawn_global(async move {
+            let _state_report_handler = self.clone().start_state_report_handler().await;
             self.run(shutdown).await;
         })
     }
@@ -533,6 +565,8 @@ impl FlowWorkerManager {
         let default_interval = Duration::from_secs(1);
         let mut avg_spd = 0; // rows/sec
         let mut since_last_run = tokio::time::Instant::now();
+        let run_per_trace = 10;
+        let mut run_cnt = 0;
         loop {
             // TODO(discord9): only run when new inputs arrive or scheduled to
             let row_cnt = self.run_available(true).await.unwrap_or_else(|err| {
@@ -575,10 +609,19 @@ impl FlowWorkerManager {
             } else {
                 (9 * avg_spd + cur_spd) / 10
             };
-            trace!("avg_spd={} r/s, cur_spd={} r/s", avg_spd, cur_spd);
             let new_wait = BATCH_SIZE * 1000 / avg_spd.max(1); //in ms
             let new_wait = Duration::from_millis(new_wait as u64).min(default_interval);
-            trace!("Wait for {} ms, row_cnt={}", new_wait.as_millis(), row_cnt);
+
+            // print trace every `run_per_trace` times so that we can see if there is something wrong
+            // but also not get flooded with trace
+            if run_cnt >= run_per_trace {
+                trace!("avg_spd={} r/s, cur_spd={} r/s", avg_spd, cur_spd);
+                trace!("Wait for {} ms, row_cnt={}", new_wait.as_millis(), row_cnt);
+                run_cnt = 0;
+            } else {
+                run_cnt += 1;
+            }
+
             METRIC_FLOW_RUN_INTERVAL_MS.set(new_wait.as_millis() as i64);
             since_last_run = tokio::time::Instant::now();
             tokio::time::sleep(new_wait).await;
@@ -638,13 +681,18 @@ impl FlowWorkerManager {
         &self,
         region_id: RegionId,
         rows: Vec<DiffRow>,
+        batch_datatypes: &[ConcreteDataType],
     ) -> Result<(), Error> {
         let rows_len = rows.len();
         let table_id = region_id.table_id();
         let _timer = METRIC_FLOW_INSERT_ELAPSED
             .with_label_values(&[table_id.to_string().as_str()])
             .start_timer();
-        self.node_context.read().await.send(table_id, rows).await?;
+        self.node_context
+            .read()
+            .await
+            .send(table_id, rows, batch_datatypes)
+            .await?;
         trace!(
             "Handling write request for table_id={} with {} rows",
             table_id,

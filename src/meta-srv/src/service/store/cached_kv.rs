@@ -386,6 +386,10 @@ impl ResettableKvBackend for LeaderCachedKvBackend {
     fn reset(&self) {
         self.cache.reset()
     }
+
+    fn as_kv_backend_ref(self: Arc<Self>) -> KvBackendRef<Self::Error> {
+        self
+    }
 }
 
 #[cfg(test)]

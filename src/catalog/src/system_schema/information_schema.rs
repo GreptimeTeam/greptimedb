@@ -35,6 +35,7 @@ use common_catalog::consts::{self, DEFAULT_CATALOG_NAME, INFORMATION_SCHEMA_NAME
 use common_error::ext::ErrorExt;
 use common_meta::cluster::NodeInfo;
 use common_meta::datanode::RegionStat;
+use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::key::flow::FlowMetadataManager;
 use common_procedure::ProcedureInfo;
 use common_recordbatch::SendableRecordBatchStream;
@@ -192,6 +193,7 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
             )) as _),
             FLOWS => Some(Arc::new(InformationSchemaFlows::new(
                 self.catalog_name.clone(),
+                self.catalog_manager.clone(),
                 self.flow_metadata_manager.clone(),
             )) as _),
             PROCEDURE_INFO => Some(
@@ -338,6 +340,9 @@ pub trait InformationExtension {
 
     /// Gets the region statistics.
     async fn region_stats(&self) -> std::result::Result<Vec<RegionStat>, Self::Error>;
+
+    /// Get the flow statistics. If no flownode is available, return `None`.
+    async fn flow_stats(&self) -> std::result::Result<Option<FlowStat>, Self::Error>;
 }
 
 pub struct NoopInformationExtension;
@@ -356,5 +361,9 @@ impl InformationExtension for NoopInformationExtension {
 
     async fn region_stats(&self) -> std::result::Result<Vec<RegionStat>, Self::Error> {
         Ok(vec![])
+    }
+
+    async fn flow_stats(&self) -> std::result::Result<Option<FlowStat>, Self::Error> {
+        Ok(None)
     }
 }

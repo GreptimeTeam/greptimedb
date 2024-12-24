@@ -39,6 +39,43 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to deserialize json"))]
+    DeserializeJson {
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Intermediate error"))]
+    Intermediate {
+        source: crate::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("File size too small for bloom filter"))]
+    FileSizeTooSmall {
+        size: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Unexpected bloom filter meta size"))]
+    UnexpectedMetaSize {
+        max_meta_size: u64,
+        actual_meta_size: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid intermediate magic"))]
+    InvalidIntermediateMagic {
+        invalid: Vec<u8>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("External error"))]
     External {
         source: BoxedError,
@@ -52,8 +89,14 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            Io { .. } | Self::SerdeJson { .. } => StatusCode::Unexpected,
+            Io { .. }
+            | SerdeJson { .. }
+            | FileSizeTooSmall { .. }
+            | UnexpectedMetaSize { .. }
+            | DeserializeJson { .. }
+            | InvalidIntermediateMagic { .. } => StatusCode::Unexpected,
 
+            Intermediate { source, .. } => source.status_code(),
             External { source, .. } => source.status_code(),
         }
     }
