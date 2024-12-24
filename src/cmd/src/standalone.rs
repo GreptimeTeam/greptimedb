@@ -152,6 +152,7 @@ pub struct StandaloneOptions {
     pub tracing: TracingOptions,
     pub init_regions_in_background: bool,
     pub init_regions_parallelism: usize,
+    pub max_in_flight_write_bytes: Option<u64>,
 }
 
 impl Default for StandaloneOptions {
@@ -181,6 +182,7 @@ impl Default for StandaloneOptions {
             tracing: TracingOptions::default(),
             init_regions_in_background: false,
             init_regions_parallelism: 16,
+            max_in_flight_write_bytes: None,
         }
     }
 }
@@ -218,6 +220,7 @@ impl StandaloneOptions {
             user_provider: cloned_opts.user_provider,
             // Handle the export metrics task run by standalone to frontend for execution
             export_metrics: cloned_opts.export_metrics,
+            max_in_flight_write_bytes: cloned_opts.max_in_flight_write_bytes,
             ..Default::default()
         }
     }
