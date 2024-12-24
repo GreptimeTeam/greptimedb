@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use async_stream::try_stream;
 use common_telemetry::debug;
 use futures::Stream;
@@ -148,7 +146,7 @@ impl PaginationStreamFactory {
 }
 
 pub struct PaginationStream<T> {
-    decoder_fn: Arc<KeyValueDecoderFn<T>>,
+    decoder_fn: fn(KeyValue) -> Result<T>,
     factory: PaginationStreamFactory,
 }
 
@@ -158,7 +156,7 @@ impl<T> PaginationStream<T> {
         kv: KvBackendRef,
         req: RangeRequest,
         page_size: usize,
-        decoder_fn: Arc<KeyValueDecoderFn<T>>,
+        decoder_fn: fn(KeyValue) -> Result<T>,
     ) -> Self {
         Self {
             decoder_fn,
@@ -191,6 +189,7 @@ mod tests {
 
     use std::assert_matches::assert_matches;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
 
     use futures::TryStreamExt;
 
@@ -250,7 +249,7 @@ mod tests {
                 ..Default::default()
             },
             DEFAULT_PAGE_SIZE,
-            Arc::new(decoder),
+            decoder,
         )
         .into_stream();
         let kv = stream.try_collect::<Vec<_>>().await.unwrap();
@@ -290,7 +289,7 @@ mod tests {
                 ..Default::default()
             },
             2,
-            Arc::new(decoder),
+            decoder,
         );
         let kv = stream
             .into_stream()

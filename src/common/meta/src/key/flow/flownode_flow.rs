@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use futures::stream::BoxStream;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
@@ -179,7 +177,7 @@ impl FlownodeFlowManager {
             self.kv_backend.clone(),
             req,
             DEFAULT_PAGE_SIZE,
-            Arc::new(flownode_flow_key_decoder),
+            flownode_flow_key_decoder,
         )
         .into_stream();
 

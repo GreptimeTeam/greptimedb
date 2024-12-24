@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_procedure::error::{DeleteStatesSnafu, ListStateSnafu, PutStateSnafu};
@@ -171,7 +169,7 @@ impl StateStore for KvStateStore {
             self.kv_backend.clone(),
             req,
             self.max_num_per_range_request.unwrap_or_default(),
-            Arc::new(decode_kv),
+            decode_kv,
         )
         .into_stream();
 

@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 use std::fmt::Display;
-use std::sync::Arc;
 
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
@@ -166,7 +165,7 @@ impl DatanodeTableManager {
             self.kv_backend.clone(),
             req,
             DEFAULT_PAGE_SIZE,
-            Arc::new(datanode_table_value_decoder),
+            datanode_table_value_decoder,
         )
         .into_stream();
 
