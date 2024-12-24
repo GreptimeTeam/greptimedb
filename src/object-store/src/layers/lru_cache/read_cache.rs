@@ -28,6 +28,10 @@ use crate::metrics::{
 };
 
 const RECOVER_CACHE_LIST_CONCURRENT: usize = 8;
+/// Subdirectory of cached files for read.
+///
+/// This must contain three layers, corresponding to [`build_prometheus_metrics_layer`](object_store::layers::build_prometheus_metrics_layer).
+const READ_CACHE_DIR: &str = "greptimedb/object_cache/read";
 
 /// Cache value for read file
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
@@ -56,10 +60,18 @@ fn can_cache(path: &str) -> bool {
 /// Generate a unique cache key for the read path and range.
 fn read_cache_key(path: &str, args: &OpRead) -> String {
     format!(
-        "{:x}.cache-{}",
+        "{READ_CACHE_DIR}/{:x}.cache-{}",
         md5::compute(path),
         args.range().to_header()
     )
+}
+
+fn read_cache_root() -> String {
+    format!("/{READ_CACHE_DIR}")
+}
+
+fn read_cache_key_prefix(path: &str) -> String {
+    format!("{READ_CACHE_DIR}/{:x}", md5::compute(path))
 }
 
 /// Local read cache for files in object storage
@@ -125,16 +137,18 @@ impl<C: Access> ReadCache<C> {
         (self.mem_cache.entry_count(), self.mem_cache.weighted_size())
     }
 
-    /// Invalidate all cache items which key starts with `prefix`.
-    pub(crate) async fn invalidate_entries_with_prefix(&self, prefix: String) {
+    /// Invalidate all cache items belong to the specific path.
+    pub(crate) async fn invalidate_entries_with_prefix(&self, path: &str) {
+        let prefix = read_cache_key_prefix(path);
         // Safety: always ok when building cache with `support_invalidation_closures`.
         self.mem_cache
             .invalidate_entries_if(move |k: &String, &_v| k.starts_with(&prefix))
             .ok();
     }
 
-    /// Blocking version of `invalidate_entries_with_prefix`.
-    pub(crate) fn blocking_invalidate_entries_with_prefix(&self, prefix: String) {
+    /// Blocking version of [`invalidate_entries_with_prefix`](Self::invalidate_entries_with_prefix).
+    pub(crate) fn blocking_invalidate_entries_with_prefix(&self, path: &str) {
+        let prefix = read_cache_key_prefix(path);
         // Safety: always ok when building cache with `support_invalidation_closures`.
         self.mem_cache
             .invalidate_entries_if(move |k: &String, &_v| k.starts_with(&prefix))
@@ -145,8 +159,9 @@ impl<C: Access> ReadCache<C> {
     /// Return entry count and total approximate entry size in bytes.
     pub(crate) async fn recover_cache(&self) -> Result<(u64, u64)> {
         let op = OperatorBuilder::new(self.file_cache.clone()).finish();
+        let root = read_cache_root();
         let mut entries = op
-            .list_with("/")
+            .list_with(&root)
             .metakey(Metakey::ContentLength | Metakey::ContentType)
             .concurrent(RECOVER_CACHE_LIST_CONCURRENT)
             .await?;
@@ -157,7 +172,7 @@ impl<C: Access> ReadCache<C> {
             OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
             OBJECT_STORE_LRU_CACHE_BYTES.add(size as i64);
             // ignore root path
-            if entry.path() != "/" {
+            if entry.path() != &root {
                 self.mem_cache
                     .insert(read_key.to_string(), ReadResult::Success(size as u32))
                     .await;

@@ -117,9 +117,7 @@ impl<I: Access, C: Access> LayeredAccess for LruCacheAccess<I, C> {
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
         let result = self.inner.write(path, args).await;
 
-        self.read_cache
-            .invalidate_entries_with_prefix(format!("{:x}", md5::compute(path)))
-            .await;
+        self.read_cache.invalidate_entries_with_prefix(path).await;
 
         result
     }
@@ -127,9 +125,7 @@ impl<I: Access, C: Access> LayeredAccess for LruCacheAccess<I, C> {
     async fn delete(&self, path: &str, args: OpDelete) -> Result<RpDelete> {
         let result = self.inner.delete(path, args).await;
 
-        self.read_cache
-            .invalidate_entries_with_prefix(format!("{:x}", md5::compute(path)))
-            .await;
+        self.read_cache.invalidate_entries_with_prefix(path).await;
 
         result
     }
@@ -147,7 +143,7 @@ impl<I: Access, C: Access> LayeredAccess for LruCacheAccess<I, C> {
         let result = self.inner.blocking_write(path, args);
 
         self.read_cache
-            .blocking_invalidate_entries_with_prefix(format!("{:x}", md5::compute(path)));
+            .blocking_invalidate_entries_with_prefix(path);
 
         result
     }
