@@ -24,6 +24,7 @@ use datafusion::execution::context::SessionState;
 use datafusion::sql::planner::PlannerContext;
 use datafusion_expr::{Expr as DfExpr, LogicalPlan};
 use datafusion_sql::planner::{ParserOptions, SqlToRel};
+use log_query::LogQuery;
 use promql_parser::parser::EvalStmt;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -31,6 +32,7 @@ use sql::ast::Expr as SqlExpr;
 use sql::statements::statement::Statement;
 
 use crate::error::{DataFusionSnafu, PlanSqlSnafu, QueryPlanSnafu, Result, SqlSnafu};
+use crate::log_query::planner::LogQueryPlanner;
 use crate::parser::QueryStatement;
 use crate::promql::planner::PromPlanner;
 use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
@@ -40,6 +42,12 @@ use crate::{DfContextProviderAdapter, QueryEngineContext};
 #[async_trait]
 pub trait LogicalPlanner: Send + Sync {
     async fn plan(&self, stmt: &QueryStatement, query_ctx: QueryContextRef) -> Result<LogicalPlan>;
+
+    async fn plan_logs_query(
+        &self,
+        query: LogQuery,
+        query_ctx: QueryContextRef,
+    ) -> Result<LogicalPlan>;
 
     fn optimize(&self, plan: LogicalPlan) -> Result<LogicalPlan>;
 
@@ -180,6 +188,34 @@ impl LogicalPlanner for DfLogicalPlanner {
             QueryStatement::Sql(stmt) => self.plan_sql(stmt, query_ctx).await,
             QueryStatement::Promql(stmt) => self.plan_pql(stmt, query_ctx).await,
         }
+    }
+
+    async fn plan_logs_query(
+        &self,
+        query: LogQuery,
+        query_ctx: QueryContextRef,
+    ) -> Result<LogicalPlan> {
+        let plan_decoder = Arc::new(DefaultPlanDecoder::new(
+            self.session_state.clone(),
+            &query_ctx,
+        )?);
+        let table_provider = DfTableSourceProvider::new(
+            self.engine_state.catalog_manager().clone(),
+            self.engine_state.disallow_cross_catalog_query(),
+            query_ctx,
+            plan_decoder,
+            self.session_state
+                .config_options()
+                .sql_parser
+                .enable_ident_normalization,
+        );
+
+        let mut planner = LogQueryPlanner::new(table_provider);
+        planner
+            .query_to_plan(query)
+            .await
+            .map_err(BoxedError::new)
+            .context(QueryPlanSnafu)
     }
 
     fn optimize(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
