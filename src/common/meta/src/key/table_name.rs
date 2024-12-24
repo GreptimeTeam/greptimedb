@@ -269,7 +269,7 @@ impl TableNameManager {
             self.kv_backend.clone(),
             req,
             DEFAULT_PAGE_SIZE,
-            Arc::new(table_decoder),
+            table_decoder,
         )
         .into_stream();
 

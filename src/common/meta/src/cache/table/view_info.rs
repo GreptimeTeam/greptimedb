@@ -40,7 +40,7 @@ pub fn new_view_info_cache(
     let view_info_manager = Arc::new(ViewInfoManager::new(kv_backend));
     let init = init_factory(view_info_manager);
 
-    CacheContainer::new(name, cache, Box::new(invalidator), init, Box::new(filter))
+    CacheContainer::new(name, cache, Box::new(invalidator), init, filter)
 }
 
 fn init_factory(view_info_manager: ViewInfoManagerRef) -> Initializer<TableId, Arc<ViewInfoValue>> {

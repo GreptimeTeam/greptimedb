@@ -43,7 +43,7 @@ pub struct CacheContainer<K, V, CacheToken> {
     cache: Cache<K, V>,
     invalidator: Invalidator<K, V, CacheToken>,
     initializer: Initializer<K, V>,
-    token_filter: TokenFilter<CacheToken>,
+    token_filter: fn(&CacheToken) -> bool,
 }
 
 impl<K, V, CacheToken> CacheContainer<K, V, CacheToken>
@@ -58,7 +58,7 @@ where
         cache: Cache<K, V>,
         invalidator: Invalidator<K, V, CacheToken>,
         initializer: Initializer<K, V>,
-        token_filter: TokenFilter<CacheToken>,
+        token_filter: fn(&CacheToken) -> bool,
     ) -> Self {
         Self {
             name,
@@ -206,10 +206,13 @@ mod tests {
         name: &'a str,
     }
 
+    fn always_true_filter(_: &String) -> bool {
+        true
+    }
+
     #[tokio::test]
     async fn test_get() {
         let cache: Cache<NameKey, String> = CacheBuilder::new(128).build();
-        let filter: TokenFilter<String> = Box::new(|_| true);
         let counter = Arc::new(AtomicI32::new(0));
         let moved_counter = counter.clone();
         let init: Initializer<NameKey, String> = Arc::new(move |_| {
@@ -219,7 +222,13 @@ mod tests {
         let invalidator: Invalidator<NameKey, String, String> =
             Box::new(|_, _| Box::pin(async { Ok(()) }));
 
-        let adv_cache = CacheContainer::new("test".to_string(), cache, invalidator, init, filter);
+        let adv_cache = CacheContainer::new(
+            "test".to_string(),
+            cache,
+            invalidator,
+            init,
+            always_true_filter,
+        );
         let key = NameKey { name: "key" };
         let value = adv_cache.get(key).await.unwrap().unwrap();
         assert_eq!(value, "hi");
@@ -233,7 +242,6 @@ mod tests {
     #[tokio::test]
     async fn test_get_by_ref() {
         let cache: Cache<String, String> = CacheBuilder::new(128).build();
-        let filter: TokenFilter<String> = Box::new(|_| true);
         let counter = Arc::new(AtomicI32::new(0));
         let moved_counter = counter.clone();
         let init: Initializer<String, String> = Arc::new(move |_| {
@@ -243,7 +251,13 @@ mod tests {
         let invalidator: Invalidator<String, String, String> =
             Box::new(|_, _| Box::pin(async { Ok(()) }));
 
-        let adv_cache = CacheContainer::new("test".to_string(), cache, invalidator, init, filter);
+        let adv_cache = CacheContainer::new(
+            "test".to_string(),
+            cache,
+            invalidator,
+            init,
+            always_true_filter,
+        );
         let value = adv_cache.get_by_ref("foo").await.unwrap().unwrap();
         assert_eq!(value, "hi");
         let value = adv_cache.get_by_ref("foo").await.unwrap().unwrap();
@@ -257,13 +271,18 @@ mod tests {
     #[tokio::test]
     async fn test_get_value_not_exits() {
         let cache: Cache<String, String> = CacheBuilder::new(128).build();
-        let filter: TokenFilter<String> = Box::new(|_| true);
         let init: Initializer<String, String> =
             Arc::new(move |_| Box::pin(async { error::ValueNotExistSnafu {}.fail() }));
         let invalidator: Invalidator<String, String, String> =
             Box::new(|_, _| Box::pin(async { Ok(()) }));
 
-        let adv_cache = CacheContainer::new("test".to_string(), cache, invalidator, init, filter);
+        let adv_cache = CacheContainer::new(
+            "test".to_string(),
+            cache,
+            invalidator,
+            init,
+            always_true_filter,
+        );
         let value = adv_cache.get_by_ref("foo").await.unwrap();
         assert!(value.is_none());
     }
@@ -271,7 +290,6 @@ mod tests {
     #[tokio::test]
     async fn test_invalidate() {
         let cache: Cache<String, String> = CacheBuilder::new(128).build();
-        let filter: TokenFilter<String> = Box::new(|_| true);
         let counter = Arc::new(AtomicI32::new(0));
         let moved_counter = counter.clone();
         let init: Initializer<String, String> = Arc::new(move |_| {
@@ -285,7 +303,13 @@ mod tests {
             })
         });
 
-        let adv_cache = CacheContainer::new("test".to_string(), cache, invalidator, init, filter);
+        let adv_cache = CacheContainer::new(
+            "test".to_string(),
+            cache,
+            invalidator,
+            init,
+            always_true_filter,
+        );
         let value = adv_cache.get_by_ref("foo").await.unwrap().unwrap();
         assert_eq!(value, "hi");
         let value = adv_cache.get_by_ref("foo").await.unwrap().unwrap();

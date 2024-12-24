@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use futures::stream::BoxStream;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -179,7 +177,7 @@ impl FlowRouteManager {
             self.kv_backend.clone(),
             req,
             DEFAULT_PAGE_SIZE,
-            Arc::new(flow_route_decoder),
+            flow_route_decoder,
         )
         .into_stream();
 
