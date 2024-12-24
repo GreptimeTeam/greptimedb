@@ -27,6 +27,9 @@ use opendal::raw::{Access, OpList, OpRead};
 use opendal::services::{Azblob, Gcs, Oss};
 use opendal::{EntryMode, OperatorBuilder};
 
+/// Duplicate of the constant in `src/layers/lru_cache/read_cache.rs`
+const READ_CACHE_DIR: &str = "cache/object/read";
+
 async fn test_object_crud(store: &ObjectStore) -> Result<()> {
     // Create object handler.
     // Write data info object;
@@ -267,7 +270,8 @@ async fn test_file_backend_with_lru_cache() -> Result<()> {
 
 async fn assert_lru_cache<C: Access>(cache_layer: &LruCacheLayer<C>, file_names: &[&str]) {
     for file_name in file_names {
-        assert!(cache_layer.contains_file(file_name).await, "{file_name}");
+        let file_path = format!("{READ_CACHE_DIR}/{file_name}");
+        assert!(cache_layer.contains_file(&file_path).await, "{file_path:?}");
     }
 }
 

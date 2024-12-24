@@ -25,14 +25,14 @@ mod prometheus {
 
     static PROMETHEUS_LAYER: OnceLock<Mutex<PrometheusLayer>> = OnceLock::new();
 
+    /// This logical tries to extract parent path from the object storage operation
+    /// the function also relies on assumption that the region path is built from
+    /// pattern `<data|index>/catalog/schema/table_id/...` OR `greptimedb/object_cache/<read|write>/...`
+    ///
+    /// We'll get the data/catalog/schema from path.
     pub fn build_prometheus_metrics_layer(with_path_label: bool) -> PrometheusLayer {
         PROMETHEUS_LAYER
             .get_or_init(|| {
-                // This logical tries to extract parent path from the object storage operation
-                // the function also relies on assumption that the region path is built from
-                // pattern `<data|index>/catalog/schema/table_id/....`
-                //
-                // We'll get the data/catalog/schema from path.
                 let path_level = if with_path_label { 3 } else { 0 };
 
                 let layer = PrometheusLayer::builder()

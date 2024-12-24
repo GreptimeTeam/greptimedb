@@ -28,7 +28,7 @@ use common_telemetry::{info, warn};
 use object_store::layers::{LruCacheLayer, RetryInterceptor, RetryLayer};
 use object_store::services::Fs;
 use object_store::util::{join_dir, normalize_dir, with_instrument_layers};
-use object_store::{Access, Error, HttpClient, ObjectStore, ObjectStoreBuilder, OBJECT_CACHE_DIR};
+use object_store::{Access, Error, HttpClient, ObjectStore, ObjectStoreBuilder};
 use snafu::prelude::*;
 
 use crate::config::{HttpClientConfig, ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
@@ -147,12 +147,10 @@ async fn build_cache_layer(
     };
 
     // Enable object cache by default
-    // Set the cache_path to be `${data_home}/object_cache/read/{name}` by default
+    // Set the cache_path to be `${data_home}/{name}` by default
     // if it's not present
     if cache_path.is_none() {
-        let object_cache_path = join_dir(data_home, OBJECT_CACHE_DIR);
-        let read_cache_path = join_dir(&object_cache_path, "read");
-        let read_cache_path = join_dir(&read_cache_path, &name.to_lowercase());
+        let read_cache_path = join_dir(data_home, &name.to_lowercase());
         tokio::fs::create_dir_all(Path::new(&read_cache_path))
             .await
             .context(CreateDirSnafu {

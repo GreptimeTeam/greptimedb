@@ -20,7 +20,6 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, info};
 use futures::AsyncWriteExt;
-use object_store::manager::ObjectStoreManagerRef;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
@@ -44,10 +43,6 @@ use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 pub struct WriteCache {
     /// Local file cache.
     file_cache: FileCacheRef,
-    /// Object store manager.
-    #[allow(unused)]
-    /// TODO: Remove unused after implementing async write cache
-    object_store_manager: ObjectStoreManagerRef,
     /// Puffin manager factory for index.
     puffin_manager_factory: PuffinManagerFactory,
     /// Intermediate manager for index.
@@ -61,7 +56,6 @@ impl WriteCache {
     /// `object_store_manager` for all object stores.
     pub async fn new(
         local_store: ObjectStore,
-        object_store_manager: ObjectStoreManagerRef,
         cache_capacity: ReadableSize,
         ttl: Option<Duration>,
         puffin_manager_factory: PuffinManagerFactory,
@@ -72,7 +66,6 @@ impl WriteCache {
 
         Ok(Self {
             file_cache,
-            object_store_manager,
             puffin_manager_factory,
             intermediate_manager,
         })
@@ -81,7 +74,6 @@ impl WriteCache {
     /// Creates a write cache based on local fs.
     pub async fn new_fs(
         cache_dir: &str,
-        object_store_manager: ObjectStoreManagerRef,
         cache_capacity: ReadableSize,
         ttl: Option<Duration>,
         puffin_manager_factory: PuffinManagerFactory,
@@ -92,7 +84,6 @@ impl WriteCache {
         let local_store = new_fs_cache_store(cache_dir).await?;
         Self::new(
             local_store,
-            object_store_manager,
             cache_capacity,
             ttl,
             puffin_manager_factory,
