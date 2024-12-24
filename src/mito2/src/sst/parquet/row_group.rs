@@ -38,25 +38,196 @@ use crate::sst::file::FileId;
 use crate::sst::parquet::helper::fetch_byte_ranges;
 use crate::sst::parquet::page_reader::RowGroupCachedReader;
 
-/// An in-memory collection of column chunks
-pub struct InMemoryRowGroup<'a> {
-    metadata: &'a RowGroupMetaData,
-    page_locations: Option<&'a [Vec<PageLocation>]>,
+pub(crate) struct RowGroupBase<'a> {
+    pub(crate) metadata: &'a RowGroupMetaData,
+    pub(crate) page_locations: Option<&'a [Vec<PageLocation>]>,
     /// Compressed page of each column.
-    column_chunks: Vec<Option<Arc<ColumnChunkData>>>,
-    row_count: usize,
-    region_id: RegionId,
-    file_id: FileId,
-    row_group_idx: usize,
-    cache_manager: Option<CacheManagerRef>,
+    pub(crate) column_chunks: Vec<Option<Arc<ColumnChunkData>>>,
+    pub(crate) row_count: usize,
     /// Row group level cached pages for each column.
     ///
     /// These pages are uncompressed pages of a row group.
     /// `column_uncompressed_pages.len()` equals to `column_chunks.len()`.
-    column_uncompressed_pages: Vec<Option<Arc<PageValue>>>,
+    pub(crate) column_uncompressed_pages: Vec<Option<Arc<PageValue>>>,
+}
+
+impl<'a> RowGroupBase<'a> {
+    pub(crate) fn new(parquet_meta: &'a ParquetMetaData, row_group_idx: usize) -> Self {
+        let metadata = parquet_meta.row_group(row_group_idx);
+        // `page_locations` is always `None` if we don't set
+        // [with_page_index()](https://docs.rs/parquet/latest/parquet/arrow/arrow_reader/struct.ArrowReaderOptions.html#method.with_page_index)
+        // to `true`.
+        let page_locations = parquet_meta
+            .offset_index()
+            .map(|x| x[row_group_idx].as_slice());
+
+        Self {
+            metadata,
+            page_locations,
+            column_chunks: vec![None; metadata.columns().len()],
+            row_count: metadata.num_rows() as usize,
+            column_uncompressed_pages: vec![None; metadata.columns().len()],
+        }
+    }
+
+    pub(crate) fn calc_sparse_read_ranges(
+        &self,
+        projection: &ProjectionMask,
+        page_locations: &[Vec<PageLocation>],
+        selection: &RowSelection,
+    ) -> (Vec<Range<u64>>, Vec<Vec<usize>>) {
+        // If we have a `RowSelection` and an `OffsetIndex` then only fetch pages required for the
+        // `RowSelection`
+        let mut page_start_offsets: Vec<Vec<usize>> = vec![];
+        let ranges = self
+            .column_chunks
+            .iter()
+            .zip(self.metadata.columns())
+            .enumerate()
+            .filter(|&(idx, (chunk, _chunk_meta))| chunk.is_none() && projection.leaf_included(idx))
+            .flat_map(|(idx, (_chunk, chunk_meta))| {
+                // If the first page does not start at the beginning of the column,
+                // then we need to also fetch a dictionary page.
+                let mut ranges = vec![];
+                let (start, _len) = chunk_meta.byte_range();
+                match page_locations[idx].first() {
+                    Some(first) if first.offset as u64 != start => {
+                        ranges.push(start..first.offset as u64);
+                    }
+                    _ => (),
+                }
+
+                ranges.extend(
+                    selection
+                        .scan_ranges(&page_locations[idx])
+                        .iter()
+                        .map(|range| range.start as u64..range.end as u64),
+                );
+                page_start_offsets.push(ranges.iter().map(|range| range.start as usize).collect());
+
+                ranges
+            })
+            .collect::<Vec<_>>();
+        (ranges, page_start_offsets)
+    }
+
+    pub(crate) fn assign_sparse_chunk(
+        &mut self,
+        projection: &ProjectionMask,
+        data: Vec<Bytes>,
+        page_start_offsets: Vec<Vec<usize>>,
+    ) {
+        let mut page_start_offsets = page_start_offsets.into_iter();
+        let mut chunk_data = data.into_iter();
+
+        for (idx, chunk) in self.column_chunks.iter_mut().enumerate() {
+            if chunk.is_some() || !projection.leaf_included(idx) {
+                continue;
+            }
+
+            if let Some(offsets) = page_start_offsets.next() {
+                let mut chunks = Vec::with_capacity(offsets.len());
+                for _ in 0..offsets.len() {
+                    chunks.push(chunk_data.next().unwrap());
+                }
+
+                *chunk = Some(Arc::new(ColumnChunkData::Sparse {
+                    length: self.metadata.column(idx).byte_range().1 as usize,
+                    data: offsets.into_iter().zip(chunks).collect(),
+                }))
+            }
+        }
+    }
+
+    pub(crate) fn calc_dense_read_ranges(&self, projection: &ProjectionMask) -> Vec<Range<u64>> {
+        self.column_chunks
+            .iter()
+            .zip(&self.column_uncompressed_pages)
+            .enumerate()
+            .filter(|&(idx, (chunk, uncompressed_pages))| {
+                // Don't need to fetch column data if we already cache the column's pages.
+                chunk.is_none() && projection.leaf_included(idx) && uncompressed_pages.is_none()
+            })
+            .map(|(idx, (_chunk, _pages))| {
+                let column = self.metadata.column(idx);
+                let (start, length) = column.byte_range();
+                start..(start + length)
+            })
+            .collect::<Vec<_>>()
+    }
+
+    /// Assigns uncompressed chunk binary data to [RowGroupBase::column_chunks]
+    /// and returns the chunk offset and binary data assigned.
+    pub(crate) fn assign_dense_chunk(
+        &mut self,
+        projection: &ProjectionMask,
+        chunk_data: Vec<Bytes>,
+    ) -> Vec<(usize, Bytes)> {
+        let mut chunk_data = chunk_data.into_iter();
+        let mut res = vec![];
+
+        for (idx, (chunk, row_group_pages)) in self
+            .column_chunks
+            .iter_mut()
+            .zip(&self.column_uncompressed_pages)
+            .enumerate()
+        {
+            if chunk.is_some() || !projection.leaf_included(idx) || row_group_pages.is_some() {
+                continue;
+            }
+
+            // Get the fetched page.
+            let Some(data) = chunk_data.next() else {
+                continue;
+            };
+
+            let column = self.metadata.column(idx);
+            res.push((idx, data.clone()));
+            *chunk = Some(Arc::new(ColumnChunkData::Dense {
+                offset: column.byte_range().0 as usize,
+                data,
+            }));
+        }
+        res
+    }
+
+    /// Create [PageReader] from [RowGroupBase::column_chunks]
+    pub(crate) fn column_reader(
+        &self,
+        col_idx: usize,
+    ) -> Result<SerializedPageReader<ColumnChunkData>> {
+        let page_reader = match &self.column_chunks[col_idx] {
+            None => {
+                return Err(ParquetError::General(format!(
+                    "Invalid column index {col_idx}, column was not fetched"
+                )))
+            }
+            Some(data) => {
+                let page_locations = self.page_locations.map(|index| index[col_idx].clone());
+                SerializedPageReader::new(
+                    data.clone(),
+                    self.metadata.column(col_idx),
+                    self.row_count,
+                    page_locations,
+                )?
+            }
+        };
+
+        // This column don't cache uncompressed pages.
+        Ok(page_reader)
+    }
+}
+
+/// An in-memory collection of column chunks
+pub struct InMemoryRowGroup<'a> {
+    region_id: RegionId,
+    file_id: FileId,
+    row_group_idx: usize,
+    cache_manager: Option<CacheManagerRef>,
     file_path: &'a str,
     /// Object store.
     object_store: ObjectStore,
+    base: RowGroupBase<'a>,
 }
 
 impl<'a> InMemoryRowGroup<'a> {
@@ -73,24 +244,12 @@ impl<'a> InMemoryRowGroup<'a> {
         file_path: &'a str,
         object_store: ObjectStore,
     ) -> Self {
-        let metadata = parquet_meta.row_group(row_group_idx);
-        // `page_locations` is always `None` if we don't set
-        // [with_page_index()](https://docs.rs/parquet/latest/parquet/arrow/arrow_reader/struct.ArrowReaderOptions.html#method.with_page_index)
-        // to `true`.
-        let page_locations = parquet_meta
-            .offset_index()
-            .map(|x| x[row_group_idx].as_slice());
-
         Self {
-            metadata,
-            row_count: metadata.num_rows() as usize,
-            column_chunks: vec![None; metadata.columns().len()],
-            page_locations,
+            base: RowGroupBase::new(parquet_meta, row_group_idx),
             region_id,
             file_id,
             row_group_idx,
             cache_manager,
-            column_uncompressed_pages: vec![None; metadata.columns().len()],
             file_path,
             object_store,
         }
@@ -102,65 +261,15 @@ impl<'a> InMemoryRowGroup<'a> {
         projection: &ProjectionMask,
         selection: Option<&RowSelection>,
     ) -> Result<()> {
-        if let Some((selection, page_locations)) = selection.zip(self.page_locations) {
-            // If we have a `RowSelection` and an `OffsetIndex` then only fetch pages required for the
-            // `RowSelection`
-            let mut page_start_offsets: Vec<Vec<usize>> = vec![];
+        if let Some((selection, page_locations)) = selection.zip(self.base.page_locations) {
+            let (fetch_ranges, page_start_offsets) =
+                self.base
+                    .calc_sparse_read_ranges(projection, page_locations, selection);
 
-            let fetch_ranges = self
-                .column_chunks
-                .iter()
-                .zip(self.metadata.columns())
-                .enumerate()
-                .filter(|&(idx, (chunk, _chunk_meta))| {
-                    chunk.is_none() && projection.leaf_included(idx)
-                })
-                .flat_map(|(idx, (_chunk, chunk_meta))| {
-                    // If the first page does not start at the beginning of the column,
-                    // then we need to also fetch a dictionary page.
-                    let mut ranges = vec![];
-                    let (start, _len) = chunk_meta.byte_range();
-                    match page_locations[idx].first() {
-                        Some(first) if first.offset as u64 != start => {
-                            ranges.push(start..first.offset as u64);
-                        }
-                        _ => (),
-                    }
-
-                    ranges.extend(
-                        selection
-                            .scan_ranges(&page_locations[idx])
-                            .iter()
-                            .map(|range| range.start as u64..range.end as u64),
-                    );
-                    page_start_offsets
-                        .push(ranges.iter().map(|range| range.start as usize).collect());
-
-                    ranges
-                })
-                .collect::<Vec<_>>();
-
-            let mut chunk_data = self.fetch_bytes(&fetch_ranges).await?.into_iter();
-
-            let mut page_start_offsets = page_start_offsets.into_iter();
-
-            for (idx, chunk) in self.column_chunks.iter_mut().enumerate() {
-                if chunk.is_some() || !projection.leaf_included(idx) {
-                    continue;
-                }
-
-                if let Some(offsets) = page_start_offsets.next() {
-                    let mut chunks = Vec::with_capacity(offsets.len());
-                    for _ in 0..offsets.len() {
-                        chunks.push(chunk_data.next().unwrap());
-                    }
-
-                    *chunk = Some(Arc::new(ColumnChunkData::Sparse {
-                        length: self.metadata.column(idx).byte_range().1 as usize,
-                        data: offsets.into_iter().zip(chunks).collect(),
-                    }))
-                }
-            }
+            let chunk_data = self.fetch_bytes(&fetch_ranges).await?;
+            // Assign sparse chunk data to base.
+            self.base
+                .assign_sparse_chunk(projection, chunk_data, page_start_offsets);
         } else {
             // Now we only use cache in dense chunk data.
             self.fetch_pages_from_cache(projection);
@@ -169,46 +278,24 @@ impl<'a> InMemoryRowGroup<'a> {
             // is a synchronous, CPU-bound operation.
             yield_now().await;
 
-            let fetch_ranges = self
-                .column_chunks
-                .iter()
-                .zip(&self.column_uncompressed_pages)
-                .enumerate()
-                .filter(|&(idx, (chunk, uncompressed_pages))| {
-                    // Don't need to fetch column data if we already cache the column's pages.
-                    chunk.is_none() && projection.leaf_included(idx) && uncompressed_pages.is_none()
-                })
-                .map(|(idx, (_chunk, _pages))| {
-                    let column = self.metadata.column(idx);
-                    let (start, length) = column.byte_range();
-                    start..(start + length)
-                })
-                .collect::<Vec<_>>();
+            // Calculate ranges to read.
+            let fetch_ranges = self.base.calc_dense_read_ranges(projection);
 
             if fetch_ranges.is_empty() {
                 // Nothing to fetch.
                 return Ok(());
             }
 
-            let mut chunk_data = self.fetch_bytes(&fetch_ranges).await?.into_iter();
+            // Fetch data with ranges
+            let chunk_data = self.fetch_bytes(&fetch_ranges).await?;
 
-            for (idx, (chunk, row_group_pages)) in self
-                .column_chunks
-                .iter_mut()
-                .zip(&self.column_uncompressed_pages)
-                .enumerate()
-            {
-                if chunk.is_some() || !projection.leaf_included(idx) || row_group_pages.is_some() {
-                    continue;
-                }
+            // Assigns fetched data to base.
+            let assigned_columns = self.base.assign_dense_chunk(projection, chunk_data);
 
-                // Get the fetched page.
-                let Some(data) = chunk_data.next() else {
-                    continue;
-                };
-
-                let column = self.metadata.column(idx);
-                if let Some(cache) = &self.cache_manager {
+            // Put fetched data to cache if necessary.
+            if let Some(cache) = &self.cache_manager {
+                for (col_idx, data) in assigned_columns {
+                    let column = self.base.metadata.column(col_idx);
                     if !cache_uncompressed_pages(column) {
                         // For columns that have multiple uncompressed pages, we only cache the compressed page
                         // to save memory.
@@ -216,17 +303,12 @@ impl<'a> InMemoryRowGroup<'a> {
                             self.region_id,
                             self.file_id,
                             self.row_group_idx,
-                            idx,
+                            col_idx,
                         );
                         cache
                             .put_pages(page_key, Arc::new(PageValue::new_compressed(data.clone())));
                     }
                 }
-
-                *chunk = Some(Arc::new(ColumnChunkData::Dense {
-                    offset: column.byte_range().0 as usize,
-                    data,
-                }));
             }
         }
 
@@ -237,7 +319,8 @@ impl<'a> InMemoryRowGroup<'a> {
     /// If the page is in the cache, sets the column chunk or `column_uncompressed_pages` for the column.
     fn fetch_pages_from_cache(&mut self, projection: &ProjectionMask) {
         let _timer = READ_STAGE_FETCH_PAGES.start_timer();
-        self.column_chunks
+        self.base
+            .column_chunks
             .iter_mut()
             .enumerate()
             .filter(|(idx, chunk)| chunk.is_none() && projection.leaf_included(*idx))
@@ -245,7 +328,7 @@ impl<'a> InMemoryRowGroup<'a> {
                 let Some(cache) = &self.cache_manager else {
                     return;
                 };
-                let column = self.metadata.column(idx);
+                let column = self.base.metadata.column(idx);
                 if cache_uncompressed_pages(column) {
                     // Fetches uncompressed pages for the row group.
                     let page_key = PageKey::new_uncompressed(
@@ -254,7 +337,7 @@ impl<'a> InMemoryRowGroup<'a> {
                         self.row_group_idx,
                         idx,
                     );
-                    self.column_uncompressed_pages[idx] = cache.get_pages(&page_key);
+                    self.base.column_uncompressed_pages[idx] = cache.get_pages(&page_key);
                 } else {
                     // Fetches the compressed page from the cache.
                     let page_key = PageKey::new_compressed(
@@ -308,34 +391,19 @@ impl<'a> InMemoryRowGroup<'a> {
 
     /// Creates a page reader to read column at `i`.
     fn column_page_reader(&self, i: usize) -> Result<Box<dyn PageReader>> {
-        if let Some(cached_pages) = &self.column_uncompressed_pages[i] {
+        if let Some(cached_pages) = &self.base.column_uncompressed_pages[i] {
             debug_assert!(!cached_pages.row_group.is_empty());
             // Hits the row group level page cache.
             return Ok(Box::new(RowGroupCachedReader::new(&cached_pages.row_group)));
         }
 
-        let page_reader = match &self.column_chunks[i] {
-            None => {
-                return Err(ParquetError::General(format!(
-                    "Invalid column index {i}, column was not fetched"
-                )))
-            }
-            Some(data) => {
-                let page_locations = self.page_locations.map(|index| index[i].clone());
-                SerializedPageReader::new(
-                    data.clone(),
-                    self.metadata.column(i),
-                    self.row_count,
-                    page_locations,
-                )?
-            }
-        };
+        let page_reader = self.base.column_reader(i)?;
 
         let Some(cache) = &self.cache_manager else {
             return Ok(Box::new(page_reader));
         };
 
-        let column = self.metadata.column(i);
+        let column = self.base.metadata.column(i);
         if cache_uncompressed_pages(column) {
             // This column use row group level page cache.
             // We collect all pages and put them into the cache.
@@ -362,7 +430,7 @@ fn cache_uncompressed_pages(column: &ColumnChunkMetaData) -> bool {
 
 impl RowGroups for InMemoryRowGroup<'_> {
     fn num_rows(&self) -> usize {
-        self.row_count
+        self.base.row_count
     }
 
     fn column_chunks(&self, i: usize) -> Result<Box<dyn PageIterator>> {
@@ -430,8 +498,8 @@ impl ChunkReader for ColumnChunkData {
 }
 
 /// Implements [`PageIterator`] for a single column chunk, yielding a single [`PageReader`]
-struct ColumnChunkIterator {
-    reader: Option<Result<Box<dyn PageReader>>>,
+pub(crate) struct ColumnChunkIterator {
+    pub(crate) reader: Option<Result<Box<dyn PageReader>>>,
 }
 
 impl Iterator for ColumnChunkIterator {

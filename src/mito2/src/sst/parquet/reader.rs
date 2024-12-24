@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::{debug, warn};
 use datafusion_expr::Expr;
+use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
@@ -39,7 +40,8 @@ use table::predicate::Predicate;
 
 use crate::cache::CacheManagerRef;
 use crate::error::{
-    ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadParquetSnafu, Result,
+    ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadDataPartSnafu,
+    ReadParquetSnafu, Result,
 };
 use crate::metrics::{
     PRECISE_FILTER_ROWS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL, READ_ROWS_TOTAL,
@@ -207,8 +209,7 @@ impl ParquetReaderBuilder {
         let hint = Some(read_format.arrow_schema().fields());
         let field_levels =
             parquet_to_arrow_field_levels(parquet_schema_desc, projection_mask.clone(), hint)
-                .context(ReadParquetSnafu { path: &file_path })?;
-
+                .context(ReadDataPartSnafu)?;
         let row_groups = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
             .await;
@@ -871,7 +872,7 @@ impl SimpleFilterContext {
     ///
     /// Returns None if the column to filter doesn't exist in the SST metadata or the
     /// expected metadata.
-    fn new_opt(
+    pub(crate) fn new_opt(
         sst_meta: &RegionMetadataRef,
         expected_meta: Option<&RegionMetadata>,
         expr: &Expr,
@@ -1035,10 +1036,51 @@ impl ParquetReader {
     }
 }
 
+/// RowGroupReaderContext represents the fields that cannot be shared
+/// between different `RowGroupReader`s.
+pub(crate) trait RowGroupReaderContext: Send {
+    fn map_result(
+        &self,
+        result: std::result::Result<Option<RecordBatch>, ArrowError>,
+    ) -> Result<Option<RecordBatch>>;
+
+    fn read_format(&self) -> &ReadFormat;
+}
+
+impl RowGroupReaderContext for FileRangeContextRef {
+    fn map_result(
+        &self,
+        result: std::result::Result<Option<RecordBatch>, ArrowError>,
+    ) -> Result<Option<RecordBatch>> {
+        result.context(ArrowReaderSnafu {
+            path: self.file_path(),
+        })
+    }
+
+    fn read_format(&self) -> &ReadFormat {
+        self.as_ref().read_format()
+    }
+}
+
+/// [RowGroupReader] that reads from [FileRange].
+pub(crate) type RowGroupReader = RowGroupReaderBase<FileRangeContextRef>;
+
+impl RowGroupReader {
+    /// Creates a new reader from file range.
+    pub(crate) fn new(context: FileRangeContextRef, reader: ParquetRecordBatchReader) -> Self {
+        Self {
+            context,
+            reader,
+            batches: VecDeque::new(),
+            metrics: ReaderMetrics::default(),
+        }
+    }
+}
+
 /// Reader to read a row group of a parquet file.
-pub struct RowGroupReader {
-    /// Context for file ranges.
-    context: FileRangeContextRef,
+pub(crate) struct RowGroupReaderBase<T> {
+    /// Context of [RowGroupReader] so adapts to different underlying implementation.
+    context: T,
     /// Inner parquet reader.
     reader: ParquetRecordBatchReader,
     /// Buffered batches to return.
@@ -1047,9 +1089,12 @@ pub struct RowGroupReader {
     metrics: ReaderMetrics,
 }
 
-impl RowGroupReader {
+impl<T> RowGroupReaderBase<T>
+where
+    T: RowGroupReaderContext,
+{
     /// Creates a new reader.
-    pub(crate) fn new(context: FileRangeContextRef, reader: ParquetRecordBatchReader) -> Self {
+    pub(crate) fn create(context: T, reader: ParquetRecordBatchReader) -> Self {
         Self {
             context,
             reader,
@@ -1062,21 +1107,19 @@ impl RowGroupReader {
     pub(crate) fn metrics(&self) -> &ReaderMetrics {
         &self.metrics
     }
-    pub(crate) fn context(&self) -> &FileRangeContextRef {
-        &self.context
+
+    /// Gets [ReadFormat] of underlying reader.
+    pub(crate) fn read_format(&self) -> &ReadFormat {
+        self.context.read_format()
     }
 
     /// Tries to fetch next [RecordBatch] from the reader.
     fn fetch_next_record_batch(&mut self) -> Result<Option<RecordBatch>> {
-        self.reader.next().transpose().context(ArrowReaderSnafu {
-            path: self.context.file_path(),
-        })
+        self.context.map_result(self.reader.next().transpose())
     }
-}
 
-#[async_trait::async_trait]
-impl BatchReader for RowGroupReader {
-    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+    /// Returns the next [Batch].
+    pub(crate) fn next_inner(&mut self) -> Result<Option<Batch>> {
         let scan_start = Instant::now();
         if let Some(batch) = self.batches.pop_front() {
             self.metrics.num_rows += batch.num_rows();
@@ -1101,6 +1144,16 @@ impl BatchReader for RowGroupReader {
         self.metrics.num_rows += batch.as_ref().map(|b| b.num_rows()).unwrap_or(0);
         self.metrics.scan_cost += scan_start.elapsed();
         Ok(batch)
+    }
+}
+
+#[async_trait::async_trait]
+impl<T> BatchReader for RowGroupReaderBase<T>
+where
+    T: RowGroupReaderContext,
+{
+    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        self.next_inner()
     }
 }
 
