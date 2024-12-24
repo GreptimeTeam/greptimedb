@@ -224,8 +224,9 @@ pub async fn metasrv_builder(
         #[cfg(feature = "pg_kvbackend")]
         (None, BackendImpl::PostgresStore) => {
             let pg_client = create_postgres_client(opts).await?;
-            let kv_backend = PgStore::with_pg_client(pg_client).await.unwrap();
-            // TODO(jeremy, weny): implement election for postgres
+            let kv_backend = PgStore::with_pg_client(pg_client)
+                .await
+                .context(error::KvBackendSnafu)?;
             (kv_backend, None)
         }
     };
@@ -275,8 +276,15 @@ async fn create_postgres_client(opts: &MetasrvOptions) -> Result<tokio_postgres:
     let postgres_url = opts.store_addrs.first().context(InvalidArgumentsSnafu {
         err_msg: "empty store addrs",
     })?;
-    let (client, _) = tokio_postgres::connect(postgres_url, NoTls)
+    let (client, connection) = tokio_postgres::connect(postgres_url, NoTls)
         .await
         .context(error::ConnectPostgresSnafu)?;
+
+    tokio::spawn(async move {
+        connection
+            .await
+            .context(error::PostgresExecutionSnafu)
+            .unwrap()
+    });
     Ok(client)
 }

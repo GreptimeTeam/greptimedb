@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 mock = []
-pg_kvbackend = ["dep:tokio-postgres"]
+pg_kvbackend = ["dep:tokio-postgres", "common-meta/pg_kvbackend"]
 
 [lints]
 workspace = true

@@ -697,6 +697,8 @@ pub enum Error {
     #[cfg(feature = "pg_kvbackend")]
     #[snafu(display("Failed to execute via postgres"))]
     PostgresExecution {
+        #[snafu(source)]
+        error: tokio_postgres::Error,
         #[snafu(implicit)]
         location: Location,
     },
