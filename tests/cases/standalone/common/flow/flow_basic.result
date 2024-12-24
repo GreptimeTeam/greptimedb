@@ -1285,7 +1285,8 @@ SHOW CREATE TABLE requests_without_ip;
 |                     |   "service_name" STRING NULL,                      |
 |                     |   "val" INT NULL,                                  |
 |                     |   "ts" TIMESTAMP(3) NOT NULL,                      |
-|                     |   TIME INDEX ("ts")                                |
+|                     |   TIME INDEX ("ts"),                               |
+|                     |   PRIMARY KEY ("service_name")                     |
 |                     | )                                                  |
 |                     |                                                    |
 |                     | ENGINE=mito                                        |
