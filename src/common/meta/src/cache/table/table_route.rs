@@ -65,7 +65,7 @@ pub fn new_table_route_cache(
     let table_info_manager = Arc::new(TableRouteManager::new(kv_backend));
     let init = init_factory(table_info_manager);
 
-    CacheContainer::new(name, cache, Box::new(invalidator), init, Box::new(filter))
+    CacheContainer::new(name, cache, Box::new(invalidator), init, filter)
 }
 
 fn init_factory(
