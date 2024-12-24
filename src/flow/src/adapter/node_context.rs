@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use common_recordbatch::RecordBatch;
 use common_telemetry::trace;
+use common_telemetry::tracing_subscriber::field::debug;
 use datatypes::prelude::ConcreteDataType;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
@@ -125,7 +126,17 @@ impl SourceSender {
             // TODO(discord9): send rows instead so it's just moving a point
             if let Some(batch) = send_buf.recv().await {
                 let len = batch.row_count();
-                self.send_buf_row_cnt.fetch_sub(len, Ordering::SeqCst);
+                let prev = self.send_buf_row_cnt.fetch_sub(len, Ordering::SeqCst);
+                if prev < len {
+                    InternalSnafu {
+                        reason: format!(
+                            "send_buf_row_cnt underflow, prev = {}, current = {}",
+                            prev,
+                            prev.wrapping_sub(len)
+                        ),
+                    }
+                    .fail()?
+                }
                 row_cnt += len;
                 self.sender
                     .send(batch)
@@ -158,9 +169,24 @@ impl SourceSender {
     ) -> Result<usize, Error> {
         let rows_len = rows.len();
         METRIC_FLOW_INPUT_BUF_SIZE.add(rows_len as _);
-        while self.send_buf_row_cnt.load(Ordering::SeqCst) >= BATCH_SIZE * 4 {
+        let mut retry = 0;
+        let max_retry = 100;
+        while self.send_buf_row_cnt.load(Ordering::SeqCst) >= BATCH_SIZE * 4 && retry < max_retry {
+            common_telemetry::debug!("Send buf is full, waiting for it to be flushed");
+            retry += 1;
             tokio::task::yield_now().await;
         }
+
+        if retry >= max_retry {
+            return crate::error::InternalSnafu {
+                reason: format!(
+                    "Send buf is full(len={}), fail to send",
+                    self.send_buf_row_cnt.load(Ordering::SeqCst)
+                ),
+            }
+            .fail()?;
+        }
+
         // row count metrics is approx so relaxed order is ok
         self.send_buf_row_cnt.fetch_add(rows_len, Ordering::SeqCst);
         let batch = Batch::try_from_rows_with_types(
@@ -183,6 +209,8 @@ impl SourceSender {
     pub async fn send_record_batch(&self, batch: RecordBatch) -> Result<usize, Error> {
         let row_cnt = batch.num_rows();
         let batch = Batch::from(batch);
+
+        self.send_buf_row_cnt.fetch_add(row_cnt, Ordering::SeqCst);
 
         self.send_buf_tx.send(batch).await.map_err(|e| {
             crate::error::InternalSnafu {
