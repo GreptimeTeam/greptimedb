@@ -316,7 +316,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::cache::index::InvertedIndexCache;
+    use crate::cache::index::inverted_index::InvertedIndexCache;
     use crate::metrics::CACHE_BYTES;
     use crate::read::BatchColumn;
     use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
