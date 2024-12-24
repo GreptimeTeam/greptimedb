@@ -102,7 +102,7 @@ impl LeaderCachedKvBackend {
                 self.store.clone(),
                 RangeRequest::new().with_prefix(prefix.as_bytes()),
                 DEFAULT_PAGE_SIZE,
-                Arc::new(Ok),
+                Ok,
             )
             .into_stream();
 

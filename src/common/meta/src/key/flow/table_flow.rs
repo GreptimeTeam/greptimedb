@@ -206,7 +206,7 @@ impl TableFlowManager {
             self.kv_backend.clone(),
             req,
             DEFAULT_PAGE_SIZE,
-            Arc::new(table_flow_decoder),
+            table_flow_decoder,
         )
         .into_stream();
 
