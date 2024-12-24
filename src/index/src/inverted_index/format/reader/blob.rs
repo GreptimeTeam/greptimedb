@@ -51,7 +51,7 @@ impl<R> InvertedIndexBlobReader<R> {
 }
 
 #[async_trait]
-impl<R: RangeReader> InvertedIndexReader for InvertedIndexBlobReader<R> {
+impl<R: RangeReader + Sync> InvertedIndexReader for InvertedIndexBlobReader<R> {
     async fn range_read(&mut self, offset: u64, size: u32) -> Result<Vec<u8>> {
         let buf = self
             .source
