@@ -24,10 +24,10 @@ use parquet::arrow::ProjectionMask;
 use parquet::column::page::{PageIterator, PageReader};
 use parquet::errors::{ParquetError, Result};
 use parquet::file::metadata::{ColumnChunkMetaData, ParquetMetaData, RowGroupMetaData};
+use parquet::file::page_index::offset_index::OffsetIndexMetaData;
 use parquet::file::properties::DEFAULT_PAGE_SIZE;
 use parquet::file::reader::{ChunkReader, Length};
 use parquet::file::serialized_reader::SerializedPageReader;
-use parquet::format::PageLocation;
 use store_api::storage::RegionId;
 use tokio::task::yield_now;
 
@@ -41,7 +41,7 @@ use crate::sst::parquet::page_reader::RowGroupCachedReader;
 /// An in-memory collection of column chunks
 pub struct InMemoryRowGroup<'a> {
     metadata: &'a RowGroupMetaData,
-    page_locations: Option<&'a [Vec<PageLocation>]>,
+    offset_index: Option<&'a [OffsetIndexMetaData]>,
     /// Compressed page of each column.
     column_chunks: Vec<Option<Arc<ColumnChunkData>>>,
     row_count: usize,
@@ -74,18 +74,20 @@ impl<'a> InMemoryRowGroup<'a> {
         object_store: ObjectStore,
     ) -> Self {
         let metadata = parquet_meta.row_group(row_group_idx);
-        // `page_locations` is always `None` if we don't set
+        // `offset_index` is always `None` if we don't set
         // [with_page_index()](https://docs.rs/parquet/latest/parquet/arrow/arrow_reader/struct.ArrowReaderOptions.html#method.with_page_index)
         // to `true`.
-        let page_locations = parquet_meta
+        let offset_index = parquet_meta
             .offset_index()
+            // filter out empty offset indexes (old versions specified Some(vec![]) when no present)
+            .filter(|index| !index.is_empty())
             .map(|x| x[row_group_idx].as_slice());
 
         Self {
             metadata,
             row_count: metadata.num_rows() as usize,
             column_chunks: vec![None; metadata.columns().len()],
-            page_locations,
+            offset_index,
             region_id,
             file_id,
             row_group_idx,
@@ -102,7 +104,7 @@ impl<'a> InMemoryRowGroup<'a> {
         projection: &ProjectionMask,
         selection: Option<&RowSelection>,
     ) -> Result<()> {
-        if let Some((selection, page_locations)) = selection.zip(self.page_locations) {
+        if let Some((selection, offset_index)) = selection.zip(self.offset_index) {
             // If we have a `RowSelection` and an `OffsetIndex` then only fetch pages required for the
             // `RowSelection`
             let mut page_start_offsets: Vec<Vec<usize>> = vec![];
@@ -120,7 +122,7 @@ impl<'a> InMemoryRowGroup<'a> {
                     // then we need to also fetch a dictionary page.
                     let mut ranges = vec![];
                     let (start, _len) = chunk_meta.byte_range();
-                    match page_locations[idx].first() {
+                    match offset_index[idx].page_locations.first() {
                         Some(first) if first.offset as u64 != start => {
                             ranges.push(start..first.offset as u64);
                         }
@@ -129,7 +131,7 @@ impl<'a> InMemoryRowGroup<'a> {
 
                     ranges.extend(
                         selection
-                            .scan_ranges(&page_locations[idx])
+                            .scan_ranges(&offset_index[idx].page_locations)
                             .iter()
                             .map(|range| range.start as u64..range.end as u64),
                     );
@@ -317,7 +319,11 @@ impl<'a> InMemoryRowGroup<'a> {
                 )))
             }
             Some(data) => {
-                let page_locations = self.page_locations.map(|index| index[i].clone());
+                let page_locations = self
+                    .offset_index
+                    // filter out empty offset indexes (old versions specified Some(vec![]) when no present)
+                    .filter(|index| !index.is_empty())
+                    .map(|index| index[i].page_locations.clone());
                 SerializedPageReader::new(
                     data.clone(),
                     self.metadata.column(i),
