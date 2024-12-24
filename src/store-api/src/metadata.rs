@@ -33,7 +33,10 @@ use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
 
-use crate::region_request::{AddColumn, AddColumnLocation, AlterKind, ModifyColumnType};
+use crate::region_request::{
+    AddColumn, AddColumnLocation, AlterKind, ApiSetIndexOptions, ApiUnsetIndexOptions,
+    ModifyColumnType,
+};
 use crate::storage::consts::is_internal_column;
 use crate::storage::{ColumnId, RegionId};
 
@@ -553,13 +556,23 @@ impl RegionMetadataBuilder {
             AlterKind::AddColumns { columns } => self.add_columns(columns)?,
             AlterKind::DropColumns { names } => self.drop_columns(&names),
             AlterKind::ModifyColumnTypes { columns } => self.modify_column_types(columns),
-            AlterKind::SetColumnFulltext {
-                column_name,
-                options,
-            } => self.change_column_fulltext_options(column_name, true, Some(options))?,
-            AlterKind::UnsetColumnFulltext { column_name } => {
-                self.change_column_fulltext_options(column_name, false, None)?
-            }
+            AlterKind::SetIndex { options } => match options {
+                ApiSetIndexOptions::Fulltext {
+                    column_name,
+                    options,
+                } => self.change_column_fulltext_options(column_name, true, Some(options))?,
+                ApiSetIndexOptions::Inverted { column_name } => {
+                    self.change_column_inverted_index_options(column_name, true)?
+                }
+            },
+            AlterKind::UnsetIndex { options } => match options {
+                ApiUnsetIndexOptions::Fulltext { column_name } => {
+                    self.change_column_fulltext_options(column_name, false, None)?
+                }
+                ApiUnsetIndexOptions::Inverted { column_name } => {
+                    self.change_column_inverted_index_options(column_name, false)?
+                }
+            },
             AlterKind::SetRegionOptions { options: _ } => {
                 // nothing to be done with RegionMetadata
             }
@@ -664,6 +677,26 @@ impl RegionMetadataBuilder {
                 column_meta.column_schema.data_type = target_type;
             }
         }
+    }
+
+    fn change_column_inverted_index_options(
+        &mut self,
+        column_name: String,
+        value: bool,
+    ) -> Result<()> {
+        for column_meta in self.column_metadatas.iter_mut() {
+            if column_meta.column_schema.name == column_name {
+                ensure!(
+                    column_meta.column_schema.data_type.is_string(),
+                    InvalidColumnOptionSnafu {
+                        column_name,
+                        msg: "INVERTED index only supports string type".to_string(),
+                    }
+                );
+                column_meta.column_schema.update_inverted_index(value)
+            }
+        }
+        Ok(())
     }
 
     fn change_column_fulltext_options(
@@ -1363,12 +1396,14 @@ mod test {
 
         let mut builder = RegionMetadataBuilder::from_existing(metadata);
         builder
-            .alter(AlterKind::SetColumnFulltext {
-                column_name: "b".to_string(),
-                options: FulltextOptions {
-                    enable: true,
-                    analyzer: datatypes::schema::FulltextAnalyzer::Chinese,
-                    case_sensitive: true,
+            .alter(AlterKind::SetIndex {
+                options: ApiSetIndexOptions::Fulltext {
+                    column_name: "b".to_string(),
+                    options: FulltextOptions {
+                        enable: true,
+                        analyzer: datatypes::schema::FulltextAnalyzer::Chinese,
+                        case_sensitive: true,
+                    },
                 },
             })
             .unwrap();
@@ -1389,8 +1424,10 @@ mod test {
 
         let mut builder = RegionMetadataBuilder::from_existing(metadata);
         builder
-            .alter(AlterKind::UnsetColumnFulltext {
-                column_name: "b".to_string(),
+            .alter(AlterKind::UnsetIndex {
+                options: ApiUnsetIndexOptions::Fulltext {
+                    column_name: "b".to_string(),
+                },
             })
             .unwrap();
         let metadata = builder.build().unwrap();
