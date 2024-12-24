@@ -17,7 +17,7 @@ futures.workspace = true
 lazy_static.workspace = true
 md5 = "0.7"
 moka = { workspace = true, features = ["future"] }
-opendal = { version = "0.50", features = [
+opendal = { git = "https://github.com/GreptimeTeam/opendal.git", rev = "c82605177f2feec83e49dcaa537c505639d94024", features = [
     "layers-tracing",
     "layers-prometheus",
     "services-azblob",
