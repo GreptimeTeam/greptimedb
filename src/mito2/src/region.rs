@@ -448,11 +448,7 @@ impl ManifestContext {
         match next_role {
             RegionRole::Follower => {
                 match self.state.fetch_update(|state| {
-                    if matches!(
-                        state,
-                        RegionRoleState::Leader(RegionLeaderState::Downgrading)
-                            | RegionRoleState::Leader(RegionLeaderState::Writable)
-                    ) {
+                    if !matches!(state, RegionRoleState::Follower) {
                         Some(RegionRoleState::Follower)
                     } else {
                         None
