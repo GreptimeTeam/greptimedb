@@ -22,6 +22,7 @@ fst.workspace = true
 futures.workspace = true
 greptime-proto.workspace = true
 mockall.workspace = true
+parquet.workspace = true
 pin-project.workspace = true
 prost.workspace = true
 regex.workspace = true
