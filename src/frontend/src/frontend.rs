@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_base::readable_size::ReadableSize;
 use common_config::config::Configurable;
 use common_options::datanode::DatanodeClientOptions;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
@@ -46,6 +47,7 @@ pub struct FrontendOptions {
     pub user_provider: Option<String>,
     pub export_metrics: ExportMetricsOption,
     pub tracing: TracingOptions,
+    pub max_in_flight_write_bytes: Option<ReadableSize>,
 }
 
 impl Default for FrontendOptions {
@@ -68,6 +70,7 @@ impl Default for FrontendOptions {
             user_provider: None,
             export_metrics: ExportMetricsOption::default(),
             tracing: TracingOptions::default(),
+            max_in_flight_write_bytes: None,
         }
     }
 }

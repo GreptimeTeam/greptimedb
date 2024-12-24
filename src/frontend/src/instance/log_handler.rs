@@ -22,7 +22,8 @@ use common_error::ext::BoxedError;
 use pipeline::pipeline_operator::PipelineOperator;
 use pipeline::{GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion};
 use servers::error::{
-    AuthSnafu, Error as ServerError, ExecuteGrpcRequestSnafu, PipelineSnafu, Result as ServerResult,
+    AuthSnafu, Error as ServerError, ExecuteGrpcRequestSnafu, InFlightWriteBytesExceededSnafu,
+    PipelineSnafu, Result as ServerResult,
 };
 use servers::interceptor::{LogIngestInterceptor, LogIngestInterceptorRef};
 use servers::query_handler::PipelineHandler;
@@ -110,6 +111,16 @@ impl Instance {
         log: RowInsertRequests,
         ctx: QueryContextRef,
     ) -> ServerResult<Output> {
+        let _guard = if let Some(limiter) = &self.limiter {
+            let result = limiter.limit_row_inserts(&log);
+            if result.is_none() {
+                return InFlightWriteBytesExceededSnafu.fail();
+            }
+            result
+        } else {
+            None
+        };
+
         self.inserter
             .handle_log_inserts(log, ctx, self.statement_executor.as_ref())
             .await

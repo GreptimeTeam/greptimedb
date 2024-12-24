@@ -321,6 +321,12 @@ pub enum Error {
         location: Location,
         source: BoxedError,
     },
+
+    #[snafu(display("In-flight write bytes exceeded the maximum limit"))]
+    InFlightWriteBytesExceeded {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -392,6 +398,8 @@ impl ErrorExt for Error {
             Error::StartScriptManager { source, .. } => source.status_code(),
 
             Error::TableOperation { source, .. } => source.status_code(),
+
+            Error::InFlightWriteBytesExceeded { .. } => StatusCode::RateLimited,
         }
     }
 
