@@ -18,6 +18,7 @@ pub(crate) mod impl_conv;
 mod scalar_add;
 mod scalar_mul;
 mod vector_mul;
+mod sub;
 
 use std::sync::Arc;
 
@@ -42,5 +43,6 @@ impl VectorFunction {
 
         // vector calculation
         registry.register(Arc::new(vector_mul::VectorMulFunction));
+        registry.register(Arc::new(sub::SubFunction));
     }
 }
