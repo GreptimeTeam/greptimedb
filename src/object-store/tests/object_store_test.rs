@@ -28,7 +28,7 @@ use opendal::services::{Azblob, Gcs, Oss};
 use opendal::{EntryMode, OperatorBuilder};
 
 /// Duplicate of the constant in `src/layers/lru_cache/read_cache.rs`
-const READ_CACHE_DIR: &str = "greptimedb/object_cache/read";
+const READ_CACHE_DIR: &str = "cache/object/read";
 
 async fn test_object_crud(store: &ObjectStore) -> Result<()> {
     // Create object handler.

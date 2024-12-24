@@ -31,7 +31,7 @@ const RECOVER_CACHE_LIST_CONCURRENT: usize = 8;
 /// Subdirectory of cached files for read.
 ///
 /// This must contain three layers, corresponding to [`build_prometheus_metrics_layer`](object_store::layers::build_prometheus_metrics_layer).
-const READ_CACHE_DIR: &str = "greptimedb/object_cache/read";
+const READ_CACHE_DIR: &str = "cache/object/read";
 
 /// Cache value for read file
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
