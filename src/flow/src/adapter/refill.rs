@@ -85,6 +85,13 @@ impl FlowWorkerManager {
             } else {
                 None
             };
+
+            common_telemetry::debug!(
+                "Time range for refill flow_id={} is {:?}",
+                flow_id,
+                time_range
+            );
+
             for src_table in info.source_table_ids() {
                 let time_index_col = self
                     .table_info_source
