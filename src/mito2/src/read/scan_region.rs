@@ -399,7 +399,7 @@ impl ScanRegion {
         });
     }
 
-    /// Use the latest schema to build the inveretd index applier.
+    /// Use the latest schema to build the inverted index applier.
     fn build_invereted_index_applier(&self) -> Option<InvertedIndexApplierRef> {
         if self.ignore_inverted_index {
             return None;
