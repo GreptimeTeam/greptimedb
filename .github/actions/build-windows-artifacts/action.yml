@@ -76,5 +76,5 @@ runs:
       uses: ./.github/actions/upload-artifacts
       with:
         artifacts-dir: ${{ inputs.artifacts-dir }}
-        target-files: target/${{ inputs.arch }}/${{ inputs.cargo-profile }}/greptime
+        target-files: target/${{ inputs.arch }}/${{ inputs.cargo-profile }}/greptime,target/${{ inputs.arch }}/${{ inputs.cargo-profile }}/greptime.pdb
         version: ${{ inputs.version }}
