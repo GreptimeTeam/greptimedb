@@ -36,7 +36,7 @@ pub fn new_schema_cache(
     let schema_manager = SchemaManager::new(kv_backend.clone());
     let init = init_factory(schema_manager);
 
-    CacheContainer::new(name, cache, Box::new(invalidator), init, Box::new(filter))
+    CacheContainer::new(name, cache, Box::new(invalidator), init, filter)
 }
 
 fn init_factory(schema_manager: SchemaManager) -> Initializer<SchemaName, Arc<SchemaNameValue>> {

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::fmt::Display;
-use std::sync::Arc;
 
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use futures::stream::BoxStream;
@@ -146,7 +145,7 @@ impl CatalogManager {
             self.kv_backend.clone(),
             req,
             DEFAULT_PAGE_SIZE,
-            Arc::new(catalog_decoder),
+            catalog_decoder,
         )
         .into_stream();
 
@@ -156,6 +155,8 @@ impl CatalogManager {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
 

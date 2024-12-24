@@ -38,7 +38,7 @@ pub fn new_table_cache(
 ) -> TableCache {
     let init = init_factory(table_info_cache, table_name_cache);
 
-    CacheContainer::new(name, cache, Box::new(invalidator), init, Box::new(filter))
+    CacheContainer::new(name, cache, Box::new(invalidator), init, filter)
 }
 
 fn init_factory(
