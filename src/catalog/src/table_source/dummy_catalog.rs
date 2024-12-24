@@ -15,6 +15,7 @@
 //! Dummy catalog for region server.
 
 use std::any::Any;
+use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -28,7 +29,7 @@ use crate::error::TableNotExistSnafu;
 use crate::CatalogManagerRef;
 
 /// Delegate the resolving requests to the `[CatalogManager]` unconditionally.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DummyCatalogList {
     catalog_manager: CatalogManagerRef,
 }
@@ -37,6 +38,12 @@ impl DummyCatalogList {
     /// Creates a new catalog list with the given catalog manager.
     pub fn new(catalog_manager: CatalogManagerRef) -> Self {
         Self { catalog_manager }
+    }
+}
+
+impl fmt::Debug for DummyCatalogList {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DummyCatalogList").finish()
     }
 }
 
@@ -66,7 +73,7 @@ impl CatalogProviderList for DummyCatalogList {
 }
 
 /// A dummy catalog provider for [DummyCatalogList].
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct DummyCatalogProvider {
     catalog_name: String,
     catalog_manager: CatalogManagerRef,
@@ -90,8 +97,16 @@ impl CatalogProvider for DummyCatalogProvider {
     }
 }
 
+impl fmt::Debug for DummyCatalogProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DummyCatalogProvider")
+            .field("catalog_name", &self.catalog_name)
+            .finish()
+    }
+}
+
 /// A dummy schema provider for [DummyCatalogList].
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct DummySchemaProvider {
     catalog_name: String,
     schema_name: String,
@@ -124,5 +139,14 @@ impl SchemaProvider for DummySchemaProvider {
 
     fn table_exist(&self, _name: &str) -> bool {
         true
+    }
+}
+
+impl fmt::Debug for DummySchemaProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DummySchemaProvider")
+            .field("catalog_name", &self.catalog_name)
+            .field("schema_name", &self.schema_name)
+            .finish()
     }
 }

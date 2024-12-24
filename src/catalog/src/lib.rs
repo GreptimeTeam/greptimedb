@@ -41,6 +41,7 @@ pub mod information_schema {
 }
 
 pub mod table_source;
+
 #[async_trait::async_trait]
 pub trait CatalogManager: Send + Sync {
     fn as_any(&self) -> &dyn Any;

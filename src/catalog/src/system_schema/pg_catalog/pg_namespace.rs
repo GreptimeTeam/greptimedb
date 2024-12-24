@@ -17,6 +17,7 @@
 
 pub(super) mod oid_map;
 
+use std::fmt;
 use std::sync::{Arc, Weak};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
@@ -46,7 +47,6 @@ use crate::CatalogManager;
 const NSPNAME: &str = "nspname";
 const INIT_CAPACITY: usize = 42;
 
-#[derive(Debug)]
 pub(super) struct PGNamespace {
     schema: SchemaRef,
     catalog_name: String,
@@ -85,6 +85,15 @@ impl PGNamespace {
             self.catalog_manager.clone(),
             self.oid_map.clone(),
         )
+    }
+}
+
+impl fmt::Debug for PGNamespace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PGNamespace")
+            .field("schema", &self.schema)
+            .field("catalog_name", &self.catalog_name)
+            .finish()
     }
 }
 
