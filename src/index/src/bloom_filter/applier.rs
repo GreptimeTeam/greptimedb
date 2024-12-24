@@ -55,7 +55,7 @@ impl BloomFilterApplier {
 
         // 2. Calculate bloom filter segment locations
         let mut segment_locations = Vec::new();
-        for (&row_group_idx, _) in basement {
+        for &row_group_idx in basement.keys() {
             // TODO(ruihang): support further filter over row selection
 
             // todo: dedup & overlap
