@@ -96,6 +96,17 @@ impl Function for SubFunction {
         let arg0 = &columns[0];
         let arg1 = &columns[1];
 
+        ensure!(
+            arg0.len() == arg1.len(),
+            InvalidFuncArgsSnafu {
+                err_msg: format!(
+                    "The lengths of the vector are not aligned, args 0: {}, args 1: {}",
+                    arg0.len(),
+                    arg1.len(),
+                )
+            }
+        );
+
         let len = arg0.len();
         let mut result = BinaryVectorBuilder::with_capacity(len);
         if len == 0 {
@@ -141,6 +152,7 @@ impl Display for SubFunction {
 mod tests {
     use std::sync::Arc;
 
+    use common_query::error::Error;
     use datatypes::vectors::StringVector;
 
     use super::*;
@@ -178,5 +190,34 @@ mod tests {
         );
         assert!(result.get_ref(2).is_null());
         assert!(result.get_ref(3).is_null());
+    }
+
+    #[test]
+    fn test_sub_error() {
+        let func = SubFunction;
+
+        let input0 = Arc::new(StringVector::from(vec![
+            Some("[1.0,2.0,3.0]".to_string()),
+            Some("[4.0,5.0,6.0]".to_string()),
+            None,
+            Some("[2.0,3.0,3.0]".to_string()),
+        ]));
+        let input1 = Arc::new(StringVector::from(vec![
+            Some("[1.0,1.0,1.0]".to_string()),
+            Some("[6.0,5.0,4.0]".to_string()),
+            Some("[3.0,2.0,2.0]".to_string()),
+        ]));
+
+        let result = func.eval(FunctionContext::default(), &[input0, input1]);
+
+        match result {
+            Err(Error::InvalidFuncArgs { err_msg, .. }) => {
+                assert_eq!(
+                    err_msg,
+                    "The lengths of the vector are not aligned, args 0: 4, args 1: 3"
+                )
+            }
+            _ => unreachable!(),
+        }
     }
 }
