@@ -13,36 +13,21 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
-use std::ops::Range;
 
-use async_trait::async_trait;
-use fastbloom::BloomFilter;
 use parquet::arrow::arrow_reader::RowSelection;
 use parquet::file::metadata::RowGroupMetaData;
 
-use super::error::Result;
-use super::{BloomFilterMeta, BloomFilterSegmentLocation, Bytes};
-
-// format
-#[async_trait]
-pub trait BloomFilterReader {
-    async fn range_read(&mut self, offset: u64, size: u32) -> Result<Vec<u8>>;
-
-    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Vec<u8>>>;
-
-    async fn metadata(&mut self) -> Result<BloomFilterMeta>;
-
-    async fn bloom_filter(&mut self, loc: &BloomFilterSegmentLocation) -> Result<BloomFilter>;
-}
-// end of format
+use crate::bloom_filter::error::Result;
+use crate::bloom_filter::reader::BloomFilterReader;
+use crate::bloom_filter::{BloomFilterMeta, BloomFilterSegmentLocation, Bytes};
 
 pub struct BloomFilterApplier {
-    reader: Box<dyn BloomFilterReader>,
+    reader: Box<dyn BloomFilterReader + Send>,
     meta: BloomFilterMeta,
 }
 
 impl BloomFilterApplier {
-    pub async fn new(mut reader: Box<dyn BloomFilterReader>) -> Result<Self> {
+    pub async fn new(mut reader: Box<dyn BloomFilterReader + Send>) -> Result<Self> {
         let meta = reader.metadata().await?;
 
         Ok(Self { reader, meta })
