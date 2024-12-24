@@ -238,6 +238,7 @@ file-engine = { path = "src/file-engine" }
 flow = { path = "src/flow" }
 frontend = { path = "src/frontend", default-features = false }
 index = { path = "src/index" }
+log-query = { path = "src/log-query" }
 log-store = { path = "src/log-store" }
 meta-client = { path = "src/meta-client" }
 meta-srv = { path = "src/meta-srv" }
