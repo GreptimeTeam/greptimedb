@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use catalog::table_source::DfTableSourceProvider;
+use common_function::utils::escape_like_pattern;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::ScalarValue;
 use datafusion_expr::utils::conjunction;
@@ -108,16 +109,16 @@ impl LogQueryPlanner {
             .name
             .clone();
 
+        let start_time = ScalarValue::Utf8(time_filter.start.clone());
+        let end_time = ScalarValue::Utf8(
+            time_filter
+                .end
+                .clone()
+                .or(Some("9999-12-31T23:59:59Z".to_string())),
+        );
         let expr = col(timestamp_col.clone())
-            .gt_eq(lit(ScalarValue::Utf8(time_filter.start.clone())))
-            .and(
-                col(timestamp_col).lt_eq(lit(ScalarValue::Utf8(
-                    time_filter
-                        .end
-                        .clone()
-                        .or(Some("9999-12-31T23:59:59Z".to_string())),
-                ))),
-            );
+            .gt_eq(lit(start_time))
+            .and(col(timestamp_col).lt_eq(lit(end_time)));
 
         Ok(expr)
     }
@@ -133,21 +134,21 @@ impl LogQueryPlanner {
             .iter()
             .map(|filter| match filter {
                 log_query::ContentFilter::Exact(pattern) => Ok(col(&column_filter.column_name)
-                    .like(lit(ScalarValue::Utf8(Some(escape_pattern(pattern)))))),
+                    .like(lit(ScalarValue::Utf8(Some(escape_like_pattern(pattern)))))),
                 log_query::ContentFilter::Prefix(pattern) => Ok(col(&column_filter.column_name)
                     .like(lit(ScalarValue::Utf8(Some(format!(
                         "{}%",
-                        escape_pattern(pattern)
+                        escape_like_pattern(pattern)
                     )))))),
                 log_query::ContentFilter::Postfix(pattern) => Ok(col(&column_filter.column_name)
                     .like(lit(ScalarValue::Utf8(Some(format!(
                         "%{}",
-                        escape_pattern(pattern)
+                        escape_like_pattern(pattern)
                     )))))),
                 log_query::ContentFilter::Contains(pattern) => Ok(col(&column_filter.column_name)
                     .like(lit(ScalarValue::Utf8(Some(format!(
                         "%{}%",
-                        escape_pattern(pattern)
+                        escape_like_pattern(pattern)
                     )))))),
                 log_query::ContentFilter::Regex(..) => Err::<Expr, _>(
                     UnimplementedSnafu {
@@ -166,16 +167,6 @@ impl LogQueryPlanner {
 
         Ok(conjunction(exprs))
     }
-}
-
-fn escape_pattern(pattern: &str) -> String {
-    pattern
-        .chars()
-        .flat_map(|c| match c {
-            '\\' | '%' | '_' => vec!['\\', c],
-            _ => vec![c],
-        })
-        .collect::<String>()
 }
 
 #[cfg(test)]
@@ -318,6 +309,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_build_time_filter_without_end() {
+        let table_provider =
+            build_test_table_provider(&[("public".to_string(), "test_table".to_string())]).await;
+        let planner = LogQueryPlanner::new(table_provider);
+
+        let time_filter = TimeFilter {
+            start: Some("2021-01-01T00:00:00Z".to_string()),
+            end: None,
+            span: None,
+        };
+
+        let expr = planner
+            .build_time_filter(&time_filter, &mock_schema())
+            .unwrap();
+
+        let expected_expr = col("timestamp")
+            .gt_eq(lit(ScalarValue::Utf8(Some(
+                "2021-01-01T00:00:00Z".to_string(),
+            ))))
+            .and(col("timestamp").lt_eq(lit(ScalarValue::Utf8(Some(
+                "9999-12-31T23:59:59Z".to_string(),
+            )))));
+
+        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
+    }
+
+    #[tokio::test]
     async fn test_build_column_filter() {
         let table_provider =
             build_test_table_provider(&[("public".to_string(), "test_table".to_string())]).await;
@@ -345,9 +363,9 @@ mod tests {
 
     #[test]
     fn test_escape_pattern() {
-        assert_eq!(escape_pattern("test"), "test");
-        assert_eq!(escape_pattern("te%st"), "te\\%st");
-        assert_eq!(escape_pattern("te_st"), "te\\_st");
-        assert_eq!(escape_pattern("te\\st"), "te\\\\st");
+        assert_eq!(escape_like_pattern("test"), "test");
+        assert_eq!(escape_like_pattern("te%st"), "te\\%st");
+        assert_eq!(escape_like_pattern("te_st"), "te\\_st");
+        assert_eq!(escape_like_pattern("te\\st"), "te\\\\st");
     }
 }

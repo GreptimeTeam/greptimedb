@@ -18,7 +18,7 @@ use common_error::ext::BoxedError;
 use log_query::LogQuery;
 use server_error::Result as ServerResult;
 use servers::error::{self as server_error, AuthSnafu, ExecuteQuerySnafu};
-use servers::interceptor::LogQueryInterceptorRef;
+use servers::interceptor::{LogQueryInterceptor, LogQueryInterceptorRef};
 use servers::query_handler::LogQueryHandler;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -39,9 +39,7 @@ impl LogQueryHandler for Instance {
             .check_permission(ctx.current_user(), PermissionReq::LogQuery)
             .context(AuthSnafu)?;
 
-        if let Some(interceptor) = &interceptor {
-            interceptor.pre_query(&request, ctx.clone())?;
-        }
+        interceptor.as_ref().pre_query(&request, ctx.clone())?;
 
         request
             .time_filter
@@ -64,10 +62,6 @@ impl LogQueryHandler for Instance {
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
 
-        if let Some(interceptor) = &interceptor {
-            Ok(interceptor.post_query(output, ctx.clone())?)
-        } else {
-            Ok(output)
-        }
+        Ok(interceptor.as_ref().post_query(output, ctx.clone())?)
     }
 }

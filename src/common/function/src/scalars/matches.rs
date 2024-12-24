@@ -204,18 +204,8 @@ impl PatternAst {
     fn convert_literal(column: &str, pattern: &str) -> Expr {
         logical_expr::col(column).like(logical_expr::lit(format!(
             "%{}%",
-            Self::escape_pattern(pattern)
+            crate::utils::escape_like_pattern(pattern)
         )))
-    }
-
-    fn escape_pattern(pattern: &str) -> String {
-        pattern
-            .chars()
-            .flat_map(|c| match c {
-                '\\' | '%' | '_' => vec!['\\', c],
-                _ => vec![c],
-            })
-            .collect::<String>()
     }
 
     /// Transform this AST with preset rules to make it correct.
