@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["default_index_file"],"mod":["client_manager","consumer","index","log_store","producer","util","worker"],"struct":["EntryImpl","GlobalIndexCollector","NamespaceImpl"]};

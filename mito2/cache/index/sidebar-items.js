@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["INDEX_CONTENT_TYPE","INDEX_METADATA_TYPE"],"fn":["prune_size"],"mod":["inverted_index"],"struct":["IndexCache","PageKey"]};

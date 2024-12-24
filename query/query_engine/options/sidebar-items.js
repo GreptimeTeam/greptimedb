@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["validate_catalog_and_schema"],"struct":["QueryOptions"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["infer_orc_schema","new_orc_stream_reader"],"struct":["OrcFormat","OrcOpener","ReaderAdapter"]};

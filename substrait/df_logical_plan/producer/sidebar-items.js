@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["make_binary_op_scalar_func","operator_to_name","parse_flat_grouping_exprs","to_substrait_agg_measure","to_substrait_groupings","to_substrait_plan","to_substrait_rel","to_substrait_rex"]};
