@@ -294,7 +294,7 @@ data_home = "/tmp/greptimedb/"
 type = "File"
 
 ## Read cache configuration for object storage such as 'S3' etc, it's configured by default when using object storage. It is recommended to configure it when using object storage for better performance.
-## A local file directory, defaults to `{data_home}/object_cache/read`. An empty string means disabling.
+## A local file directory, defaults to `{data_home}/{remote_name}`. An empty string means disabling.
 ## @toml2docs:none-default
 #+ cache_path = ""
 
@@ -478,7 +478,7 @@ auto_flush_interval = "1h"
 ## Whether to enable the experimental write cache, it's enabled by default when using object storage. It is recommended to enable it when using object storage for better performance.
 enable_experimental_write_cache = false
 
-## File system path for write cache, defaults to `{data_home}/object_cache/write`.
+## File system path for write cache, defaults to `{data_home}`.
 experimental_write_cache_path = ""
 
 ## Capacity for write cache. If your disk space is sufficient, it is recommended to set it larger.

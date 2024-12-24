@@ -172,7 +172,7 @@ impl<C: Access> ReadCache<C> {
             OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
             OBJECT_STORE_LRU_CACHE_BYTES.add(size as i64);
             // ignore root path
-            if entry.path() != &root {
+            if entry.path() != root {
                 self.mem_cache
                     .insert(read_key.to_string(), ReadResult::Success(size as u32))
                     .await;
