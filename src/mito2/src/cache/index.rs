@@ -15,6 +15,7 @@
 pub mod inverted_index;
 
 use std::future::Future;
+use std::hash::Hash;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -59,7 +60,7 @@ impl PageKey {
         start..end
     }
 
-    /// Generates a vector of IndexKey instances for the pages that a given offset and size span.
+    /// Generates a iterator of `IndexKey` for the pages that a given offset and size span.
     fn generate_page_keys(offset: u64, size: u32, page_size: u64) -> impl Iterator<Item = Self> {
         let start_page = Self::calculate_page_id(offset, page_size);
         let total_pages = Self::calculate_page_count(offset, size, page_size);
@@ -78,9 +79,6 @@ pub struct IndexCache<K, M> {
     // Page size for index content.
     page_size: u64,
 
-    /// Index type for telemetry.
-    index_type: &'static str,
-
     /// Weighter for metadata.
     weight_of_metadata: fn(&K, &Arc<M>) -> u32,
     /// Weighter for content.
@@ -89,7 +87,7 @@ pub struct IndexCache<K, M> {
 
 impl<K, M> IndexCache<K, M>
 where
-    K: std::hash::Hash + Eq + Send + Sync + 'static,
+    K: Hash + Eq + Send + Sync + 'static,
     M: Send + Sync + 'static,
 {
     pub fn new_with_weighter(
@@ -107,7 +105,7 @@ where
             .eviction_listener(move |k, v, _cause| {
                 let size = weight_of_metadata(&k, &v);
                 CACHE_BYTES
-                    .with_label_values(&[INDEX_METADATA_TYPE, index_type])
+                    .with_label_values(&[INDEX_METADATA_TYPE])
                     .sub(size.into());
             })
             .build();
@@ -117,7 +115,7 @@ where
             .eviction_listener(move |k, v, _cause| {
                 let size = weight_of_content(&k, &v);
                 CACHE_BYTES
-                    .with_label_values(&[INDEX_CONTENT_TYPE, index_type])
+                    .with_label_values(&[INDEX_CONTENT_TYPE])
                     .sub(size.into());
             })
             .build();
@@ -125,7 +123,6 @@ where
             index_metadata,
             index: index_cache,
             page_size,
-            index_type,
             weight_of_content,
             weight_of_metadata,
         }
@@ -134,7 +131,7 @@ where
 
 impl<K, M> IndexCache<K, M>
 where
-    K: std::hash::Hash + Eq + Clone + Copy + Send + Sync + 'static,
+    K: Hash + Eq + Clone + Copy + Send + Sync + 'static,
     M: Send + Sync + 'static,
 {
     pub fn get_index_metadata(&self, key: K) -> Option<Arc<M>> {
@@ -143,7 +140,7 @@ where
 
     pub fn put_index_metadata(&self, key: K, metadata: Arc<M>) {
         CACHE_BYTES
-            .with_label_values(&[INDEX_METADATA_TYPE, self.index_type])
+            .with_label_values(&[INDEX_METADATA_TYPE])
             .add((self.weight_of_metadata)(&key, &metadata).into());
         self.index_metadata.insert(key, metadata)
     }
@@ -154,7 +151,7 @@ where
 
     pub fn put_index(&self, key: K, page_key: PageKey, value: Bytes) {
         CACHE_BYTES
-            .with_label_values(&[INDEX_CONTENT_TYPE, self.index_type])
+            .with_label_values(&[INDEX_CONTENT_TYPE])
             .add((self.weight_of_content)(&(key, page_key), &value).into());
         self.index.insert((key, page_key), value);
     }
@@ -168,10 +165,10 @@ where
         offset: u64,
         size: u32,
         load: F,
-    ) -> std::result::Result<Vec<u8>, E>
+    ) -> Result<Vec<u8>, E>
     where
         F: FnOnce(Vec<Range<u64>>) -> Fut,
-        Fut: Future<Output = std::result::Result<Vec<Bytes>, E>>,
+        Fut: Future<Output = Result<Vec<Bytes>, E>>,
         E: std::error::Error,
     {
         let page_keys =
@@ -189,15 +186,11 @@ where
         for (i, page_key) in page_keys.iter().enumerate() {
             match self.get_index(key, *page_key) {
                 Some(page) => {
-                    CACHE_HIT
-                        .with_label_values(&[INDEX_CONTENT_TYPE, self.index_type])
-                        .inc();
+                    CACHE_HIT.with_label_values(&[INDEX_CONTENT_TYPE]).inc();
                     data[i] = page;
                 }
                 None => {
-                    CACHE_MISS
-                        .with_label_values(&[INDEX_CONTENT_TYPE, self.index_type])
-                        .inc();
+                    CACHE_MISS.with_label_values(&[INDEX_CONTENT_TYPE]).inc();
                     let base_offset = page_key.page_id * self.page_size;
                     let pruned_size = if i == last_index {
                         prune_size(page_keys.iter(), file_size, self.page_size)

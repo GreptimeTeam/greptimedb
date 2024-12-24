@@ -28,8 +28,6 @@ pub const FILE_TYPE_LABEL: &str = "file_type";
 pub const WORKER_LABEL: &str = "worker";
 /// Partition label.
 pub const PARTITION_LABEL: &str = "partition";
-/// Index type label.
-pub const INDEX_TYPE_LABEL: &str = "index_type";
 
 lazy_static! {
     /// Global write buffer size in bytes.
@@ -197,21 +195,21 @@ lazy_static! {
     pub static ref CACHE_HIT: IntCounterVec = register_int_counter_vec!(
         "greptime_mito_cache_hit",
         "mito cache hit",
-        &[TYPE_LABEL, INDEX_TYPE_LABEL]
+        &[TYPE_LABEL]
     )
     .unwrap();
     /// Cache miss counter.
     pub static ref CACHE_MISS: IntCounterVec = register_int_counter_vec!(
         "greptime_mito_cache_miss",
         "mito cache miss",
-        &[TYPE_LABEL, INDEX_TYPE_LABEL]
+        &[TYPE_LABEL]
     )
     .unwrap();
     /// Cache size in bytes.
     pub static ref CACHE_BYTES: IntGaugeVec = register_int_gauge_vec!(
         "greptime_mito_cache_bytes",
         "mito cache bytes",
-        &[TYPE_LABEL, INDEX_TYPE_LABEL]
+        &[TYPE_LABEL]
     )
     .unwrap();
     /// Download bytes counter in the write cache.

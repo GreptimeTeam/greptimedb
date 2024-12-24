@@ -29,7 +29,6 @@ use crate::cache::index::{IndexCache, PageKey, INDEX_METADATA_TYPE};
 use crate::metrics::{CACHE_HIT, CACHE_MISS};
 use crate::sst::file::FileId;
 
-/// Metrics for inverted index.
 const INDEX_TYPE_INVERTED_INDEX: &str = "inverted_index";
 
 /// Cache for inverted index.
@@ -99,16 +98,12 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
 
     async fn metadata(&mut self) -> index::inverted_index::error::Result<Arc<InvertedIndexMetas>> {
         if let Some(cached) = self.cache.get_index_metadata(self.file_id) {
-            CACHE_HIT
-                .with_label_values(&[INDEX_METADATA_TYPE, INDEX_TYPE_INVERTED_INDEX])
-                .inc();
+            CACHE_HIT.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             Ok(cached)
         } else {
             let meta = self.inner.metadata().await?;
             self.cache.put_index_metadata(self.file_id, meta.clone());
-            CACHE_MISS
-                .with_label_values(&[INDEX_METADATA_TYPE, INDEX_TYPE_INVERTED_INDEX])
-                .inc();
+            CACHE_MISS.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             Ok(meta)
         }
     }
