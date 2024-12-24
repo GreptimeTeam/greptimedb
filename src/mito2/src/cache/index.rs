@@ -134,26 +134,15 @@ where
     K: Hash + Eq + Clone + Copy + Send + Sync + 'static,
     M: Send + Sync + 'static,
 {
-    pub fn get_index_metadata(&self, key: K) -> Option<Arc<M>> {
+    pub fn get_metadata(&self, key: K) -> Option<Arc<M>> {
         self.index_metadata.get(&key)
     }
 
-    pub fn put_index_metadata(&self, key: K, metadata: Arc<M>) {
+    pub fn put_metadata(&self, key: K, metadata: Arc<M>) {
         CACHE_BYTES
             .with_label_values(&[INDEX_METADATA_TYPE])
             .add((self.weight_of_metadata)(&key, &metadata).into());
         self.index_metadata.insert(key, metadata)
-    }
-
-    pub fn get_index(&self, key: K, page_key: PageKey) -> Option<Bytes> {
-        self.index.get(&(key, page_key))
-    }
-
-    pub fn put_index(&self, key: K, page_key: PageKey, value: Bytes) {
-        CACHE_BYTES
-            .with_label_values(&[INDEX_CONTENT_TYPE])
-            .add((self.weight_of_content)(&(key, page_key), &value).into());
-        self.index.insert((key, page_key), value);
     }
 
     /// Gets given range of index data from cache, and loads from source if the file
@@ -184,7 +173,7 @@ where
         let last_index = page_keys.len() - 1;
         // TODO: Avoid copy as much as possible.
         for (i, page_key) in page_keys.iter().enumerate() {
-            match self.get_index(key, *page_key) {
+            match self.get_page(key, *page_key) {
                 Some(page) => {
                     CACHE_HIT.with_label_values(&[INDEX_CONTENT_TYPE]).inc();
                     data[i] = page;
@@ -207,13 +196,24 @@ where
             for (i, page) in cache_miss_idx.into_iter().zip(pages.into_iter()) {
                 let page_key = page_keys[i];
                 data[i] = page.clone();
-                self.put_index(key, page_key, page.clone());
+                self.put_page(key, page_key, page.clone());
             }
         }
         let buffer = Buffer::from_iter(data.into_iter());
         Ok(buffer
             .slice(PageKey::calculate_range(offset, size, self.page_size))
             .to_vec())
+    }
+
+    fn get_page(&self, key: K, page_key: PageKey) -> Option<Bytes> {
+        self.index.get(&(key, page_key))
+    }
+
+    fn put_page(&self, key: K, page_key: PageKey, value: Bytes) {
+        CACHE_BYTES
+            .with_label_values(&[INDEX_CONTENT_TYPE])
+            .add((self.weight_of_content)(&(key, page_key), &value).into());
+        self.index.insert((key, page_key), value);
     }
 }
 

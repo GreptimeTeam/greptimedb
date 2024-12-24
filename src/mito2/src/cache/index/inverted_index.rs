@@ -91,12 +91,12 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
     }
 
     async fn metadata(&mut self) -> Result<Arc<InvertedIndexMetas>> {
-        if let Some(cached) = self.cache.get_index_metadata(self.file_id) {
+        if let Some(cached) = self.cache.get_metadata(self.file_id) {
             CACHE_HIT.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             Ok(cached)
         } else {
             let meta = self.inner.metadata().await?;
-            self.cache.put_index_metadata(self.file_id, meta.clone());
+            self.cache.put_metadata(self.file_id, meta.clone());
             CACHE_MISS.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             Ok(meta)
         }
