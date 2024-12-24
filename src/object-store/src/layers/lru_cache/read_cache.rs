@@ -20,7 +20,7 @@ use moka::future::Cache;
 use moka::notification::ListenerFuture;
 use opendal::raw::oio::{Read, Reader, Write};
 use opendal::raw::{Access, OpDelete, OpRead, OpStat, OpWrite, RpRead};
-use opendal::{Error as OpendalError, ErrorKind, Metakey, OperatorBuilder, Result};
+use opendal::{EntryMode, Error as OpendalError, ErrorKind, Metakey, OperatorBuilder, Result};
 
 use crate::metrics::{
     OBJECT_STORE_LRU_CACHE_BYTES, OBJECT_STORE_LRU_CACHE_ENTRIES, OBJECT_STORE_LRU_CACHE_HIT,
@@ -67,7 +67,7 @@ fn read_cache_key(path: &str, args: &OpRead) -> String {
 }
 
 fn read_cache_root() -> String {
-    format!("/{READ_CACHE_DIR}")
+    format!("/{READ_CACHE_DIR}/")
 }
 
 fn read_cache_key_prefix(path: &str) -> String {
@@ -138,16 +138,7 @@ impl<C: Access> ReadCache<C> {
     }
 
     /// Invalidate all cache items belong to the specific path.
-    pub(crate) async fn invalidate_entries_with_prefix(&self, path: &str) {
-        let prefix = read_cache_key_prefix(path);
-        // Safety: always ok when building cache with `support_invalidation_closures`.
-        self.mem_cache
-            .invalidate_entries_if(move |k: &String, &_v| k.starts_with(&prefix))
-            .ok();
-    }
-
-    /// Blocking version of [`invalidate_entries_with_prefix`](Self::invalidate_entries_with_prefix).
-    pub(crate) fn blocking_invalidate_entries_with_prefix(&self, path: &str) {
+    pub(crate) fn invalidate_entries_with_prefix(&self, path: &str) {
         let prefix = read_cache_key_prefix(path);
         // Safety: always ok when building cache with `support_invalidation_closures`.
         self.mem_cache
@@ -172,7 +163,7 @@ impl<C: Access> ReadCache<C> {
             OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
             OBJECT_STORE_LRU_CACHE_BYTES.add(size as i64);
             // ignore root path
-            if entry.path() != root {
+            if entry.metadata().mode() == EntryMode::FILE {
                 self.mem_cache
                     .insert(read_key.to_string(), ReadResult::Success(size as u32))
                     .await;
