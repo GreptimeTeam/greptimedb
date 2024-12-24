@@ -46,6 +46,7 @@ pub struct FrontendOptions {
     pub user_provider: Option<String>,
     pub export_metrics: ExportMetricsOption,
     pub tracing: TracingOptions,
+    pub max_in_flight_write_bytes: Option<u64>,
 }
 
 impl Default for FrontendOptions {
@@ -68,6 +69,7 @@ impl Default for FrontendOptions {
             user_provider: None,
             export_metrics: ExportMetricsOption::default(),
             tracing: TracingOptions::default(),
+            max_in_flight_write_bytes: None,
         }
     }
 }

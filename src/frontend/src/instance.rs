@@ -86,6 +86,7 @@ use crate::error::{
 };
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::HeartbeatTask;
+use crate::limiter::LimiterRef;
 use crate::script::ScriptExecutor;
 
 #[async_trait]
@@ -124,6 +125,7 @@ pub struct Instance {
     export_metrics_task: Option<ExportMetricsTask>,
     table_metadata_manager: TableMetadataManagerRef,
     stats: StatementStatistics,
+    limiter: Option<LimiterRef>,
 }
 
 impl Instance {
