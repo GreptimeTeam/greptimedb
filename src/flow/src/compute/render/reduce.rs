@@ -399,6 +399,12 @@ fn reduce_batch_subgraph(
                 }
             }
 
+            let key_data_types = output_type
+                .column_types
+                .iter()
+                .map(|t| t.scalar_type.clone())
+                .collect_vec();
+
             // TODO(discord9): here reduce numbers of eq to minimal by keeping slicing key/val batch
             for key_row in distinct_keys {
                 let key_scalar_value = {
@@ -410,18 +416,13 @@ fn reduce_batch_subgraph(
                                     msg: "can't convert key values to datafusion value",
                                 })?;
 
-                        let key_data_type = output_type
-                            .column_types
-                            .get(key_idx)
-                            .context(InternalSnafu {
-                                reason: format!(
-                                    "Key index out of bound, expected at most {} but got {}",
-                                    output_type.column_types.len(),
-                                    key_idx
-                                ),
-                            })?
-                            .clone()
-                            .scalar_type;
+                        let key_data_type = key_data_types.get(key_idx).context(InternalSnafu {
+                            reason: format!(
+                                "Key index out of bound, expected at most {} but got {}",
+                                output_type.column_types.len(),
+                                key_idx
+                            ),
+                        })?;
 
                         // if incoming value's datatype is null, it need to be handled specially, see below
                         if key_data_type.as_arrow_type() != v.data_type()
