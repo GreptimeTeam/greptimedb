@@ -63,12 +63,14 @@ CREATE TABLE ngx_access_log (
 
 CREATE FLOW calc_ngx_country SINK TO ngx_country AS
 SELECT
+    client,
     country as 'country',
     count(1) as country_count,
     date_bin(INTERVAL '1 hour', access_time) as time_window,
 FROM
     ngx_access_log
 GROUP BY
+    client,
     country,
     time_window;
 
@@ -76,9 +78,11 @@ INSERT INTO
     ngx_access_log
 VALUES
     ("cli1", null, 0),
+    ("cli1", null, 0),
     ("cli2", null, 0),
-    ("cli3", null, 0),
-    ("cli1", "b", 0);
+    ("cli2", null, 1),
+    ("cli1", "b", 0),
+    ("cli1", "c", 0);
 
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_ngx_country');
@@ -86,6 +90,7 @@ ADMIN FLUSH_FLOW('calc_ngx_country');
 SHOW CREATE TABLE ngx_country;
 
 SELECT
+    "ngx_access_log.client",
     "ngx_access_log.country",
     country_count,
     time_window
@@ -102,6 +107,7 @@ VALUES
 ADMIN FLUSH_FLOW('calc_ngx_country');
 
 SELECT
+    "ngx_access_log.client",
     "ngx_access_log.country",
     country_count,
     time_window
@@ -117,6 +123,7 @@ VALUES
 ADMIN FLUSH_FLOW('calc_ngx_country');
 
 SELECT
+    "ngx_access_log.client",
     "ngx_access_log.country",
     country_count,
     time_window

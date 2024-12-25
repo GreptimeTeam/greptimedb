@@ -99,12 +99,14 @@ Affected Rows: 0
 
 CREATE FLOW calc_ngx_country SINK TO ngx_country AS
 SELECT
+    client,
     country as 'country',
     count(1) as country_count,
     date_bin(INTERVAL '1 hour', access_time) as time_window,
 FROM
     ngx_access_log
 GROUP BY
+    client,
     country,
     time_window;
 
@@ -114,11 +116,13 @@ INSERT INTO
     ngx_access_log
 VALUES
     ("cli1", null, 0),
+    ("cli1", null, 0),
     ("cli2", null, 0),
-    ("cli3", null, 0),
-    ("cli1", "b", 0);
+    ("cli2", null, 1),
+    ("cli1", "b", 0),
+    ("cli1", "c", 0);
 
-Affected Rows: 4
+Affected Rows: 6
 
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_ngx_country');
@@ -131,36 +135,40 @@ ADMIN FLUSH_FLOW('calc_ngx_country');
 
 SHOW CREATE TABLE ngx_country;
 
-+-------------+---------------------------------------------------------+
-| Table       | Create Table                                            |
-+-------------+---------------------------------------------------------+
-| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" (              |
-|             |   "ngx_access_log.country" STRING NULL,                 |
-|             |   "country_count" BIGINT NULL,                          |
-|             |   "time_window" TIMESTAMP(3) NULL,                      |
-|             |   "update_at" TIMESTAMP(3) NULL,                        |
-|             |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,             |
-|             |   TIME INDEX ("__ts_placeholder"),                      |
-|             |   PRIMARY KEY ("ngx_access_log.country", "time_window") |
-|             | )                                                       |
-|             |                                                         |
-|             | ENGINE=mito                                             |
-|             |                                                         |
-+-------------+---------------------------------------------------------+
++-------------+----------------------------------------------------------------------------------+
+| Table       | Create Table                                                                     |
++-------------+----------------------------------------------------------------------------------+
+| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" (                                       |
+|             |   "ngx_access_log.client" STRING NULL,                                           |
+|             |   "ngx_access_log.country" STRING NULL,                                          |
+|             |   "country_count" BIGINT NULL,                                                   |
+|             |   "time_window" TIMESTAMP(3) NULL,                                               |
+|             |   "update_at" TIMESTAMP(3) NULL,                                                 |
+|             |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,                                      |
+|             |   TIME INDEX ("__ts_placeholder"),                                               |
+|             |   PRIMARY KEY ("ngx_access_log.client", "ngx_access_log.country", "time_window") |
+|             | )                                                                                |
+|             |                                                                                  |
+|             | ENGINE=mito                                                                      |
+|             |                                                                                  |
++-------------+----------------------------------------------------------------------------------+
 
 SELECT
+    "ngx_access_log.client",
     "ngx_access_log.country",
     country_count,
     time_window
 FROM
     ngx_country;
 
-+------------------------+---------------+---------------------+
-| ngx_access_log.country | country_count | time_window         |
-+------------------------+---------------+---------------------+
-|                        | 3             | 1970-01-01T00:00:00 |
-| b                      | 1             | 1970-01-01T00:00:00 |
-+------------------------+---------------+---------------------+
++-----------------------+------------------------+---------------+---------------------+
+| ngx_access_log.client | ngx_access_log.country | country_count | time_window         |
++-----------------------+------------------------+---------------+---------------------+
+| cli1                  |                        | 2             | 1970-01-01T00:00:00 |
+| cli1                  | b                      | 1             | 1970-01-01T00:00:00 |
+| cli1                  | c                      | 1             | 1970-01-01T00:00:00 |
+| cli2                  |                        | 2             | 1970-01-01T00:00:00 |
++-----------------------+------------------------+---------------+---------------------+
 
 -- making sure distinct is working
 INSERT INTO
@@ -180,18 +188,21 @@ ADMIN FLUSH_FLOW('calc_ngx_country');
 +--------------------------------------+
 
 SELECT
+    "ngx_access_log.client",
     "ngx_access_log.country",
     country_count,
     time_window
 FROM
     ngx_country;
 
-+------------------------+---------------+---------------------+
-| ngx_access_log.country | country_count | time_window         |
-+------------------------+---------------+---------------------+
-|                        | 3             | 1970-01-01T00:00:00 |
-| b                      | 2             | 1970-01-01T00:00:00 |
-+------------------------+---------------+---------------------+
++-----------------------+------------------------+---------------+---------------------+
+| ngx_access_log.client | ngx_access_log.country | country_count | time_window         |
++-----------------------+------------------------+---------------+---------------------+
+| cli1                  |                        | 2             | 1970-01-01T00:00:00 |
+| cli1                  | b                      | 2             | 1970-01-01T00:00:00 |
+| cli1                  | c                      | 1             | 1970-01-01T00:00:00 |
+| cli2                  |                        | 2             | 1970-01-01T00:00:00 |
++-----------------------+------------------------+---------------+---------------------+
 
 INSERT INTO
     ngx_access_log
@@ -210,19 +221,21 @@ ADMIN FLUSH_FLOW('calc_ngx_country');
 +--------------------------------------+
 
 SELECT
+    "ngx_access_log.client",
     "ngx_access_log.country",
     country_count,
     time_window
 FROM
     ngx_country;
 
-+------------------------+---------------+---------------------+
-| ngx_access_log.country | country_count | time_window         |
-+------------------------+---------------+---------------------+
-|                        | 3             | 1970-01-01T00:00:00 |
-| b                      | 2             | 1970-01-01T00:00:00 |
-| c                      | 1             | 1970-01-01T00:00:00 |
-+------------------------+---------------+---------------------+
++-----------------------+------------------------+---------------+---------------------+
+| ngx_access_log.client | ngx_access_log.country | country_count | time_window         |
++-----------------------+------------------------+---------------+---------------------+
+| cli1                  |                        | 2             | 1970-01-01T00:00:00 |
+| cli1                  | b                      | 2             | 1970-01-01T00:00:00 |
+| cli1                  | c                      | 2             | 1970-01-01T00:00:00 |
+| cli2                  |                        | 2             | 1970-01-01T00:00:00 |
++-----------------------+------------------------+---------------+---------------------+
 
 DROP FLOW calc_ngx_country;
 
