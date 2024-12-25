@@ -159,6 +159,7 @@ pub enum Error {
 
     #[snafu(display("Pipeline management api error"))]
     Pipeline {
+        #[snafu(source)]
         source: pipeline::error::Error,
         #[snafu(implicit)]
         location: Location,
