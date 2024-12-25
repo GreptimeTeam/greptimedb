@@ -26,7 +26,7 @@ pub type BytesRef<'a> = &'a [u8];
 pub const SEED: u128 = 42;
 
 /// The Meta information of the bloom filter stored in the file.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct BloomFilterMeta {
     /// The number of rows per segment.
     pub rows_per_segment: usize,
@@ -45,7 +45,7 @@ pub struct BloomFilterMeta {
 }
 
 /// The location of the bloom filter segment in the file.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, Hash, PartialEq, Eq)]
 pub struct BloomFilterSegmentLocation {
     /// The offset of the bloom filter segment in the file.
     pub offset: u64,

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use parquet::arrow::arrow_reader::RowSelection;
 use parquet::file::metadata::RowGroupMetaData;
@@ -20,6 +20,21 @@ use parquet::file::metadata::RowGroupMetaData;
 use crate::bloom_filter::error::Result;
 use crate::bloom_filter::reader::BloomFilterReader;
 use crate::bloom_filter::{BloomFilterMeta, BloomFilterSegmentLocation, Bytes};
+
+/// Enumerates types of predicates for value filtering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Predicate {
+    /// Predicate for matching values in a list.
+    InList(InListPredicate),
+}
+
+/// `InListPredicate` contains a list of acceptable values. A value needs to match at least
+/// one of the elements (logical OR semantic) for the predicate to be satisfied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InListPredicate {
+    /// List of acceptable values.
+    pub list: HashSet<Bytes>,
+}
 
 pub struct BloomFilterApplier {
     reader: Box<dyn BloomFilterReader + Send>,
@@ -35,13 +50,13 @@ impl BloomFilterApplier {
 
     pub async fn search(
         &mut self,
-        probes: &[Bytes],
+        probes: &HashSet<Bytes>,
         row_group_metas: &[RowGroupMetaData],
-        basement: &BTreeMap<usize, Option<RowSelection>>,
-    ) -> Result<Vec<BloomFilterSegmentLocation>> {
+        basement: &mut BTreeMap<usize, Option<RowSelection>>,
+    ) -> Result<HashSet<BloomFilterSegmentLocation>> {
         // 0. Fast path - if basement is empty return empty vec
         if basement.is_empty() {
-            return Ok(Vec::new());
+            return Ok(HashSet::new());
         }
 
         // 1. Compute prefix sum for row counts
@@ -54,7 +69,8 @@ impl BloomFilterApplier {
         }
 
         // 2. Calculate bloom filter segment locations
-        let mut segment_locations = Vec::new();
+        let mut row_groups_to_remove = HashSet::new();
+        let mut segment_locations = HashSet::new();
         for &row_group_idx in basement.keys() {
             // TODO(ruihang): support further filter over row selection
 
@@ -64,6 +80,7 @@ impl BloomFilterApplier {
                 / self.meta.rows_per_segment as f64)
                 .ceil() as usize;
 
+            let mut is_any_range_hit = false;
             for i in rows_range_start..rows_range_end {
                 // 3. Probe each bloom filter segment
                 let loc = BloomFilterSegmentLocation {
@@ -83,9 +100,18 @@ impl BloomFilterApplier {
                 }
 
                 if matches {
-                    segment_locations.push(loc);
+                    segment_locations.insert(loc);
                 }
+                is_any_range_hit |= matches;
             }
+            if !is_any_range_hit {
+                row_groups_to_remove.insert(row_group_idx);
+            }
+        }
+
+        // 4. Remove row groups that do not match any bloom filter segment
+        for row_group_idx in row_groups_to_remove {
+            basement.remove(&row_group_idx);
         }
 
         Ok(segment_locations)
