@@ -17,7 +17,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use arrow::array::new_null_array;
-use common_telemetry::{debug, trace};
+use common_telemetry::trace;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
 use datatypes::value::{ListValue, Value};
@@ -458,7 +458,7 @@ fn reduce_batch_subgraph(
                     .map(|(key, col)| {
                         // TODO(discord9): this takes half of the cpu! And this is redundant amount of `eq`!
 
-                        // note that if lhs is a null, we stil need to get all rows that are null! But can't use `eq` since
+                        // note that if lhs is a null, we still need to get all rows that are null! But can't use `eq` since
                         // it will return null if input have null, so we need to use `is_null` instead
                         if arrow::array::Datum::get(&key).0.data_type().is_null() {
                             arrow::compute::kernels::boolean::is_null(
