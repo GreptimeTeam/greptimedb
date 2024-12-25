@@ -48,6 +48,21 @@ impl BloomFilterApplier {
         Ok(Self { reader, meta })
     }
 
+    /// Searches for matching row groups using bloom filters.
+    ///
+    /// This method applies bloom filter index to eliminate row groups that definitely
+    /// don't contain the searched values. It works by:
+    ///
+    /// 1. Computing prefix sums for row counts
+    /// 2. Calculating bloom filter segment locations for each row group
+    ///     1. A row group may span multiple bloom filter segments
+    /// 3. Probing bloom filter segments
+    /// 4. Removing non-matching row groups from the basement
+    ///     1. If a row group doesn't match any bloom filter segment with any probe, it is removed
+    ///
+    /// # Note
+    /// The method modifies the `basement` map in-place by removing row groups that
+    /// don't match the bloom filter criteria.
     pub async fn search(
         &mut self,
         probes: &HashSet<Bytes>,
@@ -89,16 +104,19 @@ impl BloomFilterApplier {
                 };
                 let bloom = self.reader.bloom_filter(&loc).await?;
 
-                // Check if all probes exist in bloom filter
-                let mut matches = true;
+                // Check if any probe exists in bloom filter
+                let mut matches = false;
                 for probe in probes {
-                    if !bloom.contains(probe) {
-                        matches = false;
+                    if bloom.contains(probe) {
+                        matches = true;
                         break;
                     }
                 }
 
                 is_any_range_hit |= matches;
+                if matches {
+                    break;
+                }
             }
             if !is_any_range_hit {
                 row_groups_to_remove.insert(row_group_idx);

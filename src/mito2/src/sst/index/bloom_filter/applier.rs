@@ -541,4 +541,182 @@ mod tests {
             }
         }
     }
+
+    fn int64_lit(i: i64) -> Expr {
+        Expr::Literal(ScalarValue::Int64(Some(i)))
+    }
+
+    #[test]
+    fn test_build_with_in_list() {
+        let (_d, factory) = PuffinManagerFactory::new_for_test_block("test_build_with_in_list_");
+        let metadata = test_region_metadata();
+        let builder = BloomFilterIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            &metadata,
+            factory,
+        );
+
+        let exprs = vec![Expr::InList(InList {
+            expr: Box::new(column("column2")),
+            list: vec![int64_lit(1), int64_lit(2), int64_lit(3)],
+            negated: false,
+        })];
+
+        let result = builder.build(&exprs).unwrap();
+        assert!(result.is_some());
+
+        let filters = result.unwrap().filters;
+        let column_predicates = filters.get(&2).unwrap();
+        assert_eq!(column_predicates.len(), 1);
+
+        match &column_predicates[0] {
+            Predicate::InList(p) => {
+                assert_eq!(p.list.len(), 3);
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_with_and_expressions() {
+        let (_d, factory) = PuffinManagerFactory::new_for_test_block("test_build_with_and_");
+        let metadata = test_region_metadata();
+        let builder = BloomFilterIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            &metadata,
+            factory,
+        );
+
+        let exprs = vec![Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(Expr::BinaryExpr(BinaryExpr {
+                left: Box::new(column("column1")),
+                op: Operator::Eq,
+                right: Box::new(string_lit("value1")),
+            })),
+            op: Operator::And,
+            right: Box::new(Expr::BinaryExpr(BinaryExpr {
+                left: Box::new(column("column2")),
+                op: Operator::Eq,
+                right: Box::new(int64_lit(42)),
+            })),
+        })];
+
+        let result = builder.build(&exprs).unwrap();
+        assert!(result.is_some());
+
+        let filters = result.unwrap().filters;
+        assert_eq!(filters.len(), 2);
+        assert!(filters.contains_key(&1));
+        assert!(filters.contains_key(&2));
+    }
+
+    #[test]
+    fn test_build_with_null_values() {
+        let (_d, factory) = PuffinManagerFactory::new_for_test_block("test_build_with_null_");
+        let metadata = test_region_metadata();
+        let builder = BloomFilterIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            &metadata,
+            factory,
+        );
+
+        let exprs = vec![
+            Expr::BinaryExpr(BinaryExpr {
+                left: Box::new(column("column1")),
+                op: Operator::Eq,
+                right: Box::new(Expr::Literal(ScalarValue::Utf8(None))),
+            }),
+            Expr::InList(InList {
+                expr: Box::new(column("column2")),
+                list: vec![
+                    int64_lit(1),
+                    Expr::Literal(ScalarValue::Int64(None)),
+                    int64_lit(3),
+                ],
+                negated: false,
+            }),
+        ];
+
+        let result = builder.build(&exprs).unwrap();
+        assert!(result.is_some());
+
+        let filters = result.unwrap().filters;
+        assert!(!filters.contains_key(&1)); // Null equality should be ignored
+        let column2_predicates = filters.get(&2).unwrap();
+        match &column2_predicates[0] {
+            Predicate::InList(p) => {
+                assert_eq!(p.list.len(), 2); // Only non-null values should be included
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_with_invalid_expressions() {
+        let (_d, factory) = PuffinManagerFactory::new_for_test_block("test_build_with_invalid_");
+        let metadata = test_region_metadata();
+        let builder = BloomFilterIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            &metadata,
+            factory,
+        );
+
+        let exprs = vec![
+            // Non-equality operator
+            Expr::BinaryExpr(BinaryExpr {
+                left: Box::new(column("column1")),
+                op: Operator::Gt,
+                right: Box::new(string_lit("value1")),
+            }),
+            // Non-existent column
+            Expr::BinaryExpr(BinaryExpr {
+                left: Box::new(column("non_existent")),
+                op: Operator::Eq,
+                right: Box::new(string_lit("value")),
+            }),
+            // Negated IN list
+            Expr::InList(InList {
+                expr: Box::new(column("column2")),
+                list: vec![int64_lit(1), int64_lit(2)],
+                negated: true,
+            }),
+        ];
+
+        let result = builder.build(&exprs).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_build_with_multiple_predicates_same_column() {
+        let (_d, factory) = PuffinManagerFactory::new_for_test_block("test_build_with_multiple_");
+        let metadata = test_region_metadata();
+        let builder = BloomFilterIndexApplierBuilder::new(
+            "test".to_string(),
+            test_object_store(),
+            &metadata,
+            factory,
+        );
+
+        let exprs = vec![
+            Expr::BinaryExpr(BinaryExpr {
+                left: Box::new(column("column1")),
+                op: Operator::Eq,
+                right: Box::new(string_lit("value1")),
+            }),
+            Expr::InList(InList {
+                expr: Box::new(column("column1")),
+                list: vec![string_lit("value2"), string_lit("value3")],
+                negated: false,
+            }),
+        ];
+
+        let result = builder.build(&exprs).unwrap();
+        assert!(result.is_some());
+
+        let filters = result.unwrap().filters;
+        let column_predicates = filters.get(&1).unwrap();
+        assert_eq!(column_predicates.len(), 2);
+    }
 }
