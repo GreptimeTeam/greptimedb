@@ -423,7 +423,7 @@ fn reduce_batch_subgraph(
                             .clone()
                             .scalar_type;
 
-                        // if incoming value's datatype is null, it need to be handled as array with known type and values being null
+                        // if incoming value's datatype is null, it need to be handled specially, see below
                         if key_data_type.as_arrow_type() != v.data_type()
                             && !v.data_type().is_null()
                         {
