@@ -54,6 +54,7 @@ use crate::error::{
     ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
 };
 use crate::heartbeat::HeartbeatTask;
+use crate::metrics::{METRIC_FLOW_PROCESSING_TIME, METRIC_FLOW_ROWS};
 use crate::transform::register_function_to_query_engine;
 use crate::utils::{SizeReportSender, StateReportHandler};
 use crate::{Error, FlowWorkerManager, FlownodeOptions};
@@ -77,6 +78,10 @@ impl flow_server::Flow for FlowService {
         &self,
         request: Request<FlowRequest>,
     ) -> Result<Response<FlowResponse>, Status> {
+        let _timer = METRIC_FLOW_PROCESSING_TIME
+            .with_label_values(&["ddl"])
+            .start_timer();
+
         let request = request.into_inner();
         self.manager
             .handle(request)
@@ -92,18 +97,31 @@ impl flow_server::Flow for FlowService {
         &self,
         request: Request<InsertRequests>,
     ) -> Result<Response<FlowResponse>, Status> {
+        let _timer = METRIC_FLOW_PROCESSING_TIME
+            .with_label_values(&["insert"])
+            .start_timer();
+
         let request = request.into_inner();
         // TODO(discord9): fix protobuf import order shenanigans to remove this duplicated define
+        let mut row_count = 0;
         let request = api::v1::region::InsertRequests {
             requests: request
                 .requests
                 .into_iter()
-                .map(|insert| api::v1::region::InsertRequest {
-                    region_id: insert.region_id,
-                    rows: insert.rows,
+                .map(|insert| {
+                    insert.rows.as_ref().inspect(|x| row_count += x.rows.len());
+                    api::v1::region::InsertRequest {
+                        region_id: insert.region_id,
+                        rows: insert.rows,
+                    }
                 })
                 .collect_vec(),
         };
+
+        METRIC_FLOW_ROWS
+            .with_label_values(&["in"])
+            .inc_by(row_count as u64);
+
         self.manager
             .handle_inserts(request)
             .await
@@ -500,6 +518,10 @@ impl FrontendInvoker {
         requests: RowInsertRequests,
         ctx: QueryContextRef,
     ) -> common_frontend::error::Result<Output> {
+        let _timer = METRIC_FLOW_PROCESSING_TIME
+            .with_label_values(&["output_insert"])
+            .start_timer();
+
         self.inserter
             .handle_row_inserts(requests, ctx, &self.statement_executor)
             .await
@@ -512,6 +534,10 @@ impl FrontendInvoker {
         requests: RowDeleteRequests,
         ctx: QueryContextRef,
     ) -> common_frontend::error::Result<Output> {
+        let _timer = METRIC_FLOW_PROCESSING_TIME
+            .with_label_values(&["output_delete"])
+            .start_timer();
+
         self.deleter
             .handle_row_deletes(requests, ctx)
             .await
