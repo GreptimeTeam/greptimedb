@@ -17,7 +17,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use arrow::array::new_null_array;
-use common_telemetry::trace;
+use common_telemetry::{debug, trace};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
 use datatypes::value::{ListValue, Value};
@@ -423,7 +423,10 @@ fn reduce_batch_subgraph(
                             .clone()
                             .scalar_type;
 
-                        if key_data_type.as_arrow_type() != v.data_type() {
+                        // if incoming value's datatype is null, it need to be handled as array with known type and values being null
+                        if key_data_type.as_arrow_type() != v.data_type()
+                            && !v.data_type().is_null()
+                        {
                             crate::expr::error::InternalSnafu {
                                 reason: format!(
                                     "Key data type mismatch, expected {:?} but got {:?}",
@@ -436,15 +439,13 @@ fn reduce_batch_subgraph(
 
                         // handle single null key
                         let arrow_value = if v.data_type().is_null() {
-                            let arrow_key_ty = key_data_type.as_arrow_type();
-                            let ret = new_null_array(&arrow_key_ty, 1);
+                            let ret = new_null_array(&arrow::datatypes::DataType::Null, 1);
                             arrow::array::Scalar::new(ret)
                         } else {
                             v.to_scalar().context(crate::expr::error::DatafusionSnafu {
                                 context: "can't convert key values to arrow value",
                             })?
                         };
-
                         key_scalar_value.push(arrow_value);
                     }
                     key_scalar_value
@@ -456,7 +457,19 @@ fn reduce_batch_subgraph(
                     .zip(key_batch.batch().iter())
                     .map(|(key, col)| {
                         // TODO(discord9): this takes half of the cpu! And this is redundant amount of `eq`!
-                        arrow::compute::kernels::cmp::eq(&key, &col.to_arrow_array().as_ref() as _)
+
+                        // note that if lhs is a null, we stil need to get all rows that are null! But can't use `eq` since
+                        // it will return null if input have null, so we need to use `is_null` instead
+                        if arrow::array::Datum::get(&key).0.data_type().is_null() {
+                            arrow::compute::kernels::boolean::is_null(
+                                col.to_arrow_array().as_ref() as _
+                            )
+                        } else {
+                            arrow::compute::kernels::cmp::eq(
+                                &key,
+                                &col.to_arrow_array().as_ref() as _,
+                            )
+                        }
                     })
                     .try_collect::<_, Vec<_>, _>()
                     .context(ArrowSnafu {
