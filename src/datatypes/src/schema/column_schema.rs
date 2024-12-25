@@ -543,7 +543,7 @@ pub struct SkippingIndexOptions {
     pub granularity: u32,
     /// The type of the skip index.
     #[serde(default)]
-    pub index_type: SkipIndexType,
+    pub index_type: SkippingIndexType,
 }
 
 impl fmt::Display for SkippingIndexOptions {
@@ -556,15 +556,15 @@ impl fmt::Display for SkippingIndexOptions {
 
 /// Skip index types.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, Visit, VisitMut)]
-pub enum SkipIndexType {
+pub enum SkippingIndexType {
     #[default]
     BloomFilter,
 }
 
-impl fmt::Display for SkipIndexType {
+impl fmt::Display for SkippingIndexType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SkipIndexType::BloomFilter => write!(f, "BLOOM"),
+            SkippingIndexType::BloomFilter => write!(f, "BLOOM"),
         }
     }
 }
@@ -587,7 +587,7 @@ impl TryFrom<HashMap<String, String>> for SkippingIndexOptions {
         // Parse index type with default value BloomFilter
         let index_type = match options.get(COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE) {
             Some(typ) => match typ.to_ascii_uppercase().as_str() {
-                "BLOOM" => SkipIndexType::BloomFilter,
+                "BLOOM" => SkippingIndexType::BloomFilter,
                 _ => {
                     return error::InvalidSkippingIndexOptionSnafu {
                         msg: format!("Invalid index type: {typ}, expected: 'BLOOM'"),
@@ -595,7 +595,7 @@ impl TryFrom<HashMap<String, String>> for SkippingIndexOptions {
                     .fail();
                 }
             },
-            None => SkipIndexType::default(),
+            None => SkippingIndexType::default(),
         };
 
         Ok(SkippingIndexOptions {
