@@ -45,9 +45,9 @@ const METADKV_CREATION: &str =
 
 const FULL_TABLE_SCAN: &str = "SELECT k, v FROM greptime_metakv $1 ORDER BY K";
 
-pub const POINT_GET: &str = "SELECT k, v FROM greptime_metakv WHERE k = $1";
+const POINT_GET: &str = "SELECT k, v FROM greptime_metakv WHERE k = $1";
 
-pub const PREFIX_SCAN: &str = "SELECT k, v FROM greptime_metakv WHERE k LIKE $1 ORDER BY K";
+const PREFIX_SCAN: &str = "SELECT k, v FROM greptime_metakv WHERE k LIKE $1 ORDER BY K";
 
 const RANGE_SCAN_LEFT_BOUNDED: &str = "SELECT k, v FROM greptime_metakv WHERE k >= $1 ORDER BY K";
 
@@ -56,7 +56,7 @@ const RANGE_SCAN_FULL_RANGE: &str =
 
 const FULL_TABLE_DELETE: &str = "DELETE FROM greptime_metakv RETURNING k,v";
 
-pub const POINT_DELETE: &str = "DELETE FROM greptime_metakv WHERE K = $1 RETURNING k,v;";
+const POINT_DELETE: &str = "DELETE FROM greptime_metakv WHERE K = $1 RETURNING k,v;";
 
 const PREFIX_DELETE: &str = "DELETE FROM greptime_metakv WHERE k LIKE $1 RETURNING k,v;";
 

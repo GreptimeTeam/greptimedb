@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 api.workspace = true
 async-trait = "0.1"
+chrono.workspace = true
 clap.workspace = true
 client.workspace = true
 common-base.workspace = true
@@ -55,7 +56,7 @@ snafu.workspace = true
 store-api.workspace = true
 table.workspace = true
 tokio.workspace = true
-tokio-postgres = { workspace = true, optional = true }
+tokio-postgres = { workspace = true, optional = true, features = ["with-chrono-0_4"] }
 tokio-stream = { workspace = true, features = ["net"] }
 toml.workspace = true
 tonic.workspace = true
