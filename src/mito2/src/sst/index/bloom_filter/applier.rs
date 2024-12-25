@@ -363,6 +363,9 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
             (Expr::Literal(lit), Expr::Column(col)) => (col, lit),
             _ => return Ok(()),
         };
+        if lit.is_null() {
+            return Ok(());
+        }
         let Some((column_id, data_type)) = self.column_id_and_type(&col.name)? else {
             return Ok(());
         };
