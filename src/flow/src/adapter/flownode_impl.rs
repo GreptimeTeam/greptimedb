@@ -138,7 +138,7 @@ impl Flownode for FlowWorkerManager {
     }
 
     async fn handle_inserts(&self, request: InsertRequests) -> Result<FlowResponse> {
-        // using try_read makesure two things:
+        // using try_read to ensure two things:
         // 1. flush wouldn't happen until inserts before it is inserted
         // 2. inserts happening concurrently with flush wouldn't be block by flush
         let _flush_lock = self.flush_lock.try_read();

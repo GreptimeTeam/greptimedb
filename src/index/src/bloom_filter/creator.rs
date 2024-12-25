@@ -73,7 +73,7 @@ impl BloomFilterCreator {
     /// `rows_per_segment` <= 0
     pub fn new(
         rows_per_segment: usize,
-        intermediate_provider: Box<dyn ExternalTempFileProvider>,
+        intermediate_provider: Arc<dyn ExternalTempFileProvider>,
         global_memory_usage: Arc<AtomicUsize>,
         global_memory_usage_threshold: Option<usize>,
     ) -> Self {
@@ -252,7 +252,7 @@ mod tests {
         let mut writer = Cursor::new(Vec::new());
         let mut creator = BloomFilterCreator::new(
             2,
-            Box::new(MockExternalTempFileProvider::new()),
+            Arc::new(MockExternalTempFileProvider::new()),
             Arc::new(AtomicUsize::new(0)),
             None,
         );
@@ -322,7 +322,7 @@ mod tests {
         let mut writer = Cursor::new(Vec::new());
         let mut creator = BloomFilterCreator::new(
             2,
-            Box::new(MockExternalTempFileProvider::new()),
+            Arc::new(MockExternalTempFileProvider::new()),
             Arc::new(AtomicUsize::new(0)),
             None,
         );

@@ -830,8 +830,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to retrieve fulltext options from column metadata"))]
-    FulltextOptions {
+    #[snafu(display("Failed to retrieve index options from column metadata"))]
+    IndexOptions {
         #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
@@ -915,6 +915,20 @@ pub enum Error {
     Metadata {
         #[snafu(source)]
         error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to push value to bloom filter"))]
+    PushBloomFilterValue {
+        source: index::bloom_filter::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to finish bloom filter"))]
+    BloomFilterFinish {
+        source: index::bloom_filter::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1046,7 +1060,7 @@ impl ErrorExt for Error {
             UnsupportedOperation { .. } => StatusCode::Unsupported,
             RemoteCompaction { .. } => StatusCode::Unexpected,
 
-            FulltextOptions { source, .. } => source.status_code(),
+            IndexOptions { source, .. } => source.status_code(),
             CreateFulltextCreator { source, .. } => source.status_code(),
             CastVector { source, .. } => source.status_code(),
             FulltextPushText { source, .. }
@@ -1056,7 +1070,12 @@ impl ErrorExt for Error {
             RegionBusy { .. } => StatusCode::RegionBusy,
             GetSchemaMetadata { source, .. } => source.status_code(),
             Timeout { .. } => StatusCode::Cancelled,
+
             DecodeArrowRowGroup { .. } => StatusCode::Internal,
+
+            PushBloomFilterValue { source, .. } | BloomFilterFinish { source, .. } => {
+                source.status_code()
+            }
         }
     }
 

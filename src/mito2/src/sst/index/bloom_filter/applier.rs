@@ -46,7 +46,7 @@ use crate::error::{
 use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::row_converter::SortField;
 use crate::sst::file::FileId;
-use crate::sst::index::inverted_index::codec::IndexValueCodec;
+use crate::sst::index::codec::IndexValueCodec;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
 use crate::sst::index::TYPE_BLOOM_FILTER_INDEX;
 use crate::sst::location;

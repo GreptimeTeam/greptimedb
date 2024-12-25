@@ -37,8 +37,8 @@ use crate::cache::file_cache::FileCacheRef;
 use crate::cache::index::inverted_index::InvertedIndexCacheRef;
 use crate::error::{BuildIndexApplierSnafu, ColumnNotFoundSnafu, ConvertValueSnafu, Result};
 use crate::row_converter::SortField;
+use crate::sst::index::codec::IndexValueCodec;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplier;
-use crate::sst::index::inverted_index::codec::IndexValueCodec;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
 /// Constructs an [`InvertedIndexApplier`] which applies predicates to SST files during scan.

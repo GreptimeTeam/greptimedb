@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub(crate) mod bloom_filter;
+mod codec;
 pub(crate) mod fulltext_index;
 mod indexer;
 pub(crate) mod intermediate;
@@ -23,8 +24,10 @@ pub(crate) mod store;
 
 use std::num::NonZeroUsize;
 
+use bloom_filter::creator::BloomFilterIndexer;
 use common_telemetry::{debug, warn};
 use puffin_manager::SstPuffinManager;
+use smallvec::SmallVec;
 use statistics::{ByteCount, RowCount};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, RegionId};
@@ -34,7 +37,7 @@ use crate::config::{FulltextIndexConfig, InvertedIndexConfig};
 use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
 use crate::read::Batch;
 use crate::region::options::IndexOptions;
-use crate::sst::file::FileId;
+use crate::sst::file::{FileId, IndexType};
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::inverted_index::creator::InvertedIndexer;
@@ -52,6 +55,24 @@ pub struct IndexOutput {
     pub inverted_index: InvertedIndexOutput,
     /// Fulltext index output.
     pub fulltext_index: FulltextIndexOutput,
+    /// Bloom filter output.
+    pub bloom_filter: BloomFilterOutput,
+}
+
+impl IndexOutput {
+    pub fn build_available_indexes(&self) -> SmallVec<[IndexType; 4]> {
+        let mut indexes = SmallVec::new();
+        if self.inverted_index.is_available() {
+            indexes.push(IndexType::InvertedIndex);
+        }
+        if self.fulltext_index.is_available() {
+            indexes.push(IndexType::FulltextIndex);
+        }
+        if self.bloom_filter.is_available() {
+            indexes.push(IndexType::BloomFilterIndex);
+        }
+        indexes
+    }
 }
 
 /// Base output of the index creation.
@@ -75,6 +96,8 @@ impl IndexBaseOutput {
 pub type InvertedIndexOutput = IndexBaseOutput;
 /// Output of the fulltext index creation.
 pub type FulltextIndexOutput = IndexBaseOutput;
+/// Output of the bloom filter creation.
+pub type BloomFilterOutput = IndexBaseOutput;
 
 /// The index creator that hides the error handling details.
 #[derive(Default)]
@@ -88,6 +111,8 @@ pub struct Indexer {
     last_mem_inverted_index: usize,
     fulltext_indexer: Option<FulltextIndexer>,
     last_mem_fulltext_index: usize,
+    bloom_filter_indexer: Option<BloomFilterIndexer>,
+    last_mem_bloom_filter: usize,
 }
 
 impl Indexer {
@@ -131,6 +156,15 @@ impl Indexer {
             .with_label_values(&[TYPE_FULLTEXT_INDEX])
             .add(fulltext_mem as i64 - self.last_mem_fulltext_index as i64);
         self.last_mem_fulltext_index = fulltext_mem;
+
+        let bloom_filter_mem = self
+            .bloom_filter_indexer
+            .as_ref()
+            .map_or(0, |creator| creator.memory_usage());
+        INDEX_CREATE_MEMORY_USAGE
+            .with_label_values(&[TYPE_BLOOM_FILTER_INDEX])
+            .add(bloom_filter_mem as i64 - self.last_mem_bloom_filter as i64);
+        self.last_mem_bloom_filter = bloom_filter_mem;
     }
 }
 
@@ -160,7 +194,11 @@ impl<'a> IndexerBuilder<'a> {
 
         indexer.inverted_indexer = self.build_inverted_indexer();
         indexer.fulltext_indexer = self.build_fulltext_indexer().await;
-        if indexer.inverted_indexer.is_none() && indexer.fulltext_indexer.is_none() {
+        indexer.bloom_filter_indexer = self.build_bloom_filter_indexer();
+        if indexer.inverted_indexer.is_none()
+            && indexer.fulltext_indexer.is_none()
+            && indexer.bloom_filter_indexer.is_none()
+        {
             indexer.abort().await;
             return Indexer::default();
         }
@@ -268,12 +306,59 @@ impl<'a> IndexerBuilder<'a> {
 
         if cfg!(any(test, feature = "test")) {
             panic!(
-                "Failed to create full-text indexer, region_id: {}, file_id: {}, err: {}",
+                "Failed to create full-text indexer, region_id: {}, file_id: {}, err: {:?}",
                 self.metadata.region_id, self.file_id, err
             );
         } else {
             warn!(
                 err; "Failed to create full-text indexer, region_id: {}, file_id: {}",
+                self.metadata.region_id, self.file_id,
+            );
+        }
+
+        None
+    }
+
+    fn build_bloom_filter_indexer(&self) -> Option<BloomFilterIndexer> {
+        let create = true; // TODO(zhongzc): add config for bloom filter
+
+        if !create {
+            debug!(
+                "Skip creating bloom filter due to config, region_id: {}, file_id: {}",
+                self.metadata.region_id, self.file_id,
+            );
+            return None;
+        }
+
+        let mem_limit = Some(16 * 1024 * 1024); // TODO(zhongzc): add config for bloom filter
+        let indexer = BloomFilterIndexer::new(
+            self.file_id,
+            self.metadata,
+            self.intermediate_manager.clone(),
+            mem_limit,
+        );
+
+        let err = match indexer {
+            Ok(indexer) => {
+                if indexer.is_none() {
+                    debug!(
+                        "Skip creating bloom filter due to no columns require indexing, region_id: {}, file_id: {}",
+                        self.metadata.region_id, self.file_id,
+                    );
+                }
+                return indexer;
+            }
+            Err(err) => err,
+        };
+
+        if cfg!(any(test, feature = "test")) {
+            panic!(
+                "Failed to create bloom filter, region_id: {}, file_id: {}, err: {:?}",
+                self.metadata.region_id, self.file_id, err
+            );
+        } else {
+            warn!(
+                err; "Failed to create bloom filter, region_id: {}, file_id: {}",
                 self.metadata.region_id, self.file_id,
             );
         }
@@ -288,7 +373,9 @@ mod tests {
 
     use api::v1::SemanticType;
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, FulltextOptions};
+    use datatypes::schema::{
+        ColumnSchema, FulltextOptions, SkippingIndexOptions, SkippingIndexType,
+    };
     use object_store::services::Memory;
     use object_store::ObjectStore;
     use puffin_manager::PuffinManagerFactory;
@@ -300,12 +387,14 @@ mod tests {
     struct MetaConfig {
         with_tag: bool,
         with_fulltext: bool,
+        with_skipping_bloom: bool,
     }
 
     fn mock_region_metadata(
         MetaConfig {
             with_tag,
             with_fulltext,
+            with_skipping_bloom,
         }: MetaConfig,
     ) -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
@@ -356,6 +445,24 @@ mod tests {
             builder.push_column_metadata(column);
         }
 
+        if with_skipping_bloom {
+            let column_schema =
+                ColumnSchema::new("bloom", ConcreteDataType::string_datatype(), false)
+                    .with_skipping_options(SkippingIndexOptions {
+                        granularity: 42,
+                        index_type: SkippingIndexType::BloomFilter,
+                    })
+                    .unwrap();
+
+            let column = ColumnMetadata {
+                column_schema,
+                semantic_type: SemanticType::Field,
+                column_id: 5,
+            };
+
+            builder.push_column_metadata(column);
+        }
+
         Arc::new(builder.build().unwrap())
     }
 
@@ -376,6 +483,7 @@ mod tests {
         let metadata = mock_region_metadata(MetaConfig {
             with_tag: true,
             with_fulltext: true,
+            with_skipping_bloom: true,
         });
         let indexer = IndexerBuilder {
             op_type: OperationType::Flush,
@@ -394,6 +502,7 @@ mod tests {
 
         assert!(indexer.inverted_indexer.is_some());
         assert!(indexer.fulltext_indexer.is_some());
+        assert!(indexer.bloom_filter_indexer.is_some());
     }
 
     #[tokio::test]
@@ -405,6 +514,7 @@ mod tests {
         let metadata = mock_region_metadata(MetaConfig {
             with_tag: true,
             with_fulltext: true,
+            with_skipping_bloom: true,
         });
         let indexer = IndexerBuilder {
             op_type: OperationType::Flush,
@@ -458,6 +568,7 @@ mod tests {
         let metadata = mock_region_metadata(MetaConfig {
             with_tag: false,
             with_fulltext: true,
+            with_skipping_bloom: true,
         });
         let indexer = IndexerBuilder {
             op_type: OperationType::Flush,
@@ -476,10 +587,36 @@ mod tests {
 
         assert!(indexer.inverted_indexer.is_none());
         assert!(indexer.fulltext_indexer.is_some());
+        assert!(indexer.bloom_filter_indexer.is_some());
 
         let metadata = mock_region_metadata(MetaConfig {
             with_tag: true,
             with_fulltext: false,
+            with_skipping_bloom: true,
+        });
+        let indexer = IndexerBuilder {
+            op_type: OperationType::Flush,
+            file_id: FileId::random(),
+            file_path: "test".to_string(),
+            metadata: &metadata,
+            row_group_size: 1024,
+            puffin_manager: factory.build(mock_object_store()),
+            intermediate_manager: intm_manager.clone(),
+            index_options: IndexOptions::default(),
+            inverted_index_config: InvertedIndexConfig::default(),
+            fulltext_index_config: FulltextIndexConfig::default(),
+        }
+        .build()
+        .await;
+
+        assert!(indexer.inverted_indexer.is_some());
+        assert!(indexer.fulltext_indexer.is_none());
+        assert!(indexer.bloom_filter_indexer.is_some());
+
+        let metadata = mock_region_metadata(MetaConfig {
+            with_tag: true,
+            with_fulltext: true,
+            with_skipping_bloom: false,
         });
         let indexer = IndexerBuilder {
             op_type: OperationType::Flush,
@@ -497,7 +634,8 @@ mod tests {
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
-        assert!(indexer.fulltext_indexer.is_none());
+        assert!(indexer.fulltext_indexer.is_some());
+        assert!(indexer.bloom_filter_indexer.is_none());
     }
 
     #[tokio::test]
@@ -509,6 +647,7 @@ mod tests {
         let metadata = mock_region_metadata(MetaConfig {
             with_tag: true,
             with_fulltext: true,
+            with_skipping_bloom: true,
         });
         let indexer = IndexerBuilder {
             op_type: OperationType::Flush,
