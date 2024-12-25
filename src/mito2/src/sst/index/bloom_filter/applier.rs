@@ -60,7 +60,6 @@ pub struct BloomFilterIndexApplier {
     puffin_manager_factory: PuffinManagerFactory,
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
     bloom_filter_index_cache: Option<BloomFilterIndexCacheRef>,
-    // filter_applier: Box<BloomFilterApplier>,
     filters: HashMap<ColumnId, Vec<Predicate>>,
 }
 
@@ -69,7 +68,6 @@ impl BloomFilterIndexApplier {
         region_dir: String,
         region_id: RegionId,
         object_store: ObjectStore,
-        // filter_applier: Box<BloomFilterApplier>,
         puffin_manager_factory: PuffinManagerFactory,
         filters: HashMap<ColumnId, Vec<Predicate>>,
     ) -> Self {
@@ -81,7 +79,6 @@ impl BloomFilterIndexApplier {
             puffin_manager_factory,
             puffin_metadata_cache: None,
             bloom_filter_index_cache: None,
-            // filter_applier,
             filters,
         }
     }
@@ -306,20 +303,10 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
             return Ok(None);
         }
 
-        // let predicates = self
-        //     .output
-        //     .into_iter()
-        //     .map(|(column_id, predicates)| (column_id.to_string(), predicates))
-        //     .collect();
-
-        // let filter_applier =
-        //     BloomFilterApplier::try_from(predicates).context(BuildBloomFilterIndexApplierSnafu)?;
-
         let applier = BloomFilterIndexApplier::new(
             self.region_dir,
             self.metadata.region_id,
             self.object_store,
-            // Box::new(filter_applier),
             self.puffin_manager_factory,
             self.output,
         )
