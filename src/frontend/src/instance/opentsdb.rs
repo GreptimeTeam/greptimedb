@@ -17,7 +17,7 @@ use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_error::ext::BoxedError;
 use common_telemetry::tracing;
 use servers::error as server_error;
-use servers::error::AuthSnafu;
+use servers::error::{AuthSnafu, InFlightWriteBytesExceededSnafu};
 use servers::opentsdb::codec::DataPoint;
 use servers::opentsdb::data_point_to_grpc_row_insert_requests;
 use servers::query_handler::OpentsdbProtocolHandler;
@@ -41,6 +41,17 @@ impl OpentsdbProtocolHandler for Instance {
             .context(AuthSnafu)?;
 
         let (requests, _) = data_point_to_grpc_row_insert_requests(data_points)?;
+
+        let _guard = if let Some(limiter) = &self.limiter {
+            let result = limiter.limit_row_inserts(&requests);
+            if result.is_none() {
+                return InFlightWriteBytesExceededSnafu.fail();
+            }
+            result
+        } else {
+            None
+        };
+
         let output = self
             .handle_row_inserts(requests, ctx)
             .await

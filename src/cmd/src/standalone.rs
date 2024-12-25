@@ -22,6 +22,7 @@ use catalog::information_schema::InformationExtension;
 use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
 use client::api::v1::meta::RegionRole;
+use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::{metadata_store_dir, Configurable, KvBackendConfig};
@@ -152,6 +153,7 @@ pub struct StandaloneOptions {
     pub tracing: TracingOptions,
     pub init_regions_in_background: bool,
     pub init_regions_parallelism: usize,
+    pub max_in_flight_write_bytes: Option<ReadableSize>,
 }
 
 impl Default for StandaloneOptions {
@@ -181,6 +183,7 @@ impl Default for StandaloneOptions {
             tracing: TracingOptions::default(),
             init_regions_in_background: false,
             init_regions_parallelism: 16,
+            max_in_flight_write_bytes: None,
         }
     }
 }
@@ -218,6 +221,7 @@ impl StandaloneOptions {
             user_provider: cloned_opts.user_provider,
             // Handle the export metrics task run by standalone to frontend for execution
             export_metrics: cloned_opts.export_metrics,
+            max_in_flight_write_bytes: cloned_opts.max_in_flight_write_bytes,
             ..Default::default()
         }
     }

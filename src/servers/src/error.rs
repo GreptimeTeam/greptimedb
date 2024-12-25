@@ -589,6 +589,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("In-flight write bytes exceeded the maximum limit"))]
+    InFlightWriteBytesExceeded {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -706,6 +712,8 @@ impl ErrorExt for Error {
             ToJson { .. } => StatusCode::Internal,
 
             ConvertSqlValue { source, .. } => source.status_code(),
+
+            InFlightWriteBytesExceeded { .. } => StatusCode::RateLimited,
         }
     }
 
