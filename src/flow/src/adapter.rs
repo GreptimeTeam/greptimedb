@@ -56,7 +56,7 @@ use crate::error::{
     EvalSnafu, ExternalSnafu, FlowAlreadyExistSnafu, InternalSnafu, InvalidQuerySnafu,
     UnexpectedSnafu,
 };
-use crate::expr::{Batch, GlobalId};
+use crate::expr::Batch;
 use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_ROWS, METRIC_FLOW_RUN_INTERVAL_MS};
 use crate::repr::{self, DiffRow, RelationDesc, Row, BATCH_SIZE};
 
