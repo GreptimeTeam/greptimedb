@@ -87,6 +87,10 @@ impl<R: RangeReader> BloomFilterReader for BloomFilterReaderImpl<R> {
             .context(IoSnafu)
     }
 
+    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+        self.reader.read_vec(ranges).await.context(IoSnafu)
+    }
+
     async fn metadata(&mut self) -> Result<BloomFilterMeta> {
         let metadata = self.reader.metadata().await.context(IoSnafu)?;
         let file_size = metadata.content_length;
