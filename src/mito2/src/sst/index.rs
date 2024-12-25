@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod bloom_filter;
 pub(crate) mod fulltext_index;
 mod indexer;
 pub(crate) mod intermediate;
@@ -40,6 +41,7 @@ use crate::sst::index::inverted_index::creator::InvertedIndexer;
 
 pub(crate) const TYPE_INVERTED_INDEX: &str = "inverted_index";
 pub(crate) const TYPE_FULLTEXT_INDEX: &str = "fulltext_index";
+pub(crate) const TYPE_BLOOM_FILTER_INDEX: &str = "bloom_filter_index";
 
 /// Output of the index creation.
 #[derive(Debug, Clone, Default)]

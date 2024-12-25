@@ -13,7 +13,5 @@
 // limitations under the License.
 
 pub(crate) mod applier;
-pub(crate) mod codec;
-pub(crate) mod creator;
 
-const INDEX_BLOB_TYPE: &str = "greptime-inverted-index-v1";
+const INDEX_BLOB_TYPE: &str = "greptime-bloom-filter-v1";

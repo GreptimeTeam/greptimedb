@@ -51,6 +51,7 @@ use crate::read::prune::{PruneReader, Source};
 use crate::read::{Batch, BatchReader};
 use crate::row_converter::{McmpRowCodec, SortField};
 use crate::sst::file::FileHandle;
+use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierRef;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::parquet::file_range::{FileRangeContext, FileRangeContextRef};
@@ -80,6 +81,7 @@ pub struct ParquetReaderBuilder {
     cache_manager: Option<CacheManagerRef>,
     /// Index appliers.
     inverted_index_applier: Option<InvertedIndexApplierRef>,
+    bloom_filter_index_applier: Option<BloomFilterIndexApplierRef>,
     fulltext_index_applier: Option<FulltextIndexApplierRef>,
     /// Expected metadata of the region while reading the SST.
     /// This is usually the latest metadata of the region. The reader use
@@ -102,6 +104,7 @@ impl ParquetReaderBuilder {
             projection: None,
             cache_manager: None,
             inverted_index_applier: None,
+            bloom_filter_index_applier: None,
             fulltext_index_applier: None,
             expected_metadata: None,
         }
@@ -137,6 +140,16 @@ impl ParquetReaderBuilder {
         index_applier: Option<InvertedIndexApplierRef>,
     ) -> Self {
         self.inverted_index_applier = index_applier;
+        self
+    }
+
+    /// Attaches the bloom filter index applier to the builder.
+    #[must_use]
+    pub(crate) fn bloom_filter_index_applier(
+        mut self,
+        index_applier: Option<BloomFilterIndexApplierRef>,
+    ) -> Self {
+        self.bloom_filter_index_applier = index_applier;
         self
     }
 
@@ -358,6 +371,9 @@ impl ParquetReaderBuilder {
         if !inverted_filtered {
             self.prune_row_groups_by_minmax(read_format, parquet_meta, &mut output, metrics);
         }
+
+        self.prune_row_groups_by_bloom_filter(parquet_meta, &mut output, metrics)
+            .await;
 
         output
     }
@@ -605,6 +621,52 @@ impl ParquetReaderBuilder {
         *filtered_rows += rows_in_row_group_before - rows_in_row_group_after;
 
         *output = res;
+    }
+
+    async fn prune_row_groups_by_bloom_filter(
+        &self,
+        parquet_meta: &ParquetMetaData,
+        output: &mut BTreeMap<usize, Option<RowSelection>>,
+        _metrics: &mut ReaderFilterMetrics,
+    ) -> bool {
+        let Some(index_applier) = &self.bloom_filter_index_applier else {
+            return false;
+        };
+
+        if !self.file_handle.meta_ref().bloom_filter_index_available() {
+            return false;
+        }
+
+        match index_applier
+            .apply(
+                self.file_handle.file_id(),
+                None,
+                parquet_meta.row_groups(),
+                output,
+            )
+            .await
+        {
+            Ok(output) => output,
+            Err(err) => {
+                if cfg!(any(test, feature = "test")) {
+                    panic!(
+                        "Failed to apply bloom filter index, region_id: {}, file_id: {}, err: {}",
+                        self.file_handle.region_id(),
+                        self.file_handle.file_id(),
+                        err
+                    );
+                } else {
+                    warn!(
+                        err; "Failed to apply bloom filter index, region_id: {}, file_id: {}",
+                        self.file_handle.region_id(), self.file_handle.file_id()
+                    );
+                }
+
+                return false;
+            }
+        };
+
+        true
     }
 
     /// Prunes row groups by ranges. The `ranges_in_row_groups` is like a map from row group to

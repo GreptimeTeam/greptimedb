@@ -562,6 +562,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to build bloom filter index applier"))]
+    BuildBloomFilterIndexApplier {
+        source: index::bloom_filter::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to convert value"))]
     ConvertValue {
         source: datatypes::error::Error,
@@ -572,6 +579,13 @@ pub enum Error {
     #[snafu(display("Failed to apply inverted index"))]
     ApplyInvertedIndex {
         source: index::inverted_index::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to apply bloom filter index"))]
+    ApplyBloomFilterIndex {
+        source: index::bloom_filter::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1008,6 +1022,9 @@ impl ErrorExt for Error {
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,
             ConvertValue { source, .. } => source.status_code(),
+            BuildBloomFilterIndexApplier { source, .. } | ApplyBloomFilterIndex { source, .. } => {
+                source.status_code()
+            }
             BuildIndexApplier { source, .. }
             | PushIndexValue { source, .. }
             | ApplyInvertedIndex { source, .. }
