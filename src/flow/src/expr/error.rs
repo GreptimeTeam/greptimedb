@@ -14,8 +14,11 @@
 
 //! Error handling for expression evaluation.
 
+use std::any::Any;
+
 use arrow_schema::ArrowError;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion_common::DataFusionError;
 use datatypes::data_type::ConcreteDataType;
@@ -125,4 +128,30 @@ pub enum EvalError {
         location: Location,
         source: BoxedError,
     },
+}
+
+impl ErrorExt for EvalError {
+    fn status_code(&self) -> StatusCode {
+        use EvalError::*;
+        match self {
+            DivisionByZero { .. }
+            | TypeMismatch { .. }
+            | TryFromValue { .. }
+            | DataAlreadyExpired { .. }
+            | InvalidArgument { .. }
+            | Overflow { .. } => StatusCode::InvalidArguments,
+
+            CastValue { source, .. } | DataType { source, .. } => source.status_code(),
+
+            Internal { .. }
+            | Optimize { .. }
+            | Arrow { .. }
+            | Datafusion { .. }
+            | External { .. } => StatusCode::Internal,
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
