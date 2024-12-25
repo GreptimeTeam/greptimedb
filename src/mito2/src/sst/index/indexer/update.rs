@@ -46,7 +46,7 @@ impl Indexer {
 
         if cfg!(any(test, feature = "test")) {
             panic!(
-                "Failed to update inverted index, region_id: {}, file_id: {}, err: {}",
+                "Failed to update inverted index, region_id: {}, file_id: {}, err: {:?}",
                 self.region_id, self.file_id, err
             );
         } else {
@@ -71,7 +71,7 @@ impl Indexer {
 
         if cfg!(any(test, feature = "test")) {
             panic!(
-                "Failed to update full-text index, region_id: {}, file_id: {}, err: {}",
+                "Failed to update full-text index, region_id: {}, file_id: {}, err: {:?}",
                 self.region_id, self.file_id, err
             );
         } else {
@@ -96,7 +96,7 @@ impl Indexer {
 
         if cfg!(any(test, feature = "test")) {
             panic!(
-                "Failed to update bloom filter, region_id: {}, file_id: {}, err: {}",
+                "Failed to update bloom filter, region_id: {}, file_id: {}, err: {:?}",
                 self.region_id, self.file_id, err
             );
         } else {

@@ -307,7 +307,7 @@ impl<'a> IndexerBuilder<'a> {
 
         if cfg!(any(test, feature = "test")) {
             panic!(
-                "Failed to create full-text indexer, region_id: {}, file_id: {}, err: {}",
+                "Failed to create full-text indexer, region_id: {}, file_id: {}, err: {:?}",
                 self.metadata.region_id, self.file_id, err
             );
         } else {
@@ -357,7 +357,7 @@ impl<'a> IndexerBuilder<'a> {
 
         if cfg!(any(test, feature = "test")) {
             panic!(
-                "Failed to create bloom filter, region_id: {}, file_id: {}, err: {}",
+                "Failed to create bloom filter, region_id: {}, file_id: {}, err: {:?}",
                 self.metadata.region_id, self.file_id, err
             );
         } else {
@@ -452,7 +452,7 @@ mod tests {
                 ColumnSchema::new("bloom", ConcreteDataType::string_datatype(), false)
                     .with_skipping_options(SkippingIndexOptions {
                         granularity: 42,
-                        index_type: SkipIndexType::BloomFilter,
+                        index_type: SkippingIndexType::BloomFilter,
                     })
                     .unwrap();
 

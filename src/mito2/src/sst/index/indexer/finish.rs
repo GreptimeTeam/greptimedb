@@ -69,7 +69,7 @@ impl Indexer {
 
         if cfg!(any(test, feature = "test")) {
             panic!(
-                "Failed to create puffin writer, region_id: {}, file_id: {}, err: {}",
+                "Failed to create puffin writer, region_id: {}, file_id: {}, err: {:?}",
                 self.region_id, self.file_id, err
             );
         } else {
@@ -90,7 +90,7 @@ impl Indexer {
 
         if cfg!(any(test, feature = "test")) {
             panic!(
-                "Failed to finish puffin writer, region_id: {}, file_id: {}, err: {}",
+                "Failed to finish puffin writer, region_id: {}, file_id: {}, err: {:?}",
                 self.region_id, self.file_id, err
             );
         } else {
@@ -128,7 +128,7 @@ impl Indexer {
 
         if cfg!(any(test, feature = "test")) {
             panic!(
-                "Failed to finish inverted index, region_id: {}, file_id: {}, err: {}",
+                "Failed to finish inverted index, region_id: {}, file_id: {}, err: {:?}",
                 self.region_id, self.file_id, err
             );
         } else {
@@ -165,7 +165,7 @@ impl Indexer {
 
         if cfg!(any(test, feature = "test")) {
             panic!(
-                "Failed to finish full-text index, region_id: {}, file_id: {}, err: {}",
+                "Failed to finish full-text index, region_id: {}, file_id: {}, err: {:?}",
                 self.region_id, self.file_id, err
             );
         } else {
@@ -202,7 +202,7 @@ impl Indexer {
 
         if cfg!(any(test, feature = "test")) {
             panic!(
-                "Failed to finish bloom filter, region_id: {}, file_id: {}, err: {}",
+                "Failed to finish bloom filter, region_id: {}, file_id: {}, err: {:?}",
                 self.region_id, self.file_id, err
             );
         } else {
