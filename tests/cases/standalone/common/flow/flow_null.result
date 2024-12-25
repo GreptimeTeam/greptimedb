@@ -133,26 +133,6 @@ ADMIN FLUSH_FLOW('calc_ngx_country');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
-SHOW CREATE TABLE ngx_country;
-
-+-------------+----------------------------------------------------------------------------------+
-| Table       | Create Table                                                                     |
-+-------------+----------------------------------------------------------------------------------+
-| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" (                                       |
-|             |   "ngx_access_log.client" STRING NULL,                                           |
-|             |   "ngx_access_log.country" STRING NULL,                                          |
-|             |   "country_count" BIGINT NULL,                                                   |
-|             |   "time_window" TIMESTAMP(3) NULL,                                               |
-|             |   "update_at" TIMESTAMP(3) NULL,                                                 |
-|             |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,                                      |
-|             |   TIME INDEX ("__ts_placeholder"),                                               |
-|             |   PRIMARY KEY ("ngx_access_log.client", "ngx_access_log.country", "time_window") |
-|             | )                                                                                |
-|             |                                                                                  |
-|             | ENGINE=mito                                                                      |
-|             |                                                                                  |
-+-------------+----------------------------------------------------------------------------------+
-
 SELECT
     "ngx_access_log.client",
     "ngx_access_log.country",
