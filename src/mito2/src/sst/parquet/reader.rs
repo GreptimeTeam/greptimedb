@@ -637,10 +637,11 @@ impl ParquetReaderBuilder {
             return false;
         }
 
+        let file_size_hint = self.file_handle.meta_ref().bloom_filter_index_size();
         match index_applier
             .apply(
                 self.file_handle.file_id(),
-                None,
+                file_size_hint,
                 parquet_meta.row_groups(),
                 output,
             )
