@@ -21,7 +21,7 @@ use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use pipeline::PipelineWay;
-use servers::error::{self, AuthSnafu, Result as ServerResult};
+use servers::error::{self, AuthSnafu, InFlightWriteBytesExceededSnafu, Result as ServerResult};
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
 use servers::query_handler::OpenTelemetryProtocolHandler;
@@ -53,6 +53,16 @@ impl OpenTelemetryProtocolHandler for Instance {
         let (requests, rows) = otlp::metrics::to_grpc_insert_requests(request)?;
         OTLP_METRICS_ROWS.inc_by(rows as u64);
 
+        let _guard = if let Some(limiter) = &self.limiter {
+            let result = limiter.limit_row_inserts(&requests);
+            if result.is_none() {
+                return InFlightWriteBytesExceededSnafu.fail();
+            }
+            result
+        } else {
+            None
+        };
+
         self.handle_row_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)
@@ -83,6 +93,16 @@ impl OpenTelemetryProtocolHandler for Instance {
 
         OTLP_TRACES_ROWS.inc_by(rows as u64);
 
+        let _guard = if let Some(limiter) = &self.limiter {
+            let result = limiter.limit_row_inserts(&requests);
+            if result.is_none() {
+                return InFlightWriteBytesExceededSnafu.fail();
+            }
+            result
+        } else {
+            None
+        };
+
         self.handle_log_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)
@@ -109,6 +129,17 @@ impl OpenTelemetryProtocolHandler for Instance {
         interceptor_ref.pre_execute(ctx.clone())?;
 
         let (requests, rows) = otlp::logs::to_grpc_insert_requests(request, pipeline, table_name)?;
+
+        let _guard = if let Some(limiter) = &self.limiter {
+            let result = limiter.limit_row_inserts(&requests);
+            if result.is_none() {
+                return InFlightWriteBytesExceededSnafu.fail();
+            }
+            result
+        } else {
+            None
+        };
+
         self.handle_log_inserts(requests, ctx)
             .await
             .inspect(|_| OTLP_LOGS_ROWS.inc_by(rows as u64))
