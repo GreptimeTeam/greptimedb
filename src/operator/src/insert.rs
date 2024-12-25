@@ -870,5 +870,5 @@ fn build_create_table_expr(
     request_schema: &[ColumnSchema],
     engine: &str,
 ) -> Result<CreateTableExpr> {
-    CreateExprFactory.create_table_expr_by_column_schemas(table, request_schema, engine)
+    CreateExprFactory.create_table_expr_by_column_schemas(table, request_schema, engine, None)
 }

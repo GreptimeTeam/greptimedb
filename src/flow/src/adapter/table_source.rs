@@ -20,11 +20,12 @@ use common_meta::key::table_name::{TableNameKey, TableNameManager};
 use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
 
+use crate::adapter::util::table_info_value_to_relation_desc;
 use crate::adapter::TableName;
 use crate::error::{
     Error, ExternalSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu, UnexpectedSnafu,
 };
-use crate::repr::{self, ColumnType, RelationDesc, RelationType};
+use crate::repr::RelationDesc;
 
 /// mapping of table name <-> table id should be query from tableinfo manager
 pub struct TableSource {
@@ -121,38 +122,7 @@ impl TableSource {
             table_name.table_name,
         ];
 
-        let raw_schema = table_info_value.table_info.meta.schema;
-        let (column_types, col_names): (Vec<_>, Vec<_>) = raw_schema
-            .column_schemas
-            .clone()
-            .into_iter()
-            .map(|col| {
-                (
-                    ColumnType {
-                        nullable: col.is_nullable(),
-                        scalar_type: col.data_type,
-                    },
-                    Some(col.name),
-                )
-            })
-            .unzip();
-
-        let key = table_info_value.table_info.meta.primary_key_indices;
-        let keys = vec![repr::Key::from(key)];
-
-        let time_index = raw_schema.timestamp_index;
-        Ok((
-            table_name,
-            RelationDesc {
-                typ: RelationType {
-                    column_types,
-                    keys,
-                    time_index,
-                    // by default table schema's column are all non-auto
-                    auto_columns: vec![],
-                },
-                names: col_names,
-            },
-        ))
+        let desc = table_info_value_to_relation_desc(table_info_value)?;
+        Ok((table_name, desc))
     }
 }
