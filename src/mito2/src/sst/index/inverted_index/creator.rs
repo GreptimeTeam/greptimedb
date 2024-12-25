@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod temp_provider;
-
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::atomic::AtomicUsize;
@@ -38,9 +36,10 @@ use crate::error::{
 use crate::read::Batch;
 use crate::row_converter::SortField;
 use crate::sst::file::FileId;
-use crate::sst::index::intermediate::{IntermediateLocation, IntermediateManager};
-use crate::sst::index::inverted_index::codec::{IndexValueCodec, IndexValuesCodec};
-use crate::sst::index::inverted_index::creator::temp_provider::TempFileProvider;
+use crate::sst::index::codec::{IndexValueCodec, IndexValuesCodec};
+use crate::sst::index::intermediate::{
+    IntermediateLocation, IntermediateManager, TempFileProvider,
+};
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};

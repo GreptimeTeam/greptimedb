@@ -28,7 +28,7 @@ use snafu::{ensure, ResultExt};
 use crate::error::{self, DuplicateColumnSnafu, Error, ProjectArrowSchemaSnafu, Result};
 use crate::prelude::ConcreteDataType;
 pub use crate::schema::column_schema::{
-    ColumnSchema, FulltextAnalyzer, FulltextOptions, Metadata, SkippingIndexOptions,
+    ColumnSchema, FulltextAnalyzer, FulltextOptions, Metadata, SkipIndexType, SkippingIndexOptions,
     COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE, COLUMN_FULLTEXT_OPT_KEY_ANALYZER,
     COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY,
     COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE, COMMENT_KEY, FULLTEXT_KEY, INVERTED_INDEX_KEY,
