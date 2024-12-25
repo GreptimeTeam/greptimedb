@@ -135,7 +135,7 @@ impl BloomFilterIndexer {
             // clean up garbage if failed to update
             if let Err(err) = self.do_cleanup().await {
                 if cfg!(any(test, feature = "test")) {
-                    panic!("Failed to clean up index creator, err: {err}",);
+                    panic!("Failed to clean up index creator, err: {err:?}",);
                 } else {
                     warn!(err; "Failed to clean up index creator");
                 }
@@ -165,7 +165,7 @@ impl BloomFilterIndexer {
         // clean up garbage no matter finish successfully or not
         if let Err(err) = self.do_cleanup().await {
             if cfg!(any(test, feature = "test")) {
-                panic!("Failed to clean up index creator, err: {err}",);
+                panic!("Failed to clean up index creator, err: {err:?}",);
             } else {
                 warn!(err; "Failed to clean up index creator");
             }

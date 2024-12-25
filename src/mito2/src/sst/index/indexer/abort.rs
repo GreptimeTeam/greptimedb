@@ -34,7 +34,7 @@ impl Indexer {
 
         if cfg!(any(test, feature = "test")) {
             panic!(
-                "Failed to abort inverted index, region_id: {}, file_id: {}, err: {}",
+                "Failed to abort inverted index, region_id: {}, file_id: {}, err: {:?}",
                 self.region_id, self.file_id, err
             );
         } else {
@@ -55,7 +55,7 @@ impl Indexer {
 
         if cfg!(any(test, feature = "test")) {
             panic!(
-                "Failed to abort full-text index, region_id: {}, file_id: {}, err: {}",
+                "Failed to abort full-text index, region_id: {}, file_id: {}, err: {:?}",
                 self.region_id, self.file_id, err
             );
         } else {
@@ -76,7 +76,7 @@ impl Indexer {
 
         if cfg!(any(test, feature = "test")) {
             panic!(
-                "Failed to abort bloom filter, region_id: {}, file_id: {}, err: {}",
+                "Failed to abort bloom filter, region_id: {}, file_id: {}, err: {:?}",
                 self.region_id, self.file_id, err
             );
         } else {

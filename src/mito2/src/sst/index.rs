@@ -306,7 +306,7 @@ impl<'a> IndexerBuilder<'a> {
 
         if cfg!(any(test, feature = "test")) {
             panic!(
-                "Failed to create full-text indexer, region_id: {}, file_id: {}, err: {}",
+                "Failed to create full-text indexer, region_id: {}, file_id: {}, err: {:?}",
                 self.metadata.region_id, self.file_id, err
             );
         } else {
@@ -330,7 +330,7 @@ impl<'a> IndexerBuilder<'a> {
             return None;
         }
 
-        let mem_limit = Some(100 * 1024 * 1024); // TODO(zhongzc): add config for bloom filter
+        let mem_limit = Some(16 * 1024 * 1024); // TODO(zhongzc): add config for bloom filter
         let indexer = BloomFilterIndexer::new(
             self.file_id,
             self.metadata,
@@ -353,7 +353,7 @@ impl<'a> IndexerBuilder<'a> {
 
         if cfg!(any(test, feature = "test")) {
             panic!(
-                "Failed to create bloom filter, region_id: {}, file_id: {}, err: {}",
+                "Failed to create bloom filter, region_id: {}, file_id: {}, err: {:?}",
                 self.metadata.region_id, self.file_id, err
             );
         } else {
