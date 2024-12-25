@@ -723,8 +723,18 @@ pub enum Error {
 
     #[snafu(display("Failed to iter data part"))]
     ReadDataPart {
+        #[snafu(implicit)]
+        location: Location,
         #[snafu(source)]
         error: parquet::errors::ParquetError,
+    },
+
+    #[snafu(display("Failed to read row group in memtable"))]
+    DecodeArrowRowGroup {
+        #[snafu(source)]
+        error: ArrowError,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Invalid region options, {}", reason))]
@@ -1043,6 +1053,8 @@ impl ErrorExt for Error {
             RegionBusy { .. } => StatusCode::RegionBusy,
             GetSchemaMetadata { source, .. } => source.status_code(),
             Timeout { .. } => StatusCode::Cancelled,
+
+            DecodeArrowRowGroup { .. } => StatusCode::Internal,
 
             PushBloomFilterValue { source, .. } | BloomFilterFinish { source, .. } => {
                 source.status_code()

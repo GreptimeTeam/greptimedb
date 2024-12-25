@@ -151,12 +151,15 @@ mod tests {
     use crate::cache::*;
     use crate::instruction::CacheIdent;
 
+    fn always_true_filter(_: &CacheIdent) -> bool {
+        true
+    }
+
     fn test_cache(
         name: &str,
         invalidator: Invalidator<String, String, CacheIdent>,
     ) -> CacheContainer<String, String, CacheIdent> {
         let cache: Cache<String, String> = CacheBuilder::new(128).build();
-        let filter: TokenFilter<CacheIdent> = Box::new(|_| true);
         let counter = Arc::new(AtomicI32::new(0));
         let moved_counter = counter.clone();
         let init: Initializer<String, String> = Arc::new(move |_| {
@@ -164,7 +167,13 @@ mod tests {
             Box::pin(async { Ok(Some("hi".to_string())) })
         });
 
-        CacheContainer::new(name.to_string(), cache, invalidator, init, filter)
+        CacheContainer::new(
+            name.to_string(),
+            cache,
+            invalidator,
+            init,
+            always_true_filter,
+        )
     }
 
     fn test_i32_cache(
@@ -172,7 +181,6 @@ mod tests {
         invalidator: Invalidator<i32, String, CacheIdent>,
     ) -> CacheContainer<i32, String, CacheIdent> {
         let cache: Cache<i32, String> = CacheBuilder::new(128).build();
-        let filter: TokenFilter<CacheIdent> = Box::new(|_| true);
         let counter = Arc::new(AtomicI32::new(0));
         let moved_counter = counter.clone();
         let init: Initializer<i32, String> = Arc::new(move |_| {
@@ -180,7 +188,13 @@ mod tests {
             Box::pin(async { Ok(Some("foo".to_string())) })
         });
 
-        CacheContainer::new(name.to_string(), cache, invalidator, init, filter)
+        CacheContainer::new(
+            name.to_string(),
+            cache,
+            invalidator,
+            init,
+            always_true_filter,
+        )
     }
 
     #[tokio::test]

@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 use std::fmt::Display;
-use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_time::DatabaseTimeToLive;
@@ -283,7 +282,7 @@ impl SchemaManager {
             self.kv_backend.clone(),
             req,
             DEFAULT_PAGE_SIZE,
-            Arc::new(schema_decoder),
+            schema_decoder,
         )
         .into_stream();
 
@@ -308,6 +307,7 @@ impl<'a> From<&'a SchemaName> for SchemaNameKey<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use super::*;

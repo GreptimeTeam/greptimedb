@@ -326,8 +326,8 @@ impl ClusterInfo for MetaClient {
         let cluster_kv_backend = Arc::new(self.cluster_client()?);
         let range_prefix = DatanodeStatKey::key_prefix_with_cluster_id(self.id.0);
         let req = RangeRequest::new().with_prefix(range_prefix);
-        let stream = PaginationStream::new(cluster_kv_backend, req, 256, Arc::new(decode_stats))
-            .into_stream();
+        let stream =
+            PaginationStream::new(cluster_kv_backend, req, 256, decode_stats).into_stream();
         let mut datanode_stats = stream
             .try_collect::<Vec<_>>()
             .await
@@ -994,8 +994,7 @@ mod tests {
 
         let req = RangeRequest::new().with_prefix(b"__prefix/");
         let stream =
-            PaginationStream::new(Arc::new(cluster_client), req, 10, Arc::new(mock_decoder))
-                .into_stream();
+            PaginationStream::new(Arc::new(cluster_client), req, 10, mock_decoder).into_stream();
 
         let res = stream.try_collect::<Vec<_>>().await.unwrap();
         assert_eq!(10, res.len());

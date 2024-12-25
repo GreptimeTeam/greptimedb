@@ -16,6 +16,7 @@ pub mod builder;
 mod grpc;
 mod influxdb;
 mod log_handler;
+mod logs;
 mod opentsdb;
 mod otlp;
 mod prom_store;
@@ -64,8 +65,8 @@ use servers::prometheus_handler::PrometheusHandler;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{
-    InfluxdbLineProtocolHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
-    PipelineHandler, PromStoreProtocolHandler, ScriptHandler,
+    InfluxdbLineProtocolHandler, LogQueryHandler, OpenTelemetryProtocolHandler,
+    OpentsdbProtocolHandler, PipelineHandler, PromStoreProtocolHandler, ScriptHandler,
 };
 use servers::server::ServerHandlers;
 use session::context::QueryContextRef;
@@ -86,6 +87,7 @@ use crate::error::{
 };
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::HeartbeatTask;
+use crate::limiter::LimiterRef;
 use crate::script::ScriptExecutor;
 
 #[async_trait]
@@ -99,6 +101,7 @@ pub trait FrontendInstance:
     + ScriptHandler
     + PrometheusHandler
     + PipelineHandler
+    + LogQueryHandler
     + Send
     + Sync
     + 'static
@@ -124,6 +127,7 @@ pub struct Instance {
     export_metrics_task: Option<ExportMetricsTask>,
     table_metadata_manager: TableMetadataManagerRef,
     stats: StatementStatistics,
+    limiter: Option<LimiterRef>,
 }
 
 impl Instance {

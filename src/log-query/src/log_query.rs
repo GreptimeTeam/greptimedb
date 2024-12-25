@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, TimeZone, Utc};
+use serde::{Deserialize, Serialize};
 use table::table_name::TableName;
 
 use crate::error::{
@@ -21,9 +22,10 @@ use crate::error::{
 };
 
 /// GreptimeDB's log query request.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct LogQuery {
     /// A fully qualified table name to query logs from.
-    pub table_name: TableName,
+    pub table: TableName,
     /// Specifies the time range for the log query. See [`TimeFilter`] for more details.
     pub time_filter: TimeFilter,
     /// Columns with filters to query.
@@ -32,6 +34,18 @@ pub struct LogQuery {
     pub limit: Option<usize>,
     /// Adjacent lines to return.
     pub context: Context,
+}
+
+impl Default for LogQuery {
+    fn default() -> Self {
+        Self {
+            table: TableName::new("", "", ""),
+            time_filter: Default::default(),
+            columns: vec![],
+            limit: None,
+            context: Default::default(),
+        }
+    }
 }
 
 /// Represents a time range for log query.
@@ -58,7 +72,7 @@ pub struct LogQuery {
 ///
 /// This struct doesn't require a timezone to be presented. When the timezone is not
 /// provided, it will fill the default timezone with the same rules akin to other queries.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TimeFilter {
     pub start: Option<String>,
     pub end: Option<String>,
@@ -69,8 +83,7 @@ impl TimeFilter {
     /// Validate and canonicalize the time filter.
     ///
     /// This function will try to fill the missing fields and convert all dates to timestamps
-    // false positive
-    #[allow(unused_assignments)]
+    #[allow(unused_assignments)] // false positive
     pub fn canonicalize(&mut self) -> Result<()> {
         let mut start_dt = None;
         let mut end_dt = None;
@@ -209,6 +222,7 @@ impl TimeFilter {
 }
 
 /// Represents a column with filters to query.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ColumnFilters {
     /// Case-sensitive column name to query.
     pub column_name: String,
@@ -216,6 +230,7 @@ pub struct ColumnFilters {
     pub filters: Vec<ContentFilter>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 pub enum ContentFilter {
     /// Only match the exact content.
     ///
@@ -234,13 +249,16 @@ pub enum ContentFilter {
     Compound(Vec<ContentFilter>, BinaryOperator),
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 pub enum BinaryOperator {
     And,
     Or,
 }
 
 /// Controls how many adjacent lines to return.
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub enum Context {
+    #[default]
     None,
     /// Specify the number of lines before and after the matched line separately.
     Lines(usize, usize),

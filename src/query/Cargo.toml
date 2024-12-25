@@ -46,6 +46,7 @@ greptime-proto.workspace = true
 humantime.workspace = true
 itertools.workspace = true
 lazy_static.workspace = true
+log-query.workspace = true
 meter-core.workspace = true
 meter-macros.workspace = true
 object-store.workspace = true
