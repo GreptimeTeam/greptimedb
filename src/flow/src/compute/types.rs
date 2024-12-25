@@ -188,7 +188,7 @@ impl ErrCollector {
 
     pub fn push_err(&self, err: EvalError) {
         METRIC_FLOW_ERRORS
-            .with_label_values(&[&err.status_code().to_string()])
+            .with_label_values(&[err.status_code().as_ref()])
             .inc();
         self.inner.blocking_lock().push_back(err)
     }
