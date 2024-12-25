@@ -60,7 +60,9 @@ impl BloomFilterApplier {
 
             // todo: dedup & overlap
             let rows_range_start = prefix_sum[row_group_idx] / self.meta.rows_per_segment;
-            let rows_range_end = prefix_sum[row_group_idx + 1] / self.meta.rows_per_segment;
+            let rows_range_end = (prefix_sum[row_group_idx + 1] as f64
+                / self.meta.rows_per_segment as f64)
+                .ceil() as usize;
 
             for i in rows_range_start..rows_range_end {
                 // 3. Probe each bloom filter segment
