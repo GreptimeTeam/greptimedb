@@ -55,7 +55,7 @@ use crate::error::{
     UnexpectedSnafu,
 };
 use crate::expr::{Batch, GlobalId};
-use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_RUN_INTERVAL_MS};
+use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_ROWS, METRIC_FLOW_RUN_INTERVAL_MS};
 use crate::repr::{self, DiffRow, Row, BATCH_SIZE};
 
 mod flownode_impl;
@@ -249,12 +249,18 @@ impl FlowWorkerManager {
                 self.try_fetch_or_create_table(&table_name).await?;
             let schema_len = proto_schema.len();
 
+            let total_rows = reqs.iter().map(|r| r.len()).sum::<usize>();
             trace!(
                 "Sending {} writeback requests to table {}, reqs total rows={}",
                 reqs.len(),
                 table_name.join("."),
                 reqs.iter().map(|r| r.len()).sum::<usize>()
             );
+
+            METRIC_FLOW_ROWS
+                .with_label_values(&["out"])
+                .inc_by(total_rows as u64);
+
             let now = self.tick_manager.tick();
             for req in reqs {
                 match req {
