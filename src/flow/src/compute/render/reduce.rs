@@ -410,7 +410,6 @@ fn reduce_batch_subgraph(
                                     msg: "can't convert key values to datafusion value",
                                 })?;
 
-                        // TODO(discord9): type check!!!!
                         let key_data_type = output_type
                             .column_types
                             .get(key_idx)
