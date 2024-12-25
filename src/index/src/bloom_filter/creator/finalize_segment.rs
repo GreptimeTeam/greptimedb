@@ -183,6 +183,13 @@ impl FinalizedBloomFilterStorage {
     }
 }
 
+impl Drop for FinalizedBloomFilterStorage {
+    fn drop(&mut self) {
+        self.global_memory_usage
+            .fetch_sub(self.memory_usage, Ordering::Relaxed);
+    }
+}
+
 /// A finalized Bloom filter segment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalizedBloomFilterSegment {
