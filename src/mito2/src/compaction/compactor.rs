@@ -21,7 +21,6 @@ use common_telemetry::{info, warn};
 use common_time::TimeToLive;
 use object_store::manager::ObjectStoreManagerRef;
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
@@ -41,7 +40,7 @@ use crate::region::options::RegionOptions;
 use crate::region::version::VersionRef;
 use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
 use crate::schedule::scheduler::LocalScheduler;
-use crate::sst::file::{FileMeta, IndexType};
+use crate::sst::file::FileMeta;
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -336,16 +335,7 @@ impl Compactor for DefaultCompactor {
                         time_range: sst_info.time_range,
                         level: output.output_level,
                         file_size: sst_info.file_size,
-                        available_indexes: {
-                            let mut indexes = SmallVec::new();
-                            if sst_info.index_metadata.inverted_index.is_available() {
-                                indexes.push(IndexType::InvertedIndex);
-                            }
-                            if sst_info.index_metadata.fulltext_index.is_available() {
-                                indexes.push(IndexType::FulltextIndex);
-                            }
-                            indexes
-                        },
+                        available_indexes: sst_info.index_metadata.build_available_indexes(),
                         index_file_size: sst_info.index_metadata.file_size,
                         num_rows: sst_info.num_rows as u64,
                         num_row_groups: sst_info.num_row_groups,

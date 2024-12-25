@@ -27,8 +27,7 @@ use store_api::storage::{ColumnId, ConcreteDataType, RegionId};
 
 use crate::error::{
     CastVectorSnafu, CreateFulltextCreatorSnafu, FieldTypeMismatchSnafu, FulltextFinishSnafu,
-    FulltextOptionsSnafu, FulltextPushTextSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu,
-    Result,
+    FulltextPushTextSnafu, IndexOptionsSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu, Result,
 };
 use crate::read::Batch;
 use crate::sst::file::FileId;
@@ -61,13 +60,12 @@ impl FulltextIndexer {
         let mut creators = HashMap::new();
 
         for column in &metadata.column_metadatas {
-            let options =
-                column
-                    .column_schema
-                    .fulltext_options()
-                    .context(FulltextOptionsSnafu {
-                        column_name: &column.column_schema.name,
-                    })?;
+            let options = column
+                .column_schema
+                .fulltext_options()
+                .context(IndexOptionsSnafu {
+                    column_name: &column.column_schema.name,
+                })?;
 
             // Relax the type constraint here as many types can be casted to string.
 

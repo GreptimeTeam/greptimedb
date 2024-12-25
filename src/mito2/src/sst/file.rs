@@ -143,6 +143,8 @@ pub enum IndexType {
     InvertedIndex,
     /// Full-text index.
     FulltextIndex,
+    /// Bloom filter.
+    BloomFilter,
 }
 
 impl FileMeta {
@@ -154,6 +156,11 @@ impl FileMeta {
     /// Returns true if the file has a fulltext index
     pub fn fulltext_index_available(&self) -> bool {
         self.available_indexes.contains(&IndexType::FulltextIndex)
+    }
+
+    /// Returns true if the file has a bloom filter
+    pub fn bloom_filter_available(&self) -> bool {
+        self.available_indexes.contains(&IndexType::BloomFilter)
     }
 
     /// Returns the size of the inverted index file
