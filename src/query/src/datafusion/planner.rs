@@ -20,7 +20,7 @@ use arrow_schema::DataType;
 use catalog::table_source::DfTableSourceProvider;
 use common_function::scalars::udf::create_udf;
 use common_query::logical_plan::create_aggregate_function;
-use datafusion::catalog::TableReference;
+use datafusion::common::TableReference;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::SessionState;
 use datafusion::sql::planner::ContextProvider;
