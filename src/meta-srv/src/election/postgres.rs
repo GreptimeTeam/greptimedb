@@ -28,7 +28,7 @@ use crate::error::{
 };
 use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
 
-// Seperator between value and expire time.
+// Separator between value and expire time.
 const LEASE_SEP: &str = r#"||__metadata_lease_sep||"#;
 
 // SQL to put a value with expire time. Parameters: key, value, lease_prefix, expire_time
