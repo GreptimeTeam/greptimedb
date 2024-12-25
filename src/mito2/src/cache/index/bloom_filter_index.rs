@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::ops::Range;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -20,6 +19,7 @@ use bytes::Bytes;
 use index::bloom_filter::error::Result;
 use index::bloom_filter::reader::BloomFilterReader;
 use index::bloom_filter::BloomFilterMeta;
+use store_api::storage::ColumnId;
 
 use crate::cache::index::{IndexCache, PageKey, INDEX_METADATA_TYPE};
 use crate::metrics::{CACHE_HIT, CACHE_MISS};
@@ -28,7 +28,7 @@ use crate::sst::file::FileId;
 const INDEX_TYPE_BLOOM_FILTER_INDEX: &str = "bloom_filter_index";
 
 /// Cache for bloom filter index.
-pub type BloomFilterIndexCache = IndexCache<FileId, BloomFilterMeta>;
+pub type BloomFilterIndexCache = IndexCache<(FileId, ColumnId), BloomFilterMeta>;
 pub type BloomFilterIndexCacheRef = Arc<BloomFilterIndexCache>;
 
 impl BloomFilterIndexCache {
@@ -46,18 +46,21 @@ impl BloomFilterIndexCache {
 }
 
 /// Calculates weight for bloom filter index metadata.
-fn bloom_filter_index_metadata_weight(k: &FileId, _: &Arc<BloomFilterMeta>) -> u32 {
-    (k.as_bytes().len() + std::mem::size_of::<BloomFilterMeta>()) as u32
+fn bloom_filter_index_metadata_weight(k: &(FileId, ColumnId), _: &Arc<BloomFilterMeta>) -> u32 {
+    (k.0.as_bytes().len()
+        + std::mem::size_of::<ColumnId>()
+        + std::mem::size_of::<BloomFilterMeta>()) as u32
 }
 
 /// Calculates weight for bloom filter index content.
-fn bloom_filter_index_content_weight((k, _): &(FileId, PageKey), v: &Bytes) -> u32 {
-    (k.as_bytes().len() + v.len()) as u32
+fn bloom_filter_index_content_weight((k, _): &((FileId, ColumnId), PageKey), v: &Bytes) -> u32 {
+    (k.0.as_bytes().len() + std::mem::size_of::<ColumnId>() + v.len()) as u32
 }
 
 /// Bloom filter index blob reader with cache.
 pub struct CachedBloomFilterIndexBlobReader<R> {
     file_id: FileId,
+    column_id: ColumnId,
     file_size: u64,
     inner: R,
     cache: BloomFilterIndexCacheRef,
@@ -65,9 +68,16 @@ pub struct CachedBloomFilterIndexBlobReader<R> {
 
 impl<R> CachedBloomFilterIndexBlobReader<R> {
     /// Creates a new bloom filter index blob reader with cache.
-    pub fn new(file_id: FileId, file_size: u64, inner: R, cache: BloomFilterIndexCacheRef) -> Self {
+    pub fn new(
+        file_id: FileId,
+        column_id: ColumnId,
+        file_size: u64,
+        inner: R,
+        cache: BloomFilterIndexCacheRef,
+    ) -> Self {
         Self {
             file_id,
+            column_id,
             file_size,
             inner,
             cache,
@@ -81,7 +91,7 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
         let inner = &mut self.inner;
         self.cache
             .get_or_load(
-                self.file_id,
+                (self.file_id, self.column_id),
                 self.file_size,
                 offset,
                 size,
@@ -91,28 +101,67 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
             .map(|b| b.into())
     }
 
-    /// Reads bunch of ranges from the file.
-    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
-        let mut results = Vec::with_capacity(ranges.len());
-        for range in ranges {
-            let size = (range.end - range.start) as u32;
-            let data = self.range_read(range.start, size).await?;
-            results.push(data);
-        }
-        Ok(results)
-    }
-
     /// Reads the meta information of the bloom filter.
     async fn metadata(&mut self) -> Result<BloomFilterMeta> {
-        if let Some(cached) = self.cache.get_metadata(self.file_id) {
+        if let Some(cached) = self.cache.get_metadata((self.file_id, self.column_id)) {
             CACHE_HIT.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             Ok((*cached).clone())
         } else {
             let meta = self.inner.metadata().await?;
             self.cache
-                .put_metadata(self.file_id, Arc::new(meta.clone()));
+                .put_metadata((self.file_id, self.column_id), Arc::new(meta.clone()));
             CACHE_MISS.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             Ok(meta)
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use rand::{Rng, RngCore};
+
+    use super::*;
+
+    const FUZZ_REPEAT_TIMES: usize = 100;
+
+    #[test]
+    fn fuzz_index_calculation() {
+        let mut rng = rand::thread_rng();
+        let mut data = vec![0u8; 1024 * 1024];
+        rng.fill_bytes(&mut data);
+
+        for _ in 0..FUZZ_REPEAT_TIMES {
+            let offset = rng.gen_range(0..data.len() as u64);
+            let size = rng.gen_range(0..data.len() as u32 - offset as u32);
+            let page_size: usize = rng.gen_range(1..1024);
+
+            let indexes =
+                PageKey::generate_page_keys(offset, size, page_size as u64).collect::<Vec<_>>();
+            let page_num = indexes.len();
+            let mut read = Vec::with_capacity(size as usize);
+            for key in indexes.into_iter() {
+                let start = key.page_id as usize * page_size;
+                let page = if start + page_size < data.len() {
+                    &data[start..start + page_size]
+                } else {
+                    &data[start..]
+                };
+                read.extend_from_slice(page);
+            }
+            let expected_range = offset as usize..(offset + size as u64 as u64) as usize;
+            let read = read[PageKey::calculate_range(offset, size, page_size as u64)].to_vec();
+            assert_eq!(
+                read,
+                data.get(expected_range).unwrap(),
+                "fuzz_read_index failed, offset: {}, size: {}, page_size: {}\nread len: {}, expected len: {}\nrange: {:?}, page num: {}",
+                offset,
+                size,
+                page_size,
+                read.len(),
+                size as usize,
+                PageKey::calculate_range(offset, size, page_size as u64),
+                page_num
+            );
         }
     }
 }

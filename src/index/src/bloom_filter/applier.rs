@@ -53,10 +53,10 @@ impl BloomFilterApplier {
         probes: &HashSet<Bytes>,
         row_group_metas: &[RowGroupMetaData],
         basement: &mut BTreeMap<usize, Option<RowSelection>>,
-    ) -> Result<HashSet<BloomFilterSegmentLocation>> {
+    ) -> Result<()> {
         // 0. Fast path - if basement is empty return empty vec
         if basement.is_empty() {
-            return Ok(HashSet::new());
+            return Ok(());
         }
 
         // 1. Compute prefix sum for row counts
@@ -70,7 +70,6 @@ impl BloomFilterApplier {
 
         // 2. Calculate bloom filter segment locations
         let mut row_groups_to_remove = HashSet::new();
-        let mut segment_locations = HashSet::new();
         for &row_group_idx in basement.keys() {
             // TODO(ruihang): support further filter over row selection
 
@@ -99,9 +98,6 @@ impl BloomFilterApplier {
                     }
                 }
 
-                if matches {
-                    segment_locations.insert(loc);
-                }
                 is_any_range_hit |= matches;
             }
             if !is_any_range_hit {
@@ -114,6 +110,6 @@ impl BloomFilterApplier {
             basement.remove(&row_group_idx);
         }
 
-        Ok(segment_locations)
+        Ok(())
     }
 }

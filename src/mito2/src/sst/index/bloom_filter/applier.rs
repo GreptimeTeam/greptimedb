@@ -24,7 +24,6 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
 use index::bloom_filter::applier::{BloomFilterApplier, InListPredicate, Predicate};
 use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
-use index::bloom_filter::BloomFilterSegmentLocation;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::RowSelection;
 use parquet::file::metadata::RowGroupMetaData;
@@ -128,7 +127,8 @@ impl BloomFilterIndexApplier {
                     if let Err(err) = other {
                         warn!(err; "An unexpected error occurred while reading the cached index file. Fallback to remote index file.")
                     }
-                    self.remote_blob_reader(file_id, file_size_hint).await?
+                    self.remote_blob_reader(file_id, *column_id, file_size_hint)
+                        .await?
                 }
             };
 
@@ -141,6 +141,7 @@ impl BloomFilterIndexApplier {
                 };
                 let reader = CachedBloomFilterIndexBlobReader::new(
                     file_id,
+                    *column_id,
                     file_size,
                     BloomFilterReaderImpl::new(blob),
                     bloom_filter_cache.clone(),
@@ -199,6 +200,7 @@ impl BloomFilterIndexApplier {
     async fn remote_blob_reader(
         &self,
         file_id: FileId,
+        column_id: ColumnId,
         file_size_hint: Option<u64>,
     ) -> Result<BlobReader> {
         let puffin_manager = self
@@ -212,7 +214,7 @@ impl BloomFilterIndexApplier {
             .await
             .context(PuffinBuildReaderSnafu)?
             .with_file_size_hint(file_size_hint)
-            .blob(INDEX_BLOB_TYPE)
+            .blob(&Self::column_blob_name(column_id))
             .await
             .context(PuffinReadBlobSnafu)?
             .reader()
@@ -229,21 +231,12 @@ impl BloomFilterIndexApplier {
     ) -> std::result::Result<(), index::bloom_filter::error::Error> {
         let mut applier = BloomFilterApplier::new(Box::new(reader)).await?;
 
-        let mut result: Option<HashSet<BloomFilterSegmentLocation>> = None;
-
         for predicate in predicates {
             match predicate {
                 Predicate::InList(in_list) => {
-                    let search_result = applier
+                    applier
                         .search(&in_list.list, row_group_metas, basement)
                         .await?;
-
-                    result = match result {
-                        Some(result) => {
-                            Some(result.intersection(&search_result).cloned().collect())
-                        }
-                        None => Some(search_result),
-                    };
                 }
             }
         }
