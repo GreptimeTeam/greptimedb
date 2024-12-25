@@ -4152,6 +4152,7 @@ dependencies = [
  "futures",
  "humantime-serde",
  "lazy_static",
+ "log-query",
  "log-store",
  "meta-client",
  "opentelemetry-proto 0.5.0",
@@ -6123,6 +6124,7 @@ dependencies = [
  "chrono",
  "common-error",
  "common-macro",
+ "serde",
  "snafu 0.8.5",
  "table",
 ]
@@ -7471,8 +7473,7 @@ checksum = "b410bbe7e14ab526a0e86877eb47c6996a2bd7746f027ba551028c925390e4e9"
 [[package]]
 name = "opendal"
 version = "0.50.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb28bb6c64e116ceaf8dd4e87099d3cfea4a58e85e62b104fef74c91afba0f44"
+source = "git+https://github.com/GreptimeTeam/opendal.git?rev=c82605177f2feec83e49dcaa537c505639d94024#c82605177f2feec83e49dcaa537c505639d94024"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8161,7 +8162,7 @@ dependencies = [
  "rand",
  "ring 0.17.8",
  "rust_decimal",
- "thiserror 2.0.4",
+ "thiserror 2.0.6",
  "tokio",
  "tokio-rustls 0.26.0",
  "tokio-util",
@@ -9099,6 +9100,7 @@ dependencies = [
  "humantime",
  "itertools 0.10.5",
  "lazy_static",
+ "log-query",
  "meter-core",
  "meter-macros",
  "num",
@@ -10953,6 +10955,7 @@ dependencies = [
  "json5",
  "jsonb",
  "lazy_static",
+ "log-query",
  "loki-api",
  "mime_guess",
  "mysql_async",
@@ -12435,11 +12438,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.4"
+version = "2.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f49a1853cf82743e3b7950f77e0f4d622ca36cf4317cba00c767838bac8d490"
+checksum = "8fec2a1820ebd077e2b90c4df007bebf344cd394098a13c563957d0afc83ea47"
 dependencies = [
- "thiserror-impl 2.0.4",
+ "thiserror-impl 2.0.6",
 ]
 
 [[package]]
@@ -12455,9 +12458,9 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.4"
+version = "2.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8381894bb3efe0c4acac3ded651301ceee58a15d47c2e34885ed1908ad667061"
+checksum = "d65750cab40f4ff1929fb1ba509e9914eb756131cef4210da8d5d700d26f6312"
 dependencies = [
  "proc-macro2",
  "quote",

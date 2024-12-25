@@ -31,12 +31,21 @@ mod footer;
 /// InvertedIndexReader defines an asynchronous reader of inverted index data
 #[mockall::automock]
 #[async_trait]
-pub trait InvertedIndexReader: Send {
+pub trait InvertedIndexReader: Send + Sync {
     /// Seeks to given offset and reads data with exact size as provided.
     async fn range_read(&mut self, offset: u64, size: u32) -> Result<Vec<u8>>;
 
     /// Reads the bytes in the given ranges.
-    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>>;
+    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+        let mut result = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            let data = self
+                .range_read(range.start, (range.end - range.start) as u32)
+                .await?;
+            result.push(Bytes::from(data));
+        }
+        Ok(result)
+    }
 
     /// Retrieves metadata of all inverted indices stored within the blob.
     async fn metadata(&mut self) -> Result<Arc<InvertedIndexMetas>>;

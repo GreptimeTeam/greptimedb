@@ -11,5 +11,6 @@ workspace = true
 chrono.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
+serde.workspace = true
 snafu.workspace = true
 table.workspace = true

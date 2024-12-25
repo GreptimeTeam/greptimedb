@@ -29,7 +29,7 @@ use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
-use crate::cache::index::{CachedInvertedIndexBlobReader, InvertedIndexCacheRef};
+use crate::cache::index::inverted_index::{CachedInvertedIndexBlobReader, InvertedIndexCacheRef};
 use crate::error::{
     ApplyInvertedIndexSnafu, MetadataSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result,
 };

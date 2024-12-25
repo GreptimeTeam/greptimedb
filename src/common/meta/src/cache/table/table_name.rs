@@ -41,7 +41,7 @@ pub fn new_table_name_cache(
     let table_name_manager = Arc::new(TableNameManager::new(kv_backend));
     let init = init_factory(table_name_manager);
 
-    CacheContainer::new(name, cache, Box::new(invalidator), init, Box::new(filter))
+    CacheContainer::new(name, cache, Box::new(invalidator), init, filter)
 }
 
 fn init_factory(table_name_manager: TableNameManagerRef) -> Initializer<TableName, TableId> {

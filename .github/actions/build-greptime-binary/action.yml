@@ -54,7 +54,7 @@ runs:
         PROFILE_TARGET: ${{ inputs.cargo-profile == 'dev' && 'debug' || inputs.cargo-profile }}
       with:
         artifacts-dir: ${{ inputs.artifacts-dir }}
-        target-file: ./target/$PROFILE_TARGET/greptime
+        target-files: ./target/$PROFILE_TARGET/greptime
         version: ${{ inputs.version }}
         working-dir: ${{ inputs.working-dir }}
 
@@ -72,6 +72,6 @@ runs:
       if: ${{ inputs.build-android-artifacts == 'true' }}
       with:
         artifacts-dir: ${{ inputs.artifacts-dir }}
-        target-file: ./target/aarch64-linux-android/release/greptime
+        target-files: ./target/aarch64-linux-android/release/greptime
         version: ${{ inputs.version }}
         working-dir: ${{ inputs.working-dir }}
