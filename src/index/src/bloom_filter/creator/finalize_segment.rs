@@ -43,7 +43,7 @@ pub struct FinalizedBloomFilterStorage {
     intermediate_prefix: String,
 
     /// The provider for intermediate Bloom filter files.
-    intermediate_provider: Box<dyn ExternalTempFileProvider>,
+    intermediate_provider: Arc<dyn ExternalTempFileProvider>,
 
     /// The memory usage of the in-memory Bloom filters.
     memory_usage: usize,
@@ -59,7 +59,7 @@ pub struct FinalizedBloomFilterStorage {
 impl FinalizedBloomFilterStorage {
     /// Creates a new `FinalizedBloomFilterStorage`.
     pub fn new(
-        intermediate_provider: Box<dyn ExternalTempFileProvider>,
+        intermediate_provider: Arc<dyn ExternalTempFileProvider>,
         global_memory_usage: Arc<AtomicUsize>,
         global_memory_usage_threshold: Option<usize>,
     ) -> Self {
@@ -132,7 +132,7 @@ impl FinalizedBloomFilterStorage {
     /// Drains the storage and returns a stream of finalized Bloom filter segments.
     pub async fn drain(
         &mut self,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<FinalizedBloomFilterSegment>> + '_>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<FinalizedBloomFilterSegment>> + Send + '_>>> {
         // FAST PATH: memory only
         if self.intermediate_file_id_counter == 0 {
             return Ok(Box::pin(stream::iter(self.in_memory.drain(..).map(Ok))));
@@ -257,7 +257,7 @@ mod tests {
 
         let global_memory_usage = Arc::new(AtomicUsize::new(0));
         let global_memory_usage_threshold = Some(1024 * 1024); // 1MB
-        let provider = Box::new(mock_provider);
+        let provider = Arc::new(mock_provider);
         let mut storage = FinalizedBloomFilterStorage::new(
             provider,
             global_memory_usage.clone(),
