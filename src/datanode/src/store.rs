@@ -147,10 +147,10 @@ async fn build_cache_layer(
     };
 
     // Enable object cache by default
-    // Set the cache_path to be `${data_home}/{name}` by default
+    // Set the cache_path to be `${data_home}` by default
     // if it's not present
     if cache_path.is_none() {
-        let read_cache_path = join_dir(data_home, &name.to_lowercase());
+        let read_cache_path = data_home.to_string();
         tokio::fs::create_dir_all(Path::new(&read_cache_path))
             .await
             .context(CreateDirSnafu {

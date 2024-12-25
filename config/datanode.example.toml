@@ -294,7 +294,7 @@ data_home = "/tmp/greptimedb/"
 type = "File"
 
 ## Read cache configuration for object storage such as 'S3' etc, it's configured by default when using object storage. It is recommended to configure it when using object storage for better performance.
-## A local file directory, defaults to `{data_home}/{remote_name}`. An empty string means disabling.
+## A local file directory, defaults to `{data_home}`. An empty string means disabling.
 ## @toml2docs:none-default
 #+ cache_path = ""
 
