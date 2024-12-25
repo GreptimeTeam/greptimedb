@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::Arc;
 
+use arrow::array::new_null_array;
 use common_telemetry::trace;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
@@ -398,20 +399,54 @@ fn reduce_batch_subgraph(
                 }
             }
 
-            // TODO: here reduce numbers of eq to minimal by keeping slicing key/val batch
+            let key_data_types = output_type
+                .column_types
+                .iter()
+                .map(|t| t.scalar_type.clone())
+                .collect_vec();
+
+            // TODO(discord9): here reduce numbers of eq to minimal by keeping slicing key/val batch
             for key_row in distinct_keys {
                 let key_scalar_value = {
                     let mut key_scalar_value = Vec::with_capacity(key_row.len());
-                    for key in key_row.iter() {
+                    for (key_idx, key) in key_row.iter().enumerate() {
                         let v =
                             key.try_to_scalar_value(&key.data_type())
                                 .context(DataTypeSnafu {
                                     msg: "can't convert key values to datafusion value",
                                 })?;
-                        let arrow_value =
+
+                        let key_data_type = key_data_types.get(key_idx).context(InternalSnafu {
+                            reason: format!(
+                                "Key index out of bound, expected at most {} but got {}",
+                                output_type.column_types.len(),
+                                key_idx
+                            ),
+                        })?;
+
+                        // if incoming value's datatype is null, it need to be handled specially, see below
+                        if key_data_type.as_arrow_type() != v.data_type()
+                            && !v.data_type().is_null()
+                        {
+                            crate::expr::error::InternalSnafu {
+                                reason: format!(
+                                    "Key data type mismatch, expected {:?} but got {:?}",
+                                    key_data_type.as_arrow_type(),
+                                    v.data_type()
+                                ),
+                            }
+                            .fail()?
+                        }
+
+                        // handle single null key
+                        let arrow_value = if v.data_type().is_null() {
+                            let ret = new_null_array(&arrow::datatypes::DataType::Null, 1);
+                            arrow::array::Scalar::new(ret)
+                        } else {
                             v.to_scalar().context(crate::expr::error::DatafusionSnafu {
                                 context: "can't convert key values to arrow value",
-                            })?;
+                            })?
+                        };
                         key_scalar_value.push(arrow_value);
                     }
                     key_scalar_value
@@ -423,7 +458,19 @@ fn reduce_batch_subgraph(
                     .zip(key_batch.batch().iter())
                     .map(|(key, col)| {
                         // TODO(discord9): this takes half of the cpu! And this is redundant amount of `eq`!
-                        arrow::compute::kernels::cmp::eq(&key, &col.to_arrow_array().as_ref() as _)
+
+                        // note that if lhs is a null, we still need to get all rows that are null! But can't use `eq` since
+                        // it will return null if input have null, so we need to use `is_null` instead
+                        if arrow::array::Datum::get(&key).0.data_type().is_null() {
+                            arrow::compute::kernels::boolean::is_null(
+                                col.to_arrow_array().as_ref() as _
+                            )
+                        } else {
+                            arrow::compute::kernels::cmp::eq(
+                                &key,
+                                &col.to_arrow_array().as_ref() as _,
+                            )
+                        }
                     })
                     .try_collect::<_, Vec<_>, _>()
                     .context(ArrowSnafu {
