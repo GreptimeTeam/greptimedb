@@ -320,7 +320,7 @@ mod tests {
     #[tokio::test]
     async fn test_bloom_filter_creator_batch_push() {
         let mut writer = Cursor::new(Vec::new());
-        let mut creator = BloomFilterCreator::new(
+        let mut creator: BloomFilterCreator = BloomFilterCreator::new(
             2,
             Arc::new(MockExternalTempFileProvider::new()),
             Arc::new(AtomicUsize::new(0)),

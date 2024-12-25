@@ -301,6 +301,7 @@ impl Compactor for DefaultCompactor {
             let merge_mode = compaction_region.current_version.options.merge_mode();
             let inverted_index_config = compaction_region.engine_config.inverted_index.clone();
             let fulltext_index_config = compaction_region.engine_config.fulltext_index.clone();
+            let bloom_filter_config = compaction_region.engine_config.bloom_filter.clone();
             futs.push(async move {
                 let reader = CompactionSstReaderBuilder {
                     metadata: region_metadata.clone(),
@@ -325,6 +326,7 @@ impl Compactor for DefaultCompactor {
                             index_options,
                             inverted_index_config,
                             fulltext_index_config,
+                            bloom_filter_config,
                         },
                         &write_opts,
                     )

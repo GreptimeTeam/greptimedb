@@ -360,6 +360,7 @@ impl RegionFlushTask {
                 index_options: self.index_options.clone(),
                 inverted_index_config: self.engine_config.inverted_index.clone(),
                 fulltext_index_config: self.engine_config.fulltext_index.clone(),
+                bloom_filter_config: self.engine_config.bloom_filter.clone(),
             };
             let Some(sst_info) = self
                 .access_layer

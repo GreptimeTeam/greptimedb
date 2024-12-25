@@ -955,6 +955,13 @@ apply_on_query = "auto"
 mem_threshold_on_create = "auto"
 compress = true
 
+[region_engine.mito.bloom_filter]
+create_on_flush = "auto"
+create_on_compaction = "auto"
+apply_on_query = "auto"
+mem_threshold_on_create = "auto"
+content_cache_page_size = "8MiB"
+
 [region_engine.mito.memtable]
 type = "time_series"
 
