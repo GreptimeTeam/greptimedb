@@ -447,7 +447,26 @@ impl ManifestContext {
     pub(crate) fn set_role(&self, next_role: RegionRole, region_id: RegionId) {
         match next_role {
             RegionRole::Follower => {
-                self.state.store(RegionRoleState::Follower);
+                match self.state.fetch_update(|state| {
+                    if !matches!(state, RegionRoleState::Follower) {
+                        Some(RegionRoleState::Follower)
+                    } else {
+                        None
+                    }
+                }) {
+                    Ok(state) => info!(
+                        "Convert region {} to follower, previous role state: {:?}",
+                        region_id, state
+                    ),
+                    Err(state) => {
+                        if state != RegionRoleState::Follower {
+                            warn!(
+                                "Failed to convert region {} to follower, current role state: {:?}",
+                                region_id, state
+                            )
+                        }
+                    }
+                }
             }
             RegionRole::Leader => {
                 match self.state.fetch_update(|state| {
