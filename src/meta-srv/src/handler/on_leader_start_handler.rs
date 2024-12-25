@@ -36,7 +36,7 @@ impl HeartbeatHandler for OnLeaderStartHandler {
             return Ok(HandleControl::Continue);
         };
 
-        if election.in_infancy() {
+        if election.in_leader_infancy() {
             ctx.is_infancy = true;
             // TODO(weny): Unifies the multiple leader state between Context and Metasrv.
             // we can't ensure the in-memory kv has already been reset in the outside loop.

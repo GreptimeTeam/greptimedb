@@ -88,7 +88,7 @@ pub struct PgElection {
     leader_value: String,
     client: Client,
     is_leader: AtomicBool,
-    infancy: AtomicBool,
+    leader_infancy: AtomicBool,
     leader_watcher: broadcast::Sender<LeaderChangeMessage>,
     store_key_prefix: String,
     candidate_lease_ttl_secs: u64,
@@ -106,7 +106,7 @@ impl PgElection {
             leader_value,
             client,
             is_leader: AtomicBool::new(false),
-            infancy: AtomicBool::new(true),
+            leader_infancy: AtomicBool::new(false),
             leader_watcher: tx,
             store_key_prefix,
             candidate_lease_ttl_secs,
@@ -138,8 +138,8 @@ impl Election for PgElection {
         self.is_leader.load(Ordering::Relaxed)
     }
 
-    fn in_infancy(&self) -> bool {
-        self.infancy
+    fn in_leader_infancy(&self) -> bool {
+        self.leader_infancy
             .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
     }
@@ -383,7 +383,7 @@ mod tests {
             leader_value: "test_leader".to_string(),
             client,
             is_leader: AtomicBool::new(false),
-            infancy: AtomicBool::new(true),
+            leader_infancy: AtomicBool::new(true),
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
             candidate_lease_ttl_secs: 10,
@@ -452,7 +452,7 @@ mod tests {
             leader_value,
             client,
             is_leader: AtomicBool::new(false),
-            infancy: AtomicBool::new(true),
+            leader_infancy: AtomicBool::new(true),
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
             candidate_lease_ttl_secs,
@@ -488,7 +488,7 @@ mod tests {
             leader_value,
             client,
             is_leader: AtomicBool::new(false),
-            infancy: AtomicBool::new(true),
+            leader_infancy: AtomicBool::new(true),
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
             candidate_lease_ttl_secs,

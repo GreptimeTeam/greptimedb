@@ -87,7 +87,7 @@ pub trait Election: Send + Sync {
     /// initialization operations can be performed.
     ///
     /// note: a new leader will only return true on the first call.
-    fn in_infancy(&self) -> bool;
+    fn in_leader_infancy(&self) -> bool;
 
     /// Registers a candidate for the election.
     async fn register_candidate(&self, node_info: &MetasrvNodeInfo) -> Result<()>;

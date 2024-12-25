@@ -149,7 +149,7 @@ impl Election for EtcdElection {
         self.is_leader.load(Ordering::Relaxed)
     }
 
-    fn in_infancy(&self) -> bool {
+    fn in_leader_infancy(&self) -> bool {
         self.infancy
             .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
