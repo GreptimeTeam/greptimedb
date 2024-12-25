@@ -157,7 +157,6 @@ impl WorkerGroup {
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_purges));
         let write_cache = write_cache_from_config(
             &config,
-            object_store_manager.clone(),
             puffin_manager_factory.clone(),
             intermediate_manager.clone(),
         )
@@ -303,7 +302,6 @@ impl WorkerGroup {
             .with_buffer_size(Some(config.index.write_buffer_size.as_bytes() as _));
         let write_cache = write_cache_from_config(
             &config,
-            object_store_manager.clone(),
             puffin_manager_factory.clone(),
             intermediate_manager.clone(),
         )
@@ -364,7 +362,6 @@ fn region_id_to_index(id: RegionId, num_workers: usize) -> usize {
 
 async fn write_cache_from_config(
     config: &MitoConfig,
-    object_store_manager: ObjectStoreManagerRef,
     puffin_manager_factory: PuffinManagerFactory,
     intermediate_manager: IntermediateManager,
 ) -> Result<Option<WriteCacheRef>> {
@@ -383,7 +380,6 @@ async fn write_cache_from_config(
 
     let cache = WriteCache::new_fs(
         &config.experimental_write_cache_path,
-        object_store_manager,
         config.experimental_write_cache_size,
         config.experimental_write_cache_ttl,
         puffin_manager_factory,

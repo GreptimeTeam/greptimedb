@@ -37,8 +37,10 @@ use crate::sst::file::FileId;
 use crate::sst::parquet::helper::fetch_byte_ranges;
 use crate::sst::parquet::metadata::MetadataLoader;
 
-/// Subdirectory of cached files.
-const FILE_DIR: &str = "files/";
+/// Subdirectory of cached files for write.
+///
+/// This must contain three layers, corresponding to [`build_prometheus_metrics_layer`](object_store::layers::build_prometheus_metrics_layer).
+const FILE_DIR: &str = "cache/object/write/";
 
 /// A file cache manages files on local store and evict files based
 /// on size.
