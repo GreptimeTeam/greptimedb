@@ -373,7 +373,9 @@ mod tests {
 
     use api::v1::SemanticType;
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, FulltextOptions, SkipIndexType, SkippingIndexOptions};
+    use datatypes::schema::{
+        ColumnSchema, FulltextOptions, SkippingIndexOptions, SkippingIndexType,
+    };
     use object_store::services::Memory;
     use object_store::ObjectStore;
     use puffin_manager::PuffinManagerFactory;
@@ -448,7 +450,7 @@ mod tests {
                 ColumnSchema::new("bloom", ConcreteDataType::string_datatype(), false)
                     .with_skipping_options(SkippingIndexOptions {
                         granularity: 42,
-                        index_type: SkipIndexType::BloomFilter,
+                        index_type: SkippingIndexType::BloomFilter,
                     })
                     .unwrap();
 

@@ -17,7 +17,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 use common_telemetry::warn;
-use datatypes::schema::SkipIndexType;
+use datatypes::schema::SkippingIndexType;
 use index::bloom_filter::creator::BloomFilterCreator;
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
 use snafu::{ensure, ResultExt};
@@ -91,7 +91,7 @@ impl BloomFilterIndexer {
                     })?;
 
             let options = match options {
-                Some(options) if options.index_type == SkipIndexType::BloomFilter => options,
+                Some(options) if options.index_type == SkippingIndexType::BloomFilter => options,
                 _ => continue,
             };
 
@@ -375,7 +375,7 @@ mod tests {
                     false,
                 )
                 .with_skipping_options(SkippingIndexOptions {
-                    index_type: SkipIndexType::BloomFilter,
+                    index_type: SkippingIndexType::BloomFilter,
                     granularity: 2,
                 })
                 .unwrap(),
@@ -398,7 +398,7 @@ mod tests {
                     false,
                 )
                 .with_skipping_options(SkippingIndexOptions {
-                    index_type: SkipIndexType::BloomFilter,
+                    index_type: SkippingIndexType::BloomFilter,
                     granularity: 4,
                 })
                 .unwrap(),
