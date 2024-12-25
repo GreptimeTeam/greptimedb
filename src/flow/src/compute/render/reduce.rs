@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::Arc;
 
+use arrow::array::BooleanArray;
 use common_telemetry::trace;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
@@ -417,13 +418,35 @@ fn reduce_batch_subgraph(
                     key_scalar_value
                 };
 
+                let all_false_array = {
+                    let batch_len = key_batch.row_count();
+                    let mut builder = BooleanArray::builder(batch_len);
+                    builder
+                        .append_values(&vec![false; batch_len], &vec![true; batch_len])
+                        .context(ArrowSnafu {
+                            context: "Failed to build a all false boolean array",
+                        })?;
+                    builder.finish()
+                };
+
                 // first compute equal from separate columns
                 let eq_results = key_scalar_value
                     .into_iter()
                     .zip(key_batch.batch().iter())
                     .map(|(key, col)| {
                         // TODO(discord9): this takes half of the cpu! And this is redundant amount of `eq`!
-                        arrow::compute::kernels::cmp::eq(&key, &col.to_arrow_array().as_ref() as _)
+                        let lhs_ty = arrow::array::Datum::get(&key).0.data_type();
+                        let rhs = col.to_arrow_array();
+                        let rhs_ty = rhs.data_type();
+                        if lhs_ty != rhs_ty {
+                            // if type not match, return all false(this happens when one of them is null array)
+                            Ok(all_false_array.clone())
+                        } else {
+                            arrow::compute::kernels::cmp::eq(
+                                &key,
+                                &col.to_arrow_array().as_ref() as _,
+                            )
+                        }
                     })
                     .try_collect::<_, Vec<_>, _>()
                     .context(ArrowSnafu {
