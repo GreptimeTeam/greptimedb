@@ -117,6 +117,8 @@ pub struct MitoConfig {
     pub inverted_index: InvertedIndexConfig,
     /// Full-text index configs.
     pub fulltext_index: FulltextIndexConfig,
+    /// Bloom filter index configs.
+    pub bloom_filter_index: BloomFilterConfig,
 
     /// Memtable config
     pub memtable: MemtableConfig,
@@ -155,6 +157,7 @@ impl Default for MitoConfig {
             index: IndexConfig::default(),
             inverted_index: InvertedIndexConfig::default(),
             fulltext_index: FulltextIndexConfig::default(),
+            bloom_filter_index: BloomFilterConfig::default(),
             memtable: MemtableConfig::default(),
             min_compaction_interval: Duration::from_secs(0),
         };
@@ -507,6 +510,48 @@ impl FulltextIndexConfig {
             }
             MemoryThreshold::Unlimited => usize::MAX,
             MemoryThreshold::Size(size) => size.as_bytes() as _,
+        }
+    }
+}
+
+/// Configuration options for the bloom filter.
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct BloomFilterConfig {
+    /// Whether to create the index on flush: automatically or never.
+    pub create_on_flush: Mode,
+    /// Whether to create the index on compaction: automatically or never.
+    pub create_on_compaction: Mode,
+    /// Whether to apply the index on query: automatically or never.
+    pub apply_on_query: Mode,
+    /// Memory threshold for creating the index.
+    pub mem_threshold_on_create: MemoryThreshold,
+}
+
+impl Default for BloomFilterConfig {
+    fn default() -> Self {
+        Self {
+            create_on_flush: Mode::Auto,
+            create_on_compaction: Mode::Auto,
+            apply_on_query: Mode::Auto,
+            mem_threshold_on_create: MemoryThreshold::Auto,
+        }
+    }
+}
+
+impl BloomFilterConfig {
+    pub fn mem_threshold_on_create(&self) -> Option<usize> {
+        match self.mem_threshold_on_create {
+            MemoryThreshold::Auto => {
+                if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
+                    Some((sys_memory / INDEX_CREATE_MEM_THRESHOLD_FACTOR).as_bytes() as usize)
+                } else {
+                    Some(ReadableSize::mb(64).as_bytes() as usize)
+                }
+            }
+            MemoryThreshold::Unlimited => None,
+            MemoryThreshold::Size(size) => Some(size.as_bytes() as usize),
         }
     }
 }
