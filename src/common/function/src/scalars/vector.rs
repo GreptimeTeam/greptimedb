@@ -18,9 +18,9 @@ mod elem_sum;
 pub mod impl_conv;
 mod scalar_add;
 mod scalar_mul;
-mod vector_mul;
 mod sub;
 pub(crate) mod sum;
+mod vector_mul;
 
 use std::sync::Arc;
 

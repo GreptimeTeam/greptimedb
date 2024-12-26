@@ -1,3 +1,17 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::borrow::Cow;
 use std::ops::AddAssign;
 
@@ -14,13 +28,13 @@ async fn test_vec_sum_aggregator() -> Result<(), common_query::error::Error> {
     common_telemetry::init_default_ut_logging();
     let engine = function::create_query_engine_for_vector10x3();
     let sql = "select VEC_SUM(vector) as vec_sum from vectors";
-    let result = exec_selection(engine.clone(), &sql).await;
+    let result = exec_selection(engine.clone(), sql).await;
     let value = function::get_value_from_batches("vec_sum", result);
 
     let mut expected_value = None;
 
     let sql = "SELECT vector FROM vectors";
-    let vectors = exec_selection(engine, &sql).await;
+    let vectors = exec_selection(engine, sql).await;
 
     let column = vectors[0].column(0);
     let vector_const = as_veclit_if_const(column)?;
