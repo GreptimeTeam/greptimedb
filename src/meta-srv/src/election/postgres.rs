@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use common_time::Timestamp;
 use itertools::Itertools;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::broadcast;
 use tokio_postgres::Client;
 
@@ -61,25 +61,24 @@ const POINT_DELETE: &str = "DELETE FROM greptime_metakv WHERE k = $1 RETURNING k
 
 /// Parse the value and expire time from the given string. The value should be in the format "value || LEASE_SEP || expire_time".
 fn parse_value_and_expire_time(value: &str) -> Result<(String, Timestamp)> {
-    if let Some((value, expire_time)) = value.split(LEASE_SEP).collect_tuple() {
-        // Given expire_time is in the format 'YYYY-MM-DD HH24:MI:SS.MS'
-        let expire_time = match Timestamp::from_str(expire_time, None) {
-            Ok(ts) => ts,
-            Err(_) => UnexpectedSnafu {
-                violated: format!("Invalid timestamp: {}", expire_time),
-            }
-            .fail()?,
-        };
-        Ok((value.to_string(), expire_time))
-    } else {
-        UnexpectedSnafu {
+    let (value, expire_time) = value
+        .split(LEASE_SEP)
+        .collect_tuple()
+        .context(UnexpectedSnafu {
             violated: format!(
                 "Invalid value {}, expect node info || {} || expire time",
                 value, LEASE_SEP
             ),
+        })?;
+    // Given expire_time is in the format 'YYYY-MM-DD HH24:MI:SS.MS'
+    let expire_time = match Timestamp::from_str(expire_time, None) {
+        Ok(ts) => ts,
+        Err(_) => UnexpectedSnafu {
+            violated: format!("Invalid timestamp: {}", expire_time),
         }
-        .fail()
-    }
+        .fail()?,
+    };
+    Ok((value.to_string(), expire_time))
 }
 
 /// PostgreSql implementation of Election.
@@ -129,10 +128,6 @@ impl PgElection {
 #[async_trait::async_trait]
 impl Election for PgElection {
     type Leader = LeaderValue;
-
-    fn subscribe_leader_change(&self) -> broadcast::Receiver<LeaderChangeMessage> {
-        self.leader_watcher.subscribe()
-    }
 
     fn is_leader(&self) -> bool {
         self.is_leader.load(Ordering::Relaxed)
@@ -212,6 +207,10 @@ impl Election for PgElection {
 
     async fn resign(&self) -> Result<()> {
         todo!()
+    }
+
+    fn subscribe_leader_change(&self) -> broadcast::Receiver<LeaderChangeMessage> {
+        self.leader_watcher.subscribe()
     }
 }
 
