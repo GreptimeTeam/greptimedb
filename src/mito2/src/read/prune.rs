@@ -113,13 +113,13 @@ impl PruneReader {
         let num_rows_before_filter = batch.num_rows();
         let Some(batch_filtered) = self.context.precise_filter(batch)? else {
             // the entire batch is filtered out
-            self.metrics.filter_metrics.num_rows_precise_filtered += num_rows_before_filter;
+            self.metrics.filter_metrics.rows_precise_filtered += num_rows_before_filter;
             return Ok(None);
         };
 
         // update metric
         let filtered_rows = num_rows_before_filter - batch_filtered.num_rows();
-        self.metrics.filter_metrics.num_rows_precise_filtered += filtered_rows;
+        self.metrics.filter_metrics.rows_precise_filtered += filtered_rows;
 
         if !batch_filtered.is_empty() {
             Ok(Some(batch_filtered))
