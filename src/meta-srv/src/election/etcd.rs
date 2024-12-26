@@ -18,17 +18,40 @@ use std::time::Duration;
 
 use common_meta::distributed_time_constants::{META_KEEP_ALIVE_INTERVAL_SECS, META_LEASE_SECS};
 use common_telemetry::{error, info, warn};
-use etcd_client::{Client, GetOptions, LeaderKey, LeaseKeepAliveStream, LeaseKeeper, PutOptions};
+use etcd_client::{
+    Client, GetOptions, LeaderKey as EtcdLeaderKey, LeaseKeepAliveStream, LeaseKeeper, PutOptions,
+};
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::Receiver;
 use tokio::time::{timeout, MissedTickBehavior};
 
-use crate::election::{Election, LeaderChangeMessage, CANDIDATES_ROOT, ELECTION_KEY};
+use crate::election::{
+    Election, LeaderChangeMessage, LeaderKey, CANDIDATES_ROOT, CANDIDATE_LEASE_SECS, ELECTION_KEY,
+    KEEP_ALIVE_INTERVAL_SECS,
+};
 use crate::error;
 use crate::error::Result;
 use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
+
+impl LeaderKey for EtcdLeaderKey {
+    fn name(&self) -> &[u8] {
+        self.name()
+    }
+
+    fn key(&self) -> &[u8] {
+        self.key()
+    }
+
+    fn revision(&self) -> i64 {
+        self.rev()
+    }
+
+    fn lease_id(&self) -> i64 {
+        self.lease()
+    }
+}
 
 pub struct EtcdElection {
     leader_value: String,
@@ -75,15 +98,15 @@ impl EtcdElection {
                         LeaderChangeMessage::Elected(key) => {
                             info!(
                                 "[{leader_ident}] is elected as leader: {:?}, lease: {}",
-                                key.name_str(),
-                                key.lease()
+                                String::from_utf8_lossy(key.name()),
+                                key.lease_id()
                             );
                         }
                         LeaderChangeMessage::StepDown(key) => {
                             warn!(
                                 "[{leader_ident}] is stepping down: {:?}, lease: {}",
-                                key.name_str(),
-                                key.lease()
+                                String::from_utf8_lossy(key.name()),
+                                key.lease_id()
                             );
                         }
                     },
@@ -126,16 +149,13 @@ impl Election for EtcdElection {
         self.is_leader.load(Ordering::Relaxed)
     }
 
-    fn in_infancy(&self) -> bool {
+    fn in_leader_infancy(&self) -> bool {
         self.infancy
             .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
     }
 
     async fn register_candidate(&self, node_info: &MetasrvNodeInfo) -> Result<()> {
-        const CANDIDATE_LEASE_SECS: u64 = 600;
-        const KEEP_ALIVE_INTERVAL_SECS: u64 = CANDIDATE_LEASE_SECS / 2;
-
         let mut lease_client = self.client.lease_client();
         let res = lease_client
             .grant(CANDIDATE_LEASE_SECS as i64, None)
@@ -239,7 +259,7 @@ impl Election for EtcdElection {
                 // The keep alive operation MUST be done in `META_KEEP_ALIVE_INTERVAL_SECS`.
                 match timeout(
                     keep_lease_duration,
-                    self.keep_alive(&mut keeper, &mut receiver, leader),
+                    self.keep_alive(&mut keeper, &mut receiver, leader.clone()),
                 )
                 .await
                 {
@@ -303,7 +323,7 @@ impl EtcdElection {
         &self,
         keeper: &mut LeaseKeeper,
         receiver: &mut LeaseKeepAliveStream,
-        leader: &LeaderKey,
+        leader: EtcdLeaderKey,
     ) -> Result<()> {
         keeper.keep_alive().await.context(error::EtcdFailedSnafu)?;
         if let Some(res) = receiver.message().await.context(error::EtcdFailedSnafu)? {
@@ -324,7 +344,7 @@ impl EtcdElection {
 
                 if let Err(e) = self
                     .leader_watcher
-                    .send(LeaderChangeMessage::Elected(Arc::new(leader.clone())))
+                    .send(LeaderChangeMessage::Elected(Arc::new(leader)))
                 {
                     error!(e; "Failed to send leader change message");
                 }

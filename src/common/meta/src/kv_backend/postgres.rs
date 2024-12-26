@@ -16,6 +16,7 @@ use std::any::Any;
 use std::borrow::Cow;
 use std::sync::Arc;
 
+use common_telemetry::error;
 use snafu::ResultExt;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{Client, NoTls};
@@ -97,7 +98,11 @@ impl PgStore {
         let (client, conn) = tokio_postgres::connect(url, NoTls)
             .await
             .context(ConnectPostgresSnafu)?;
-        tokio::spawn(async move { conn.await.context(ConnectPostgresSnafu) });
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                error!(e; "connection error");
+            }
+        });
         Self::with_pg_client(client).await
     }
 
