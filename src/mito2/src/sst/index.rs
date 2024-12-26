@@ -179,7 +179,7 @@ pub(crate) struct IndexerBuilder<'a> {
     pub(crate) index_options: IndexOptions,
     pub(crate) inverted_index_config: InvertedIndexConfig,
     pub(crate) fulltext_index_config: FulltextIndexConfig,
-    pub(crate) bloom_filter_config: BloomFilterConfig,
+    pub(crate) bloom_filter_index_config: BloomFilterConfig,
 }
 
 impl<'a> IndexerBuilder<'a> {
@@ -322,8 +322,8 @@ impl<'a> IndexerBuilder<'a> {
 
     fn build_bloom_filter_indexer(&self) -> Option<BloomFilterIndexer> {
         let create = match self.op_type {
-            OperationType::Flush => self.bloom_filter_config.create_on_flush.auto(),
-            OperationType::Compact => self.bloom_filter_config.create_on_compaction.auto(),
+            OperationType::Flush => self.bloom_filter_index_config.create_on_flush.auto(),
+            OperationType::Compact => self.bloom_filter_index_config.create_on_compaction.auto(),
         };
 
         if !create {
@@ -334,7 +334,7 @@ impl<'a> IndexerBuilder<'a> {
             return None;
         }
 
-        let mem_limit = self.bloom_filter_config.mem_threshold_on_create();
+        let mem_limit = self.bloom_filter_index_config.mem_threshold_on_create();
         let indexer = BloomFilterIndexer::new(
             self.file_id,
             self.metadata,
@@ -500,7 +500,7 @@ mod tests {
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
-            bloom_filter_config: BloomFilterConfig::default(),
+            bloom_filter_index_config: BloomFilterConfig::default(),
         }
         .build()
         .await;
@@ -535,7 +535,7 @@ mod tests {
                 ..Default::default()
             },
             fulltext_index_config: FulltextIndexConfig::default(),
-            bloom_filter_config: BloomFilterConfig::default(),
+            bloom_filter_index_config: BloomFilterConfig::default(),
         }
         .build()
         .await;
@@ -558,7 +558,7 @@ mod tests {
                 create_on_compaction: Mode::Disable,
                 ..Default::default()
             },
-            bloom_filter_config: BloomFilterConfig::default(),
+            bloom_filter_index_config: BloomFilterConfig::default(),
         }
         .build()
         .await;
@@ -578,7 +578,7 @@ mod tests {
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
-            bloom_filter_config: BloomFilterConfig {
+            bloom_filter_index_config: BloomFilterConfig {
                 create_on_compaction: Mode::Disable,
                 ..Default::default()
             },
@@ -613,7 +613,7 @@ mod tests {
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
-            bloom_filter_config: BloomFilterConfig::default(),
+            bloom_filter_index_config: BloomFilterConfig::default(),
         }
         .build()
         .await;
@@ -638,7 +638,7 @@ mod tests {
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
-            bloom_filter_config: BloomFilterConfig::default(),
+            bloom_filter_index_config: BloomFilterConfig::default(),
         }
         .build()
         .await;
@@ -663,7 +663,7 @@ mod tests {
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
-            bloom_filter_config: BloomFilterConfig::default(),
+            bloom_filter_index_config: BloomFilterConfig::default(),
         }
         .build()
         .await;
@@ -695,7 +695,7 @@ mod tests {
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
-            bloom_filter_config: BloomFilterConfig::default(),
+            bloom_filter_index_config: BloomFilterConfig::default(),
         }
         .build()
         .await;

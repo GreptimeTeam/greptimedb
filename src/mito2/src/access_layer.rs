@@ -154,7 +154,7 @@ impl AccessLayer {
                 index_options: request.index_options,
                 inverted_index_config: request.inverted_index_config,
                 fulltext_index_config: request.fulltext_index_config,
-                bloom_filter_config: request.bloom_filter_config,
+                bloom_filter_index_config: request.bloom_filter_index_config,
             }
             .build()
             .await;
@@ -199,7 +199,7 @@ pub(crate) struct SstWriteRequest {
     pub(crate) index_options: IndexOptions,
     pub(crate) inverted_index_config: InvertedIndexConfig,
     pub(crate) fulltext_index_config: FulltextIndexConfig,
-    pub(crate) bloom_filter_config: BloomFilterConfig,
+    pub(crate) bloom_filter_index_config: BloomFilterConfig,
 }
 
 pub(crate) async fn new_fs_cache_store(root: &str) -> Result<ObjectStore> {

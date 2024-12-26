@@ -576,37 +576,37 @@ apply_on_query = "auto"
 ## - `[size]` e.g. `64MB`: fixed memory threshold
 mem_threshold_on_create = "auto"
 
-## The options for bloom filter in Mito engine.
-[region_engine.mito.bloom_filter]
+## The options for bloom filter index in Mito engine.
+[region_engine.mito.bloom_filter_index]
 
-## Whether to create the bloom filter on flush.
+## Whether to create the index on flush.
 ## - `auto`: automatically (default)
 ## - `disable`: never
 create_on_flush = "auto"
 
-## Whether to create the bloom filter on compaction.
+## Whether to create the index on compaction.
 ## - `auto`: automatically (default)
 ## - `disable`: never
 create_on_compaction = "auto"
 
-## Whether to apply the bloom filter on query
+## Whether to apply the index on query
 ## - `auto`: automatically (default)
 ## - `disable`: never
 apply_on_query = "auto"
 
-## Memory threshold for bloom filter creation.
+## Memory threshold for the index creation.
 ## - `auto`: automatically determine the threshold based on the system memory size (default)
 ## - `unlimited`: no memory limit
 ## - `[size]` e.g. `64MB`: fixed memory threshold
 mem_threshold_on_create = "auto"
 
-## Cache size for bloom filter metadata.
+## Cache size for the index metadata.
 metadata_cache_size = "4MiB"
 
-## Cache size for bloom filter content.
+## Cache size for the index content.
 content_cache_size = "128MiB"
 
-## Page size for bloom filter content cache.
+## Page size for the index content cache.
 content_cache_page_size = "8MiB"
 
 [region_engine.mito.memtable]

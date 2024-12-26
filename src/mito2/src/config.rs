@@ -117,8 +117,8 @@ pub struct MitoConfig {
     pub inverted_index: InvertedIndexConfig,
     /// Full-text index configs.
     pub fulltext_index: FulltextIndexConfig,
-    /// Bloom filter configs.
-    pub bloom_filter: BloomFilterConfig,
+    /// Bloom filter index configs.
+    pub bloom_filter_index: BloomFilterConfig,
 
     /// Memtable config
     pub memtable: MemtableConfig,
@@ -157,7 +157,7 @@ impl Default for MitoConfig {
             index: IndexConfig::default(),
             inverted_index: InvertedIndexConfig::default(),
             fulltext_index: FulltextIndexConfig::default(),
-            bloom_filter: BloomFilterConfig::default(),
+            bloom_filter_index: BloomFilterConfig::default(),
             memtable: MemtableConfig::default(),
             min_compaction_interval: Duration::from_secs(0),
         };

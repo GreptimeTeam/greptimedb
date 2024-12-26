@@ -955,7 +955,7 @@ apply_on_query = "auto"
 mem_threshold_on_create = "auto"
 compress = true
 
-[region_engine.mito.bloom_filter]
+[region_engine.mito.bloom_filter_index]
 create_on_flush = "auto"
 create_on_compaction = "auto"
 apply_on_query = "auto"

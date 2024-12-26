@@ -620,7 +620,7 @@ apply_on_query = "auto"
 mem_threshold_on_create = "auto"
 
 ## The options for bloom filter in Mito engine.
-[region_engine.mito.bloom_filter]
+[region_engine.mito.bloom_filter_index]
 
 ## Whether to create the bloom filter on flush.
 ## - `auto`: automatically (default)
