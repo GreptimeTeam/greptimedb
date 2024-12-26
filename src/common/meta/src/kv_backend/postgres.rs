@@ -65,7 +65,7 @@ const RANGE_DELETE_LEFT_BOUNDED: &str = "DELETE FROM greptime_metakv WHERE k >= 
 const RANGE_DELETE_FULL_RANGE: &str =
     "DELETE FROM greptime_metakv WHERE k >= $1 AND K < $2 RETURNING k,v;";
 
-pub const CAS: &str = r#"
+const CAS: &str = r#"
 WITH prev AS (
     SELECT k,v FROM greptime_metakv WHERE k = $1 AND v = $2
 ), update AS (
@@ -79,7 +79,7 @@ WHERE
 SELECT k, v FROM prev;
 "#;
 
-pub const PUT_IF_NOT_EXISTS: &str = r#"    
+const PUT_IF_NOT_EXISTS: &str = r#"    
 WITH prev AS (
     select k,v from greptime_metakv where k = $1
 ), insert AS (

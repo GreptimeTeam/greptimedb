@@ -344,7 +344,7 @@ impl EtcdElection {
 
                 if let Err(e) = self
                     .leader_watcher
-                    .send(LeaderChangeMessage::Elected(Arc::new(leader.clone())))
+                    .send(LeaderChangeMessage::Elected(Arc::new(leader)))
                 {
                     error!(e; "Failed to send leader change message");
                 }

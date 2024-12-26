@@ -31,7 +31,7 @@ use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
 // Separator between value and expire time.
 const LEASE_SEP: &str = r#"||__metadata_lease_sep||"#;
 
-// SQL to put a value with expire time. Parameters: key, value, lease_prefix, expire_time
+// SQL to put a value with expire time. Parameters: key, value, LEASE_SEP, expire_time
 const PUT_IF_NOT_EXISTS_WITH_EXPIRE_TIME: &str = r#"
 WITH prev AS (
     SELECT k, v FROM greptime_metakv WHERE k = $1
@@ -44,7 +44,7 @@ WITH prev AS (
 SELECT k, v FROM prev;
 "#;
 
-// SQL to update a value with expire time. Parameters: key, prev_value_with_lease, updated_value, lease_prefix, expire_time
+// SQL to update a value with expire time. Parameters: key, prev_value_with_lease, updated_value, LEASE_SEP, expire_time
 const CAS_WITH_EXPIRE_TIME: &str = r#"
 UPDATE greptime_metakv
 SET k=$1,
@@ -59,7 +59,7 @@ const PREFIX_GET_WITH_CURRENT_TIMESTAMP: &str = r#"SELECT v, TO_CHAR(CURRENT_TIM
 
 const POINT_DELETE: &str = "DELETE FROM greptime_metakv WHERE k = $1 RETURNING k,v;";
 
-/// Parse the value and expire time from the given string. The value should be in the format "value || __metadata_lease_prefix || expire_time".
+/// Parse the value and expire time from the given string. The value should be in the format "value || LEASE_SEP || expire_time".
 fn parse_value_and_expire_time(value: &str) -> Result<(String, Timestamp)> {
     if let Some((value, expire_time)) = value.split(LEASE_SEP).collect_tuple() {
         // Given expire_time is in the format 'YYYY-MM-DD HH24:MI:SS.MS'
