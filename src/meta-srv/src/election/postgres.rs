@@ -230,6 +230,7 @@ impl PgElection {
         if res.is_empty() {
             Ok(None)
         } else {
+            // Safety: Checked if res is empty above.
             let current_time_str = res[0].get(1);
             let current_time = match Timestamp::from_str(current_time_str, None) {
                 Ok(ts) => ts,
@@ -238,7 +239,7 @@ impl PgElection {
                 }
                 .fail()?,
             };
-
+            // Safety: Checked if res is empty above.
             let value_and_expire_time = res[0].get(0);
             let (value, expire_time) = parse_value_and_expire_time(value_and_expire_time)?;
 

@@ -26,6 +26,8 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 #[cfg(feature = "pg_kvbackend")]
 use common_meta::kv_backend::postgres::PgStore;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
+#[cfg(feature = "pg_kvbackend")]
+use common_telemetry::error;
 use common_telemetry::info;
 use etcd_client::Client;
 use futures::future;
@@ -281,10 +283,9 @@ async fn create_postgres_client(opts: &MetasrvOptions) -> Result<tokio_postgres:
         .context(error::ConnectPostgresSnafu)?;
 
     tokio::spawn(async move {
-        connection
-            .await
-            .context(error::PostgresExecutionSnafu)
-            .unwrap()
+        if let Err(e) = connection.await {
+            error!(e; "connection error");
+        }
     });
     Ok(client)
 }
