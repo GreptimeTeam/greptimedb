@@ -135,6 +135,7 @@ lazy_static = "1.4"
 meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "a10facb353b41460eeb98578868ebf19c2084fac" }
 mockall = "0.11.4"
 moka = "0.12"
+nalgebra = "0.33"
 notify = "6.1"
 num_cpus = "1.16"
 once_cell = "1.18"
