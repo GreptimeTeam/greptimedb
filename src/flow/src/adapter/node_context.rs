@@ -20,7 +20,6 @@ use std::sync::Arc;
 
 use common_recordbatch::RecordBatch;
 use common_telemetry::trace;
-use common_telemetry::tracing_subscriber::field::debug;
 use datatypes::prelude::ConcreteDataType;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};

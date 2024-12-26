@@ -25,7 +25,7 @@ use common_error::ext::BoxedError;
 use common_meta::cache::{LayeredCacheRegistryRef, TableFlownodeSetCacheRef, TableRouteCacheRef};
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::flow::FlowMetadataManagerRef;
-use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::{FlowId, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::{Flownode, NodeManagerRef};
 use common_query::request::QueryRequest;
@@ -339,18 +339,20 @@ impl FlownodeBuilder {
     ///
     /// or recover all existing flow tasks if in standalone mode(nodeid is None)
     ///
+    /// return all flow ids that are successfully recovered
+    ///
     /// TODO(discord9): persistent flow tasks with internal state
     pub(crate) async fn recover_flows(
         &self,
         manager: &FlowWorkerManagerRef,
-    ) -> Result<usize, Error> {
+    ) -> Result<Vec<FlowId>, Error> {
         let nodeid = self.opts.node_id;
         let to_be_recovered =
             get_all_flow_ids(&self.flow_metadata_manager, &self.catalog_manager, nodeid).await?;
-        let cnt = to_be_recovered.len();
+        let mut did_recover = vec![];
 
         // TODO(discord9): recover in parallel
-        for flow_id in to_be_recovered {
+        'flow_id_loop: for flow_id in to_be_recovered {
             let info = self
                 .flow_metadata_manager
                 .flow_info_manager()
@@ -365,6 +367,20 @@ impl FlownodeBuilder {
                 info.sink_table_name().schema_name.clone(),
                 info.sink_table_name().table_name.clone(),
             ];
+
+            let source_table_ids = info.source_table_ids().to_vec();
+
+            for src in &source_table_ids {
+                if !manager.table_info_source().check_table_exist(src).await? {
+                    common_telemetry::error!(
+                        "source table_id={:?} not found, skip recover flow_id={:?}",
+                        src,
+                        flow_id
+                    );
+                    continue 'flow_id_loop;
+                }
+            }
+
             let args = CreateFlowArgs {
                 flow_id: flow_id as _,
                 sink_table_name,
@@ -385,9 +401,10 @@ impl FlownodeBuilder {
                 ),
             };
             manager.create_flow(args).await?;
+            did_recover.push(flow_id);
         }
 
-        Ok(cnt)
+        Ok(did_recover)
     }
 
     /// build [`FlowWorkerManager`], note this doesn't take ownership of `self`,

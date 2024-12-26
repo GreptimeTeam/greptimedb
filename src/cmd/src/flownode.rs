@@ -331,12 +331,15 @@ impl StartCommand {
             .set_frontend_invoker(invoker)
             .await;
 
-        flownode
+        if let Err(err) = flownode
             .flow_worker_manager()
             .create_and_start_refill_flow_tasks(&flow_metadata_manager, &(catalog_manager as _))
             .await
             .map_err(BoxedError::new)
-            .context(BuildCliSnafu)?;
+            .context(BuildCliSnafu)
+        {
+            common_telemetry::error!(?err, "Failed to create and start refill flow tasks");
+        }
 
         Ok(Instance::new(flownode, guard))
     }

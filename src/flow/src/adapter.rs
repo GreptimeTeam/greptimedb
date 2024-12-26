@@ -137,6 +137,7 @@ pub struct FlowWorkerManager {
     frontend_invoker: RwLock<Option<FrontendInvoker>>,
     /// contains mapping from table name to global id, and table schema
     node_context: RwLock<FlownodeContext>,
+    /// Contains all refill tasks
     refill_tasks: RwLock<BTreeMap<FlowId, RefillTask>>,
     flow_err_collectors: RwLock<BTreeMap<FlowId, ErrCollector>>,
     src_send_buf_lens: RwLock<BTreeMap<TableId, watch::Receiver<usize>>>,
@@ -734,6 +735,11 @@ impl CreateFlowArgs {
 
 /// Create&Remove flow
 impl FlowWorkerManager {
+    /// Get table info source
+    pub fn table_info_source(&self) -> &TableSource {
+        &self.table_info_source
+    }
+
     /// remove a flow by it's id
     pub async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
         for handle in self.worker_handles.iter() {

@@ -142,6 +142,16 @@ impl ManagedTableSource {
         Ok(ret)
     }
 
+    pub async fn check_table_exist(&self, table_id: &TableId) -> Result<bool, Error> {
+        Ok(self
+            .table_info_manager
+            .get(*table_id)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?
+            .is_some())
+    }
+
     /// query metasrv about the table name and table id
     pub async fn get_table_name(&self, table_id: &TableId) -> Result<TableName, Error> {
         self.table_info_manager

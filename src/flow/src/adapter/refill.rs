@@ -20,6 +20,7 @@ use common_error::ext::BoxedError;
 use common_meta::key::flow::FlowMetadataManagerRef;
 use common_recordbatch::{RecordBatch, RecordBatches, SendableRecordBatchStream};
 use common_runtime::JoinHandle;
+use common_telemetry::error;
 use datatypes::value::Value;
 use futures::StreamExt;
 use query::parser::QueryLanguageParser;
@@ -61,7 +62,7 @@ impl FlowWorkerManager {
 
         let flow_ids = get_all_flow_ids(flow_metadata_manager, catalog_manager, nodeid).await?;
         let mut refill_tasks = Vec::new();
-        for flow_id in flow_ids {
+        'flow_id_loop: for flow_id in flow_ids {
             let info = flow_metadata_manager
                 .flow_info_manager()
                 .get(flow_id)
@@ -69,6 +70,19 @@ impl FlowWorkerManager {
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?
                 .context(FlowNotFoundSnafu { id: flow_id })?;
+
+            // TODO(discord9): also check flow is already running
+            for src_table in info.source_table_ids() {
+                // check if source table still exists
+                if !self.table_info_source.check_table_exist(src_table).await? {
+                    error!(
+                        "Source table id = {:?} not found while refill flow_id={}, consider re-create the flow if necessary",
+                        src_table, flow_id
+                    );
+                    continue 'flow_id_loop;
+                }
+            }
+
             let expire_after = info.expire_after();
             // TODO(discord9): better way to get last point
             let now = self.tick_manager.tick();
