@@ -231,7 +231,6 @@ impl ScanRegion {
 
     /// Sets whether to ignore bloom filter.
     #[must_use]
-    #[allow(dead_code)] // TODO(ruihang): waiting for #5237
     pub(crate) fn with_ignore_bloom_filter(mut self, ignore: bool) -> Self {
         self.ignore_bloom_filter = ignore;
         self

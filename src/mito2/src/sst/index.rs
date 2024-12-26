@@ -33,7 +33,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, RegionId};
 
 use crate::access_layer::OperationType;
-use crate::config::{FulltextIndexConfig, InvertedIndexConfig};
+use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
 use crate::read::Batch;
 use crate::region::options::IndexOptions;
@@ -179,6 +179,7 @@ pub(crate) struct IndexerBuilder<'a> {
     pub(crate) index_options: IndexOptions,
     pub(crate) inverted_index_config: InvertedIndexConfig,
     pub(crate) fulltext_index_config: FulltextIndexConfig,
+    pub(crate) bloom_filter_index_config: BloomFilterConfig,
 }
 
 impl<'a> IndexerBuilder<'a> {
@@ -320,7 +321,10 @@ impl<'a> IndexerBuilder<'a> {
     }
 
     fn build_bloom_filter_indexer(&self) -> Option<BloomFilterIndexer> {
-        let create = true; // TODO(zhongzc): add config for bloom filter
+        let create = match self.op_type {
+            OperationType::Flush => self.bloom_filter_index_config.create_on_flush.auto(),
+            OperationType::Compact => self.bloom_filter_index_config.create_on_compaction.auto(),
+        };
 
         if !create {
             debug!(
@@ -330,7 +334,7 @@ impl<'a> IndexerBuilder<'a> {
             return None;
         }
 
-        let mem_limit = Some(16 * 1024 * 1024); // TODO(zhongzc): add config for bloom filter
+        let mem_limit = self.bloom_filter_index_config.mem_threshold_on_create();
         let indexer = BloomFilterIndexer::new(
             self.file_id,
             self.metadata,
@@ -496,6 +500,7 @@ mod tests {
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
+            bloom_filter_index_config: BloomFilterConfig::default(),
         }
         .build()
         .await;
@@ -530,12 +535,37 @@ mod tests {
                 ..Default::default()
             },
             fulltext_index_config: FulltextIndexConfig::default(),
+            bloom_filter_index_config: BloomFilterConfig::default(),
         }
         .build()
         .await;
 
         assert!(indexer.inverted_indexer.is_none());
         assert!(indexer.fulltext_indexer.is_some());
+        assert!(indexer.bloom_filter_indexer.is_some());
+
+        let indexer = IndexerBuilder {
+            op_type: OperationType::Compact,
+            file_id: FileId::random(),
+            file_path: "test".to_string(),
+            metadata: &metadata,
+            row_group_size: 1024,
+            puffin_manager: factory.build(mock_object_store()),
+            intermediate_manager: intm_manager.clone(),
+            index_options: IndexOptions::default(),
+            inverted_index_config: InvertedIndexConfig::default(),
+            fulltext_index_config: FulltextIndexConfig {
+                create_on_compaction: Mode::Disable,
+                ..Default::default()
+            },
+            bloom_filter_index_config: BloomFilterConfig::default(),
+        }
+        .build()
+        .await;
+
+        assert!(indexer.inverted_indexer.is_some());
+        assert!(indexer.fulltext_indexer.is_none());
+        assert!(indexer.bloom_filter_indexer.is_some());
 
         let indexer = IndexerBuilder {
             op_type: OperationType::Compact,
@@ -547,7 +577,8 @@ mod tests {
             intermediate_manager: intm_manager,
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
-            fulltext_index_config: FulltextIndexConfig {
+            fulltext_index_config: FulltextIndexConfig::default(),
+            bloom_filter_index_config: BloomFilterConfig {
                 create_on_compaction: Mode::Disable,
                 ..Default::default()
             },
@@ -556,7 +587,8 @@ mod tests {
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
-        assert!(indexer.fulltext_indexer.is_none());
+        assert!(indexer.fulltext_indexer.is_some());
+        assert!(indexer.bloom_filter_indexer.is_none());
     }
 
     #[tokio::test]
@@ -581,6 +613,7 @@ mod tests {
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
+            bloom_filter_index_config: BloomFilterConfig::default(),
         }
         .build()
         .await;
@@ -605,6 +638,7 @@ mod tests {
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
+            bloom_filter_index_config: BloomFilterConfig::default(),
         }
         .build()
         .await;
@@ -629,6 +663,7 @@ mod tests {
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
+            bloom_filter_index_config: BloomFilterConfig::default(),
         }
         .build()
         .await;
@@ -660,6 +695,7 @@ mod tests {
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
+            bloom_filter_index_config: BloomFilterConfig::default(),
         }
         .build()
         .await;
