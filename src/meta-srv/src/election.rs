@@ -13,11 +13,12 @@
 // limitations under the License.
 
 pub mod etcd;
+#[cfg(feature = "pg_kvbackend")]
+pub mod postgres;
 
-use std::fmt;
+use std::fmt::{self, Debug};
 use std::sync::Arc;
 
-use etcd_client::LeaderKey;
 use tokio::sync::broadcast::Receiver;
 
 use crate::error::Result;
@@ -26,10 +27,31 @@ use crate::metasrv::MetasrvNodeInfo;
 pub const ELECTION_KEY: &str = "__metasrv_election";
 pub const CANDIDATES_ROOT: &str = "__metasrv_election_candidates/";
 
+pub(crate) const CANDIDATE_LEASE_SECS: u64 = 600;
+const KEEP_ALIVE_INTERVAL_SECS: u64 = CANDIDATE_LEASE_SECS / 2;
+
+/// Messages sent when the leader changes.
 #[derive(Debug, Clone)]
 pub enum LeaderChangeMessage {
-    Elected(Arc<LeaderKey>),
-    StepDown(Arc<LeaderKey>),
+    Elected(Arc<dyn LeaderKey>),
+    StepDown(Arc<dyn LeaderKey>),
+}
+
+/// LeaderKey is a key that represents the leader of metasrv.
+/// The structure is corresponding to [etcd_client::LeaderKey].
+pub trait LeaderKey: Send + Sync + Debug {
+    /// The name in byte. name is the election identifier that corresponds to the leadership key.
+    fn name(&self) -> &[u8];
+
+    /// The key in byte. key is an opaque key representing the ownership of the election. If the key
+    /// is deleted, then leadership is lost.
+    fn key(&self) -> &[u8];
+
+    /// The creation revision of the key.
+    fn revision(&self) -> i64;
+
+    /// The lease ID of the election leader.
+    fn lease_id(&self) -> i64;
 }
 
 impl fmt::Display for LeaderChangeMessage {
@@ -47,8 +69,8 @@ impl fmt::Display for LeaderChangeMessage {
         write!(f, "LeaderKey {{ ")?;
         write!(f, "name: {}", String::from_utf8_lossy(leader_key.name()))?;
         write!(f, ", key: {}", String::from_utf8_lossy(leader_key.key()))?;
-        write!(f, ", rev: {}", leader_key.rev())?;
-        write!(f, ", lease: {}", leader_key.lease())?;
+        write!(f, ", rev: {}", leader_key.revision())?;
+        write!(f, ", lease: {}", leader_key.lease_id())?;
         write!(f, " }})")
     }
 }
@@ -65,7 +87,7 @@ pub trait Election: Send + Sync {
     /// initialization operations can be performed.
     ///
     /// note: a new leader will only return true on the first call.
-    fn in_infancy(&self) -> bool;
+    fn in_leader_infancy(&self) -> bool;
 
     /// Registers a candidate for the election.
     async fn register_candidate(&self, node_info: &MetasrvNodeInfo) -> Result<()>;
