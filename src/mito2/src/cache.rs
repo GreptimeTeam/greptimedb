@@ -28,6 +28,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
+use index::bloom_filter_index::{BloomFilterIndexCache, BloomFilterIndexCacheRef};
 use moka::notification::RemovalCause;
 use moka::sync::Cache;
 use parquet::column::page::Page;
@@ -69,6 +70,8 @@ pub struct CacheManager {
     write_cache: Option<WriteCacheRef>,
     /// Cache for inverted index.
     index_cache: Option<InvertedIndexCacheRef>,
+    /// Cache for bloom filter index.
+    bloom_filter_index_cache: Option<BloomFilterIndexCacheRef>,
     /// Puffin metadata cache.
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
     /// Cache for time series selectors.
@@ -221,6 +224,10 @@ impl CacheManager {
         self.index_cache.as_ref()
     }
 
+    pub(crate) fn bloom_filter_index_cache(&self) -> Option<&BloomFilterIndexCacheRef> {
+        self.bloom_filter_index_cache.as_ref()
+    }
+
     pub(crate) fn puffin_metadata_cache(&self) -> Option<&PuffinMetadataCacheRef> {
         self.puffin_metadata_cache.as_ref()
     }
@@ -364,6 +371,12 @@ impl CacheManagerBuilder {
             self.index_content_size,
             self.index_content_page_size,
         );
+        // TODO(ruihang): check if it's ok to reuse the same param with inverted index
+        let bloom_filter_index_cache = BloomFilterIndexCache::new(
+            self.index_metadata_size,
+            self.index_content_size,
+            self.index_content_page_size,
+        );
         let puffin_metadata_cache =
             PuffinMetadataCache::new(self.puffin_metadata_size, &CACHE_BYTES);
         let selector_result_cache = (self.selector_result_cache_size != 0).then(|| {
@@ -387,6 +400,7 @@ impl CacheManagerBuilder {
             page_cache,
             write_cache: self.write_cache,
             index_cache: Some(Arc::new(inverted_index_cache)),
+            bloom_filter_index_cache: Some(Arc::new(bloom_filter_index_cache)),
             puffin_metadata_cache: Some(Arc::new(puffin_metadata_cache)),
             selector_result_cache,
         }

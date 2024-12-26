@@ -44,7 +44,7 @@ use crate::sst::index::inverted_index::creator::InvertedIndexer;
 
 pub(crate) const TYPE_INVERTED_INDEX: &str = "inverted_index";
 pub(crate) const TYPE_FULLTEXT_INDEX: &str = "fulltext_index";
-pub(crate) const TYPE_BLOOM_FILTER: &str = "bloom_filter";
+pub(crate) const TYPE_BLOOM_FILTER_INDEX: &str = "bloom_filter_index";
 
 /// Output of the index creation.
 #[derive(Debug, Clone, Default)]
@@ -69,7 +69,7 @@ impl IndexOutput {
             indexes.push(IndexType::FulltextIndex);
         }
         if self.bloom_filter.is_available() {
-            indexes.push(IndexType::BloomFilter);
+            indexes.push(IndexType::BloomFilterIndex);
         }
         indexes
     }
@@ -162,7 +162,7 @@ impl Indexer {
             .as_ref()
             .map_or(0, |creator| creator.memory_usage());
         INDEX_CREATE_MEMORY_USAGE
-            .with_label_values(&[TYPE_BLOOM_FILTER])
+            .with_label_values(&[TYPE_BLOOM_FILTER_INDEX])
             .add(bloom_filter_mem as i64 - self.last_mem_bloom_filter as i64);
         self.last_mem_bloom_filter = bloom_filter_mem;
     }
