@@ -697,7 +697,7 @@ jobs:
         working-directory: tests-integration/fixtures/postgres
         run: docker compose -f docker-compose-standalone.yml up -d --wait
       - name: Run nextest cases
-        run: cargo llvm-cov nextest --features all --workspace --lcov --output-path lcov.info -F pyo3_backend -F dashboard
+        run: cargo llvm-cov nextest --features all-features --workspace --lcov --output-path lcov.info -F pyo3_backend -F dashboard
         env:
           CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
           RUST_BACKTRACE: 1
