@@ -619,6 +619,30 @@ apply_on_query = "auto"
 ## - `[size]` e.g. `64MB`: fixed memory threshold
 mem_threshold_on_create = "auto"
 
+## The options for bloom filter in Mito engine.
+[region_engine.mito.bloom_filter_index]
+
+## Whether to create the bloom filter on flush.
+## - `auto`: automatically (default)
+## - `disable`: never
+create_on_flush = "auto"
+
+## Whether to create the bloom filter on compaction.
+## - `auto`: automatically (default)
+## - `disable`: never
+create_on_compaction = "auto"
+
+## Whether to apply the bloom filter on query
+## - `auto`: automatically (default)
+## - `disable`: never
+apply_on_query = "auto"
+
+## Memory threshold for bloom filter creation.
+## - `auto`: automatically determine the threshold based on the system memory size (default)
+## - `unlimited`: no memory limit
+## - `[size]` e.g. `64MB`: fixed memory threshold
+mem_threshold_on_create = "auto"
+
 [region_engine.mito.memtable]
 ## Memtable type.
 ## - `time_series`: time-series memtable
