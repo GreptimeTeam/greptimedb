@@ -282,10 +282,10 @@ impl ScanHintVisitor {
 mod test {
     use std::sync::Arc;
 
-    use datafusion_expr::expr::{AggregateFunction, AggregateFunctionDefinition};
+    use datafusion::functions_aggregate::first_last::last_value_udaf;
+    use datafusion_expr::expr::AggregateFunction;
     use datafusion_expr::{col, LogicalPlanBuilder};
     use datafusion_optimizer::OptimizerContext;
-    use datafusion_physical_expr::expressions::LastValue;
     use store_api::storage::RegionId;
 
     use super::*;
@@ -330,7 +330,7 @@ mod test {
             .aggregate(
                 vec![col("k0")],
                 vec![Expr::AggregateFunction(AggregateFunction {
-                    func_def: AggregateFunctionDefinition::UDF(Arc::new(LastValue::new().into())),
+                    func: last_value_udaf(),
                     args: vec![col("v0")],
                     distinct: false,
                     filter: None,

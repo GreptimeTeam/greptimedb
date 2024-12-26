@@ -24,13 +24,12 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use arrow::array::ArrayRef;
-use arrow::compute::{concat, take_record_batch};
+use arrow::compute::{concat, concat_batches, take_record_batch};
 use arrow_schema::SchemaRef;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
 use datafusion::common::arrow::compute::sort_to_indices;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::execution::{RecordBatchStream, TaskContext};
-use datafusion::physical_plan::coalesce_batches::concat_batches;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties, TopK,
@@ -459,12 +458,7 @@ impl PartSortStream {
         let total_mem: usize = buffer.iter().map(|r| r.get_array_memory_size()).sum();
         self.reservation.try_grow(total_mem * 2)?;
 
-        let full_input = concat_batches(
-            &self.schema,
-            &buffer,
-            buffer.iter().map(|r| r.num_rows()).sum(),
-        )
-        .map_err(|e| {
+        let full_input = concat_batches(&self.schema, &buffer).map_err(|e| {
             DataFusionError::ArrowError(
                 e,
                 Some(format!(

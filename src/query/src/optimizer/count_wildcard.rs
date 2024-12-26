@@ -17,7 +17,7 @@ use datafusion_common::tree_node::{
     Transformed, TransformedResult, TreeNode, TreeNodeRecursion, TreeNodeVisitor,
 };
 use datafusion_common::{Column, Result as DataFusionResult};
-use datafusion_expr::expr::{AggregateFunction, AggregateFunctionDefinition, WindowFunction};
+use datafusion_expr::expr::{AggregateFunction, WindowFunction};
 use datafusion_expr::utils::COUNT_STAR_EXPANSION;
 use datafusion_expr::{col, lit, Expr, LogicalPlan, WindowFunctionDefinition};
 use datafusion_optimizer::utils::NamePreserver;
@@ -105,27 +105,23 @@ impl CountWildcardToTimeIndexRule {
 /// Utility functions from the original rule.
 impl CountWildcardToTimeIndexRule {
     fn is_wildcard(expr: &Expr) -> bool {
-        matches!(expr, Expr::Wildcard { qualifier: None })
+        matches!(expr, Expr::Wildcard { .. })
     }
 
     fn is_count_star_aggregate(aggregate_function: &AggregateFunction) -> bool {
-        matches!(
-            &aggregate_function.func_def,
-            AggregateFunctionDefinition::BuiltIn(
-                datafusion_expr::aggregate_function::AggregateFunction::Count,
-            )
-        ) && aggregate_function.args.len() == 1
-            && Self::is_wildcard(&aggregate_function.args[0])
+        matches!(aggregate_function,
+            AggregateFunction {
+                func,
+                args,
+                ..
+            } if func.name() == "count" && (args.len() == 1 && Self::is_wildcard(&args[0]) || args.is_empty()))
     }
 
     fn is_count_star_window_aggregate(window_function: &WindowFunction) -> bool {
-        matches!(
-            &window_function.fun,
-            WindowFunctionDefinition::AggregateFunction(
-                datafusion_expr::aggregate_function::AggregateFunction::Count,
-            )
-        ) && window_function.args.len() == 1
-            && Self::is_wildcard(&window_function.args[0])
+        let args = &window_function.args;
+        matches!(window_function.fun,
+                WindowFunctionDefinition::AggregateUDF(ref udaf)
+                    if udaf.name() == "count" && (args.len() == 1 && Self::is_wildcard(&args[0]) || args.is_empty()))
     }
 }
 
@@ -187,7 +183,8 @@ impl TimeIndexFinder {
 mod test {
     use std::sync::Arc;
 
-    use datafusion_expr::{count, wildcard, LogicalPlanBuilder};
+    use datafusion::functions_aggregate::count::count;
+    use datafusion_expr::{wildcard, LogicalPlanBuilder};
     use table::table::numbers::NumbersTable;
 
     use super::*;

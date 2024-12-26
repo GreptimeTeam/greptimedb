@@ -22,7 +22,13 @@ use common_query::prelude::GREPTIME_VALUE;
 use datafusion::common::{DFSchemaRef, Result as DfResult};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::context::SessionState;
-use datafusion::functions_aggregate::sum;
+use datafusion::functions_aggregate::average::avg_udaf;
+use datafusion::functions_aggregate::count::count_udaf;
+use datafusion::functions_aggregate::grouping::grouping_udaf;
+use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
+use datafusion::functions_aggregate::stddev::stddev_pop_udaf;
+use datafusion::functions_aggregate::sum::sum_udaf;
+use datafusion::functions_aggregate::variance::var_pop_udaf;
 use datafusion::logical_expr::expr::{
     AggregateFunction, AggregateFunctionDefinition, Alias, ScalarFunction,
 };
@@ -1478,18 +1484,14 @@ impl PromPlanner {
         input_plan: &LogicalPlan,
     ) -> Result<Vec<DfExpr>> {
         let aggr = match op.id() {
-            token::T_SUM => AggregateFunctionDefinition::UDF(sum::sum_udaf()),
-            token::T_AVG => AggregateFunctionDefinition::BuiltIn(AggregateFunctionEnum::Avg),
-            token::T_COUNT => AggregateFunctionDefinition::BuiltIn(AggregateFunctionEnum::Count),
-            token::T_MIN => AggregateFunctionDefinition::BuiltIn(AggregateFunctionEnum::Min),
-            token::T_MAX => AggregateFunctionDefinition::BuiltIn(AggregateFunctionEnum::Max),
-            token::T_GROUP => AggregateFunctionDefinition::BuiltIn(AggregateFunctionEnum::Grouping),
-            token::T_STDDEV => {
-                AggregateFunctionDefinition::BuiltIn(AggregateFunctionEnum::StddevPop)
-            }
-            token::T_STDVAR => {
-                AggregateFunctionDefinition::BuiltIn(AggregateFunctionEnum::VariancePop)
-            }
+            token::T_SUM => sum_udaf(),
+            token::T_AVG => avg_udaf(),
+            token::T_COUNT => count_udaf(),
+            token::T_MIN => min_udaf(),
+            token::T_MAX => max_udaf(),
+            token::T_GROUP => grouping_udaf(),
+            token::T_STDDEV => stddev_pop_udaf(),
+            token::T_STDVAR => var_pop_udaf(),
             token::T_TOPK | token::T_BOTTOMK | token::T_COUNT_VALUES | token::T_QUANTILE => {
                 UnsupportedExprSnafu {
                     name: format!("{op:?}"),
@@ -1506,7 +1508,7 @@ impl PromPlanner {
             .iter()
             .map(|col| {
                 DfExpr::AggregateFunction(AggregateFunction {
-                    func_def: aggr.clone(),
+                    func: aggr.clone(),
                     args: vec![DfExpr::Column(Column::from_name(col))],
                     distinct: false,
                     filter: None,

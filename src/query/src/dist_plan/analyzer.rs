@@ -376,8 +376,9 @@ mod test {
     use std::sync::Arc;
 
     use datafusion::datasource::DefaultTableSource;
+    use datafusion::functions_aggregate::expr_fn::avg;
     use datafusion_common::JoinType;
-    use datafusion_expr::{avg, col, lit, Expr, LogicalPlanBuilder};
+    use datafusion_expr::{col, lit, Expr, LogicalPlanBuilder};
     use table::table::adapter::DfTableProviderAdapter;
     use table::table::numbers::NumbersTable;
 
