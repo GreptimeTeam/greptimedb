@@ -14,12 +14,13 @@
 
 use std::sync::Arc;
 
+use common_function::scalars::vector::impl_conv::veclit_to_binlit;
 use common_recordbatch::RecordBatch;
 use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::types::WrapperType;
-use datatypes::vectors::Helper;
+use datatypes::vectors::{BinaryVector, Helper};
 use rand::Rng;
 use table::test_util::MemTable;
 
@@ -50,6 +51,34 @@ pub fn create_query_engine() -> QueryEngineRef {
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
     let number_table = MemTable::table("numbers", recordbatch);
     new_query_engine_with_table(number_table)
+}
+
+pub fn create_query_engine_for_vector10x3() -> QueryEngineRef {
+    let mut column_schemas = vec![];
+    let mut columns = vec![];
+    let mut rng = rand::thread_rng();
+
+    let column_name = "vector";
+    let column_schema = ColumnSchema::new(column_name, ConcreteDataType::binary_datatype(), true);
+    column_schemas.push(column_schema);
+
+    let vectors = (0..10)
+        .map(|_| {
+            let veclit = [
+                rng.gen_range(-100f32..100.0),
+                rng.gen_range(-100f32..100.0),
+                rng.gen_range(-100f32..100.0),
+            ];
+            veclit_to_binlit(&veclit)
+        })
+        .collect::<Vec<_>>();
+    let column: VectorRef = Arc::new(BinaryVector::from(vectors));
+    columns.push(column);
+
+    let schema = Arc::new(Schema::new(column_schemas.clone()));
+    let recordbatch = RecordBatch::new(schema, columns).unwrap();
+    let vector_table = MemTable::table("vectors", recordbatch);
+    new_query_engine_with_table(vector_table)
 }
 
 pub async fn get_numbers_from_table<'s, T>(

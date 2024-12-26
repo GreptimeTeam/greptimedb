@@ -9105,6 +9105,7 @@ dependencies = [
  "log-query",
  "meter-core",
  "meter-macros",
+ "nalgebra 0.33.2",
  "num",
  "num-traits",
  "object-store",
