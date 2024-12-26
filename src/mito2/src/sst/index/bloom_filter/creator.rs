@@ -39,7 +39,7 @@ use crate::sst::index::intermediate::{
 };
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
-use crate::sst::index::TYPE_BLOOM_FILTER;
+use crate::sst::index::TYPE_BLOOM_FILTER_INDEX;
 
 /// The buffer size for the pipe used to send index data to the puffin blob.
 const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
@@ -114,7 +114,7 @@ impl BloomFilterIndexer {
             temp_file_provider,
             codec,
             aborted: false,
-            stats: Statistics::new(TYPE_BLOOM_FILTER),
+            stats: Statistics::new(TYPE_BLOOM_FILTER_INDEX),
             global_memory_usage,
         };
         Ok(Some(indexer))

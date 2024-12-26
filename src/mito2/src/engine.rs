@@ -433,6 +433,7 @@ impl EngineInner {
         .with_parallel_scan_channel_size(self.config.parallel_scan_channel_size)
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
+        // .with_ignore_bloom_filter(self.config.bloom_filter_index.apply_on_query.disabled()) // TODO(ruihang): wait for #5237
         .with_start_time(query_start);
 
         Ok(scan_region)
