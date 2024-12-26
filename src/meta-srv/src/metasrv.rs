@@ -70,6 +70,8 @@ use crate::state::{become_follower, become_leader, StateRef};
 pub const TABLE_ID_SEQ: &str = "table_id";
 pub const FLOW_ID_SEQ: &str = "flow_id";
 pub const METASRV_HOME: &str = "/tmp/metasrv";
+#[cfg(feature = "pg_kvbackend")]
+pub const PG_TABLE_NAME: &str = "greptime_metakv";
 
 // The datastores that implements metadata kvbackend.
 #[derive(Clone, Debug, PartialEq, Serialize, Default, Deserialize, ValueEnum)]
@@ -139,6 +141,9 @@ pub struct MetasrvOptions {
     pub tracing: TracingOptions,
     /// The datastore for kv metadata.
     pub backend: BackendImpl,
+    #[cfg(feature = "pg_kvbackend")]
+    /// Postgres table name for PG backend.
+    pub meta_table_name: String,
 }
 
 impl Default for MetasrvOptions {
@@ -173,6 +178,8 @@ impl Default for MetasrvOptions {
             flush_stats_factor: 3,
             tracing: TracingOptions::default(),
             backend: BackendImpl::EtcdStore,
+            #[cfg(feature = "pg_kvbackend")]
+            meta_table_name: PG_TABLE_NAME.to_string(),
         }
     }
 }
