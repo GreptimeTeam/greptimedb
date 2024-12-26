@@ -29,3 +29,11 @@ SELECT vec_elem_sum('[-1.0, -2.0, -3.0]');
 SELECT vec_elem_sum(parse_vec('[1.0, 2.0, 3.0]'));
 
 SELECT vec_elem_sum(parse_vec('[-1.0, -2.0, -3.0]'));
+
+SELECT vec_to_string(vec_div('[1.0, 2.0]', '[3.0, 4.0]'));
+
+SELECT vec_to_string(vec_div(parse_vec('[1.0, 2.0]'), '[3.0, 4.0]'));
+
+SELECT vec_to_string(vec_div('[1.0, 2.0]', parse_vec('[3.0, 4.0]')));
+
+SELECT vec_to_string(vec_div('[1.0, -2.0]', parse_vec('[0.0, 0.0]')));
