@@ -527,13 +527,6 @@ pub struct BloomFilterConfig {
     pub apply_on_query: Mode,
     /// Memory threshold for creating the index.
     pub mem_threshold_on_create: MemoryThreshold,
-
-    /// Cache size for metadata of the index. Setting it to 0 to disable the cache.
-    pub metadata_cache_size: ReadableSize,
-    /// Cache size for the index content. Setting it to 0 to disable the cache.
-    pub content_cache_size: ReadableSize,
-    /// Page size for the index content.
-    pub content_cache_page_size: ReadableSize,
 }
 
 impl Default for BloomFilterConfig {
@@ -543,9 +536,6 @@ impl Default for BloomFilterConfig {
             create_on_compaction: Mode::Auto,
             apply_on_query: Mode::Auto,
             mem_threshold_on_create: MemoryThreshold::Auto,
-            metadata_cache_size: ReadableSize::mb(4),
-            content_cache_size: ReadableSize::mb(128),
-            content_cache_page_size: ReadableSize::mb(8),
         }
     }
 }

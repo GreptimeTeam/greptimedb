@@ -643,15 +643,6 @@ apply_on_query = "auto"
 ## - `[size]` e.g. `64MB`: fixed memory threshold
 mem_threshold_on_create = "auto"
 
-## Cache size for bloom filter metadata.
-metadata_cache_size = "4MiB"
-
-## Cache size for bloom filter content.
-content_cache_size = "128MiB"
-
-## Page size for bloom filter content cache.
-content_cache_page_size = "8MiB"
-
 [region_engine.mito.memtable]
 ## Memtable type.
 ## - `time_series`: time-series memtable
