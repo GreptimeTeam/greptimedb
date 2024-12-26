@@ -32,3 +32,5 @@ EXPLAIN ANALYZE SELECT * FROM skipping_table WHERE id = 'id2' ORDER BY `name`;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 EXPLAIN ANALYZE SELECT * FROM skipping_table WHERE id = 'id5' ORDER BY `name`;
+
+DROP TABLE IF EXISTS skipping_table;
