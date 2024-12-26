@@ -139,7 +139,7 @@ async fn unstable_execute_parallel_alter_table(ctx: FuzzContext, input: FuzzInpu
     let mut action = 0;
     while action < input.actions {
         let expr = generate_alter_table_add_column_expr(table_ctx.clone(), &mut rng).unwrap();
-        if let AlterTableOperation::AddColumn { column, .. } = &expr.alter_options {
+        if let AlterTableOperation::AddColumn { column, .. } = &expr.alter_kinds {
             if used_column_names.contains(&column.name) {
                 info!("Column name already used: {}, retrying", column.name.value);
                 continue;
@@ -149,7 +149,7 @@ async fn unstable_execute_parallel_alter_table(ctx: FuzzContext, input: FuzzInpu
         }
         let translator = AlterTableExprTranslator;
         let sql = translator.translate(&expr)?;
-        if let AlterTableOperation::AddColumn { .. } = expr.alter_options {
+        if let AlterTableOperation::AddColumn { .. } = expr.alter_kinds {
             // Applies changes
             after_all_alter_table_ctx = Arc::new(
                 Arc::unwrap_or_clone(after_all_alter_table_ctx)
