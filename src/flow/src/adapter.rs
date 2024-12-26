@@ -60,6 +60,7 @@ use crate::error::{
 };
 use crate::expr::Batch;
 use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_ROWS, METRIC_FLOW_RUN_INTERVAL_MS};
+use crate::plan::TypedPlan;
 use crate::repr::{self, DiffRow, RelationDesc, Row, BATCH_SIZE};
 
 mod flownode_impl;
@@ -753,6 +754,108 @@ impl FlowWorkerManager {
         Ok(())
     }
 
+    /// adjust flow plan's time index to match real table schema
+    async fn fix_time_index_for_flow_plan(
+        &self,
+        flow_plan: &TypedPlan,
+        real_schema: &[ColumnSchema],
+    ) -> Result<TypedPlan, Error> {
+        todo!()
+    }
+
+    ///// check schema against actual table schema if exists
+    /// if not exist create sink table immediately
+    async fn valid_or_create_sink_table(
+        &self,
+        flow_id: FlowId,
+        flow_plan: &TypedPlan,
+        sink_table_name: &TableName,
+        node_ctx: &mut FlownodeContext,
+    ) -> Result<(), Error> {
+        if let Some((_, _, real_schema)) = self.fetch_table_pk_schema(sink_table_name).await? {
+            let auto_schema = relation_desc_to_column_schemas_with_fallback(&flow_plan.schema);
+
+            // for column schema, only `data_type` need to be check for equality
+            // since one can omit flow's column name when write flow query
+            // print a user friendly error message about mismatch and how to correct them
+            for (idx, zipped) in auto_schema
+                .iter()
+                .zip_longest(real_schema.iter())
+                .enumerate()
+            {
+                match zipped {
+                    EitherOrBoth::Both(auto, real) => {
+                        if auto.data_type != real.data_type {
+                            InvalidQuerySnafu {
+                                    reason: format!(
+                                        "Column {}(name is '{}', flow inferred name is '{}')'s data type mismatch, expect {:?} got {:?}",
+                                        idx,
+                                        real.name,
+                                        auto.name,
+                                        real.data_type,
+                                        auto.data_type
+                                    ),
+                                }
+                                .fail()?;
+                        }
+                    }
+                    EitherOrBoth::Right(real) if real.data_type.is_timestamp() => {
+                        // if table is auto created, the last one or two column should be timestamp(update at and ts placeholder)
+                        continue;
+                    }
+                    _ => InvalidQuerySnafu {
+                        reason: format!(
+                            "schema length mismatched, expected {} found {}",
+                            real_schema.len(),
+                            auto_schema.len()
+                        ),
+                    }
+                    .fail()?,
+                }
+            }
+
+            let table_id = self
+                .table_info_source
+                .get_table_id_from_name(sink_table_name)
+                .await?
+                .context(UnexpectedSnafu {
+                    reason: format!("Can't get table id for table name {:?}", sink_table_name),
+                })?;
+            let table_info_value = self
+                .table_info_source
+                .get_table_info_value(&table_id)
+                .await?
+                .context(UnexpectedSnafu {
+                    reason: format!("Can't get table info value for table id {:?}", table_id),
+                })?;
+            let real_schema = table_info_value_to_relation_desc(table_info_value)?;
+            node_ctx.assign_table_schema(sink_table_name, real_schema.clone())?;
+        } else {
+            // assign inferred schema to sink table
+            // create sink table
+            node_ctx.assign_table_schema(sink_table_name, flow_plan.schema.clone())?;
+            let did_create = self
+                .create_table_from_relation(
+                    &format!("flow-id={flow_id}"),
+                    sink_table_name,
+                    &flow_plan.schema,
+                )
+                .await?;
+            if !did_create {
+                UnexpectedSnafu {
+                    reason: format!("Failed to create table {:?}", sink_table_name),
+                }
+                .fail()?;
+            }
+        }
+
+        node_ctx.add_flow_plan(flow_id, flow_plan.clone());
+
+        debug!("Flow {:?}'s Plan is {:?}", flow_id, flow_plan);
+
+        Ok(())
+    }
+
     /// Return task id if a new task is created, otherwise return None
     ///
     /// steps to create task:
@@ -827,70 +930,10 @@ impl FlowWorkerManager {
         // construct a active dataflow state with it
         let flow_plan = sql_to_flow_plan(&mut node_ctx, &self.query_engine, &sql).await?;
 
-        node_ctx.add_flow_plan(flow_id, flow_plan.clone());
-
-        debug!("Flow {:?}'s Plan is {:?}", flow_id, flow_plan);
-
         // check schema against actual table schema if exists
         // if not exist create sink table immediately
-        if let Some((_, _, real_schema)) = self.fetch_table_pk_schema(&sink_table_name).await? {
-            let auto_schema = relation_desc_to_column_schemas_with_fallback(&flow_plan.schema);
-
-            // for column schema, only `data_type` need to be check for equality
-            // since one can omit flow's column name when write flow query
-            // print a user friendly error message about mismatch and how to correct them
-            for (idx, zipped) in auto_schema
-                .iter()
-                .zip_longest(real_schema.iter())
-                .enumerate()
-            {
-                match zipped {
-                    EitherOrBoth::Both(auto, real) => {
-                        if auto.data_type != real.data_type {
-                            InvalidQuerySnafu {
-                                    reason: format!(
-                                        "Column {}(name is '{}', flow inferred name is '{}')'s data type mismatch, expect {:?} got {:?}",
-                                        idx,
-                                        real.name,
-                                        auto.name,
-                                        real.data_type,
-                                        auto.data_type
-                                    ),
-                                }
-                                .fail()?;
-                        }
-                    }
-                    EitherOrBoth::Right(real) if real.data_type.is_timestamp() => {
-                        // if table is auto created, the last one or two column should be timestamp(update at and ts placeholder)
-                        continue;
-                    }
-                    _ => InvalidQuerySnafu {
-                        reason: format!(
-                            "schema length mismatched, expected {} found {}",
-                            real_schema.len(),
-                            auto_schema.len()
-                        ),
-                    }
-                    .fail()?,
-                }
-            }
-        } else {
-            // assign inferred schema to sink table
-            // create sink table
-            let did_create = self
-                .create_table_from_relation(
-                    &format!("flow-id={flow_id}"),
-                    &sink_table_name,
-                    &flow_plan.schema,
-                )
-                .await?;
-            if !did_create {
-                UnexpectedSnafu {
-                    reason: format!("Failed to create table {:?}", sink_table_name),
-                }
-                .fail()?;
-            }
-        }
+        self.valid_or_create_sink_table(flow_id, &flow_plan, &sink_table_name, &mut node_ctx)
+            .await?;
 
         let _ = comment;
         let _ = flow_options;
