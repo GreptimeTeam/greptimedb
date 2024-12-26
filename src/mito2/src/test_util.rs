@@ -643,7 +643,6 @@ impl TestEnv {
             .await
             .unwrap();
 
-        let object_store_manager = self.get_object_store_manager().unwrap();
         let write_cache = WriteCache::new(local_store, capacity, None, puffin_mgr, intm_mgr)
             .await
             .unwrap();

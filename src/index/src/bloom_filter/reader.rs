@@ -38,7 +38,15 @@ pub trait BloomFilterReader {
     async fn range_read(&mut self, offset: u64, size: u32) -> Result<Bytes>;
 
     /// Reads bunch of ranges from the file.
-    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>>;
+    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+        let mut results = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            let size = (range.end - range.start) as u32;
+            let data = self.range_read(range.start, size).await?;
+            results.push(data);
+        }
+        Ok(results)
+    }
 
     /// Reads the meta information of the bloom filter.
     async fn metadata(&mut self) -> Result<BloomFilterMeta>;
