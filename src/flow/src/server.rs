@@ -55,10 +55,9 @@ use tonic::{Request, Response, Status};
 
 use crate::adapter::{CreateFlowArgs, FlowWorkerManagerRef};
 use crate::error::{
-    to_status_with_last_err, CacheRequiredSnafu, ExternalSnafu, FlowNotFoundSnafu, ListFlowsSnafu,
-    ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
-    FindTableRouteSnafu, 
-    RequestQuerySnafu,
+    to_status_with_last_err, CacheRequiredSnafu, ExternalSnafu, FindTableRouteSnafu,
+    FlowNotFoundSnafu, ListFlowsSnafu, ParseAddrSnafu, RequestQuerySnafu, ShutdownServerSnafu,
+    StartServerSnafu, UnexpectedSnafu,
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::metrics::{METRIC_FLOW_PROCESSING_TIME, METRIC_FLOW_ROWS};
@@ -582,10 +581,6 @@ impl FrontendInvoker {
             .await
             .map_err(BoxedError::new)
             .context(common_frontend::error::ExternalSnafu)
-    }
-
-    pub fn statement_executor(&self) -> Arc<StatementExecutor> {
-        self.statement_executor.clone()
     }
 }
 

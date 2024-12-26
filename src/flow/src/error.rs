@@ -20,9 +20,9 @@ use common_error::ext::BoxedError;
 use common_error::{define_into_tonic_status, from_err_code_msg_to_header};
 use common_macro::stack_trace_debug;
 use common_telemetry::common_error::ext::ErrorExt;
-use common_telemetry::common_error::status_code::StatusCode;\
-use tonic::metadata::MetadataMap;
+use common_telemetry::common_error::status_code::StatusCode;
 use snafu::{Location, ResultExt, Snafu};
+use tonic::metadata::MetadataMap;
 
 use crate::adapter::FlowId;
 use crate::expr::EvalError;
