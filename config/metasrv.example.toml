@@ -16,6 +16,9 @@ store_key_prefix = ""
 ## The datastore for meta server.
 backend = "EtcdStore"
 
+## Table name in postgresql to store metadata. Only effect when backend is `PostgresStore`.
+pg_table_name = "greptime_metakv"
+
 ## Datanode selector type.
 ## - `round_robin` (default value)
 ## - `lease_based`
