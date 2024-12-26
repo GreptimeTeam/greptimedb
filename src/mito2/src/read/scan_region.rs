@@ -223,6 +223,13 @@ impl ScanRegion {
         self
     }
 
+    /// Sets whether to ignore bloom filter.
+    #[must_use]
+    pub(crate) fn with_ignore_bloom_filter(mut self, ignore: bool) -> Self {
+        self.ignore_bloom_filter = ignore;
+        self
+    }
+
     #[must_use]
     pub(crate) fn with_start_time(mut self, now: Instant) -> Self {
         self.start_time = Some(now);
