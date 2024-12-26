@@ -32,6 +32,7 @@ pub use scipy_stats_norm_cdf::ScipyStatsNormCdfAccumulatorCreator;
 pub use scipy_stats_norm_pdf::ScipyStatsNormPdfAccumulatorCreator;
 
 use crate::function_registry::FunctionRegistry;
+use crate::scalars::vector::sum::VectorSumCreator;
 
 /// A function creates `AggregateFunctionCreator`.
 /// "Aggregator" *is* AggregatorFunction. Since the later one is long, we named an short alias for it.
@@ -91,6 +92,7 @@ impl AggregateFunctions {
         register_aggr_func!("argmin", 1, ArgminAccumulatorCreator);
         register_aggr_func!("scipystatsnormcdf", 2, ScipyStatsNormCdfAccumulatorCreator);
         register_aggr_func!("scipystatsnormpdf", 2, ScipyStatsNormPdfAccumulatorCreator);
+        register_aggr_func!("vec_sum", 1, VectorSumCreator);
 
         #[cfg(feature = "geo")]
         register_aggr_func!(

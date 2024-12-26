@@ -14,11 +14,13 @@
 
 mod convert;
 mod distance;
-pub(crate) mod impl_conv;
+mod elem_sum;
+pub mod impl_conv;
 mod scalar_add;
 mod scalar_mul;
 mod vector_mul;
 mod sub;
+pub(crate) mod sum;
 
 use std::sync::Arc;
 
@@ -44,5 +46,6 @@ impl VectorFunction {
         // vector calculation
         registry.register(Arc::new(vector_mul::VectorMulFunction));
         registry.register(Arc::new(sub::SubFunction));
+        registry.register(Arc::new(elem_sum::ElemSumFunction));
     }
 }
