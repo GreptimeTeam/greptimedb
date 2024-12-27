@@ -49,6 +49,7 @@ use tonic::transport::server::{Router, TcpIncoming};
 use crate::election::etcd::EtcdElection;
 #[cfg(feature = "pg_kvbackend")]
 use crate::election::postgres::PgElection;
+#[cfg(feature = "pg_kvbackend")]
 use crate::election::CANDIDATE_LEASE_SECS;
 #[cfg(feature = "pg_kvbackend")]
 use crate::error::InvalidArgumentsSnafu;
