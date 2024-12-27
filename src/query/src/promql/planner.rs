@@ -29,13 +29,11 @@ use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
 use datafusion::functions_aggregate::stddev::stddev_pop_udaf;
 use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion::functions_aggregate::variance::var_pop_udaf;
-use datafusion::logical_expr::expr::{
-    AggregateFunction, AggregateFunctionDefinition, Alias, ScalarFunction,
-};
+use datafusion::logical_expr::expr::{AggregateFunction, Alias, ScalarFunction};
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
 use datafusion::logical_expr::{
-    AggregateFunction as AggregateFunctionEnum, BinaryExpr, Cast, Extension, LogicalPlan,
-    LogicalPlanBuilder, Operator, ScalarUDF as ScalarUdfDef,
+    BinaryExpr, Cast, Extension, LogicalPlan, LogicalPlanBuilder, Operator,
+    ScalarUDF as ScalarUdfDef,
 };
 use datafusion::prelude as df_prelude;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};

@@ -33,7 +33,7 @@ use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool};
 use datafusion::execution::{RecordBatchStream, TaskContext};
 use datafusion::physical_plan::memory::MemoryStream;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
-use datafusion::physical_plan::sorts::streaming_merge::streaming_merge;
+use datafusion::physical_plan::sorts::streaming_merge::StreamingMergeBuilder;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
 };
@@ -52,7 +52,7 @@ use crate::error::{QueryExecutionSnafu, Result};
 /// merge sort them whenever possible, and emit the sorted result as soon as possible.
 /// This sorting plan only accept sort by ts and will not sort by other fields.
 ///
-/// internally, it call [`streaming_merge`] multiple times to merge multiple sorted "working ranges"
+/// internally, it call [`StreamingMergeBuilder`] multiple times to merge multiple sorted "working ranges"
 ///
 /// # Invariant Promise on Input Stream
 /// 1. The input stream must be sorted by timestamp and
@@ -636,15 +636,15 @@ impl WindowedSortStream {
             .register(&self.memory_pool);
         self.merge_count += 1;
 
-        let resulting_stream = streaming_merge(
-            streams,
-            self.schema(),
-            &[self.expression.clone()],
-            self.metrics.clone(),
-            self.batch_size,
-            fetch,
-            reservation,
-        )?;
+        let resulting_stream = StreamingMergeBuilder::new()
+            .with_streams(streams)
+            .with_schema(self.schema())
+            .with_expressions(&[self.expression.clone()])
+            .with_metrics(self.metrics.clone())
+            .with_batch_size(self.batch_size)
+            .with_fetch(fetch)
+            .with_reservation(reservation)
+            .build()?;
         self.merge_stream.push_back(resulting_stream);
         // this working range is done, move to next working range
         Ok(())

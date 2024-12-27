@@ -777,10 +777,7 @@ impl RangeSelect {
                         // TODO(discord9): add default null treatment?
 
                         let input_phy_exprs = self.create_physical_expr_list(
-                            matches!(
-                                aggr.func_def,
-                                AggregateFunctionDefinition::BuiltIn(AggregateFunction::Count,)
-                            ),
+                            aggr.func.name() == "count",
                             &aggr.args,
                             input_dfschema,
                             session_state,
