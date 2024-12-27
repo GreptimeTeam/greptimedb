@@ -773,7 +773,6 @@ mod tests {
         }
     }
 
-    
     #[tokio::test]
     async fn test_elected_and_step_down() {
         let leader_value = "test_leader".to_string();
@@ -804,7 +803,10 @@ mod tests {
         match rx.recv().await {
             Ok(LeaderChangeMessage::Elected(key)) => {
                 assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
-                assert_eq!(String::from_utf8_lossy(key.key()), leader_pg_election.election_key());
+                assert_eq!(
+                    String::from_utf8_lossy(key.key()),
+                    leader_pg_election.election_key()
+                );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
             }
@@ -823,7 +825,10 @@ mod tests {
         match rx.recv().await {
             Ok(LeaderChangeMessage::StepDown(key)) => {
                 assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
-                assert_eq!(String::from_utf8_lossy(key.key()), leader_pg_election.election_key());
+                assert_eq!(
+                    String::from_utf8_lossy(key.key()),
+                    leader_pg_election.election_key()
+                );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
             }
@@ -843,7 +848,10 @@ mod tests {
         match rx.recv().await {
             Ok(LeaderChangeMessage::Elected(key)) => {
                 assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
-                assert_eq!(String::from_utf8_lossy(key.key()), leader_pg_election.election_key());
+                assert_eq!(
+                    String::from_utf8_lossy(key.key()),
+                    leader_pg_election.election_key()
+                );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
             }
@@ -861,7 +869,10 @@ mod tests {
         match rx.recv().await {
             Ok(LeaderChangeMessage::StepDown(key)) => {
                 assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
-                assert_eq!(String::from_utf8_lossy(key.key()), leader_pg_election.election_key());
+                assert_eq!(
+                    String::from_utf8_lossy(key.key()),
+                    leader_pg_election.election_key()
+                );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
             }
@@ -887,7 +898,11 @@ mod tests {
         };
 
         // Step 1: No leader exists, campaign and elected.
-        let res = leader_pg_election.client.query(CAMPAIGN, &[]).await.unwrap();
+        let res = leader_pg_election
+            .client
+            .query(CAMPAIGN, &[])
+            .await
+            .unwrap();
         let res: bool = res[0].get(0);
         assert!(res);
         leader_pg_election.leader_action().await.unwrap();
@@ -903,7 +918,10 @@ mod tests {
         match rx.recv().await {
             Ok(LeaderChangeMessage::Elected(key)) => {
                 assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
-                assert_eq!(String::from_utf8_lossy(key.key()), leader_pg_election.election_key());
+                assert_eq!(
+                    String::from_utf8_lossy(key.key()),
+                    leader_pg_election.election_key()
+                );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
             }
@@ -911,7 +929,11 @@ mod tests {
         }
 
         // Step 2: As a leader, renew the lease.
-        let res = leader_pg_election.client.query(CAMPAIGN, &[]).await.unwrap();
+        let res = leader_pg_election
+            .client
+            .query(CAMPAIGN, &[])
+            .await
+            .unwrap();
         let res: bool = res[0].get(0);
         assert!(res);
         leader_pg_election.leader_action().await.unwrap();
@@ -927,7 +949,11 @@ mod tests {
         // Step 3: Something wrong, the leader lease expired.
         tokio::time::sleep(Duration::from_secs(META_LEASE_SECS)).await;
 
-        let res = leader_pg_election.client.query(CAMPAIGN, &[]).await.unwrap();
+        let res = leader_pg_election
+            .client
+            .query(CAMPAIGN, &[])
+            .await
+            .unwrap();
         let res: bool = res[0].get(0);
         assert!(res);
         leader_pg_election.leader_action().await.unwrap();
@@ -940,7 +966,10 @@ mod tests {
         match rx.recv().await {
             Ok(LeaderChangeMessage::StepDown(key)) => {
                 assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
-                assert_eq!(String::from_utf8_lossy(key.key()), leader_pg_election.election_key());
+                assert_eq!(
+                    String::from_utf8_lossy(key.key()),
+                    leader_pg_election.election_key()
+                );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
             }
@@ -948,9 +977,14 @@ mod tests {
         }
 
         // Step 4: Re-campaign and elected.
-        let res = leader_pg_election.client.query(CAMPAIGN, &[]).await.unwrap();
+        let res = leader_pg_election
+            .client
+            .query(CAMPAIGN, &[])
+            .await
+            .unwrap();
         let res: bool = res[0].get(0);
-        assert!(res);        leader_pg_election.leader_action().await.unwrap();
+        assert!(res);
+        leader_pg_election.leader_action().await.unwrap();
         let (leader, expire_time, current, _) = leader_pg_election
             .get_value_with_lease(&leader_pg_election.election_key(), false)
             .await
@@ -963,7 +997,10 @@ mod tests {
         match rx.recv().await {
             Ok(LeaderChangeMessage::Elected(key)) => {
                 assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
-                assert_eq!(String::from_utf8_lossy(key.key()), leader_pg_election.election_key());
+                assert_eq!(
+                    String::from_utf8_lossy(key.key()),
+                    leader_pg_election.election_key()
+                );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
             }
@@ -971,7 +1008,10 @@ mod tests {
         }
 
         // Step 5: Something wrong, the leader key is deleted by other followers.
-        leader_pg_election.delete_value(&leader_pg_election.election_key()).await.unwrap();
+        leader_pg_election
+            .delete_value(&leader_pg_election.election_key())
+            .await
+            .unwrap();
         leader_pg_election.leader_action().await.unwrap();
         let res = leader_pg_election
             .get_value_with_lease(&leader_pg_election.election_key(), false)
@@ -983,7 +1023,10 @@ mod tests {
         match rx.recv().await {
             Ok(LeaderChangeMessage::StepDown(key)) => {
                 assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
-                assert_eq!(String::from_utf8_lossy(key.key()), leader_pg_election.election_key());
+                assert_eq!(
+                    String::from_utf8_lossy(key.key()),
+                    leader_pg_election.election_key()
+                );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
             }
@@ -991,9 +1034,14 @@ mod tests {
         }
 
         // Step 6: Re-campaign and elected.
-        let res = leader_pg_election.client.query(CAMPAIGN, &[]).await.unwrap();
+        let res = leader_pg_election
+            .client
+            .query(CAMPAIGN, &[])
+            .await
+            .unwrap();
         let res: bool = res[0].get(0);
-        assert!(res);        leader_pg_election.leader_action().await.unwrap();
+        assert!(res);
+        leader_pg_election.leader_action().await.unwrap();
         let (leader, expire_time, current, _) = leader_pg_election
             .get_value_with_lease(&leader_pg_election.election_key(), false)
             .await
@@ -1006,7 +1054,10 @@ mod tests {
         match rx.recv().await {
             Ok(LeaderChangeMessage::Elected(key)) => {
                 assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
-                assert_eq!(String::from_utf8_lossy(key.key()), leader_pg_election.election_key());
+                assert_eq!(
+                    String::from_utf8_lossy(key.key()),
+                    leader_pg_election.election_key()
+                );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
             }
@@ -1014,11 +1065,21 @@ mod tests {
         }
 
         // Step 7: Something wrong, the leader key changed by others.
-        let res = leader_pg_election.client.query(CAMPAIGN, &[]).await.unwrap();
+        let res = leader_pg_election
+            .client
+            .query(CAMPAIGN, &[])
+            .await
+            .unwrap();
         let res: bool = res[0].get(0);
         assert!(res);
-        leader_pg_election.delete_value(&leader_pg_election.election_key()).await.unwrap();
-        leader_pg_election.put_value_with_lease(&leader_pg_election.election_key(), "test", 10).await.unwrap();
+        leader_pg_election
+            .delete_value(&leader_pg_election.election_key())
+            .await
+            .unwrap();
+        leader_pg_election
+            .put_value_with_lease(&leader_pg_election.election_key(), "test", 10)
+            .await
+            .unwrap();
         leader_pg_election.leader_action().await.unwrap();
         let res = leader_pg_election
             .get_value_with_lease(&leader_pg_election.election_key(), false)
@@ -1030,7 +1091,10 @@ mod tests {
         match rx.recv().await {
             Ok(LeaderChangeMessage::StepDown(key)) => {
                 assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
-                assert_eq!(String::from_utf8_lossy(key.key()), leader_pg_election.election_key());
+                assert_eq!(
+                    String::from_utf8_lossy(key.key()),
+                    leader_pg_election.election_key()
+                );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
             }
@@ -1066,7 +1130,11 @@ mod tests {
             candidate_lease_ttl_secs,
         };
 
-        leader_pg_election.client.query(CAMPAIGN, &[]).await.unwrap();
+        leader_pg_election
+            .client
+            .query(CAMPAIGN, &[])
+            .await
+            .unwrap();
         leader_pg_election.elected().await.unwrap();
 
         // Step 1: As a follower, the leader exists and the lease is not expired.
@@ -1077,17 +1145,25 @@ mod tests {
         assert!(follower_pg_election.follower_action().await.is_err());
 
         // Step 3: As a follower, the leader does not exist.
-        leader_pg_election.delete_value(&leader_pg_election.election_key()).await.unwrap();
+        leader_pg_election
+            .delete_value(&leader_pg_election.election_key())
+            .await
+            .unwrap();
         assert!(follower_pg_election.follower_action().await.is_err());
 
         // Step 4: Follower thinks it's the leader but failed to acquire the lock.
-        follower_pg_election.is_leader.store(true, Ordering::Relaxed);
+        follower_pg_election
+            .is_leader
+            .store(true, Ordering::Relaxed);
         assert!(follower_pg_election.follower_action().await.is_err());
 
         match rx.recv().await {
             Ok(LeaderChangeMessage::StepDown(key)) => {
                 assert_eq!(String::from_utf8_lossy(key.name()), "test_follower");
-                assert_eq!(String::from_utf8_lossy(key.key()), follower_pg_election.election_key());
+                assert_eq!(
+                    String::from_utf8_lossy(key.key()),
+                    follower_pg_election.election_key()
+                );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
             }
