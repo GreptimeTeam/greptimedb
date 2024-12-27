@@ -30,13 +30,18 @@ mod prometheus {
     /// pattern `<data|index>/catalog/schema/table_id/...` OR `greptimedb/object_cache/<read|write>/...`
     ///
     /// We'll get the data/catalog/schema from path.
-    pub fn build_prometheus_metrics_layer(with_path_label: bool) -> PrometheusLayer {
+    pub fn build_prometheus_metrics_layer(_with_path_label: bool) -> PrometheusLayer {
         PROMETHEUS_LAYER
             .get_or_init(|| {
-                let path_level = if with_path_label { 3 } else { 0 };
+                // let path_level = if with_path_label { 3 } else { 0 };
+
+                // opendal doesn't support dynamic path label trim
+                // we have uuid in index path, which casues the label size to explode
+                // remove path label first, waiting for later fix
+                // TODO(shuiyisong): add dynamic path label trim for opendal
 
                 let layer = PrometheusLayer::builder()
-                    .path_label(path_level)
+                    .path_label(0)
                     .register_default()
                     .unwrap();
 
