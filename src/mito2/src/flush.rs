@@ -337,6 +337,18 @@ impl RegionFlushTask {
         }
 
         let memtables = version.memtables.immutables();
+        // get max_sequence from all non-empty memetables
+        let max_sequence = memtables
+            .iter()
+            .filter_map(|m| {
+                if !m.is_empty() {
+                    Some(m.stats().max_sequence())
+                } else {
+                    None
+                }
+            })
+            .max();
+
         let mut file_metas = Vec::with_capacity(memtables.len());
         let mut flushed_bytes = 0;
         for mem in memtables {
@@ -357,6 +369,7 @@ impl RegionFlushTask {
                 source,
                 cache_manager: self.cache_manager.clone(),
                 storage: version.options.storage.clone(),
+                max_sequence,
                 index_options: self.index_options.clone(),
                 inverted_index_config: self.engine_config.inverted_index.clone(),
                 fulltext_index_config: self.engine_config.fulltext_index.clone(),

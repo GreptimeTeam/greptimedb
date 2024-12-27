@@ -15,7 +15,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, Bound, HashSet};
 use std::fmt::{Debug, Formatter};
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -100,6 +100,7 @@ pub struct TimeSeriesMemtable {
     alloc_tracker: AllocTracker,
     max_timestamp: AtomicI64,
     min_timestamp: AtomicI64,
+    max_sequence: AtomicU64,
     dedup: bool,
     merge_mode: MergeMode,
     /// Total written rows in memtable. This also includes deleted and duplicated rows.
@@ -134,6 +135,7 @@ impl TimeSeriesMemtable {
             alloc_tracker: AllocTracker::new(write_buffer_manager),
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
+            max_sequence: AtomicU64::new(0),
             dedup,
             merge_mode,
             num_rows: Default::default(),
@@ -199,6 +201,10 @@ impl Memtable for TimeSeriesMemtable {
         // so that we can ensure writing to memtable will succeed.
         self.update_stats(local_stats);
 
+        // update max_sequence
+        let sequence = kvs.mutation.sequence;
+        self.max_sequence.fetch_max(sequence, Ordering::Relaxed);
+
         self.num_rows.fetch_add(kvs.num_rows(), Ordering::Relaxed);
         Ok(())
     }
@@ -209,6 +215,13 @@ impl Memtable for TimeSeriesMemtable {
         metrics.value_bytes += std::mem::size_of::<Timestamp>() + std::mem::size_of::<OpType>();
 
         self.update_stats(metrics);
+
+        // update max_sequence
+        if res.is_ok() {
+            self.max_sequence
+                .fetch_max(key_value.sequence(), Ordering::Relaxed);
+        }
+
         self.num_rows.fetch_add(1, Ordering::Relaxed);
         res
     }
@@ -294,6 +307,7 @@ impl Memtable for TimeSeriesMemtable {
                 time_range: None,
                 num_rows: 0,
                 num_ranges: 0,
+                max_sequence: 0,
             };
         }
         let ts_type = self
@@ -311,6 +325,7 @@ impl Memtable for TimeSeriesMemtable {
             time_range: Some((min_timestamp, max_timestamp)),
             num_rows: self.num_rows.load(Ordering::Relaxed),
             num_ranges: 1,
+            max_sequence: self.max_sequence.load(Ordering::Relaxed),
         }
     }
 

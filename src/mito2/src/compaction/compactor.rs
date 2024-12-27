@@ -324,6 +324,7 @@ impl Compactor for DefaultCompactor {
                             source: Source::Reader(reader),
                             cache_manager,
                             storage,
+                            max_sequence: None,
                             index_options,
                             inverted_index_config,
                             fulltext_index_config,

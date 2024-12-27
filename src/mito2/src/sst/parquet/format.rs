@@ -42,7 +42,7 @@ use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::statistics::Statistics;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, SequenceNumber};
 
 use crate::error::{
     ConvertVectorSnafu, InvalidBatchSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
@@ -65,6 +65,7 @@ pub(crate) struct WriteFormat {
     metadata: RegionMetadataRef,
     /// SST file schema.
     arrow_schema: SchemaRef,
+    override_sequence: Option<SequenceNumber>,
 }
 
 impl WriteFormat {
@@ -74,7 +75,17 @@ impl WriteFormat {
         WriteFormat {
             metadata,
             arrow_schema,
+            override_sequence: None,
         }
+    }
+
+    /// Set override sequence.
+    pub(crate) fn with_override_sequence(
+        mut self,
+        override_sequence: Option<SequenceNumber>,
+    ) -> Self {
+        self.override_sequence = override_sequence;
+        self
     }
 
     /// Gets the arrow schema to store in parquet.
@@ -107,7 +118,14 @@ impl WriteFormat {
         columns.push(batch.timestamps().to_arrow_array());
         // Add internal columns: primary key, sequences, op types.
         columns.push(new_primary_key_array(batch.primary_key(), batch.num_rows()));
-        columns.push(batch.sequences().to_arrow_array());
+
+        if let Some(override_sequence) = self.override_sequence {
+            let sequence_array =
+                Arc::new(UInt64Array::from(vec![override_sequence; batch.num_rows()]));
+            columns.push(sequence_array);
+        } else {
+            columns.push(batch.sequences().to_arrow_array());
+        }
         columns.push(batch.op_types().to_arrow_array());
 
         RecordBatch::try_new(self.arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
@@ -748,6 +766,27 @@ mod tests {
             Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
             build_test_pk_array(&[(b"test".to_vec(), num_rows)]), // primary key
             Arc::new(UInt64Array::from(vec![TEST_SEQUENCE; num_rows])), // sequence
+            Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
+        ];
+        let expect_record = RecordBatch::try_new(build_test_arrow_schema(), columns).unwrap();
+
+        let actual = write_format.convert_batch(&batch).unwrap();
+        assert_eq!(expect_record, actual);
+    }
+
+    #[test]
+    fn test_convert_batch_with_override_sequence() {
+        let metadata = build_test_region_metadata();
+        let write_format = WriteFormat::new(metadata).with_override_sequence(Some(415411));
+
+        let num_rows = 4;
+        let batch = new_batch(b"test", 1, 2, num_rows);
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![2; num_rows])), // field1
+            Arc::new(Int64Array::from(vec![3; num_rows])), // field0
+            Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
+            build_test_pk_array(&[(b"test".to_vec(), num_rows)]), // primary key
+            Arc::new(UInt64Array::from(vec![415411; num_rows])), // sequence
             Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
         ];
         let expect_record = RecordBatch::try_new(build_test_arrow_schema(), columns).unwrap();

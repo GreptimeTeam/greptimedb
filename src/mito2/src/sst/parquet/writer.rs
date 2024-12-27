@@ -31,6 +31,7 @@ use parquet::schema::types::ColumnPath;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
+use store_api::storage::SequenceNumber;
 use tokio::io::AsyncWrite;
 use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
 
@@ -112,9 +113,11 @@ where
     pub async fn write_all(
         &mut self,
         mut source: Source,
+        override_sequence: Option<SequenceNumber>, // override the `sequence` field from `Source`
         opts: &WriteOptions,
     ) -> Result<Option<SstInfo>> {
-        let write_format = WriteFormat::new(self.metadata.clone());
+        let write_format =
+            WriteFormat::new(self.metadata.clone()).with_override_sequence(override_sequence);
         let mut stats = SourceStats::default();
 
         while let Some(res) = self
