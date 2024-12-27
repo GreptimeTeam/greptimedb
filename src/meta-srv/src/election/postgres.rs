@@ -751,7 +751,7 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
             candidate_lease_ttl_secs,
-            table_name: "{}".to_string(),
+            table_name: "greptime_metakv".to_string(),
         };
 
         let node_info = MetasrvNodeInfo {
@@ -788,7 +788,7 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
             candidate_lease_ttl_secs,
-            table_name: "{}".to_string(),
+            table_name: "greptime_metakv".to_string(),
         };
 
         let candidates = pg_election.all_candidates().await.unwrap();
