@@ -51,7 +51,7 @@ pub struct FlownodeContext {
     /// note that the sink receiver should only have one, and we are using broadcast as mpsc channel here
     pub sink_receiver:
         BTreeMap<TableName, (mpsc::UnboundedSender<Batch>, mpsc::UnboundedReceiver<Batch>)>,
-    /// can query the schema of the table souce, from metasrv with local cache
+    /// can query the schema of the table source, from metasrv with local cache
     pub table_source: Box<dyn FlowTableSource>,
     /// All the tables that have been registered in the worker
     pub table_repr: IdToNameMap,
