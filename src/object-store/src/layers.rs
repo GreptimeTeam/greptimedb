@@ -36,7 +36,7 @@ mod prometheus {
                 // let path_level = if with_path_label { 3 } else { 0 };
 
                 // opendal doesn't support dynamic path label trim
-                // we have uuid in index path, which casues the label size to explode
+                // we have uuid in index path, which causes the label size to explode
                 // remove path label first, waiting for later fix
                 // TODO(shuiyisong): add dynamic path label trim for opendal
 
