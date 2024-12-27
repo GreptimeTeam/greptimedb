@@ -477,7 +477,7 @@ impl PgElection {
                             warn!("Leader lease expired, now stepping down.");
                             self.step_down().await?;
                         }
-                        // Rarelly happens:
+                        // Rarely happens:
                         // Case 1.3: I'm not the leader. This happens when I failed to step down in the previous term and the lock released
                         //           after the session expired. And then I reconnect and find a gap that others just released the lock.
                         //           I should re-step-down and re-init campaign.
