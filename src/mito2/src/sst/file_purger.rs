@@ -176,6 +176,7 @@ mod tests {
                     index_file_size: 0,
                     num_rows: 0,
                     num_row_groups: 0,
+                    max_sequence: 0,
                 },
                 file_purger,
             );
@@ -238,6 +239,7 @@ mod tests {
                     index_file_size: 4096,
                     num_rows: 1024,
                     num_row_groups: 1,
+                    max_sequence: 4096,
                 },
                 file_purger,
             );

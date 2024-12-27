@@ -134,6 +134,8 @@ pub struct FileMeta {
     /// the default value `0` doesn't means the file doesn't contains any rows,
     /// but instead means the number of rows is unknown.
     pub num_row_groups: u64,
+    /// Max sequence in this file
+    pub max_sequence: u64,
 }
 
 /// Type of index.
@@ -343,6 +345,7 @@ mod tests {
             index_file_size: 0,
             num_rows: 0,
             num_row_groups: 0,
+            max_sequence: 0,
         }
     }
 

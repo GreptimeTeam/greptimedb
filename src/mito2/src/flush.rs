@@ -395,6 +395,7 @@ impl RegionFlushTask {
                 index_file_size: sst_info.index_metadata.file_size,
                 num_rows: sst_info.num_rows as u64,
                 num_row_groups: sst_info.num_row_groups,
+                max_sequence: max_sequence.unwrap_or(0),
             };
             file_metas.push(file_meta);
         }

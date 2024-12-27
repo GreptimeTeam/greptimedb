@@ -303,6 +303,12 @@ impl Compactor for DefaultCompactor {
             let fulltext_index_config = compaction_region.engine_config.fulltext_index.clone();
             let bloom_filter_index_config =
                 compaction_region.engine_config.bloom_filter_index.clone();
+            let max_sequence = output
+                .inputs
+                .iter()
+                .map(|f| f.meta_ref().max_sequence)
+                .max()
+                .and_then(|x| if x == 0 { None } else { Some(x) });
             futs.push(async move {
                 let reader = CompactionSstReaderBuilder {
                     metadata: region_metadata.clone(),
@@ -324,7 +330,7 @@ impl Compactor for DefaultCompactor {
                             source: Source::Reader(reader),
                             cache_manager,
                             storage,
-                            max_sequence: None,
+                            max_sequence,
                             index_options,
                             inverted_index_config,
                             fulltext_index_config,
@@ -343,6 +349,7 @@ impl Compactor for DefaultCompactor {
                         index_file_size: sst_info.index_metadata.file_size,
                         num_rows: sst_info.num_rows as u64,
                         num_row_groups: sst_info.num_row_groups,
+                        max_sequence: max_sequence.unwrap_or(0),
                     });
                 Ok(file_meta_opt)
             });

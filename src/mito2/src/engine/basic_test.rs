@@ -580,7 +580,7 @@ async fn test_region_usage() {
     flush_region(&engine, region_id, None).await;
 
     let region_stat = region.region_statistic();
-    assert_eq!(region_stat.sst_size, 2790);
+    assert_eq!(region_stat.sst_size, 2773);
     assert_eq!(region_stat.num_rows, 10);
 
     // region total usage
