@@ -137,14 +137,10 @@ impl InvertedIndexApplier {
         };
 
         if let Some(index_cache) = &self.inverted_index_cache {
-            let file_size = if let Some(file_size) = file_size_hint {
-                file_size
-            } else {
-                blob.metadata().await.context(MetadataSnafu)?.content_length
-            };
+            let blob_size = blob.metadata().await.context(MetadataSnafu)?.content_length;
             let mut index_reader = CachedInvertedIndexBlobReader::new(
                 file_id,
-                file_size,
+                blob_size,
                 InvertedIndexBlobReader::new(blob),
                 index_cache.clone(),
             );
