@@ -18,6 +18,18 @@ COPY demo TO '${SQLNESS_HOME}/export/demo.json' WITH (format='json', start_time=
 
 Affected Rows: 1
 
+COPY (select host, cpu, ts from demo where host = 'host2') TO '${SQLNESS_HOME}/export/demo.parquet';
+
+Affected Rows: 1
+
+COPY (select host, cpu, ts from demo where host = 'host2') TO '${SQLNESS_HOME}/export/demo.csv' WITH (format='csv');
+
+Affected Rows: 1
+
+COPY (select host, cpu, ts from demo where host = 'host2') TO '${SQLNESS_HOME}/export/demo.json' WITH (format='json');
+
+Affected Rows: 1
+
 drop table demo;
 
 Affected Rows: 0

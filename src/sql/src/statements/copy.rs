@@ -18,12 +18,14 @@ use serde::Serialize;
 use sqlparser::ast::ObjectName;
 use sqlparser_derive::{Visit, VisitMut};
 
+use crate::statements::statement::Statement;
 use crate::statements::OptionMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum Copy {
     CopyTable(CopyTable),
     CopyDatabase(CopyDatabase),
+    CopyQueryTo(CopyQueryTo),
 }
 
 impl Display for Copy {
@@ -31,7 +33,29 @@ impl Display for Copy {
         match self {
             Copy::CopyTable(s) => s.fmt(f),
             Copy::CopyDatabase(s) => s.fmt(f),
+            Copy::CopyQueryTo(s) => s.fmt(f),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub struct CopyQueryTo {
+    pub query: Box<Statement>,
+    pub arg: CopyQueryToArgument,
+}
+
+impl Display for CopyQueryTo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "COPY {} TO {}", &self.query, &self.arg.location)?;
+        if !self.arg.with.is_empty() {
+            let options = self.arg.with.kv_pairs();
+            write!(f, " WITH ({})", options.join(", "))?;
+        }
+        if !self.arg.connection.is_empty() {
+            let options = self.arg.connection.kv_pairs();
+            write!(f, " CONNECTION ({})", options.join(", "))?;
+        }
+        Ok(())
     }
 }
 
@@ -113,6 +137,13 @@ pub struct CopyTableArgument {
     /// Copy tbl [To|From] 'location'.
     pub location: String,
     pub limit: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub struct CopyQueryToArgument {
+    pub with: OptionMap,
+    pub connection: OptionMap,
+    pub location: String,
 }
 
 #[cfg(test)]

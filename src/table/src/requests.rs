@@ -319,6 +319,13 @@ pub struct CopyDatabaseRequest {
     pub time_range: Option<TimestampRange>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct CopyQueryToRequest {
+    pub location: String,
+    pub with: HashMap<String, String>,
+    pub connection: HashMap<String, String>,
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
