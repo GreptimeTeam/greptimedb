@@ -462,12 +462,14 @@ impl PgElection {
         let key = self.election_key();
         // Case 1: I think I'm the leader in the previous term. I'm trying to renew the lease.
         if self.is_leader() {
-            match self.get_value_with_lease(&key, false).await? {
-                Some((prev_leader, expire_time, current, _)) => {
+            match self.get_value_with_lease(&key, true).await? {
+                Some((prev_leader, expire_time, current, prev)) => {
                     match (prev_leader == self.leader_value, expire_time > current) {
                         // Case 1.1: I'm still the leader and the lease does not expired. Renew the lease.
                         (true, true) => {
-                            self.update_value_with_lease(&key, &prev_leader, &self.leader_value)
+                            // Safety: prev is Some since we are using `get_value_with_lease` with `true`.
+                            let prev = prev.unwrap();
+                            self.update_value_with_lease(&key, &prev, &self.leader_value)
                                 .await?;
                         }
                         // Case 1.2: I'm still the leader but the lease expired. Step down and re-init campaign.
@@ -509,6 +511,7 @@ impl PgElection {
             .await?
             .context(NoLeaderSnafu)?;
         // Case 2: Current leader exists and the lease expired. Raise an error to re-init campaign.
+        //         If the leader failed to renew the lease, its session will expire and the lock will be released.
         ensure!(expire_time > current, NoLeaderSnafu);
         // Case 3: All checks passed, just return.
         Ok(())
@@ -767,6 +770,328 @@ mod tests {
             );
             let res = pg_election.delete_value(&key).await.unwrap();
             assert!(res);
+        }
+    }
+
+    
+    #[tokio::test]
+    async fn test_elected_and_step_down() {
+        let leader_value = "test_leader".to_string();
+        let candidate_lease_ttl_secs = 5;
+        let client = create_postgres_client().await.unwrap();
+
+        let (tx, mut rx) = broadcast::channel(100);
+        let leader_pg_election = PgElection {
+            leader_value: leader_value.clone(),
+            client,
+            is_leader: AtomicBool::new(false),
+            leader_infancy: AtomicBool::new(true),
+            leader_watcher: tx,
+            store_key_prefix: "test_prefix".to_string(),
+            candidate_lease_ttl_secs,
+        };
+
+        leader_pg_election.elected().await.unwrap();
+        let (leader, expire_time, current, _) = leader_pg_election
+            .get_value_with_lease(&leader_pg_election.election_key(), false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(leader == leader_value);
+        assert!(expire_time > current);
+        assert!(leader_pg_election.is_leader());
+
+        match rx.recv().await {
+            Ok(LeaderChangeMessage::Elected(key)) => {
+                assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
+                assert_eq!(String::from_utf8_lossy(key.key()), leader_pg_election.election_key());
+                assert_eq!(key.lease_id(), i64::default());
+                assert_eq!(key.revision(), i64::default());
+            }
+            _ => panic!("Expected LeaderChangeMessage::Elected"),
+        }
+
+        leader_pg_election.step_down_without_lock().await.unwrap();
+        let (leader, _, _, _) = leader_pg_election
+            .get_value_with_lease(&leader_pg_election.election_key(), false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(leader == leader_value);
+        assert!(!leader_pg_election.is_leader());
+
+        match rx.recv().await {
+            Ok(LeaderChangeMessage::StepDown(key)) => {
+                assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
+                assert_eq!(String::from_utf8_lossy(key.key()), leader_pg_election.election_key());
+                assert_eq!(key.lease_id(), i64::default());
+                assert_eq!(key.revision(), i64::default());
+            }
+            _ => panic!("Expected LeaderChangeMessage::StepDown"),
+        }
+
+        leader_pg_election.elected().await.unwrap();
+        let (leader, expire_time, current, _) = leader_pg_election
+            .get_value_with_lease(&leader_pg_election.election_key(), false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(leader == leader_value);
+        assert!(expire_time > current);
+        assert!(leader_pg_election.is_leader());
+
+        match rx.recv().await {
+            Ok(LeaderChangeMessage::Elected(key)) => {
+                assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
+                assert_eq!(String::from_utf8_lossy(key.key()), leader_pg_election.election_key());
+                assert_eq!(key.lease_id(), i64::default());
+                assert_eq!(key.revision(), i64::default());
+            }
+            _ => panic!("Expected LeaderChangeMessage::Elected"),
+        }
+
+        leader_pg_election.step_down().await.unwrap();
+        let res = leader_pg_election
+            .get_value_with_lease(&leader_pg_election.election_key(), false)
+            .await
+            .unwrap();
+        assert!(res.is_none());
+        assert!(!leader_pg_election.is_leader());
+
+        match rx.recv().await {
+            Ok(LeaderChangeMessage::StepDown(key)) => {
+                assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
+                assert_eq!(String::from_utf8_lossy(key.key()), leader_pg_election.election_key());
+                assert_eq!(key.lease_id(), i64::default());
+                assert_eq!(key.revision(), i64::default());
+            }
+            _ => panic!("Expected LeaderChangeMessage::StepDown"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_leader_action() {
+        let leader_value = "test_leader".to_string();
+        let candidate_lease_ttl_secs = 5;
+        let client = create_postgres_client().await.unwrap();
+
+        let (tx, mut rx) = broadcast::channel(100);
+        let leader_pg_election = PgElection {
+            leader_value: leader_value.clone(),
+            client,
+            is_leader: AtomicBool::new(false),
+            leader_infancy: AtomicBool::new(true),
+            leader_watcher: tx,
+            store_key_prefix: "test_prefix".to_string(),
+            candidate_lease_ttl_secs,
+        };
+
+        // Step 1: No leader exists, campaign and elected.
+        let res = leader_pg_election.client.query(CAMPAIGN, &[]).await.unwrap();
+        let res: bool = res[0].get(0);
+        assert!(res);
+        leader_pg_election.leader_action().await.unwrap();
+        let (leader, expire_time, current, _) = leader_pg_election
+            .get_value_with_lease(&leader_pg_election.election_key(), false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(leader == leader_value);
+        assert!(expire_time > current);
+        assert!(leader_pg_election.is_leader());
+
+        match rx.recv().await {
+            Ok(LeaderChangeMessage::Elected(key)) => {
+                assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
+                assert_eq!(String::from_utf8_lossy(key.key()), leader_pg_election.election_key());
+                assert_eq!(key.lease_id(), i64::default());
+                assert_eq!(key.revision(), i64::default());
+            }
+            _ => panic!("Expected LeaderChangeMessage::Elected"),
+        }
+
+        // Step 2: As a leader, renew the lease.
+        let res = leader_pg_election.client.query(CAMPAIGN, &[]).await.unwrap();
+        let res: bool = res[0].get(0);
+        assert!(res);
+        leader_pg_election.leader_action().await.unwrap();
+        let (leader, new_expire_time, current, _) = leader_pg_election
+            .get_value_with_lease(&leader_pg_election.election_key(), false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(leader == leader_value);
+        assert!(new_expire_time > current && new_expire_time > expire_time);
+        assert!(leader_pg_election.is_leader());
+
+        // Step 3: Something wrong, the leader lease expired.
+        tokio::time::sleep(Duration::from_secs(META_LEASE_SECS)).await;
+
+        let res = leader_pg_election.client.query(CAMPAIGN, &[]).await.unwrap();
+        let res: bool = res[0].get(0);
+        assert!(res);
+        leader_pg_election.leader_action().await.unwrap();
+        let res = leader_pg_election
+            .get_value_with_lease(&leader_pg_election.election_key(), false)
+            .await
+            .unwrap();
+        assert!(res.is_none());
+
+        match rx.recv().await {
+            Ok(LeaderChangeMessage::StepDown(key)) => {
+                assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
+                assert_eq!(String::from_utf8_lossy(key.key()), leader_pg_election.election_key());
+                assert_eq!(key.lease_id(), i64::default());
+                assert_eq!(key.revision(), i64::default());
+            }
+            _ => panic!("Expected LeaderChangeMessage::StepDown"),
+        }
+
+        // Step 4: Re-campaign and elected.
+        let res = leader_pg_election.client.query(CAMPAIGN, &[]).await.unwrap();
+        let res: bool = res[0].get(0);
+        assert!(res);        leader_pg_election.leader_action().await.unwrap();
+        let (leader, expire_time, current, _) = leader_pg_election
+            .get_value_with_lease(&leader_pg_election.election_key(), false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(leader == leader_value);
+        assert!(expire_time > current);
+        assert!(leader_pg_election.is_leader());
+
+        match rx.recv().await {
+            Ok(LeaderChangeMessage::Elected(key)) => {
+                assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
+                assert_eq!(String::from_utf8_lossy(key.key()), leader_pg_election.election_key());
+                assert_eq!(key.lease_id(), i64::default());
+                assert_eq!(key.revision(), i64::default());
+            }
+            _ => panic!("Expected LeaderChangeMessage::Elected"),
+        }
+
+        // Step 5: Something wrong, the leader key is deleted by other followers.
+        leader_pg_election.delete_value(&leader_pg_election.election_key()).await.unwrap();
+        leader_pg_election.leader_action().await.unwrap();
+        let res = leader_pg_election
+            .get_value_with_lease(&leader_pg_election.election_key(), false)
+            .await
+            .unwrap();
+        assert!(res.is_none());
+        assert!(!leader_pg_election.is_leader());
+
+        match rx.recv().await {
+            Ok(LeaderChangeMessage::StepDown(key)) => {
+                assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
+                assert_eq!(String::from_utf8_lossy(key.key()), leader_pg_election.election_key());
+                assert_eq!(key.lease_id(), i64::default());
+                assert_eq!(key.revision(), i64::default());
+            }
+            _ => panic!("Expected LeaderChangeMessage::StepDown"),
+        }
+
+        // Step 6: Re-campaign and elected.
+        let res = leader_pg_election.client.query(CAMPAIGN, &[]).await.unwrap();
+        let res: bool = res[0].get(0);
+        assert!(res);        leader_pg_election.leader_action().await.unwrap();
+        let (leader, expire_time, current, _) = leader_pg_election
+            .get_value_with_lease(&leader_pg_election.election_key(), false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(leader == leader_value);
+        assert!(expire_time > current);
+        assert!(leader_pg_election.is_leader());
+
+        match rx.recv().await {
+            Ok(LeaderChangeMessage::Elected(key)) => {
+                assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
+                assert_eq!(String::from_utf8_lossy(key.key()), leader_pg_election.election_key());
+                assert_eq!(key.lease_id(), i64::default());
+                assert_eq!(key.revision(), i64::default());
+            }
+            _ => panic!("Expected LeaderChangeMessage::Elected"),
+        }
+
+        // Step 7: Something wrong, the leader key changed by others.
+        let res = leader_pg_election.client.query(CAMPAIGN, &[]).await.unwrap();
+        let res: bool = res[0].get(0);
+        assert!(res);
+        leader_pg_election.delete_value(&leader_pg_election.election_key()).await.unwrap();
+        leader_pg_election.put_value_with_lease(&leader_pg_election.election_key(), "test", 10).await.unwrap();
+        leader_pg_election.leader_action().await.unwrap();
+        let res = leader_pg_election
+            .get_value_with_lease(&leader_pg_election.election_key(), false)
+            .await
+            .unwrap();
+        assert!(res.is_none());
+        assert!(!leader_pg_election.is_leader());
+
+        match rx.recv().await {
+            Ok(LeaderChangeMessage::StepDown(key)) => {
+                assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
+                assert_eq!(String::from_utf8_lossy(key.key()), leader_pg_election.election_key());
+                assert_eq!(key.lease_id(), i64::default());
+                assert_eq!(key.revision(), i64::default());
+            }
+            _ => panic!("Expected LeaderChangeMessage::StepDown"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_follower_action() {
+        let candidate_lease_ttl_secs = 5;
+
+        let follower_client = create_postgres_client().await.unwrap();
+        let (tx, mut rx) = broadcast::channel(100);
+        let follower_pg_election = PgElection {
+            leader_value: "test_follower".to_string(),
+            client: follower_client,
+            is_leader: AtomicBool::new(false),
+            leader_infancy: AtomicBool::new(true),
+            leader_watcher: tx,
+            store_key_prefix: "test_prefix".to_string(),
+            candidate_lease_ttl_secs,
+        };
+
+        let leader_client = create_postgres_client().await.unwrap();
+        let (tx, _) = broadcast::channel(100);
+        let leader_pg_election = PgElection {
+            leader_value: "test_leader".to_string(),
+            client: leader_client,
+            is_leader: AtomicBool::new(false),
+            leader_infancy: AtomicBool::new(true),
+            leader_watcher: tx,
+            store_key_prefix: "test_prefix".to_string(),
+            candidate_lease_ttl_secs,
+        };
+
+        leader_pg_election.client.query(CAMPAIGN, &[]).await.unwrap();
+        leader_pg_election.elected().await.unwrap();
+
+        // Step 1: As a follower, the leader exists and the lease is not expired.
+        follower_pg_election.follower_action().await.unwrap();
+
+        // Step 2: As a follower, the leader exists but the lease expired.
+        tokio::time::sleep(Duration::from_secs(META_LEASE_SECS)).await;
+        assert!(follower_pg_election.follower_action().await.is_err());
+
+        // Step 3: As a follower, the leader does not exist.
+        leader_pg_election.delete_value(&leader_pg_election.election_key()).await.unwrap();
+        assert!(follower_pg_election.follower_action().await.is_err());
+
+        // Step 4: Follower thinks it's the leader but failed to acquire the lock.
+        follower_pg_election.is_leader.store(true, Ordering::Relaxed);
+        assert!(follower_pg_election.follower_action().await.is_err());
+
+        match rx.recv().await {
+            Ok(LeaderChangeMessage::StepDown(key)) => {
+                assert_eq!(String::from_utf8_lossy(key.name()), "test_follower");
+                assert_eq!(String::from_utf8_lossy(key.key()), follower_pg_election.election_key());
+                assert_eq!(key.lease_id(), i64::default());
+                assert_eq!(key.revision(), i64::default());
+            }
+            _ => panic!("Expected LeaderChangeMessage::StepDown"),
         }
     }
 }
