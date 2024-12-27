@@ -17,6 +17,7 @@
 use common_error::ext::BoxedError;
 use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
 use common_meta::key::table_name::{TableNameKey, TableNameManager};
+use datatypes::data_type::ConcreteDataType as CDT;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
 
@@ -25,18 +26,57 @@ use crate::adapter::TableName;
 use crate::error::{
     Error, ExternalSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu, UnexpectedSnafu,
 };
-use crate::repr::RelationDesc;
+use crate::repr::{ColumnType, RelationDesc, RelationType};
+
+#[async_trait::async_trait]
+pub trait FlowTableSource: Send + Sync + std::fmt::Debug {
+    async fn table_name_from_id(&self, table_id: &TableId) -> Result<TableName, Error>;
+    async fn table_id_from_name(&self, name: &TableName) -> Result<TableId, Error>;
+
+    /// Get the table schema by table name
+    async fn table(&self, name: &TableName) -> Result<RelationDesc, Error> {
+        let id = self.table_id_from_name(name).await?;
+        self.table_from_id(&id).await
+    }
+    async fn table_from_id(&self, table_id: &TableId) -> Result<RelationDesc, Error>;
+}
 
 /// mapping of table name <-> table id should be query from tableinfo manager
-pub struct TableSource {
+#[derive(Clone)]
+pub struct KvBackendTableSource {
     /// for query `TableId -> TableName` mapping
     table_info_manager: TableInfoManager,
     table_name_manager: TableNameManager,
 }
 
-impl TableSource {
+#[async_trait::async_trait]
+impl FlowTableSource for KvBackendTableSource {
+    async fn table_from_id(&self, table_id: &TableId) -> Result<RelationDesc, Error> {
+        let table_info_value = self
+            .get_table_info_value(table_id)
+            .await?
+            .with_context(|| TableNotFoundSnafu {
+                name: format!("TableId = {:?}, Can't found table info", table_id),
+            })?;
+        let desc = table_info_value_to_relation_desc(table_info_value)?;
+
+        Ok(desc)
+    }
+    async fn table_name_from_id(&self, table_id: &TableId) -> Result<TableName, Error> {
+        self.get_table_name(table_id).await
+    }
+    async fn table_id_from_name(&self, name: &TableName) -> Result<TableId, Error> {
+        self.get_opt_table_id_from_name(name)
+            .await?
+            .with_context(|| TableNotFoundSnafu {
+                name: name.join("."),
+            })
+    }
+}
+
+impl KvBackendTableSource {
     pub fn new(table_info_manager: TableInfoManager, table_name_manager: TableNameManager) -> Self {
-        TableSource {
+        KvBackendTableSource {
             table_info_manager,
             table_name_manager,
         }
@@ -63,7 +103,10 @@ impl TableSource {
     }
 
     /// If the table haven't been created in database, the tableId returned would be null
-    pub async fn get_table_id_from_name(&self, name: &TableName) -> Result<Option<TableId>, Error> {
+    pub async fn get_opt_table_id_from_name(
+        &self,
+        name: &TableName,
+    ) -> Result<Option<TableId>, Error> {
         let ret = self
             .table_name_manager
             .get(TableNameKey::new(&name[0], &name[1], &name[2]))
@@ -124,5 +167,91 @@ impl TableSource {
 
         let desc = table_info_value_to_relation_desc(table_info_value)?;
         Ok((table_name, desc))
+    }
+}
+
+impl std::fmt::Debug for KvBackendTableSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KvBackendTableSource").finish()
+    }
+}
+
+pub struct FlowDummyTableSource {
+    pub id_names_to_desc: Vec<(TableId, TableName, RelationDesc)>,
+}
+
+impl Default for FlowDummyTableSource {
+    fn default() -> Self {
+        let id_names_to_desc = vec![
+            (
+                1024,
+                [
+                    "greptime".to_string(),
+                    "public".to_string(),
+                    "numbers".to_string(),
+                ],
+                RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)])
+                    .into_named(vec![Some("number".to_string())]),
+            ),
+            (
+                1025,
+                [
+                    "greptime".to_string(),
+                    "public".to_string(),
+                    "numbers_with_ts".to_string(),
+                ],
+                RelationType::new(vec![
+                    ColumnType::new(CDT::uint32_datatype(), false),
+                    ColumnType::new(CDT::timestamp_millisecond_datatype(), false),
+                ])
+                .into_named(vec![Some("number".to_string()), Some("ts".to_string())]),
+            ),
+        ];
+        Self { id_names_to_desc }
+    }
+}
+
+#[async_trait::async_trait]
+impl FlowTableSource for FlowDummyTableSource {
+    async fn table_from_id(&self, table_id: &TableId) -> Result<RelationDesc, Error> {
+        for (id, _name, desc) in &self.id_names_to_desc {
+            if id == table_id {
+                return Ok(desc.clone());
+            }
+        }
+        TableNotFoundSnafu {
+            name: format!("Table id = {:?}, couldn't found table desc", table_id),
+        }
+        .fail()?
+    }
+
+    async fn table_name_from_id(&self, table_id: &TableId) -> Result<TableName, Error> {
+        for (id, name, _desc) in &self.id_names_to_desc {
+            if id == table_id {
+                return Ok(name.clone());
+            }
+        }
+        TableNotFoundSnafu {
+            name: format!("Table id = {:?}, couldn't found table desc", table_id),
+        }
+        .fail()?
+    }
+
+    async fn table_id_from_name(&self, name: &TableName) -> Result<TableId, Error> {
+        for (id, table_name, _desc) in &self.id_names_to_desc {
+            if name == table_name {
+                return Ok(*id);
+            }
+        }
+        TableNotFoundSnafu {
+            name: format!("Table name = {:?}, couldn't found table id", name),
+        }
+        .fail()?
+    }
+}
+
+impl std::fmt::Debug for FlowDummyTableSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DummyTableSource").finish()
     }
 }

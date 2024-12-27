@@ -34,6 +34,7 @@ use crate::error::InternalSnafu;
 use crate::metrics::METRIC_FLOW_TASK_COUNT;
 use crate::repr::{self, DiffRow};
 
+/// TODO(discord9): add location
 fn to_meta_err(err: crate::error::Error) -> common_meta::error::Error {
     // TODO(discord9): refactor this
     Err::<(), _>(BoxedError::new(err))
@@ -156,15 +157,14 @@ impl Flownode for FlowWorkerManager {
 
             let fetch_order = {
                 let ctx = self.node_context.read().await;
-                let table_col_names = ctx
-                    .table_repr
-                    .get_by_table_id(&table_id)
-                    .map(|r| r.1)
-                    .and_then(|id| ctx.schema.get(&id))
-                    .map(|desc| &desc.names)
-                    .context(UnexpectedSnafu {
-                        err_msg: format!("Table not found: {}", table_id),
-                    })?;
+
+                // TODO(discord9): also check schema version so that altered table can be reported
+                let table_schema = ctx
+                    .table_source
+                    .table_from_id(&table_id)
+                    .await
+                    .map_err(to_meta_err)?;
+                let table_col_names = table_schema.names;
                 let table_col_names = table_col_names
                     .iter().enumerate()
                     .map(|(idx,name)| match name {

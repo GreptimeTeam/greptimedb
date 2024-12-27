@@ -173,12 +173,11 @@ mod test {
 
     use super::*;
     use crate::adapter::node_context::IdToNameMap;
+    use crate::adapter::table_source::FlowDummyTableSource;
     use crate::df_optimizer::apply_df_optimizer;
     use crate::expr::GlobalId;
-    use crate::repr::{ColumnType, RelationType};
 
     pub fn create_test_ctx() -> FlownodeContext {
-        let mut schemas = HashMap::new();
         let mut tri_map = IdToNameMap::new();
         {
             let gid = GlobalId::User(0);
@@ -187,10 +186,7 @@ mod test {
                 "public".to_string(),
                 "numbers".to_string(),
             ];
-            let schema = RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]);
-
             tri_map.insert(Some(name.clone()), Some(1024), gid);
-            schemas.insert(gid, schema.into_named(vec![Some("number".to_string())]));
         }
 
         {
@@ -200,23 +196,16 @@ mod test {
                 "public".to_string(),
                 "numbers_with_ts".to_string(),
             ];
-            let schema = RelationType::new(vec![
-                ColumnType::new(CDT::uint32_datatype(), false),
-                ColumnType::new(CDT::timestamp_millisecond_datatype(), false),
-            ]);
-            schemas.insert(
-                gid,
-                schema.into_named(vec![Some("number".to_string()), Some("ts".to_string())]),
-            );
             tri_map.insert(Some(name.clone()), Some(1025), gid);
         }
 
-        FlownodeContext {
-            schema: schemas,
-            table_repr: tri_map,
-            query_context: Some(Arc::new(QueryContext::with("greptime", "public"))),
-            ..Default::default()
-        }
+        let dummy_source = FlowDummyTableSource::default();
+
+        let mut ctx = FlownodeContext::new(Box::new(dummy_source));
+        ctx.table_repr = tri_map;
+        ctx.query_context = Some(Arc::new(QueryContext::with("greptime", "public")));
+
+        ctx
     }
 
     pub fn create_test_query_engine() -> Arc<dyn QueryEngine> {
