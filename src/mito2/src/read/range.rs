@@ -22,7 +22,7 @@ use parquet::arrow::arrow_reader::RowSelection;
 use smallvec::{smallvec, SmallVec};
 use store_api::region_engine::PartitionRange;
 
-use crate::cache::CacheManager;
+use crate::cache::CacheStrategy;
 use crate::error::Result;
 use crate::memtable::{MemtableRange, MemtableRanges, MemtableStats};
 use crate::read::scan_region::ScanInput;
@@ -112,7 +112,7 @@ impl RangeMeta {
         Self::push_unordered_file_ranges(
             input.memtables.len(),
             &input.files,
-            input.cache_manager.as_deref(),
+            &input.cache_strategy,
             &mut ranges,
         );
 
@@ -203,16 +203,15 @@ impl RangeMeta {
     fn push_unordered_file_ranges(
         num_memtables: usize,
         files: &[FileHandle],
-        cache: Option<&CacheManager>,
+        cache: &CacheStrategy,
         ranges: &mut Vec<RangeMeta>,
     ) {
         // For append mode, we can parallelize reading row groups.
         for (i, file) in files.iter().enumerate() {
             let file_index = num_memtables + i;
             // Get parquet meta from the cache.
-            let parquet_meta = cache.and_then(|c| {
-                c.get_parquet_meta_data_from_mem_cache(file.region_id(), file.file_id())
-            });
+            let parquet_meta =
+                cache.get_parquet_meta_data_from_mem_cache(file.region_id(), file.file_id());
             if let Some(parquet_meta) = parquet_meta {
                 // Scans each row group.
                 for row_group_index in 0..file.meta_ref().num_row_groups {

@@ -38,7 +38,7 @@ use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
-use crate::cache::CacheManagerRef;
+use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::error::{
     ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadDataPartSnafu,
     ReadParquetSnafu, Result,
@@ -77,8 +77,8 @@ pub struct ParquetReaderBuilder {
     /// `None` reads all columns. Due to schema change, the projection
     /// can contain columns not in the parquet file.
     projection: Option<Vec<ColumnId>>,
-    /// Manager that caches SST data.
-    cache_manager: Option<CacheManagerRef>,
+    /// Strategy to cache SST data.
+    cache_strategy: CacheStrategy,
     /// Index appliers.
     inverted_index_applier: Option<InvertedIndexApplierRef>,
     bloom_filter_index_applier: Option<BloomFilterIndexApplierRef>,
@@ -102,7 +102,8 @@ impl ParquetReaderBuilder {
             object_store,
             predicate: None,
             projection: None,
-            cache_manager: None,
+            // TODO(yingwen): Maybe add a Disabled variant.
+            cache_strategy: CacheStrategy::Normal(CacheManagerRef::default()),
             inverted_index_applier: None,
             bloom_filter_index_applier: None,
             fulltext_index_applier: None,
@@ -128,8 +129,8 @@ impl ParquetReaderBuilder {
 
     /// Attaches the cache to the builder.
     #[must_use]
-    pub fn cache(mut self, cache: Option<CacheManagerRef>) -> ParquetReaderBuilder {
-        self.cache_manager = cache;
+    pub fn cache(mut self, cache: CacheStrategy) -> ParquetReaderBuilder {
+        self.cache_strategy = cache;
         self
     }
 
@@ -234,7 +235,7 @@ impl ParquetReaderBuilder {
             object_store: self.object_store.clone(),
             projection: projection_mask,
             field_levels,
-            cache_manager: self.cache_manager.clone(),
+            cache_strategy: self.cache_strategy.clone(),
         };
 
         let filters = if let Some(predicate) = &self.predicate {
@@ -308,10 +309,12 @@ impl ParquetReaderBuilder {
         let region_id = self.file_handle.region_id();
         let file_id = self.file_handle.file_id();
         // Tries to get from global cache.
-        if let Some(manager) = &self.cache_manager {
-            if let Some(metadata) = manager.get_parquet_meta_data(region_id, file_id).await {
-                return Ok(metadata);
-            }
+        if let Some(metadata) = self
+            .cache_strategy
+            .get_parquet_meta_data(region_id, file_id)
+            .await
+        {
+            return Ok(metadata);
         }
 
         // Cache miss, load metadata directly.
@@ -319,13 +322,11 @@ impl ParquetReaderBuilder {
         let metadata = metadata_loader.load().await?;
         let metadata = Arc::new(metadata);
         // Cache the metadata.
-        if let Some(cache) = &self.cache_manager {
-            cache.put_parquet_meta_data(
-                self.file_handle.region_id(),
-                self.file_handle.file_id(),
-                metadata.clone(),
-            );
-        }
+        self.cache_strategy.put_parquet_meta_data(
+            self.file_handle.region_id(),
+            self.file_handle.file_id(),
+            metadata.clone(),
+        );
 
         Ok(metadata)
     }
@@ -857,7 +858,7 @@ pub(crate) struct RowGroupReaderBuilder {
     /// Field levels to read.
     field_levels: FieldLevels,
     /// Cache.
-    cache_manager: Option<CacheManagerRef>,
+    cache_strategy: CacheStrategy,
 }
 
 impl RowGroupReaderBuilder {
@@ -875,8 +876,8 @@ impl RowGroupReaderBuilder {
         &self.parquet_meta
     }
 
-    pub(crate) fn cache_manager(&self) -> &Option<CacheManagerRef> {
-        &self.cache_manager
+    pub(crate) fn cache_strategy(&self) -> &CacheStrategy {
+        &self.cache_strategy
     }
 
     /// Builds a [ParquetRecordBatchReader] to read the row group at `row_group_idx`.
@@ -890,7 +891,7 @@ impl RowGroupReaderBuilder {
             self.file_handle.file_id(),
             &self.parquet_meta,
             row_group_idx,
-            self.cache_manager.clone(),
+            self.cache_strategy.clone(),
             &self.file_path,
             self.object_store.clone(),
         );

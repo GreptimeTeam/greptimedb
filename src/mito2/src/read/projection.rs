@@ -30,7 +30,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 
-use crate::cache::CacheManager;
+use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, Result};
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
@@ -171,7 +171,7 @@ impl ProjectionMapper {
     pub(crate) fn convert(
         &self,
         batch: &Batch,
-        cache_manager: Option<&CacheManager>,
+        cache_strategy: &CacheStrategy,
     ) -> common_recordbatch::error::Result<RecordBatch> {
         debug_assert_eq!(self.batch_fields.len(), batch.fields().len());
         debug_assert!(self
@@ -204,15 +204,12 @@ impl ProjectionMapper {
             match index {
                 BatchIndex::Tag(idx) => {
                     let value = &pk_values[*idx];
-                    let vector = match cache_manager {
-                        Some(cache) => repeated_vector_with_cache(
-                            &column_schema.data_type,
-                            value,
-                            num_rows,
-                            cache,
-                        )?,
-                        None => new_repeated_vector(&column_schema.data_type, value, num_rows)?,
-                    };
+                    let vector = repeated_vector_with_cache(
+                        &column_schema.data_type,
+                        value,
+                        num_rows,
+                        cache_strategy,
+                    )?;
                     columns.push(vector);
                 }
                 BatchIndex::Timestamp => {
@@ -244,9 +241,9 @@ fn repeated_vector_with_cache(
     data_type: &ConcreteDataType,
     value: &Value,
     num_rows: usize,
-    cache_manager: &CacheManager,
+    cache_strategy: &CacheStrategy,
 ) -> common_recordbatch::error::Result<VectorRef> {
-    if let Some(vector) = cache_manager.get_repeated_vector(data_type, value) {
+    if let Some(vector) = cache_strategy.get_repeated_vector(data_type, value) {
         // Tries to get the vector from cache manager. If the vector doesn't
         // have enough length, creates a new one.
         match vector.len().cmp(&num_rows) {
@@ -260,7 +257,7 @@ fn repeated_vector_with_cache(
     let vector = new_repeated_vector(data_type, value, num_rows)?;
     // Updates cache.
     if vector.len() <= MAX_VECTOR_LENGTH_TO_CACHE {
-        cache_manager.put_repeated_vector(value.clone(), vector.clone());
+        cache_strategy.put_repeated_vector(value.clone(), vector.clone());
     }
 
     Ok(vector)
@@ -284,12 +281,15 @@ fn new_repeated_vector(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use api::v1::OpType;
     use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray, UInt64Array, UInt8Array};
     use datatypes::arrow::util::pretty;
     use datatypes::value::ValueRef;
 
     use super::*;
+    use crate::cache::CacheManager;
     use crate::read::BatchBuilder;
     use crate::test_util::meta_util::TestRegionMetadataBuilder;
 
@@ -359,8 +359,9 @@ mod tests {
 
         // With vector cache.
         let cache = CacheManager::builder().vector_cache_size(1024).build();
+        let cache = CacheStrategy::Normal(Arc::new(cache));
         let batch = new_batch(0, &[1, 2], &[(3, 3), (4, 4)], 3);
-        let record_batch = mapper.convert(&batch, Some(&cache)).unwrap();
+        let record_batch = mapper.convert(&batch, &cache).unwrap();
         let expect = "\
 +---------------------+----+----+----+----+
 | ts                  | k0 | k1 | v0 | v1 |
@@ -380,7 +381,7 @@ mod tests {
         assert!(cache
             .get_repeated_vector(&ConcreteDataType::int64_datatype(), &Value::Int64(3))
             .is_none());
-        let record_batch = mapper.convert(&batch, Some(&cache)).unwrap();
+        let record_batch = mapper.convert(&batch, &cache).unwrap();
         assert_eq!(expect, print_record_batch(record_batch));
     }
 
@@ -401,7 +402,9 @@ mod tests {
         );
 
         let batch = new_batch(0, &[1, 2], &[(4, 4)], 3);
-        let record_batch = mapper.convert(&batch, None).unwrap();
+        let cache = CacheManager::builder().vector_cache_size(1024).build();
+        let cache = CacheStrategy::Normal(Arc::new(cache));
+        let record_batch = mapper.convert(&batch, &cache).unwrap();
         let expect = "\
 +----+----+
 | v1 | k0 |

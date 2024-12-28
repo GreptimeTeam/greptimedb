@@ -332,7 +332,7 @@ mod tests {
     use super::*;
     use crate::access_layer::OperationType;
     use crate::cache::test_util::new_fs_store;
-    use crate::cache::CacheManager;
+    use crate::cache::{CacheManager, CacheStrategy};
     use crate::region::options::IndexOptions;
     use crate::sst::file::FileId;
     use crate::sst::location::{index_file_path, sst_file_path};
@@ -495,7 +495,7 @@ mod tests {
 
         // Read metadata from write cache
         let builder = ParquetReaderBuilder::new(data_home, handle.clone(), mock_store.clone())
-            .cache(Some(cache_manager.clone()));
+            .cache(CacheStrategy::Normal(cache_manager.clone()));
         let reader = builder.build().await.unwrap();
 
         // Check parquet metadata

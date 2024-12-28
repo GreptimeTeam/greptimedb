@@ -148,7 +148,7 @@ impl UnorderedScan {
         let stream = try_stream! {
             part_metrics.on_first_poll();
 
-            let cache = stream_ctx.input.cache_manager.as_deref();
+            let cache = &stream_ctx.input.cache_strategy;
             let range_builder_list = Arc::new(RangeBuilderList::new(
                 stream_ctx.input.num_memtables(),
                 stream_ctx.input.num_files(),
