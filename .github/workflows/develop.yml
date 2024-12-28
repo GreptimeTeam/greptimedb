@@ -84,7 +84,7 @@ jobs:
           # Shares across multiple jobs
           shared-key: "check-toml"
       - name: Install taplo
-        run: cargo +stable install taplo-cli --version ^0.9 --locked
+        run: cargo +stable install taplo-cli --version ^0.9 --locked --force
       - name: Run taplo
         run: taplo format --check
 
