@@ -107,7 +107,7 @@ jobs:
           shared-key: "build-binaries"
       - name: Install cargo-gc-bin
         shell: bash
-        run: cargo install cargo-gc-bin
+        run: cargo install cargo-gc-bin --force
       - name: Build greptime binaries
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
@@ -268,7 +268,7 @@ jobs:
           shared-key: "build-greptime-ci"
       - name: Install cargo-gc-bin
         shell: bash
-        run: cargo install cargo-gc-bin
+        run: cargo install cargo-gc-bin --force
       - name: Build greptime bianry
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
