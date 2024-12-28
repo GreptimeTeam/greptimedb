@@ -1347,14 +1347,17 @@ async fn test_alter_table(instance: Arc<dyn MockInstance>) {
     ));
 
     // Add column
-    let output = execute_sql(&instance, "alter table demo add my_tag string null")
-        .await
-        .data;
+    let output = execute_sql(
+        &instance,
+        "alter table demo add my_tag1 string null, my_tag2 integer",
+    )
+    .await
+    .data;
     assert!(matches!(output, OutputData::AffectedRows(0)));
 
     let output = execute_sql(
         &instance,
-        "insert into demo(host, cpu, memory, ts, my_tag) values ('host2', 2.2, 200, 2000, 'hello')",
+        "insert into demo(host, cpu, memory, ts, my_tag1, my_tag2) values ('host2', 2.2, 200, 2000, 'hello', 123)",
     )
     .await
     .data;
@@ -1371,13 +1374,13 @@ async fn test_alter_table(instance: Arc<dyn MockInstance>) {
         .await
         .data;
     let expected = "\
-+-------+-----+--------+---------------------+--------+
-| host  | cpu | memory | ts                  | my_tag |
-+-------+-----+--------+---------------------+--------+
-| host1 | 1.1 | 100.0  | 1970-01-01T00:00:01 |        |
-| host2 | 2.2 | 200.0  | 1970-01-01T00:00:02 | hello  |
-| host3 | 3.3 | 300.0  | 1970-01-01T00:00:03 |        |
-+-------+-----+--------+---------------------+--------+";
++-------+-----+--------+---------------------+---------+---------+
+| host  | cpu | memory | ts                  | my_tag1 | my_tag2 |
++-------+-----+--------+---------------------+---------+---------+
+| host1 | 1.1 | 100.0  | 1970-01-01T00:00:01 |         |         |
+| host2 | 2.2 | 200.0  | 1970-01-01T00:00:02 | hello   | 123     |
+| host3 | 3.3 | 300.0  | 1970-01-01T00:00:03 |         |         |
++-------+-----+--------+---------------------+---------+---------+";
     check_output_stream(output, expected).await;
 
     // Drop a column
@@ -1390,19 +1393,19 @@ async fn test_alter_table(instance: Arc<dyn MockInstance>) {
         .await
         .data;
     let expected = "\
-+-------+-----+---------------------+--------+
-| host  | cpu | ts                  | my_tag |
-+-------+-----+---------------------+--------+
-| host1 | 1.1 | 1970-01-01T00:00:01 |        |
-| host2 | 2.2 | 1970-01-01T00:00:02 | hello  |
-| host3 | 3.3 | 1970-01-01T00:00:03 |        |
-+-------+-----+---------------------+--------+";
++-------+-----+---------------------+---------+---------+
+| host  | cpu | ts                  | my_tag1 | my_tag2 |
++-------+-----+---------------------+---------+---------+
+| host1 | 1.1 | 1970-01-01T00:00:01 |         |         |
+| host2 | 2.2 | 1970-01-01T00:00:02 | hello   | 123     |
+| host3 | 3.3 | 1970-01-01T00:00:03 |         |         |
++-------+-----+---------------------+---------+---------+";
     check_output_stream(output, expected).await;
 
     // insert a new row
     let output = execute_sql(
         &instance,
-        "insert into demo(host, cpu, ts, my_tag) values ('host4', 400, 4000, 'world')",
+        "insert into demo(host, cpu, ts, my_tag1, my_tag2) values ('host4', 400, 4000, 'world', 321)",
     )
     .await
     .data;
@@ -1412,14 +1415,14 @@ async fn test_alter_table(instance: Arc<dyn MockInstance>) {
         .await
         .data;
     let expected = "\
-+-------+-------+---------------------+--------+
-| host  | cpu   | ts                  | my_tag |
-+-------+-------+---------------------+--------+
-| host1 | 1.1   | 1970-01-01T00:00:01 |        |
-| host2 | 2.2   | 1970-01-01T00:00:02 | hello  |
-| host3 | 3.3   | 1970-01-01T00:00:03 |        |
-| host4 | 400.0 | 1970-01-01T00:00:04 | world  |
-+-------+-------+---------------------+--------+";
++-------+-------+---------------------+---------+---------+
+| host  | cpu   | ts                  | my_tag1 | my_tag2 |
++-------+-------+---------------------+---------+---------+
+| host1 | 1.1   | 1970-01-01T00:00:01 |         |         |
+| host2 | 2.2   | 1970-01-01T00:00:02 | hello   | 123     |
+| host3 | 3.3   | 1970-01-01T00:00:03 |         |         |
+| host4 | 400.0 | 1970-01-01T00:00:04 | world   | 321     |
++-------+-------+---------------------+---------+---------+";
     check_output_stream(output, expected).await;
 }
 
