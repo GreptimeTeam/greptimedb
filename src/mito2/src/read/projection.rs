@@ -359,7 +359,7 @@ mod tests {
 
         // With vector cache.
         let cache = CacheManager::builder().vector_cache_size(1024).build();
-        let cache = CacheStrategy::Normal(Arc::new(cache));
+        let cache = CacheStrategy::EnableAll(Arc::new(cache));
         let batch = new_batch(0, &[1, 2], &[(3, 3), (4, 4)], 3);
         let record_batch = mapper.convert(&batch, &cache).unwrap();
         let expect = "\
@@ -403,7 +403,7 @@ mod tests {
 
         let batch = new_batch(0, &[1, 2], &[(4, 4)], 3);
         let cache = CacheManager::builder().vector_cache_size(1024).build();
-        let cache = CacheStrategy::Normal(Arc::new(cache));
+        let cache = CacheStrategy::EnableAll(Arc::new(cache));
         let record_batch = mapper.convert(&batch, &cache).unwrap();
         let expect = "\
 +----+----+

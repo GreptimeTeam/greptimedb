@@ -195,7 +195,7 @@ mod tests {
             .unwrap();
 
         // Enable page cache.
-        let cache = CacheStrategy::Normal(Arc::new(
+        let cache = CacheStrategy::EnableAll(Arc::new(
             CacheManager::builder()
                 .page_cache_size(64 * 1024 * 1024)
                 .build(),

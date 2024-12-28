@@ -60,13 +60,13 @@ const SELECTOR_RESULT_TYPE: &str = "selector_result";
 pub enum CacheStrategy {
     /// Strategy for normal operations.
     /// Doesn't disable any cache.
-    Normal(CacheManagerRef),
+    EnableAll(CacheManagerRef),
     /// Strategy for compaction.
-    /// Disables some caches that are not needed during compaction.
+    /// Disables some caches during compaction to avoid affecting queries.
     /// Enables the write cache so that the compaction can read files cached
     /// in the write cache and write the compacted files back to the write cache.
     Compaction(CacheManagerRef),
-    /// No cache.
+    /// Do not use any cache.
     Disabled,
 }
 
@@ -78,7 +78,7 @@ impl CacheStrategy {
         file_id: FileId,
     ) -> Option<Arc<ParquetMetaData>> {
         match self {
-            CacheStrategy::Normal(cache_manager) => {
+            CacheStrategy::EnableAll(cache_manager) => {
                 cache_manager
                     .get_parquet_meta_data(region_id, file_id)
                     .await
@@ -99,7 +99,7 @@ impl CacheStrategy {
         file_id: FileId,
     ) -> Option<Arc<ParquetMetaData>> {
         match self {
-            CacheStrategy::Normal(cache_manager) => {
+            CacheStrategy::EnableAll(cache_manager) => {
                 cache_manager.get_parquet_meta_data_from_mem_cache(region_id, file_id)
             }
             CacheStrategy::Compaction(cache_manager) => {
@@ -117,7 +117,7 @@ impl CacheStrategy {
         metadata: Arc<ParquetMetaData>,
     ) {
         match self {
-            CacheStrategy::Normal(cache_manager) => {
+            CacheStrategy::EnableAll(cache_manager) => {
                 cache_manager.put_parquet_meta_data(region_id, file_id, metadata);
             }
             CacheStrategy::Compaction(cache_manager) => {
@@ -130,7 +130,7 @@ impl CacheStrategy {
     /// Calls [CacheManager::remove_parquet_meta_data()].
     pub fn remove_parquet_meta_data(&self, region_id: RegionId, file_id: FileId) {
         match self {
-            CacheStrategy::Normal(cache_manager) => {
+            CacheStrategy::EnableAll(cache_manager) => {
                 cache_manager.remove_parquet_meta_data(region_id, file_id);
             }
             CacheStrategy::Compaction(cache_manager) => {
@@ -148,7 +148,7 @@ impl CacheStrategy {
         value: &Value,
     ) -> Option<VectorRef> {
         match self {
-            CacheStrategy::Normal(cache_manager) => {
+            CacheStrategy::EnableAll(cache_manager) => {
                 cache_manager.get_repeated_vector(data_type, value)
             }
             CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
@@ -156,9 +156,9 @@ impl CacheStrategy {
     }
 
     /// Calls [CacheManager::put_repeated_vector()].
-    /// It does nothing if the strategy isn't [CacheStrategy::Normal].
+    /// It does nothing if the strategy isn't [CacheStrategy::EnableAll].
     pub fn put_repeated_vector(&self, value: Value, vector: VectorRef) {
-        if let CacheStrategy::Normal(cache_manager) = self {
+        if let CacheStrategy::EnableAll(cache_manager) = self {
             cache_manager.put_repeated_vector(value, vector);
         }
     }
@@ -167,15 +167,15 @@ impl CacheStrategy {
     /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
     pub fn get_pages(&self, page_key: &PageKey) -> Option<Arc<PageValue>> {
         match self {
-            CacheStrategy::Normal(cache_manager) => cache_manager.get_pages(page_key),
+            CacheStrategy::EnableAll(cache_manager) => cache_manager.get_pages(page_key),
             CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
         }
     }
 
     /// Calls [CacheManager::put_pages()].
-    /// It does nothing if the strategy isn't [CacheStrategy::Normal].
+    /// It does nothing if the strategy isn't [CacheStrategy::EnableAll].
     pub fn put_pages(&self, page_key: PageKey, pages: Arc<PageValue>) {
-        if let CacheStrategy::Normal(cache_manager) = self {
+        if let CacheStrategy::EnableAll(cache_manager) = self {
             cache_manager.put_pages(page_key, pages);
         }
     }
@@ -187,19 +187,21 @@ impl CacheStrategy {
         selector_key: &SelectorResultKey,
     ) -> Option<Arc<SelectorResultValue>> {
         match self {
-            CacheStrategy::Normal(cache_manager) => cache_manager.get_selector_result(selector_key),
+            CacheStrategy::EnableAll(cache_manager) => {
+                cache_manager.get_selector_result(selector_key)
+            }
             CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
         }
     }
 
     /// Calls [CacheManager::put_selector_result()].
-    /// It does nothing if the strategy isn't [CacheStrategy::Normal].
+    /// It does nothing if the strategy isn't [CacheStrategy::EnableAll].
     pub fn put_selector_result(
         &self,
         selector_key: SelectorResultKey,
         result: Arc<SelectorResultValue>,
     ) {
-        if let CacheStrategy::Normal(cache_manager) = self {
+        if let CacheStrategy::EnableAll(cache_manager) = self {
             cache_manager.put_selector_result(selector_key, result);
         }
     }
@@ -208,7 +210,7 @@ impl CacheStrategy {
     /// It returns None if the strategy is [CacheStrategy::Disabled].
     pub fn write_cache(&self) -> Option<&WriteCacheRef> {
         match self {
-            CacheStrategy::Normal(cache_manager) => cache_manager.write_cache(),
+            CacheStrategy::EnableAll(cache_manager) => cache_manager.write_cache(),
             CacheStrategy::Compaction(cache_manager) => cache_manager.write_cache(),
             CacheStrategy::Disabled => None,
         }
@@ -218,7 +220,7 @@ impl CacheStrategy {
     /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
     pub fn index_cache(&self) -> Option<&InvertedIndexCacheRef> {
         match self {
-            CacheStrategy::Normal(cache_manager) => cache_manager.index_cache(),
+            CacheStrategy::EnableAll(cache_manager) => cache_manager.index_cache(),
             CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
         }
     }
@@ -227,7 +229,7 @@ impl CacheStrategy {
     /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
     pub fn bloom_filter_index_cache(&self) -> Option<&BloomFilterIndexCacheRef> {
         match self {
-            CacheStrategy::Normal(cache_manager) => cache_manager.bloom_filter_index_cache(),
+            CacheStrategy::EnableAll(cache_manager) => cache_manager.bloom_filter_index_cache(),
             CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
         }
     }
@@ -236,7 +238,7 @@ impl CacheStrategy {
     /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
     pub fn puffin_metadata_cache(&self) -> Option<&PuffinMetadataCacheRef> {
         match self {
-            CacheStrategy::Normal(cache_manager) => cache_manager.puffin_metadata_cache(),
+            CacheStrategy::EnableAll(cache_manager) => cache_manager.puffin_metadata_cache(),
             CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
         }
     }
