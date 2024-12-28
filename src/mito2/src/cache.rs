@@ -66,6 +66,8 @@ pub enum CacheStrategy {
     /// Enables the write cache so that the compaction can read files cached
     /// in the write cache and write the compacted files back to the write cache.
     Compaction(CacheManagerRef),
+    /// No cache.
+    Disabled,
 }
 
 impl CacheStrategy {
@@ -86,6 +88,7 @@ impl CacheStrategy {
                     .get_parquet_meta_data(region_id, file_id)
                     .await
             }
+            CacheStrategy::Disabled => None,
         }
     }
 
@@ -102,6 +105,7 @@ impl CacheStrategy {
             CacheStrategy::Compaction(cache_manager) => {
                 cache_manager.get_parquet_meta_data_from_mem_cache(region_id, file_id)
             }
+            CacheStrategy::Disabled => None,
         }
     }
 
@@ -119,6 +123,7 @@ impl CacheStrategy {
             CacheStrategy::Compaction(cache_manager) => {
                 cache_manager.put_parquet_meta_data(region_id, file_id, metadata);
             }
+            CacheStrategy::Disabled => {}
         }
     }
 
@@ -131,11 +136,12 @@ impl CacheStrategy {
             CacheStrategy::Compaction(cache_manager) => {
                 cache_manager.remove_parquet_meta_data(region_id, file_id);
             }
+            CacheStrategy::Disabled => {}
         }
     }
 
     /// Calls [CacheManager::get_repeated_vector()].
-    /// It returns None if the strategy is [CacheStrategy::Compaction].
+    /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
     pub fn get_repeated_vector(
         &self,
         data_type: &ConcreteDataType,
@@ -145,12 +151,12 @@ impl CacheStrategy {
             CacheStrategy::Normal(cache_manager) => {
                 cache_manager.get_repeated_vector(data_type, value)
             }
-            CacheStrategy::Compaction(_) => None,
+            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
         }
     }
 
     /// Calls [CacheManager::put_repeated_vector()].
-    /// It does nothing if the strategy is [CacheStrategy::Compaction].
+    /// It does nothing if the strategy isn't [CacheStrategy::Normal].
     pub fn put_repeated_vector(&self, value: Value, vector: VectorRef) {
         if let CacheStrategy::Normal(cache_manager) = self {
             cache_manager.put_repeated_vector(value, vector);
@@ -158,16 +164,16 @@ impl CacheStrategy {
     }
 
     /// Calls [CacheManager::get_pages()].
-    /// It returns None if the strategy is [CacheStrategy::Compaction].
+    /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
     pub fn get_pages(&self, page_key: &PageKey) -> Option<Arc<PageValue>> {
         match self {
             CacheStrategy::Normal(cache_manager) => cache_manager.get_pages(page_key),
-            CacheStrategy::Compaction(_) => None,
+            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
         }
     }
 
     /// Calls [CacheManager::put_pages()].
-    /// It does nothing if the strategy is [CacheStrategy::Compaction].
+    /// It does nothing if the strategy isn't [CacheStrategy::Normal].
     pub fn put_pages(&self, page_key: PageKey, pages: Arc<PageValue>) {
         if let CacheStrategy::Normal(cache_manager) = self {
             cache_manager.put_pages(page_key, pages);
@@ -175,19 +181,19 @@ impl CacheStrategy {
     }
 
     /// Calls [CacheManager::get_selector_result()].
-    /// It returns None if the strategy is [CacheStrategy::Compaction].
+    /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
     pub fn get_selector_result(
         &self,
         selector_key: &SelectorResultKey,
     ) -> Option<Arc<SelectorResultValue>> {
         match self {
             CacheStrategy::Normal(cache_manager) => cache_manager.get_selector_result(selector_key),
-            CacheStrategy::Compaction(_) => None,
+            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
         }
     }
 
     /// Calls [CacheManager::put_selector_result()].
-    /// It does nothing if the strategy is [CacheStrategy::Compaction].
+    /// It does nothing if the strategy isn't [CacheStrategy::Normal].
     pub fn put_selector_result(
         &self,
         selector_key: SelectorResultKey,
@@ -199,37 +205,39 @@ impl CacheStrategy {
     }
 
     /// Calls [CacheManager::write_cache()].
+    /// It returns None if the strategy is [CacheStrategy::Disabled].
     pub fn write_cache(&self) -> Option<&WriteCacheRef> {
         match self {
             CacheStrategy::Normal(cache_manager) => cache_manager.write_cache(),
             CacheStrategy::Compaction(cache_manager) => cache_manager.write_cache(),
+            CacheStrategy::Disabled => None,
         }
     }
 
     /// Calls [CacheManager::index_cache()].
-    /// It returns None if the strategy is [CacheStrategy::Compaction].
+    /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
     pub fn index_cache(&self) -> Option<&InvertedIndexCacheRef> {
         match self {
             CacheStrategy::Normal(cache_manager) => cache_manager.index_cache(),
-            CacheStrategy::Compaction(_) => None,
+            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
         }
     }
 
     /// Calls [CacheManager::bloom_filter_index_cache()].
-    /// It returns None if the strategy is [CacheStrategy::Compaction].
+    /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
     pub fn bloom_filter_index_cache(&self) -> Option<&BloomFilterIndexCacheRef> {
         match self {
             CacheStrategy::Normal(cache_manager) => cache_manager.bloom_filter_index_cache(),
-            CacheStrategy::Compaction(_) => None,
+            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
         }
     }
 
     /// Calls [CacheManager::puffin_metadata_cache()].
-    /// It returns None if the strategy is [CacheStrategy::Compaction].
+    /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
     pub fn puffin_metadata_cache(&self) -> Option<&PuffinMetadataCacheRef> {
         match self {
             CacheStrategy::Normal(cache_manager) => cache_manager.puffin_metadata_cache(),
-            CacheStrategy::Compaction(_) => None,
+            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
         }
     }
 }

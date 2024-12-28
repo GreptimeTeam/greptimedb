@@ -38,7 +38,7 @@ use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
-use crate::cache::{CacheManagerRef, CacheStrategy};
+use crate::cache::CacheStrategy;
 use crate::error::{
     ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadDataPartSnafu,
     ReadParquetSnafu, Result,
@@ -102,8 +102,7 @@ impl ParquetReaderBuilder {
             object_store,
             predicate: None,
             projection: None,
-            // TODO(yingwen): Maybe add a Disabled variant.
-            cache_strategy: CacheStrategy::Normal(CacheManagerRef::default()),
+            cache_strategy: CacheStrategy::Disabled,
             inverted_index_applier: None,
             bloom_filter_index_applier: None,
             fulltext_index_applier: None,
