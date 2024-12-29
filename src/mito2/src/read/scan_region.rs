@@ -564,7 +564,7 @@ impl ScanInput {
             predicate: None,
             memtables: Vec::new(),
             files: Vec::new(),
-            cache_strategy: CacheStrategy::EnableAll(CacheManagerRef::default()),
+            cache_strategy: CacheStrategy::Disabled,
             ignore_file_not_found: false,
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             inverted_index_applier: None,
