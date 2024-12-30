@@ -206,7 +206,7 @@ impl Memtable for TimeSeriesMemtable {
         self.update_stats(local_stats);
 
         // update max_sequence
-        let sequence = kvs.mutation.sequence + kvs.num_rows() as u64 - 1;
+        let sequence = kvs.max_sequence();
         self.max_sequence.fetch_max(sequence, Ordering::Relaxed);
 
         self.num_rows.fetch_add(kvs.num_rows(), Ordering::Relaxed);

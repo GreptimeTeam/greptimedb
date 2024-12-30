@@ -68,6 +68,20 @@ impl KeyValues {
     pub fn is_empty(&self) -> bool {
         self.mutation.rows.is_none()
     }
+
+    /// Return the max sequence in this container.
+    ///
+    /// When the mutation has no rows, the sequence is the same as the mutation sequence.
+    pub fn max_sequence(&self) -> SequenceNumber {
+        let mut sequence = self.mutation.sequence;
+        let num_rows = self.mutation.rows.as_ref().unwrap().rows.len() as u64;
+        sequence += num_rows;
+        if num_rows > 0 {
+            sequence -= 1;
+        }
+
+        sequence
+    }
 }
 
 /// Key value view of a mutation.

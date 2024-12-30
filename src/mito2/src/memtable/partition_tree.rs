@@ -147,7 +147,7 @@ impl Memtable for PartitionTreeMemtable {
 
         // update max_sequence
         if res.is_ok() {
-            let sequence = kvs.mutation.sequence + kvs.num_rows() as u64 - 1;
+            let sequence = kvs.max_sequence();
             self.max_sequence.fetch_max(sequence, Ordering::Relaxed);
         }
 
