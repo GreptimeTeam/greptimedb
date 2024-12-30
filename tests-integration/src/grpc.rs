@@ -96,7 +96,9 @@ mod test {
 
     /// Runs the query and ignores the error.
     async fn query_ignore_err(instance: &Instance, request: Request) {
-        let _ = GrpcQueryHandler::do_query(instance, request, QueryContext::arc()).await;
+        if let Err(e) = GrpcQueryHandler::do_query(instance, request, QueryContext::arc()).await {
+            common_telemetry::error!(e; "Failed to query");
+        }
     }
 
     async fn test_handle_multi_ddl_request(instance: &Instance) {
