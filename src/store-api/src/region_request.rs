@@ -597,7 +597,8 @@ pub struct AddColumn {
 impl AddColumn {
     /// Returns an error if the column to add is invalid.
     ///
-    /// It allows adding existing columns.
+    /// It allows adding existing columns. However, the existing column must have the same metadata
+    /// and the location must be None.
     pub fn validate(&self, metadata: &RegionMetadata) -> Result<()> {
         ensure!(
             self.column_metadata.column_schema.is_nullable()
@@ -614,6 +615,46 @@ impl AddColumn {
                 ),
             }
         );
+
+        if let Some(existing_column) =
+            metadata.column_by_name(&self.column_metadata.column_schema.name)
+        {
+            // If the column already exists.
+            ensure!(
+                *existing_column == self.column_metadata,
+                InvalidRegionRequestSnafu {
+                    region_id: metadata.region_id,
+                    err: format!(
+                        "column {} already exists with different metadata",
+                        self.column_metadata.column_schema.name
+                    ),
+                }
+            );
+            ensure!(
+                self.location.is_none(),
+                InvalidRegionRequestSnafu {
+                    region_id: metadata.region_id,
+                    err: format!(
+                        "column {} already exists, but location is specified",
+                        self.column_metadata.column_schema.name
+                    ),
+                }
+            );
+        }
+
+        if let Some(existing_column) = metadata.column_by_id(self.column_metadata.column_id) {
+            // Ensures the existing column has the same name.
+            ensure!(
+                existing_column.column_schema.name == self.column_metadata.column_schema.name,
+                InvalidRegionRequestSnafu {
+                    region_id: metadata.region_id,
+                    err: format!(
+                        "column id {} already exists with different name {}",
+                        self.column_metadata.column_id, existing_column.column_schema.name
+                    ),
+                }
+            );
+        }
 
         Ok(())
     }
@@ -1008,6 +1049,8 @@ mod tests {
         );
     }
 
+    /// Returns a new region metadata for testing. Metadata:
+    /// `[(ts, ms, 1), (tag_0, string, 2), (field_0, string, 3), (field_1, bool, 4)]`
     fn new_metadata() -> RegionMetadata {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
         builder
@@ -1062,7 +1105,7 @@ mod tests {
                     true,
                 ),
                 semantic_type: SemanticType::Tag,
-                column_id: 4,
+                column_id: 5,
             },
             location: None,
         };
@@ -1078,7 +1121,7 @@ mod tests {
                     false,
                 ),
                 semantic_type: SemanticType::Tag,
-                column_id: 4,
+                column_id: 5,
             },
             location: None,
         }
@@ -1094,7 +1137,7 @@ mod tests {
                     true,
                 ),
                 semantic_type: SemanticType::Tag,
-                column_id: 4,
+                column_id: 2,
             },
             location: None,
         };
@@ -1114,7 +1157,7 @@ mod tests {
                             true,
                         ),
                         semantic_type: SemanticType::Tag,
-                        column_id: 4,
+                        column_id: 5,
                     },
                     location: None,
                 },
@@ -1126,7 +1169,7 @@ mod tests {
                             true,
                         ),
                         semantic_type: SemanticType::Field,
-                        column_id: 5,
+                        column_id: 6,
                     },
                     location: None,
                 },
@@ -1135,6 +1178,82 @@ mod tests {
         let metadata = new_metadata();
         kind.validate(&metadata).unwrap();
         assert!(kind.need_alter(&metadata));
+    }
+
+    #[test]
+    fn test_add_existing_column_different_metadata() {
+        let metadata = new_metadata();
+
+        // Add existing column with different id.
+        let kind = AlterKind::AddColumns {
+            columns: vec![AddColumn {
+                column_metadata: ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "tag_0",
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 4,
+                },
+                location: None,
+            }],
+        };
+        kind.validate(&metadata).unwrap_err();
+
+        // Add existing column with different type.
+        let kind = AlterKind::AddColumns {
+            columns: vec![AddColumn {
+                column_metadata: ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "tag_0",
+                        ConcreteDataType::int64_datatype(),
+                        true,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 2,
+                },
+                location: None,
+            }],
+        };
+        kind.validate(&metadata).unwrap_err();
+
+        // Add existing column with different name.
+        let kind = AlterKind::AddColumns {
+            columns: vec![AddColumn {
+                column_metadata: ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "tag_1",
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 2,
+                },
+                location: None,
+            }],
+        };
+        kind.validate(&metadata).unwrap_err();
+    }
+
+    #[test]
+    fn test_add_existing_column_with_location() {
+        let metadata = new_metadata();
+        let kind = AlterKind::AddColumns {
+            columns: vec![AddColumn {
+                column_metadata: ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "tag_0",
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 2,
+                },
+                location: Some(AddColumnLocation::First),
+            }],
+        };
+        kind.validate(&metadata).unwrap_err();
     }
 
     #[test]
@@ -1235,19 +1354,19 @@ mod tests {
                             true,
                         ),
                         semantic_type: SemanticType::Tag,
-                        column_id: 4,
+                        column_id: 5,
                     },
                     location: None,
                 },
                 AddColumn {
                     column_metadata: ColumnMetadata {
                         column_schema: ColumnSchema::new(
-                            "field_1",
+                            "field_2",
                             ConcreteDataType::string_datatype(),
                             true,
                         ),
                         semantic_type: SemanticType::Field,
-                        column_id: 5,
+                        column_id: 6,
                     },
                     location: None,
                 },
