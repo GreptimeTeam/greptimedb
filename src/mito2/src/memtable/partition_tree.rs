@@ -132,6 +132,10 @@ impl Memtable for PartitionTreeMemtable {
     }
 
     fn write(&self, kvs: &KeyValues) -> Result<()> {
+        if kvs.is_empty() {
+            return Ok(());
+        }
+
         // TODO(yingwen): Validate schema while inserting rows.
 
         let mut metrics = WriteMetrics::default();
@@ -143,7 +147,7 @@ impl Memtable for PartitionTreeMemtable {
 
         // update max_sequence
         if res.is_ok() {
-            let sequence = kvs.mutation.sequence;
+            let sequence = kvs.mutation.sequence + kvs.num_rows() as u64 - 1;
             self.max_sequence.fetch_max(sequence, Ordering::Relaxed);
         }
 

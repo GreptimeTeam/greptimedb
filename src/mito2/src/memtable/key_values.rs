@@ -63,6 +63,11 @@ impl KeyValues {
         // Safety: rows is not None.
         self.mutation.rows.as_ref().unwrap().rows.len()
     }
+
+    /// Returns if this container is empty
+    pub fn is_empty(&self) -> bool {
+        self.mutation.rows.is_none()
+    }
 }
 
 /// Key value view of a mutation.

@@ -188,6 +188,10 @@ impl Memtable for TimeSeriesMemtable {
     }
 
     fn write(&self, kvs: &KeyValues) -> Result<()> {
+        if kvs.is_empty() {
+            return Ok(());
+        }
+
         let mut local_stats = WriteMetrics::default();
 
         for kv in kvs.iter() {
@@ -202,7 +206,7 @@ impl Memtable for TimeSeriesMemtable {
         self.update_stats(local_stats);
 
         // update max_sequence
-        let sequence = kvs.mutation.sequence;
+        let sequence = kvs.mutation.sequence + kvs.num_rows() as u64 - 1;
         self.max_sequence.fetch_max(sequence, Ordering::Relaxed);
 
         self.num_rows.fetch_add(kvs.num_rows(), Ordering::Relaxed);
