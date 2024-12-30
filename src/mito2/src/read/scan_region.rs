@@ -33,7 +33,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::file_cache::FileCacheRef;
-use crate::cache::{CacheManagerRef, CacheStrategy};
+use crate::cache::CacheStrategy;
 use crate::config::DEFAULT_SCAN_CHANNEL_SIZE;
 use crate::error::Result;
 use crate::memtable::MemtableRange;
