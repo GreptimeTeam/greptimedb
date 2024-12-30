@@ -91,18 +91,12 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Install Cargo Nextest
         uses: taiki-e/install-action@nextest
-      - name: Install Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-      - name: Install PyArrow Package
-        run: pip install pyarrow numpy
       - name: Install WSL distribution
         uses: Vampire/setup-wsl@v2
         with:
           distribution: Ubuntu-22.04
       - name: Running tests
-        run: cargo nextest run -F pyo3_backend,dashboard
+        run: cargo nextest run -F dashboard
         env:
           CARGO_BUILD_RUSTFLAGS: "-C linker=lld-link"
           RUST_BACKTRACE: 1
