@@ -667,10 +667,18 @@ pub enum Error {
     },
 
     #[cfg(feature = "pg_kvbackend")]
-    #[snafu(display("Failed to connect to Postgres"))]
-    ConnectPostgres {
+    #[snafu(display("Failed to create connection pool for Postgres"))]
+    CreatePostgresPool {
         #[snafu(source)]
-        error: tokio_postgres::Error,
+        error: deadpool_postgres::CreatePoolError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Failed to get postgres connection from pool, reason: {}", reason))]
+    GetPostgresConnection {
+        reason: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -786,9 +794,9 @@ impl ErrorExt for Error {
             | EmptyDdlTasks { .. } => StatusCode::InvalidArguments,
 
             #[cfg(feature = "pg_kvbackend")]
-            PostgresExecution { .. } => StatusCode::Internal,
-            #[cfg(feature = "pg_kvbackend")]
-            ConnectPostgres { .. } => StatusCode::Internal,
+            PostgresExecution { .. } | CreatePostgresPool { .. } | GetPostgresConnection { .. } => {
+                StatusCode::Internal
+            }
             Error::DatanodeTableInfoNotFound { .. } => StatusCode::Internal,
         }
     }

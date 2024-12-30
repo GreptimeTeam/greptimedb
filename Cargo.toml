@@ -118,6 +118,8 @@ datafusion-physical-expr = { git = "https://github.com/waynexia/arrow-datafusion
 datafusion-physical-plan = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
 datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
 datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
+deadpool = "0.10"
+deadpool-postgres = "0.12"
 derive_builder = "0.12"
 dotenv = "0.15"
 etcd-client = "0.13"

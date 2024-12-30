@@ -2192,6 +2192,8 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datatypes",
+ "deadpool",
+ "deadpool-postgres",
  "derive_builder 0.12.0",
  "etcd-client",
  "futures",
@@ -3309,6 +3311,39 @@ dependencies = [
  "snafu 0.8.5",
  "sqlparser 0.45.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=54a267ac89c09b11c0c88934690530807185d3e7)",
  "sqlparser_derive 0.1.1",
+]
+
+[[package]]
+name = "deadpool"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb84100978c1c7b37f09ed3ce3e5f843af02c2a2c431bae5b19230dad2c1b490"
+dependencies = [
+ "async-trait",
+ "deadpool-runtime",
+ "num_cpus",
+ "tokio",
+]
+
+[[package]]
+name = "deadpool-postgres"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bda39fa1cfff190d8924d447ad04fd22772c250438ca5ce1dfb3c80621c05aaa"
+dependencies = [
+ "deadpool",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+]
+
+[[package]]
+name = "deadpool-runtime"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]
@@ -6529,6 +6564,8 @@ dependencies = [
  "common-wal",
  "dashmap",
  "datatypes",
+ "deadpool",
+ "deadpool-postgres",
  "derive_builder 0.12.0",
  "etcd-client",
  "futures",

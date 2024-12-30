@@ -16,15 +16,17 @@ use std::any::Any;
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use common_telemetry::error;
+use deadpool_postgres::{Config, Pool, Runtime};
 use snafu::ResultExt;
 use tokio_postgres::types::ToSql;
-use tokio_postgres::{Client, NoTls};
+use tokio_postgres::NoTls;
 
-use super::{KvBackend, TxnService};
-use crate::error::{ConnectPostgresSnafu, Error, PostgresExecutionSnafu, Result, StrFromUtf8Snafu};
+use crate::error::{
+    CreatePostgresPoolSnafu, Error, GetPostgresConnectionSnafu, PostgresExecutionSnafu, Result,
+    StrFromUtf8Snafu,
+};
 use crate::kv_backend::txn::{Txn as KvTxn, TxnResponse as KvTxnResponse};
-use crate::kv_backend::KvBackendRef;
+use crate::kv_backend::{KvBackend, KvBackendRef, TxnService};
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
@@ -35,7 +37,7 @@ use crate::rpc::KeyValue;
 /// Posgres backend store for metasrv
 pub struct PgStore {
     // TODO: Consider using sqlx crate.
-    client: Client,
+    pool: Pool,
 }
 
 const EMPTY: &[u8] = &[0];
@@ -94,33 +96,49 @@ SELECT k, v FROM prev;"#;
 impl PgStore {
     /// Create pgstore impl of KvBackendRef from url.
     pub async fn with_url(url: &str) -> Result<KvBackendRef> {
-        // TODO: support tls.
-        let (client, conn) = tokio_postgres::connect(url, NoTls)
-            .await
-            .context(ConnectPostgresSnafu)?;
-        tokio::spawn(async move {
-            if let Err(e) = conn.await {
-                error!(e; "connection error");
-            }
-        });
-        Self::with_pg_client(client).await
+        let mut cfg = Config::new();
+        cfg.url = Some(url.to_string());
+        let pool = cfg
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .context(CreatePostgresPoolSnafu)?;
+        Self::with_pg_pool(pool).await
     }
 
     /// Create pgstore impl of KvBackendRef from tokio-postgres client.
-    pub async fn with_pg_client(client: Client) -> Result<KvBackendRef> {
+    pub async fn with_pg_pool(pool: Pool) -> Result<KvBackendRef> {
         // This step ensures the postgres metadata backend is ready to use.
         // We check if greptime_metakv table exists, and we will create a new table
         // if it does not exist.
+        let client = match pool.get().await {
+            Ok(client) => client,
+            Err(e) => {
+                return GetPostgresConnectionSnafu {
+                    reason: e.to_string(),
+                }
+                .fail();
+            }
+        };
         client
-            .execute(METADKV_CREATION, &[])
+            .query(METADKV_CREATION, &[])
             .await
             .context(PostgresExecutionSnafu)?;
-        Ok(Arc::new(Self { client }))
+        Ok(Arc::new(Self { pool }))
+    }
+
+    async fn get_client(&self) -> Result<deadpool::managed::Object<deadpool_postgres::Manager>> {
+        match self.pool.get().await {
+            Ok(client) => Ok(client),
+            Err(e) => GetPostgresConnectionSnafu {
+                reason: e.to_string(),
+            }
+            .fail(),
+        }
     }
 
     async fn put_if_not_exists(&self, key: &str, value: &str) -> Result<bool> {
         let res = self
-            .client
+            .get_client()
+            .await?
             .query(PUT_IF_NOT_EXISTS, &[&key, &value])
             .await
             .context(PostgresExecutionSnafu)?;
@@ -259,7 +277,8 @@ impl KvBackend for PgStore {
             })
             .collect();
         let res = self
-            .client
+            .get_client()
+            .await?
             .query(&template, &params)
             .await
             .context(PostgresExecutionSnafu)?;
@@ -327,8 +346,10 @@ impl KvBackend for PgStore {
             in_params.iter().map(|x| x as &(dyn ToSql + Sync)).collect();
 
         let query = generate_batch_upsert_query(req.kvs.len());
+
         let res = self
-            .client
+            .get_client()
+            .await?
             .query(&query, &params)
             .await
             .context(PostgresExecutionSnafu)?;
@@ -365,8 +386,10 @@ impl KvBackend for PgStore {
             .iter()
             .map(|x| x as &(dyn ToSql + Sync))
             .collect();
+
         let res = self
-            .client
+            .get_client()
+            .await?
             .query(&query, &params)
             .await
             .context(PostgresExecutionSnafu)?;
@@ -409,7 +432,8 @@ impl KvBackend for PgStore {
             .collect();
 
         let res = self
-            .client
+            .get_client()
+            .await?
             .query(template, &params)
             .await
             .context(PostgresExecutionSnafu)?;
@@ -453,8 +477,10 @@ impl KvBackend for PgStore {
             .iter()
             .map(|x| x as &(dyn ToSql + Sync))
             .collect();
+
         let res = self
-            .client
+            .get_client()
+            .await?
             .query(&query, &params)
             .await
             .context(PostgresExecutionSnafu)?;
@@ -488,7 +514,8 @@ impl KvBackend for PgStore {
         let expect = process_bytes(&req.expect, "CASExpect")?;
 
         let res = self
-            .client
+            .get_client()
+            .await?
             .query(CAS, &[&key, &value, &expect])
             .await
             .context(PostgresExecutionSnafu)?;
@@ -560,10 +587,13 @@ mod tests {
             return None;
         }
 
-        let (client, connection) = tokio_postgres::connect(&endpoints, NoTls).await.unwrap();
-        tokio::spawn(connection);
-        let _ = client.execute(METADKV_CREATION, &[]).await;
-        Some(PgStore { client })
+        let mut cfg = Config::new();
+        cfg.url = Some(endpoints);
+        let pool = cfg
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .context(CreatePostgresPoolSnafu)
+            .unwrap();
+        Some(PgStore { pool })
     }
 
     #[tokio::test]
