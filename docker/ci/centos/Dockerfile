@@ -7,9 +7,7 @@ RUN sed -i s/^#.*baseurl=http/baseurl=http/g /etc/yum.repos.d/*.repo
 RUN yum install -y epel-release \
     openssl \
     openssl-devel  \
-    centos-release-scl  \
-    rh-python38  \
-    rh-python38-python-devel
+    centos-release-scl
 
 ARG TARGETARCH
 
