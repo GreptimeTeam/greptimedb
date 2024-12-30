@@ -80,8 +80,12 @@ impl VersionControl {
     /// Freezes the mutable memtable if it is not empty.
     pub(crate) fn freeze_mutable(&self) -> Result<()> {
         let version = self.current().version;
+        let time_window = version.compaction_time_window;
 
-        let Some(new_memtables) = version.memtables.freeze_mutable(&version.metadata)? else {
+        let Some(new_memtables) = version
+            .memtables
+            .freeze_mutable(&version.metadata, time_window)?
+        else {
             return Ok(());
         };
 
