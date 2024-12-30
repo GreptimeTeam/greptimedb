@@ -17,6 +17,7 @@
 
 mod join;
 mod reduce;
+mod utils;
 
 use std::collections::BTreeSet;
 
@@ -204,6 +205,18 @@ impl Plan {
             Plan::Reduce { input, .. } => Some(input),
             Plan::Join { inputs, .. } => inputs.first(),
             Plan::Union { inputs, .. } => inputs.first(),
+            _ => None,
+        }
+    }
+
+    /// Get mutable ref to the first input plan if exists
+    pub fn get_mut_first_input_plan(&mut self) -> Option<&mut TypedPlan> {
+        match self {
+            Plan::Let { value, .. } => Some(value),
+            Plan::Mfp { input, .. } => Some(input),
+            Plan::Reduce { input, .. } => Some(input),
+            Plan::Join { inputs, .. } => inputs.first_mut(),
+            Plan::Union { inputs, .. } => inputs.first_mut(),
             _ => None,
         }
     }

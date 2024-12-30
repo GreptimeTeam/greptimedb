@@ -15,6 +15,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
+use datatypes::schema::ColumnSchema;
 use datatypes::value::Value;
 use snafu::{ensure, OptionExt};
 

@@ -29,6 +29,7 @@ use common_runtime::JoinHandle;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_telemetry::{debug, info, trace};
 use datatypes::schema::ColumnSchema;
+use datatypes::time;
 use datatypes::value::Value;
 use greptime_proto::v1;
 use itertools::{EitherOrBoth, Itertools};
@@ -57,7 +58,7 @@ use crate::error::{
     EvalSnafu, ExternalSnafu, FlowAlreadyExistSnafu, InternalSnafu, InvalidQuerySnafu,
     UnexpectedSnafu,
 };
-use crate::expr::Batch;
+use crate::expr::{Batch, ScalarExpr};
 use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_ROWS, METRIC_FLOW_RUN_INTERVAL_MS};
 use crate::plan::TypedPlan;
 use crate::repr::{self, DiffRow, RelationDesc, Row, BATCH_SIZE};
@@ -752,15 +753,6 @@ impl FlowWorkerManager {
         }
         self.node_context.write().await.remove_flow(flow_id);
         Ok(())
-    }
-
-    /// adjust flow plan's time index to match real table schema
-    async fn fix_time_index_for_flow_plan(
-        &self,
-        flow_plan: &TypedPlan,
-        real_schema: &[ColumnSchema],
-    ) -> Result<TypedPlan, Error> {
-        todo!()
     }
 
     ///// check schema against actual table schema if exists
