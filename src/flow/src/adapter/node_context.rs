@@ -67,6 +67,7 @@ impl FlownodeContext {
             source_to_tasks: Default::default(),
             flow_to_sink: Default::default(),
             sink_to_flow: Default::default(),
+            flow_plans: Default::default(),
             source_sender: Default::default(),
             sink_receiver: Default::default(),
             table_source,

@@ -29,7 +29,7 @@ use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
 
 use super::{FlowId, FlowWorkerManager};
-use crate::adapter::table_source::TableSource;
+use crate::adapter::table_source::KvBackendTableSource;
 use crate::adapter::FlowWorkerManagerRef;
 use crate::error::{FlowNotFoundSnafu, JoinTaskSnafu, UnexpectedSnafu};
 use crate::expr::error::ExternalSnafu;
@@ -331,7 +331,7 @@ impl RefillTask {
         table_id: TableId,
         time_range: Option<(common_time::Timestamp, common_time::Timestamp)>,
         time_col_name: &str,
-        table_src: &TableSource,
+        table_src: &KvBackendTableSource,
     ) -> Result<RefillTask, Error> {
         let (table_name, table_schema) = table_src.get_table_name_schema(&table_id).await?;
         let all_col_names: BTreeSet<_> = table_schema

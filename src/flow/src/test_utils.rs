@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::RegisterTableRequest;
@@ -37,14 +36,13 @@ use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::test_util::MemTable;
 
 use crate::adapter::node_context::IdToNameMap;
+use crate::adapter::table_source::FlowDummyTableSource;
 use crate::adapter::FlownodeContext;
 use crate::df_optimizer::apply_df_optimizer;
 use crate::expr::GlobalId;
-use crate::repr::{ColumnType, RelationType};
 use crate::transform::register_function_to_query_engine;
 
 pub fn create_test_ctx() -> FlownodeContext {
-    let mut schemas = HashMap::new();
     let mut tri_map = IdToNameMap::new();
     {
         let gid = GlobalId::User(0);
@@ -53,10 +51,7 @@ pub fn create_test_ctx() -> FlownodeContext {
             "public".to_string(),
             "numbers".to_string(),
         ];
-        let schema = RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]);
-
         tri_map.insert(Some(name.clone()), Some(1024), gid);
-        schemas.insert(gid, schema.into_named(vec![Some("number".to_string())]));
     }
 
     {
@@ -66,23 +61,16 @@ pub fn create_test_ctx() -> FlownodeContext {
             "public".to_string(),
             "numbers_with_ts".to_string(),
         ];
-        let schema = RelationType::new(vec![
-            ColumnType::new(CDT::uint32_datatype(), false),
-            ColumnType::new(CDT::timestamp_millisecond_datatype(), false),
-        ]);
-        schemas.insert(
-            gid,
-            schema.into_named(vec![Some("number".to_string()), Some("ts".to_string())]),
-        );
         tri_map.insert(Some(name.clone()), Some(1025), gid);
     }
 
-    FlownodeContext {
-        schema: schemas,
-        table_repr: tri_map,
-        query_context: Some(Arc::new(QueryContext::with("greptime", "public"))),
-        ..Default::default()
-    }
+    let dummy_source = FlowDummyTableSource::default();
+
+    let mut ctx = FlownodeContext::new(Box::new(dummy_source));
+    ctx.table_repr = tri_map;
+    ctx.query_context = Some(Arc::new(QueryContext::with("greptime", "public")));
+
+    ctx
 }
 
 pub fn create_test_query_engine() -> Arc<dyn QueryEngine> {

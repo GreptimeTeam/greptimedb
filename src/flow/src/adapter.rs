@@ -48,9 +48,8 @@ use tokio::sync::{broadcast, watch, Mutex, RwLock};
 pub(crate) use crate::adapter::node_context::FlownodeContext;
 use crate::adapter::table_source::ManagedTableSource;
 use crate::adapter::refill::RefillTask;
-use crate::adapter::util::{
-    relation_desc_to_column_schemas_with_fallback, table_info_value_to_relation_desc,
-};
+use crate::adapter::table_source::KvBackendTableSource;
+use crate::adapter::util::relation_desc_to_column_schemas_with_fallback;
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
 use crate::df_optimizer::sql_to_flow_plan;
@@ -738,7 +737,7 @@ impl CreateFlowArgs {
 /// Create&Remove flow
 impl FlowWorkerManager {
     /// Get table info source
-    pub fn table_info_source(&self) -> &TableSource {
+    pub fn table_info_source(&self) -> &KvBackendTableSource {
         &self.table_info_source
     }
 
@@ -814,27 +813,8 @@ impl FlowWorkerManager {
                     .fail()?,
                 }
             }
-
-            let table_id = self
-                .table_info_source
-                .get_table_id_from_name(sink_table_name)
-                .await?
-                .context(UnexpectedSnafu {
-                    reason: format!("Can't get table id for table name {:?}", sink_table_name),
-                })?;
-            let table_info_value = self
-                .table_info_source
-                .get_table_info_value(&table_id)
-                .await?
-                .context(UnexpectedSnafu {
-                    reason: format!("Can't get table info value for table id {:?}", table_id),
-                })?;
-            let real_schema = table_info_value_to_relation_desc(table_info_value)?;
-            node_ctx.assign_table_schema(sink_table_name, real_schema.clone())?;
         } else {
-            // assign inferred schema to sink table
             // create sink table
-            node_ctx.assign_table_schema(sink_table_name, flow_plan.schema.clone())?;
             let did_create = self
                 .create_table_from_relation(
                     &format!("flow-id={flow_id}"),
