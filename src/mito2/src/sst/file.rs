@@ -137,7 +137,7 @@ pub struct FileMeta {
     pub num_row_groups: u64,
     /// Sequence in this file.
     ///
-    /// This sequence is the only sequence in this file. And it's retrived from the max
+    /// This sequence is the only sequence in this file. And it's retrieved from the max
     /// sequence of the rows on generating this file.
     pub sequence: Option<NonZeroU64>,
 }
