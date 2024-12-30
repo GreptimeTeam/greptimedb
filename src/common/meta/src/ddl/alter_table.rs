@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use strum::AsRefStr;
-use table::metadata::{RawTableInfo, TableId};
+use table::metadata::{RawTableInfo, TableId, TableInfo};
 use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context;
@@ -51,10 +51,14 @@ use crate::{metrics, ClusterId};
 
 /// The alter table procedure
 pub struct AlterTableProcedure {
-    // The runtime context.
+    /// The runtime context.
     context: DdlContext,
-    // The serialized data.
+    /// The serialized data.
     data: AlterTableData,
+    /// Cached new table metadata in the prepare step.
+    /// If we recover the procedure from json, then the table info value is not cached.
+    /// But we already validated it in the prepare step.
+    new_table_info: Option<TableInfo>,
 }
 
 impl AlterTableProcedure {
@@ -70,18 +74,31 @@ impl AlterTableProcedure {
         Ok(Self {
             context,
             data: AlterTableData::new(task, table_id, cluster_id),
+            new_table_info: None,
         })
     }
 
     pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
         let data: AlterTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
-        Ok(AlterTableProcedure { context, data })
+        Ok(AlterTableProcedure {
+            context,
+            data,
+            new_table_info: None,
+        })
     }
 
     // Checks whether the table exists.
     pub(crate) async fn on_prepare(&mut self) -> Result<Status> {
         self.check_alter().await?;
         self.fill_table_info().await?;
+
+        // Validates the request and builds the new table info.
+        // We need to build the new table info here because we should ensure the alteration
+        // is valid in `UpdateMeta` state as we already altered the region.
+        // Safety: `fill_table_info()` already set it.
+        let table_info_value = self.data.table_info_value.as_ref().unwrap();
+        self.new_table_info = Some(self.build_new_table_info(&table_info_value.table_info)?);
+
         // Safety: Checked in `AlterTableProcedure::new`.
         let alter_kind = self.data.task.alter_table.kind.as_ref().unwrap();
         if matches!(alter_kind, Kind::RenameTable { .. }) {
@@ -150,7 +167,11 @@ impl AlterTableProcedure {
         let table_ref = self.data.table_ref();
         // Safety: checked before.
         let table_info_value = self.data.table_info_value.as_ref().unwrap();
-        let new_info = self.build_new_table_info(&table_info_value.table_info)?;
+        // Gets the table info from the cache or builds it.
+        let new_info = match &self.new_table_info {
+            Some(cached) => cached.clone(),
+            None => self.build_new_table_info(&table_info_value.table_info)?,
+        };
 
         debug!(
             "Starting update table: {} metadata, new table info {:?}",
@@ -174,7 +195,7 @@ impl AlterTableProcedure {
             .await?;
         }
 
-        info!("Updated table metadata for table {table_ref}, table_id: {table_id}");
+        info!("Updated table metadata for table {table_ref}, table_id: {table_id}, kind: {alter_kind:?}");
         self.data.state = AlterTableState::InvalidateTableCache;
         Ok(Status::executing(true))
     }
