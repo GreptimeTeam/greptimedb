@@ -119,6 +119,8 @@ impl FilePurger for LocalFilePurger {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU64;
+
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::services::Fs;
     use object_store::ObjectStore;
@@ -176,7 +178,7 @@ mod tests {
                     index_file_size: 0,
                     num_rows: 0,
                     num_row_groups: 0,
-                    max_sequence: 0,
+                    sequence: None,
                 },
                 file_purger,
             );
@@ -239,7 +241,7 @@ mod tests {
                     index_file_size: 4096,
                     num_rows: 1024,
                     num_row_groups: 1,
-                    max_sequence: 4096,
+                    sequence: NonZeroU64::new(4096),
                 },
                 file_purger,
             );

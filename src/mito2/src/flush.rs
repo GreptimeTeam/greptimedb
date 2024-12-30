@@ -15,6 +15,7 @@
 //! Flush related utilities and structs.
 
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -337,18 +338,6 @@ impl RegionFlushTask {
         }
 
         let memtables = version.memtables.immutables();
-        // get max_sequence from all non-empty memetables
-        let max_sequence = memtables
-            .iter()
-            .filter_map(|m| {
-                if !m.is_empty() {
-                    Some(m.stats().max_sequence())
-                } else {
-                    None
-                }
-            })
-            .max();
-
         let mut file_metas = Vec::with_capacity(memtables.len());
         let mut flushed_bytes = 0;
         for mem in memtables {
@@ -357,6 +346,7 @@ impl RegionFlushTask {
                 continue;
             }
 
+            let max_sequence = mem.stats().max_sequence();
             let file_id = FileId::random();
             let iter = mem.iter(None, None)?;
             let source = Source::Iter(iter);
@@ -369,7 +359,7 @@ impl RegionFlushTask {
                 source,
                 cache_manager: self.cache_manager.clone(),
                 storage: version.options.storage.clone(),
-                max_sequence,
+                max_sequence: Some(max_sequence),
                 index_options: self.index_options.clone(),
                 inverted_index_config: self.engine_config.inverted_index.clone(),
                 fulltext_index_config: self.engine_config.fulltext_index.clone(),
@@ -395,7 +385,7 @@ impl RegionFlushTask {
                 index_file_size: sst_info.index_metadata.file_size,
                 num_rows: sst_info.num_rows as u64,
                 num_row_groups: sst_info.num_row_groups,
-                max_sequence: max_sequence.unwrap_or(0),
+                sequence: NonZeroU64::new(max_sequence),
             };
             file_metas.push(file_meta);
         }

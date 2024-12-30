@@ -15,6 +15,7 @@
 //! Utilities to mock version.
 
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use api::v1::value::ValueData;
@@ -103,7 +104,7 @@ impl VersionControlBuilder {
                 index_file_size: 0,
                 num_rows: 0,
                 num_row_groups: 0,
-                max_sequence: 0,
+                sequence: None,
             },
         );
         self
@@ -195,7 +196,7 @@ pub(crate) fn apply_edit(
                 index_file_size: 0,
                 num_rows: 0,
                 num_row_groups: 0,
-                max_sequence: 0,
+                sequence: None,
             }
         })
         .collect();
