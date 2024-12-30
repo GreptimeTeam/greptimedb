@@ -14,6 +14,8 @@
 
 //! How to query table information from database
 
+use std::collections::HashMap;
+
 use common_error::ext::BoxedError;
 use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
 use common_meta::key::table_name::{TableNameKey, TableNameManager};
@@ -179,6 +181,8 @@ impl std::fmt::Debug for KvBackendTableSource {
 
 pub struct FlowDummyTableSource {
     pub id_names_to_desc: Vec<(TableId, TableName, RelationDesc)>,
+    id_to_idx: HashMap<TableId, usize>,
+    name_to_idx: HashMap<TableName, usize>,
 }
 
 impl Default for FlowDummyTableSource {
@@ -208,34 +212,50 @@ impl Default for FlowDummyTableSource {
                 .into_named(vec![Some("number".to_string()), Some("ts".to_string())]),
             ),
         ];
-        Self { id_names_to_desc }
+        let id_to_idx = id_names_to_desc
+            .iter()
+            .enumerate()
+            .map(|(idx, (id, _name, _desc))| (*id, idx))
+            .collect();
+        let name_to_idx = id_names_to_desc
+            .iter()
+            .enumerate()
+            .map(|(idx, (_id, name, _desc))| (name.clone(), idx))
+            .collect();
+        Self {
+            id_names_to_desc,
+            id_to_idx,
+            name_to_idx,
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl FlowTableSource for FlowDummyTableSource {
     async fn table_from_id(&self, table_id: &TableId) -> Result<RelationDesc, Error> {
-        for (id, _name, desc) in &self.id_names_to_desc {
-            if id == table_id {
-                return Ok(desc.clone());
-            }
-        }
-        TableNotFoundSnafu {
+        let idx = self.id_to_idx.get(table_id).context(TableNotFoundSnafu {
             name: format!("Table id = {:?}, couldn't found table desc", table_id),
-        }
-        .fail()?
+        })?;
+        let desc = self
+            .id_names_to_desc
+            .get(*idx)
+            .map(|x| x.2.clone())
+            .context(TableNotFoundSnafu {
+                name: format!("Table id = {:?}, couldn't found table desc", table_id),
+            })?;
+        Ok(desc)
     }
 
     async fn table_name_from_id(&self, table_id: &TableId) -> Result<TableName, Error> {
-        for (id, name, _desc) in &self.id_names_to_desc {
-            if id == table_id {
-                return Ok(name.clone());
-            }
-        }
-        TableNotFoundSnafu {
+        let idx = self.id_to_idx.get(table_id).context(TableNotFoundSnafu {
             name: format!("Table id = {:?}, couldn't found table desc", table_id),
-        }
-        .fail()?
+        })?;
+        self.id_names_to_desc
+            .get(*idx)
+            .map(|x| x.1.clone())
+            .context(TableNotFoundSnafu {
+                name: format!("Table id = {:?}, couldn't found table desc", table_id),
+            })
     }
 
     async fn table_id_from_name(&self, name: &TableName) -> Result<TableId, Error> {
