@@ -58,17 +58,17 @@ fn inverted_index_content_weight((k, _): &(FileId, PageKey), v: &Bytes) -> u32 {
 /// Inverted index blob reader with cache.
 pub struct CachedInvertedIndexBlobReader<R> {
     file_id: FileId,
-    file_size: u64,
+    blob_size: u64,
     inner: R,
     cache: InvertedIndexCacheRef,
 }
 
 impl<R> CachedInvertedIndexBlobReader<R> {
     /// Creates a new inverted index blob reader with cache.
-    pub fn new(file_id: FileId, file_size: u64, inner: R, cache: InvertedIndexCacheRef) -> Self {
+    pub fn new(file_id: FileId, blob_size: u64, inner: R, cache: InvertedIndexCacheRef) -> Self {
         Self {
             file_id,
-            file_size,
+            blob_size,
             inner,
             cache,
         }
@@ -82,7 +82,7 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
         self.cache
             .get_or_load(
                 self.file_id,
-                self.file_size,
+                self.blob_size,
                 offset,
                 size,
                 move |ranges| async move { inner.read_vec(&ranges).await },

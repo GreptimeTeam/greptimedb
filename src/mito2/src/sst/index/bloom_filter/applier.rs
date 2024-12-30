@@ -33,18 +33,18 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
 use store_api::storage::{ColumnId, RegionId};
 
-use super::INDEX_BLOB_TYPE;
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::index::bloom_filter_index::{
     BloomFilterIndexCacheRef, CachedBloomFilterIndexBlobReader,
 };
 use crate::error::{
-    ApplyBloomFilterIndexSnafu, ColumnNotFoundSnafu, ConvertValueSnafu, MetadataSnafu,
+    ApplyBloomFilterIndexSnafu, ColumnNotFoundSnafu, ConvertValueSnafu, Error, MetadataSnafu,
     PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result,
 };
 use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::row_converter::SortField;
 use crate::sst::file::FileId;
+use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
 use crate::sst::index::codec::IndexValueCodec;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
 use crate::sst::index::TYPE_BLOOM_FILTER_INDEX;
@@ -118,28 +118,21 @@ impl BloomFilterIndexApplier {
             .start_timer();
 
         for (column_id, predicates) in &self.filters {
-            let mut blob = match self.cached_blob_reader(file_id, *column_id).await {
-                Ok(Some(puffin_reader)) => puffin_reader,
-                other => {
-                    if let Err(err) = other {
-                        warn!(err; "An unexpected error occurred while reading the cached index file. Fallback to remote index file.")
-                    }
-                    self.remote_blob_reader(file_id, *column_id, file_size_hint)
-                        .await?
-                }
+            let mut blob = match self
+                .blob_reader(file_id, *column_id, file_size_hint)
+                .await?
+            {
+                Some(blob) => blob,
+                None => continue,
             };
 
             // Create appropriate reader based on whether we have caching enabled
             if let Some(bloom_filter_cache) = &self.bloom_filter_index_cache {
-                let file_size = if let Some(file_size) = file_size_hint {
-                    file_size
-                } else {
-                    blob.metadata().await.context(MetadataSnafu)?.content_length
-                };
+                let blob_size = blob.metadata().await.context(MetadataSnafu)?.content_length;
                 let reader = CachedBloomFilterIndexBlobReader::new(
                     file_id,
                     *column_id,
-                    file_size,
+                    blob_size,
                     BloomFilterReaderImpl::new(blob),
                     bloom_filter_cache.clone(),
                 );
@@ -155,6 +148,43 @@ impl BloomFilterIndexApplier {
         }
 
         Ok(())
+    }
+
+    /// Creates a blob reader from the cached or remote index file.
+    ///
+    /// Returus `None` if the column does not have an index.
+    async fn blob_reader(
+        &self,
+        file_id: FileId,
+        column_id: ColumnId,
+        file_size_hint: Option<u64>,
+    ) -> Result<Option<BlobReader>> {
+        let reader = match self.cached_blob_reader(file_id, column_id).await {
+            Ok(Some(puffin_reader)) => puffin_reader,
+            other => {
+                if let Err(err) = other {
+                    // Blob not found means no index for this column
+                    if is_blob_not_found(&err) {
+                        return Ok(None);
+                    }
+                    warn!(err; "An unexpected error occurred while reading the cached index file. Fallback to remote index file.")
+                }
+                let res = self
+                    .remote_blob_reader(file_id, column_id, file_size_hint)
+                    .await;
+                if let Err(err) = res {
+                    // Blob not found means no index for this column
+                    if is_blob_not_found(&err) {
+                        return Ok(None);
+                    }
+                    return Err(err);
+                }
+
+                res?
+            }
+        };
+
+        Ok(Some(reader))
     }
 
     /// Creates a blob reader from the cached index file
@@ -240,6 +270,16 @@ impl BloomFilterIndexApplier {
 
         Ok(())
     }
+}
+
+fn is_blob_not_found(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::PuffinBuildReader {
+            source: puffin::error::Error::BlobNotFound { .. },
+            ..
+        }
+    )
 }
 
 pub struct BloomFilterIndexApplierBuilder<'a> {
