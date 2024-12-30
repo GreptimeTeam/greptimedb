@@ -141,6 +141,7 @@ pub struct FlowWorkerManager {
     /// Contains all refill tasks
     refill_tasks: RwLock<BTreeMap<FlowId, RefillTask>>,
     flow_err_collectors: RwLock<BTreeMap<FlowId, ErrCollector>>,
+    /// Contains the length of send buffer for each source table
     src_send_buf_lens: RwLock<BTreeMap<TableId, watch::Receiver<usize>>>,
     tick_manager: FlowTickManager,
     node_id: Option<u32>,
