@@ -28,6 +28,7 @@ use crate::error::{
 };
 use crate::repr::{ColumnType, RelationDesc, RelationType};
 
+/// Table source but for flow, provide table schema by table name/id
 #[async_trait::async_trait]
 pub trait FlowTableSource: Send + Sync + std::fmt::Debug {
     async fn table_name_from_id(&self, table_id: &TableId) -> Result<TableName, Error>;

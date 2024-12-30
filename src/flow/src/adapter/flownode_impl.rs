@@ -34,18 +34,15 @@ use crate::error::InternalSnafu;
 use crate::metrics::METRIC_FLOW_TASK_COUNT;
 use crate::repr::{self, DiffRow};
 
-/// TODO(discord9): add location
+/// return a function to convert `crate::error::Error` to `common_meta::error::Error`
 fn to_meta_err(
     location: snafu::Location,
 ) -> impl FnOnce(crate::error::Error) -> common_meta::error::Error {
-    // TODO(discord9): refactor this
     move |err: crate::error::Error| -> common_meta::error::Error {
-        Err::<(), _>(BoxedError::new(err))
-            .map_err(|err| common_meta::error::Error::External {
-                location,
-                source: err,
-            })
-            .unwrap_err()
+        common_meta::error::Error::External {
+            location,
+            source: BoxedError::new(err),
+        }
     }
 }
 
