@@ -43,7 +43,7 @@ use table::predicate::Predicate;
 use tokio::sync::mpsc::{self, Sender};
 
 use crate::access_layer::AccessLayerRef;
-use crate::cache::CacheManagerRef;
+use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion, DefaultCompactor};
 use crate::compaction::picker::{new_picker, CompactionTask};
 use crate::compaction::task::CompactionTaskImpl;
@@ -573,6 +573,7 @@ pub struct SerializedCompactionOutput {
 struct CompactionSstReaderBuilder<'a> {
     metadata: RegionMetadataRef,
     sst_layer: AccessLayerRef,
+    cache: CacheManagerRef,
     inputs: &'a [FileHandle],
     append_mode: bool,
     filter_deleted: bool,
@@ -586,7 +587,8 @@ impl<'a> CompactionSstReaderBuilder<'a> {
         let mut scan_input = ScanInput::new(self.sst_layer, ProjectionMapper::all(&self.metadata)?)
             .with_files(self.inputs.to_vec())
             .with_append_mode(self.append_mode)
-            .with_cache(None)
+            // We use special cache strategy for compaction.
+            .with_cache(CacheStrategy::Compaction(self.cache))
             .with_filter_deleted(self.filter_deleted)
             // We ignore file not found error during compaction.
             .with_ignore_file_not_found(true)

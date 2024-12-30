@@ -114,7 +114,7 @@ impl FileRange {
             let reader = RowGroupLastRowCachedReader::new(
                 self.file_handle().file_id(),
                 self.row_group_idx,
-                self.context.reader_builder.cache_manager().clone(),
+                self.context.reader_builder.cache_strategy().clone(),
                 RowGroupReader::new(self.context.clone(), parquet_reader),
             );
             PruneReader::new_with_last_row_reader(self.context.clone(), reader)

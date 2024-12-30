@@ -84,7 +84,7 @@ jobs:
           # Shares across multiple jobs
           shared-key: "check-toml"
       - name: Install taplo
-        run: cargo +stable install taplo-cli --version ^0.9 --locked
+        run: cargo +stable install taplo-cli --version ^0.9 --locked --force
       - name: Run taplo
         run: taplo format --check
 
@@ -107,7 +107,7 @@ jobs:
           shared-key: "build-binaries"
       - name: Install cargo-gc-bin
         shell: bash
-        run: cargo install cargo-gc-bin
+        run: cargo install cargo-gc-bin --force
       - name: Build greptime binaries
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
@@ -163,7 +163,7 @@ jobs:
         run: |
           sudo apt-get install -y libfuzzer-14-dev
           rustup install nightly
-          cargo +nightly install cargo-fuzz cargo-gc-bin
+          cargo +nightly install cargo-fuzz cargo-gc-bin --force
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:
@@ -220,7 +220,7 @@ jobs:
         shell: bash
         run: |
           sudo apt update && sudo apt install -y libfuzzer-14-dev
-          cargo install cargo-fuzz cargo-gc-bin
+          cargo install cargo-fuzz cargo-gc-bin --force
       - name: Download pre-built binariy
         uses: actions/download-artifact@v4
         with:
@@ -268,7 +268,7 @@ jobs:
           shared-key: "build-greptime-ci"
       - name: Install cargo-gc-bin
         shell: bash
-        run: cargo install cargo-gc-bin
+        run: cargo install cargo-gc-bin --force
       - name: Build greptime bianry
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
@@ -338,7 +338,7 @@ jobs:
         run: |
           sudo apt-get install -y libfuzzer-14-dev
           rustup install nightly
-          cargo +nightly install cargo-fuzz cargo-gc-bin
+          cargo +nightly install cargo-fuzz cargo-gc-bin --force
       # Downloads ci image
       - name: Download pre-built binariy
         uses: actions/download-artifact@v4
@@ -487,7 +487,7 @@ jobs:
         run: |
           sudo apt-get install -y libfuzzer-14-dev
           rustup install nightly
-          cargo +nightly install cargo-fuzz cargo-gc-bin
+          cargo +nightly install cargo-fuzz cargo-gc-bin --force
       # Downloads ci image
       - name: Download pre-built binariy
         uses: actions/download-artifact@v4
