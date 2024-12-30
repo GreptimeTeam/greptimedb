@@ -23,13 +23,12 @@ use etcd_client::{
 };
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::broadcast;
-use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::Receiver;
 use tokio::time::{timeout, MissedTickBehavior};
 
 use crate::election::{
-    Election, LeaderChangeMessage, LeaderKey, CANDIDATES_ROOT, CANDIDATE_LEASE_SECS, ELECTION_KEY,
-    KEEP_ALIVE_INTERVAL_SECS,
+    listen_leader_change, Election, LeaderChangeMessage, LeaderKey, CANDIDATES_ROOT,
+    CANDIDATE_LEASE_SECS, ELECTION_KEY, KEEP_ALIVE_INTERVAL_SECS,
 };
 use crate::error;
 use crate::error::Result;
@@ -88,36 +87,7 @@ impl EtcdElection {
         E: AsRef<str>,
     {
         let leader_value: String = leader_value.as_ref().into();
-
-        let leader_ident = leader_value.clone();
-        let (tx, mut rx) = broadcast::channel(100);
-        let _handle = common_runtime::spawn_global(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(msg) => match msg {
-                        LeaderChangeMessage::Elected(key) => {
-                            info!(
-                                "[{leader_ident}] is elected as leader: {:?}, lease: {}",
-                                String::from_utf8_lossy(key.name()),
-                                key.lease_id()
-                            );
-                        }
-                        LeaderChangeMessage::StepDown(key) => {
-                            warn!(
-                                "[{leader_ident}] is stepping down: {:?}, lease: {}",
-                                String::from_utf8_lossy(key.name()),
-                                key.lease_id()
-                            );
-                        }
-                    },
-                    Err(RecvError::Lagged(_)) => {
-                        warn!("Log printing is too slow or leader changed too fast!");
-                    }
-                    Err(RecvError::Closed) => break,
-                }
-            }
-        });
-
+        let tx = listen_leader_change(leader_value.clone());
         Ok(Arc::new(Self {
             leader_value,
             client,
