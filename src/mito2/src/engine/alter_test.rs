@@ -116,6 +116,7 @@ async fn test_alter_region() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -210,6 +211,7 @@ async fn test_put_after_alter() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -315,6 +317,7 @@ async fn test_alter_region_retry() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -374,6 +377,7 @@ async fn test_alter_on_flushing() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -477,6 +481,7 @@ async fn test_alter_column_fulltext_options() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -594,6 +599,7 @@ async fn test_alter_region_ttl_options() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
     engine
@@ -644,6 +650,7 @@ async fn test_write_stall_on_altering() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 

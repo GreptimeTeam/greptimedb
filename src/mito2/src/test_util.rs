@@ -36,6 +36,8 @@ use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_datasource::compression::CompressionType;
 use common_meta::cache::{new_schema_cache, new_table_schema_cache};
+use common_meta::key::schema_name::SchemaNameValue;
+use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
@@ -63,6 +65,7 @@ use store_api::region_request::{
     RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
 use store_api::storage::{ColumnId, RegionId};
+use table::metadata::TableId;
 
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::config::MitoConfig;
@@ -201,6 +204,7 @@ pub struct TestEnv {
     log_store_factory: LogStoreFactory,
     object_store_manager: Option<ObjectStoreManagerRef>,
     schema_metadata_manager: SchemaMetadataManagerRef,
+    kv_backend: KvBackendRef,
 }
 
 impl Default for TestEnv {
@@ -212,37 +216,40 @@ impl Default for TestEnv {
 impl TestEnv {
     /// Returns a new env with empty prefix for test.
     pub fn new() -> TestEnv {
-        let schema_metadata_manager = mock_schema_metadata_manager();
+        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
         TestEnv {
             data_home: create_temp_dir(""),
             log_store: None,
             log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
             schema_metadata_manager,
+            kv_backend,
         }
     }
 
     /// Returns a new env with specific `prefix` for test.
     pub fn with_prefix(prefix: &str) -> TestEnv {
-        let schema_metadata_manager = mock_schema_metadata_manager();
+        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
         TestEnv {
             data_home: create_temp_dir(prefix),
             log_store: None,
             log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
             schema_metadata_manager,
+            kv_backend,
         }
     }
 
     /// Returns a new env with specific `data_home` for test.
     pub fn with_data_home(data_home: TempDir) -> TestEnv {
-        let schema_metadata_manager = mock_schema_metadata_manager();
+        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
         TestEnv {
             data_home,
             log_store: None,
             log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
             schema_metadata_manager,
+            kv_backend,
         }
     }
 
@@ -652,6 +659,10 @@ impl TestEnv {
 
     pub fn get_schema_metadata_manager(&self) -> SchemaMetadataManagerRef {
         self.schema_metadata_manager.clone()
+    }
+
+    pub fn get_kv_backend(&self) -> KvBackendRef {
+        self.kv_backend.clone()
     }
 }
 
@@ -1143,7 +1154,7 @@ pub async fn reopen_region(
     }
 }
 
-pub(crate) fn mock_schema_metadata_manager() -> Arc<SchemaMetadataManager> {
+pub(crate) fn mock_schema_metadata_manager() -> (Arc<SchemaMetadataManager>, KvBackendRef) {
     let kv_backend = Arc::new(MemoryKvBackend::new());
     let table_schema_cache = Arc::new(new_table_schema_cache(
         "table_schema_name_cache".to_string(),
@@ -1155,9 +1166,8 @@ pub(crate) fn mock_schema_metadata_manager() -> Arc<SchemaMetadataManager> {
         CacheBuilder::default().build(),
         kv_backend.clone(),
     ));
-    Arc::new(SchemaMetadataManager::new(
+    (
+        Arc::new(SchemaMetadataManager::new(table_schema_cache, schema_cache)),
         kv_backend as KvBackendRef,
-        table_schema_cache,
-        schema_cache,
-    ))
+    )
 }

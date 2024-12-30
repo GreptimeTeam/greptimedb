@@ -695,7 +695,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let mut scheduler = env.mock_compaction_scheduler(tx);
         let mut builder = VersionControlBuilder::new();
-        let schema_metadata_manager = mock_schema_metadata_manager();
+        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
         schema_metadata_manager
             .register_region_table_info(
                 builder.region_id().table_id(),
@@ -703,6 +703,7 @@ mod tests {
                 "test_catalog",
                 "test_schema",
                 None,
+                kv_backend,
             )
             .await;
         // Nothing to compact.
@@ -759,7 +760,7 @@ mod tests {
         let purger = builder.file_purger();
         let region_id = builder.region_id();
 
-        let schema_metadata_manager = mock_schema_metadata_manager();
+        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
         schema_metadata_manager
             .register_region_table_info(
                 builder.region_id().table_id(),
@@ -767,6 +768,7 @@ mod tests {
                 "test_catalog",
                 "test_schema",
                 None,
+                kv_backend,
             )
             .await;
 
