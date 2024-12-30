@@ -434,8 +434,8 @@ impl DatanodeBuilder {
     ) -> Result<MitoEngine> {
         if opts.storage.is_object_storage() {
             // Enable the write cache when setting object storage
-            config.enable_experimental_write_cache = true;
-            info!("Configured 'enable_experimental_write_cache=true' for mito engine.");
+            config.enable_write_cache = true;
+            info!("Configured 'enable_write_cache=true' for mito engine.");
         }
 
         let mito_engine = match &opts.wal {
