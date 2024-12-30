@@ -84,6 +84,7 @@ use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::{oneshot, Semaphore};
 
+use crate::cache::CacheStrategy;
 use crate::config::MitoConfig;
 use crate::error::{
     InvalidRequestSnafu, JoinSnafu, RecvSnafu, RegionNotFoundSnafu, Result, SerdeJsonSnafu,
@@ -428,7 +429,7 @@ impl EngineInner {
             version,
             region.access_layer.clone(),
             request,
-            Some(cache_manager),
+            CacheStrategy::EnableAll(cache_manager),
         )
         .with_parallel_scan_channel_size(self.config.parallel_scan_channel_size)
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())

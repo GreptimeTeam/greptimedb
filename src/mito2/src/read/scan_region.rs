@@ -33,7 +33,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::file_cache::FileCacheRef;
-use crate::cache::CacheManagerRef;
+use crate::cache::CacheStrategy;
 use crate::config::DEFAULT_SCAN_CHANNEL_SIZE;
 use crate::error::Result;
 use crate::memtable::MemtableRange;
@@ -171,7 +171,7 @@ pub(crate) struct ScanRegion {
     /// Scan request.
     request: ScanRequest,
     /// Cache.
-    cache_manager: Option<CacheManagerRef>,
+    cache_strategy: CacheStrategy,
     /// Capacity of the channel to send data from parallel scan tasks to the main task.
     parallel_scan_channel_size: usize,
     /// Whether to ignore inverted index.
@@ -190,13 +190,13 @@ impl ScanRegion {
         version: VersionRef,
         access_layer: AccessLayerRef,
         request: ScanRequest,
-        cache_manager: Option<CacheManagerRef>,
+        cache_strategy: CacheStrategy,
     ) -> ScanRegion {
         ScanRegion {
             version,
             access_layer,
             request,
-            cache_manager,
+            cache_strategy,
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             ignore_inverted_index: false,
             ignore_fulltext_index: false,
@@ -357,7 +357,7 @@ impl ScanRegion {
             .with_predicate(Some(predicate))
             .with_memtables(memtables)
             .with_files(files)
-            .with_cache(self.cache_manager)
+            .with_cache(self.cache_strategy)
             .with_inverted_index_applier(inverted_index_applier)
             .with_bloom_filter_index_applier(bloom_filter_applier)
             .with_fulltext_index_applier(fulltext_index_applier)
@@ -421,23 +421,14 @@ impl ScanRegion {
         }
 
         let file_cache = || -> Option<FileCacheRef> {
-            let cache_manager = self.cache_manager.as_ref()?;
-            let write_cache = cache_manager.write_cache()?;
+            let write_cache = self.cache_strategy.write_cache()?;
             let file_cache = write_cache.file_cache();
             Some(file_cache)
         }();
 
-        let index_cache = self
-            .cache_manager
-            .as_ref()
-            .and_then(|c| c.index_cache())
-            .cloned();
+        let index_cache = self.cache_strategy.index_cache().cloned();
 
-        let puffin_metadata_cache = self
-            .cache_manager
-            .as_ref()
-            .and_then(|c| c.puffin_metadata_cache())
-            .cloned();
+        let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
 
         InvertedIndexApplierBuilder::new(
             self.access_layer.region_dir().to_string(),
@@ -470,23 +461,14 @@ impl ScanRegion {
         }
 
         let file_cache = || -> Option<FileCacheRef> {
-            let cache_manager = self.cache_manager.as_ref()?;
-            let write_cache = cache_manager.write_cache()?;
+            let write_cache = self.cache_strategy.write_cache()?;
             let file_cache = write_cache.file_cache();
             Some(file_cache)
         }();
 
-        let index_cache = self
-            .cache_manager
-            .as_ref()
-            .and_then(|c| c.bloom_filter_index_cache())
-            .cloned();
+        let index_cache = self.cache_strategy.bloom_filter_index_cache().cloned();
 
-        let puffin_metadata_cache = self
-            .cache_manager
-            .as_ref()
-            .and_then(|c| c.puffin_metadata_cache())
-            .cloned();
+        let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
 
         BloomFilterIndexApplierBuilder::new(
             self.access_layer.region_dir().to_string(),
@@ -550,7 +532,7 @@ pub(crate) struct ScanInput {
     /// Handles to SST files to scan.
     pub(crate) files: Vec<FileHandle>,
     /// Cache.
-    pub(crate) cache_manager: Option<CacheManagerRef>,
+    pub(crate) cache_strategy: CacheStrategy,
     /// Ignores file not found error.
     ignore_file_not_found: bool,
     /// Capacity of the channel to send data from parallel scan tasks to the main task.
@@ -582,7 +564,7 @@ impl ScanInput {
             predicate: None,
             memtables: Vec::new(),
             files: Vec::new(),
-            cache_manager: None,
+            cache_strategy: CacheStrategy::Disabled,
             ignore_file_not_found: false,
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             inverted_index_applier: None,
@@ -626,8 +608,8 @@ impl ScanInput {
 
     /// Sets cache for this query.
     #[must_use]
-    pub(crate) fn with_cache(mut self, cache: Option<CacheManagerRef>) -> Self {
-        self.cache_manager = cache;
+    pub(crate) fn with_cache(mut self, cache: CacheStrategy) -> Self {
+        self.cache_strategy = cache;
         self
     }
 
@@ -760,7 +742,7 @@ impl ScanInput {
             .read_sst(file.clone())
             .predicate(self.predicate.clone())
             .projection(Some(self.mapper.column_ids().to_vec()))
-            .cache(self.cache_manager.clone())
+            .cache(self.cache_strategy.clone())
             .inverted_index_applier(self.inverted_index_applier.clone())
             .bloom_filter_index_applier(self.bloom_filter_index_applier.clone())
             .fulltext_index_applier(self.fulltext_index_applier.clone())
