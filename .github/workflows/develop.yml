@@ -10,17 +10,6 @@ on:
       - 'docker/**'
       - '.gitignore'
       - 'grafana/**'
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - 'docs/**'
-      - 'config/**'
-      - '**.md'
-      - '.dockerignore'
-      - 'docker/**'
-      - '.gitignore'
-      - 'grafana/**'
   workflow_dispatch:
 
 name: CI
