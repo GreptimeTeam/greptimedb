@@ -19,7 +19,9 @@ pub mod postgres;
 use std::fmt::{self, Debug};
 use std::sync::Arc;
 
-use tokio::sync::broadcast::Receiver;
+use common_telemetry::{info, warn};
+use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::broadcast::{self, Receiver, Sender};
 
 use crate::error::Result;
 use crate::metasrv::MetasrvNodeInfo;
@@ -73,6 +75,37 @@ impl fmt::Display for LeaderChangeMessage {
         write!(f, ", lease: {}", leader_key.lease_id())?;
         write!(f, " }})")
     }
+}
+
+fn listen_leader_change(leader_value: String) -> Sender<LeaderChangeMessage> {
+    let (tx, mut rx) = broadcast::channel(100);
+    let _handle = common_runtime::spawn_global(async move {
+        loop {
+            match rx.recv().await {
+                Ok(msg) => match msg {
+                    LeaderChangeMessage::Elected(key) => {
+                        info!(
+                            "[{leader_value}] is elected as leader: {:?}, lease: {}",
+                            String::from_utf8_lossy(key.name()),
+                            key.lease_id()
+                        );
+                    }
+                    LeaderChangeMessage::StepDown(key) => {
+                        warn!(
+                            "[{leader_value}] is stepping down: {:?}, lease: {}",
+                            String::from_utf8_lossy(key.name()),
+                            key.lease_id()
+                        );
+                    }
+                },
+                Err(RecvError::Lagged(_)) => {
+                    warn!("Log printing is too slow or leader changed too fast!");
+                }
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
+    tx
 }
 
 #[async_trait::async_trait]

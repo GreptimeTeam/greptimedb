@@ -17,22 +17,24 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_meta::distributed_time_constants::{META_KEEP_ALIVE_INTERVAL_SECS, META_LEASE_SECS};
-use common_telemetry::{error, info, warn};
+use common_telemetry::{error, warn};
 use common_time::Timestamp;
 use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::broadcast;
-use tokio::sync::broadcast::error::RecvError;
+use tokio::time::MissedTickBehavior;
 use tokio_postgres::Client;
 
-use crate::election::{Election, LeaderChangeMessage, LeaderKey, CANDIDATES_ROOT, ELECTION_KEY};
+use crate::election::{
+    listen_leader_change, Election, LeaderChangeMessage, LeaderKey, CANDIDATES_ROOT, ELECTION_KEY,
+};
 use crate::error::{
     DeserializeFromJsonSnafu, NoLeaderSnafu, PostgresExecutionSnafu, Result, SerializeToJsonSnafu,
     UnexpectedSnafu,
 };
 use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
 
-// TODO: The lock id should be configurable.
+// TODO(CookiePie): The lock id should be configurable.
 const CAMPAIGN: &str = "SELECT pg_try_advisory_lock(28319)";
 const STEP_DOWN: &str = "SELECT pg_advisory_unlock(28319)";
 const SET_IDLE_SESSION_TIMEOUT: &str = "SET idle_in_transaction_session_timeout = $1";
@@ -143,35 +145,7 @@ impl PgElection {
             .await
             .context(PostgresExecutionSnafu)?;
 
-        let (tx, mut rx) = broadcast::channel(100);
-        let leader_ident = leader_value.clone();
-        let _handle = common_runtime::spawn_global(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(msg) => match msg {
-                        LeaderChangeMessage::Elected(key) => {
-                            info!(
-                                "[{leader_ident}] is elected as leader: {:?}, lease: {}",
-                                String::from_utf8_lossy(key.name()),
-                                key.lease_id()
-                            );
-                        }
-                        LeaderChangeMessage::StepDown(key) => {
-                            warn!(
-                                "[{leader_ident}] is stepping down: {:?}, lease: {}",
-                                String::from_utf8_lossy(key.name()),
-                                key.lease_id()
-                            );
-                        }
-                    },
-                    Err(RecvError::Lagged(_)) => {
-                        warn!("Log printing is too slow or leader changed too fast!");
-                    }
-                    Err(RecvError::Closed) => break,
-                }
-            }
-        });
-
+        let tx = listen_leader_change(leader_value.clone());
         Ok(Arc::new(Self {
             leader_value,
             client,
@@ -271,12 +245,24 @@ impl Election for PgElection {
         Ok(valid_candidates)
     }
 
+    /// Attempts to acquire leadership by executing a campaign. This function continuously checks
+    /// if the current instance can become the leader by acquiring an advisory lock in the PostgreSQL database.
+    ///
+    /// The function operates in a loop, where it:
+    ///
+    /// 1. Waits for a predefined interval before attempting to acquire the lock again.
+    /// 2. Executes the `CAMPAIGN` SQL query to try to acquire the advisory lock.
+    /// 3. Checks the result of the query:
+    ///    - If the lock is successfully acquired (result is true), it calls the `leader_action` method
+    ///      to perform actions as the leader.
+    ///    - If the lock is not acquired (result is false), it calls the `follower_action` method
+    ///      to perform actions as a follower.
     async fn campaign(&self) -> Result<()> {
         let mut keep_alive_interval =
             tokio::time::interval(Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS));
+        keep_alive_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         loop {
-            let _ = keep_alive_interval.tick().await;
             let res = self
                 .client
                 .query(CAMPAIGN, &[])
@@ -300,6 +286,7 @@ impl Election for PgElection {
                 }
                 .fail();
             }
+            let _ = keep_alive_interval.tick().await;
         }
     }
 
@@ -458,51 +445,78 @@ impl PgElection {
         Ok(res.len() == 1)
     }
 
+    /// Handles the actions of a leader in the election process.
+    ///
+    /// This function performs the following checks and actions:
+    ///
+    /// - **Case 1**: If the current instance believes it is the leader from the previous term,
+    ///   it attempts to renew the lease. It checks if the lease is still valid and either renews it
+    ///   or steps down if it has expired.
+    ///
+    ///   - **Case 1.1**: If the instance is still the leader and the lease is valid, it renews the lease
+    ///     by updating the value associated with the election key.
+    ///   - **Case 1.2**: If the instance is still the leader but the lease has expired, it logs a warning
+    ///     and steps down, initiating a new campaign for leadership.
+    ///   - **Case 1.3**: If the instance is not the leader (which is a rare scenario), it logs a warning
+    ///     indicating that it still holds the lock and steps down to re-initiate the campaign. This may
+    ///     happen if the leader has failed to renew the lease and the session has expired, and recovery
+    ///     after a period of time during which other leaders have been elected and stepped down.
+    ///   - **Case 1.4**: If no lease information is found, it also steps down and re-initiates the campaign.
+    ///
+    /// - **Case 2**: If the current instance is not leader previously, it calls the
+    ///   `elected` method as a newly elected leader.
     async fn leader_action(&self) -> Result<()> {
         let key = self.election_key();
-        // Case 1: I think I'm the leader in the previous term. I'm trying to renew the lease.
+        // Case 1
         if self.is_leader() {
             match self.get_value_with_lease(&key, true).await? {
                 Some((prev_leader, expire_time, current, prev)) => {
                     match (prev_leader == self.leader_value, expire_time > current) {
-                        // Case 1.1: I'm still the leader and the lease does not expired. Renew the lease.
+                        // Case 1.1
                         (true, true) => {
                             // Safety: prev is Some since we are using `get_value_with_lease` with `true`.
                             let prev = prev.unwrap();
                             self.update_value_with_lease(&key, &prev, &self.leader_value)
                                 .await?;
                         }
-                        // Case 1.2: I'm still the leader but the lease expired. Step down and re-init campaign.
+                        // Case 1.2
                         (true, false) => {
                             warn!("Leader lease expired, now stepping down.");
                             self.step_down().await?;
                         }
-                        // Rarely happens:
-                        // Case 1.3: I'm not the leader. This happens when I failed to step down in the previous term and the lock released
-                        //           after the session expired. And then I reconnect and find a gap that others just released the lock.
-                        //           I should re-step-down and re-init campaign.
+                        // Case 1.3
                         (false, _) => {
                             warn!("Leader lease not found, but still hold the lock. Now stepping down.");
                             self.step_down().await?;
                         }
                     }
                 }
-                // Case 1.4: Same as case 1.3, just re-step-down and re-init campaign.
+                // Case 1.4
                 None => {
                     warn!("Leader lease not found, but still hold the lock. Now stepping down.");
                     self.step_down().await?;
                 }
             }
-        // Case 2: I'm not the leader in the previous term.
+        // Case 2
         } else {
             self.elected().await?;
         }
         Ok(())
     }
 
+    /// Handles the actions of a follower in the election process.
+    ///
+    /// This function performs the following checks and actions:
+    ///
+    /// - **Case 1**: If the current instance believes it is the leader from the previous term,
+    ///   it steps down without deleting the key.
+    /// - **Case 2**: If the current instance is not the leader but the lease has expired, it raises an error
+    ///   to re-initiate the campaign. If the leader failed to renew the lease, its session will expire and the lock
+    ///   will be released.
+    /// - **Case 3**: If all checks pass, the function returns without performing any actions.
     async fn follower_action(&self) -> Result<()> {
         let key = self.election_key();
-        // Case 1: I think I'm the leader in the previous term but failed to acquire the lock. I just step down.
+        // Case 1
         if self.is_leader() {
             self.step_down_without_lock().await?;
         }
@@ -510,16 +524,18 @@ impl PgElection {
             .get_value_with_lease(&key, false)
             .await?
             .context(NoLeaderSnafu)?;
-        // Case 2: Current leader exists and the lease expired. Raise an error to re-init campaign.
-        //         If the leader failed to renew the lease, its session will expire and the lock will be released.
+        // Case 2
         ensure!(expire_time > current, NoLeaderSnafu);
-        // Case 3: All checks passed, just return.
+        // Case 3
         Ok(())
     }
 
     /// Step down the leader. The leader should delete the key and notify the leader watcher.
-    /// Do not check if the deletion is successful, since the key may be deleted by other followers.
-    /// Caution: Should only step down while holding the advisory lock.
+    ///
+    /// __DO NOT__ check if the deletion is successful, since the key may be deleted by others elected.
+    ///
+    /// ## Caution:
+    /// Should only step down while holding the advisory lock.
     async fn step_down(&self) -> Result<()> {
         let key = self.election_key();
         let leader_key = PgLeaderKey {
