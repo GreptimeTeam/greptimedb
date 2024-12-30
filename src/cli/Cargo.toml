@@ -15,7 +15,7 @@ cache.workspace = true
 catalog.workspace = true
 chrono.workspace = true
 clap.workspace = true
-client.workspace = true
+client = { workspace = true, features = ["testing"] }
 common-base.workspace = true
 common-catalog.workspace = true
 common-config.workspace = true
@@ -56,7 +56,6 @@ tokio.workspace = true
 tracing-appender.workspace = true
 
 [dev-dependencies]
-client = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 common-version.workspace = true
 serde.workspace = true
