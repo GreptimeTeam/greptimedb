@@ -35,6 +35,8 @@ pub(crate) fn extract_hints<T: ToHeaderMap>(headers: &T) -> Vec<(String, String)
                 hints.push((key.trim().to_string(), value.trim().to_string()));
             }
         });
+        // If hints are provided in the `x-greptime-hints` header, ignore the rest of the headers
+        return hints;
     }
     for key in HINT_KEYS.iter() {
         if let Some(value) = headers.get(key) {
