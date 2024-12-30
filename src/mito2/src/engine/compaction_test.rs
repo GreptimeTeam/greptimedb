@@ -394,6 +394,7 @@ async fn test_compaction_update_time_window() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 

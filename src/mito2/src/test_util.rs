@@ -36,8 +36,6 @@ use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_datasource::compression::CompressionType;
 use common_meta::cache::{new_schema_cache, new_table_schema_cache};
-use common_meta::key::schema_name::SchemaNameValue;
-use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
@@ -65,7 +63,6 @@ use store_api::region_request::{
     RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
 use store_api::storage::{ColumnId, RegionId};
-use table::metadata::TableId;
 
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::config::MitoConfig;
