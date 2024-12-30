@@ -61,7 +61,7 @@ fn bloom_filter_index_content_weight((k, _): &((FileId, ColumnId), PageKey), v: 
 pub struct CachedBloomFilterIndexBlobReader<R> {
     file_id: FileId,
     column_id: ColumnId,
-    file_size: u64,
+    blob_size: u64,
     inner: R,
     cache: BloomFilterIndexCacheRef,
 }
@@ -71,14 +71,14 @@ impl<R> CachedBloomFilterIndexBlobReader<R> {
     pub fn new(
         file_id: FileId,
         column_id: ColumnId,
-        file_size: u64,
+        blob_size: u64,
         inner: R,
         cache: BloomFilterIndexCacheRef,
     ) -> Self {
         Self {
             file_id,
             column_id,
-            file_size,
+            blob_size,
             inner,
             cache,
         }
@@ -92,7 +92,7 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
         self.cache
             .get_or_load(
                 (self.file_id, self.column_id),
-                self.file_size,
+                self.blob_size,
                 offset,
                 size,
                 move |ranges| async move { inner.read_vec(&ranges).await },
