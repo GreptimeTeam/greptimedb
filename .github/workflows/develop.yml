@@ -10,17 +10,6 @@ on:
       - 'docker/**'
       - '.gitignore'
       - 'grafana/**'
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - 'docs/**'
-      - 'config/**'
-      - '**.md'
-      - '.dockerignore'
-      - 'docker/**'
-      - '.gitignore'
-      - 'grafana/**'
   workflow_dispatch:
 
 name: CI
@@ -653,6 +642,7 @@ jobs:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-20.04-8-cores
     timeout-minutes: 60
+    needs:  [clippy, fmt]
     steps:
       - uses: actions/checkout@v4
       - uses: arduino/setup-protoc@v3
