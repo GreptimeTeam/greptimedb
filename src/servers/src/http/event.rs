@@ -53,8 +53,8 @@ use crate::metrics::{
 };
 use crate::query_handler::PipelineHandlerRef;
 
+pub const GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME: &str = "greptime_identity";
 const GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX: &str = "greptime_";
-const GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME: &str = "greptime_identity";
 
 lazy_static! {
     pub static ref JSON_CONTENT_TYPE: ContentType = ContentType::json();
@@ -64,15 +64,30 @@ lazy_static! {
         ContentType::from_str(CONTENT_TYPE_PROTOBUF_STR).unwrap();
 }
 
+/// LogIngesterQueryParams is used for query params of log ingester API.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct LogIngesterQueryParams {
-    pub table: Option<String>,
+    /// The database where log data will be written to.
     pub db: Option<String>,
+
+    /// The table where log data will be written to.
+    pub table: Option<String>,
+
+    /// The pipeline that will be used for log ingestion.
     pub pipeline_name: Option<String>,
+
+    /// The version of the pipeline to be used for log ingestion.
+    pub version: Option<String>,
+
+    /// Whether to ignore errors during log ingestion.
     pub ignore_errors: Option<bool>,
 
-    pub version: Option<String>,
+    /// The source of the log data.
     pub source: Option<String>,
+
+    /// The JSON field name of the log message. If not provided, it will take the whole log as the message.
+    /// The field must be at the top level of the JSON structure.
+    pub msg_field: Option<String>,
 }
 
 pub struct PipelineContent(String);
@@ -530,7 +545,7 @@ fn extract_pipeline_value_by_content_type(
     })
 }
 
-async fn ingest_logs_inner(
+pub(crate) async fn ingest_logs_inner(
     state: PipelineHandlerRef,
     pipeline_name: String,
     version: PipelineVersion,

@@ -398,6 +398,7 @@ pub enum Channel {
     Influx = 7,
     Opentsdb = 8,
     Loki = 9,
+    Elasticsearch = 10,
 }
 
 impl From<u32> for Channel {
@@ -412,7 +413,7 @@ impl From<u32> for Channel {
             7 => Self::Influx,
             8 => Self::Opentsdb,
             9 => Self::Loki,
-
+            10 => Self::Elasticsearch,
             _ => Self::Unknown,
         }
     }
@@ -440,6 +441,7 @@ impl Display for Channel {
             Channel::Influx => write!(f, "influx"),
             Channel::Opentsdb => write!(f, "opentsdb"),
             Channel::Loki => write!(f, "loki"),
+            Channel::Elasticsearch => write!(f, "elasticsearch"),
             Channel::Unknown => write!(f, "unknown"),
         }
     }

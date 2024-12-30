@@ -603,6 +603,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid elasticsearch input, reason: {}", reason))]
+    InvalidElasticsearchInput {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -674,7 +681,8 @@ impl ErrorExt for Error {
             | UnsupportedJsonDataTypeForTag { .. }
             | InvalidTableName { .. }
             | PrepareStatementNotFound { .. }
-            | FailedToParseQuery { .. } => StatusCode::InvalidArguments,
+            | FailedToParseQuery { .. }
+            | InvalidElasticsearchInput { .. } => StatusCode::InvalidArguments,
 
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),

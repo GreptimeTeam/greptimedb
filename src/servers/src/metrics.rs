@@ -182,6 +182,13 @@ lazy_static! {
             &[METRIC_DB_LABEL, METRIC_RESULT_LABEL]
         )
         .unwrap();
+    pub static ref METRIC_ELASTICSEARCH_LOGS_INGESTION_ELAPSED: HistogramVec =
+        register_histogram_vec!(
+            "greptime_servers_elasticsearch_logs_ingestion_elapsed",
+            "servers elasticsearch logs ingestion elapsed",
+            &[METRIC_DB_LABEL]
+        )
+        .unwrap();
     pub static ref METRIC_HTTP_LOGS_TRANSFORM_ELAPSED: HistogramVec =
         register_histogram_vec!(
             "greptime_servers_http_logs_transform_elapsed",
