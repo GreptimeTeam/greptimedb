@@ -95,7 +95,7 @@ mod tests {
     use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
     use super::*;
-    use crate::cache::{CacheManager, PageKey};
+    use crate::cache::{CacheManager, CacheStrategy, PageKey};
     use crate::sst::index::Indexer;
     use crate::sst::parquet::format::WriteFormat;
     use crate::sst::parquet::reader::ParquetReaderBuilder;
@@ -195,7 +195,7 @@ mod tests {
             .unwrap();
 
         // Enable page cache.
-        let cache = Some(Arc::new(
+        let cache = CacheStrategy::EnableAll(Arc::new(
             CacheManager::builder()
                 .page_cache_size(64 * 1024 * 1024)
                 .build(),
@@ -219,15 +219,15 @@ mod tests {
 
         // Doesn't have compressed page cached.
         let page_key = PageKey::new_compressed(metadata.region_id, handle.file_id(), 0, 0);
-        assert!(cache.as_ref().unwrap().get_pages(&page_key).is_none());
+        assert!(cache.get_pages(&page_key).is_none());
 
         // Cache 4 row groups.
         for i in 0..4 {
             let page_key = PageKey::new_uncompressed(metadata.region_id, handle.file_id(), i, 0);
-            assert!(cache.as_ref().unwrap().get_pages(&page_key).is_some());
+            assert!(cache.get_pages(&page_key).is_some());
         }
         let page_key = PageKey::new_uncompressed(metadata.region_id, handle.file_id(), 5, 0);
-        assert!(cache.as_ref().unwrap().get_pages(&page_key).is_none());
+        assert!(cache.get_pages(&page_key).is_none());
     }
 
     #[tokio::test]
