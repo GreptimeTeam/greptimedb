@@ -13,8 +13,6 @@ RUN yum install -y epel-release  \
     openssl \
     openssl-devel  \
     centos-release-scl  \
-    rh-python38  \
-    rh-python38-python-devel \
     which
 
 # Install protoc
@@ -43,8 +41,6 @@ RUN yum install -y epel-release \
     openssl \
     openssl-devel  \
     centos-release-scl  \
-    rh-python38  \
-    rh-python38-python-devel \
     which
 
 WORKDIR /greptime
