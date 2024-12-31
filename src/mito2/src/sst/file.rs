@@ -15,6 +15,7 @@
 //! Structures to describe metadata of files.
 
 use std::fmt;
+use std::num::NonZeroU64;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -134,6 +135,11 @@ pub struct FileMeta {
     /// the default value `0` doesn't means the file doesn't contains any rows,
     /// but instead means the number of rows is unknown.
     pub num_row_groups: u64,
+    /// Sequence in this file.
+    ///
+    /// This sequence is the only sequence in this file. And it's retrieved from the max
+    /// sequence of the rows on generating this file.
+    pub sequence: Option<NonZeroU64>,
 }
 
 /// Type of index.
@@ -343,6 +349,7 @@ mod tests {
             index_file_size: 0,
             num_rows: 0,
             num_row_groups: 0,
+            sequence: None,
         }
     }
 

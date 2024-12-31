@@ -138,7 +138,9 @@ impl WriteCache {
             indexer,
         );
 
-        let sst_info = writer.write_all(write_request.source, write_opts).await?;
+        let sst_info = writer
+            .write_all(write_request.source, write_request.max_sequence, write_opts)
+            .await?;
 
         timer.stop_and_record();
 
@@ -375,6 +377,7 @@ mod tests {
             metadata,
             source,
             storage: None,
+            max_sequence: None,
             cache_manager: Default::default(),
             index_options: IndexOptions::default(),
             inverted_index_config: Default::default(),
@@ -468,6 +471,7 @@ mod tests {
             metadata,
             source,
             storage: None,
+            max_sequence: None,
             cache_manager: cache_manager.clone(),
             index_options: IndexOptions::default(),
             inverted_index_config: Default::default(),
