@@ -149,7 +149,7 @@ impl Default for MitoConfig {
             selector_result_cache_size: ReadableSize::mb(512),
             enable_write_cache: false,
             write_cache_path: String::new(),
-            write_cache_size: ReadableSize::gb(10),
+            write_cache_size: ReadableSize::gb(5),
             write_cache_ttl: None,
             sst_write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,

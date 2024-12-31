@@ -525,7 +525,7 @@ enable_write_cache = false
 write_cache_path = ""
 
 ## Capacity for write cache. If your disk space is sufficient, it is recommended to set it larger.
-write_cache_size = "10GiB"
+write_cache_size = "5GiB"
 
 ## TTL for write cache.
 ## @toml2docs:none-default
