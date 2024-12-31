@@ -15,7 +15,7 @@
 use datatypes::schema::ColumnSchema;
 use snafu::OptionExt;
 
-use crate::error::{Error, UnexpectedSnafu};
+use crate::error::{Error, InvalidQuerySnafu, UnexpectedSnafu};
 use crate::plan::{ScalarExpr, TypedPlan};
 
 /// Fix the time index of a flow plan to match the real schema.
@@ -55,6 +55,21 @@ pub fn fix_time_index_for_flow_plan(
         if let Some(ty) = cur_plan.schema.typ.column_types.get(time_index)
             && ty.scalar_type.is_timestamp()
         {
+            let is_key = cur_plan
+                .schema
+                .typ
+                .keys
+                .iter()
+                .any(|k| k.column_indices.contains(&time_index));
+            if !is_key {
+                InvalidQuerySnafu {
+                    reason: format!(
+                        "The time index column in the sink table is not a key column in the flow's SQL. It is expected to be a key column (i.e. included in the `GROUP BY` clause). The column's name in the flow is {:?}",
+                        flow_plan.schema.names.get(outer_time_index)
+                    ),
+                }
+                .fail()?
+            }
             cur_plan.schema.typ = cur_plan
                 .schema
                 .typ
@@ -95,5 +110,99 @@ pub fn fix_time_index_for_flow_plan(
 
 #[cfg(test)]
 mod test {
+    use datatypes::data_type::ConcreteDataType;
+
     use super::*;
+    use crate::repr::RelationDesc;
+    use crate::test_utils::{create_test_ctx, create_test_query_engine, sql_to_substrait};
+
+    fn find_all_nested_relation(plan: &TypedPlan) -> Vec<RelationDesc> {
+        let mut types = vec![];
+        let mut cur_plan = plan;
+        loop {
+            types.push(cur_plan.schema.clone());
+            if let Some(input) = cur_plan.plan.get_first_input_plan() {
+                cur_plan = input;
+            } else {
+                break;
+            }
+        }
+
+        types
+    }
+
+    /// Test if sink table's time index is not flow's key column in flow's plan
+    /// should cause error with a friendly error message.
+    #[tokio::test]
+    async fn test_handle_non_key_ts_column() {
+        let sql = "SELECT count(ts)::timestamp as ts_cnt, date_bin('10 minutes', ts) as tw2 FROM numbers_with_ts GROUP BY tw2";
+
+        let engine = create_test_query_engine();
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
+            .await
+            .unwrap();
+
+        let real_schema = vec![
+            ColumnSchema::new(
+                "tw1",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new(
+                "tw2",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ];
+        assert_eq!(
+            find_all_nested_relation(&flow_plan)[1].typ().time_index,
+            Some(0)
+        );
+        let fixed_plan = fix_time_index_for_flow_plan(&flow_plan, &real_schema);
+
+        assert!(fixed_plan.unwrap_err().to_string().contains(
+            r#"The time index column in the sink table is not a key column in the flow's SQL. It is expected to be a key column (i.e. included in the `GROUP BY` clause). The column's name in the flow is Some(Some("ts_cnt"))"#
+        ));
+    }
+
+    // TODO(discord9): also test non-key timestamp column
+    #[tokio::test]
+    async fn test_two_ts_column() {
+        let sql = "SELECT date_bin('5 minutes', ts) as tw1, date_bin('10 minutes', ts) as tw2 FROM numbers_with_ts GROUP BY tw1, tw2";
+
+        let engine = create_test_query_engine();
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
+            .await
+            .unwrap();
+
+        let real_schema = vec![
+            ColumnSchema::new(
+                "tw1",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                "tw2",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ];
+        assert_eq!(
+            find_all_nested_relation(&flow_plan)[1].typ().time_index,
+            Some(0)
+        );
+        let fixed_plan = fix_time_index_for_flow_plan(&flow_plan, &real_schema).unwrap();
+        assert_eq!(
+            find_all_nested_relation(&fixed_plan)[1].typ().time_index,
+            Some(1)
+        );
+    }
 }
