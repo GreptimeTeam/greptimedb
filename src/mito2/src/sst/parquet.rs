@@ -134,7 +134,7 @@ mod tests {
         );
 
         let info = writer
-            .write_all(source, &write_opts)
+            .write_all(source, None, &write_opts)
             .await
             .unwrap()
             .unwrap();
@@ -189,7 +189,7 @@ mod tests {
         );
 
         writer
-            .write_all(source, &write_opts)
+            .write_all(source, None, &write_opts)
             .await
             .unwrap()
             .unwrap();
@@ -258,7 +258,7 @@ mod tests {
         );
 
         let sst_info = writer
-            .write_all(source, &write_opts)
+            .write_all(source, None, &write_opts)
             .await
             .unwrap()
             .expect("write_all should return sst info");
@@ -297,7 +297,7 @@ mod tests {
             Indexer::default(),
         );
         writer
-            .write_all(source, &write_opts)
+            .write_all(source, None, &write_opts)
             .await
             .unwrap()
             .unwrap();
@@ -350,7 +350,7 @@ mod tests {
             Indexer::default(),
         );
         writer
-            .write_all(source, &write_opts)
+            .write_all(source, None, &write_opts)
             .await
             .unwrap()
             .unwrap();
@@ -386,7 +386,7 @@ mod tests {
         );
 
         writer
-            .write_all(source, &write_opts)
+            .write_all(source, None, &write_opts)
             .await
             .unwrap()
             .unwrap();

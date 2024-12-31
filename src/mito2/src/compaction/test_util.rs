@@ -39,6 +39,7 @@ pub fn new_file_handle(
             index_file_size: 0,
             num_rows: 0,
             num_row_groups: 0,
+            sequence: None,
         },
         file_purger,
     )
@@ -63,6 +64,7 @@ pub(crate) fn new_file_handles(file_specs: &[(i64, i64, u64)]) -> Vec<FileHandle
                     index_file_size: 0,
                     num_rows: 0,
                     num_row_groups: 0,
+                    sequence: None,
                 },
                 file_purger.clone(),
             )
