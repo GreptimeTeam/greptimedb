@@ -15,6 +15,7 @@
 //! Flush related utilities and structs.
 
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -345,6 +346,7 @@ impl RegionFlushTask {
                 continue;
             }
 
+            let max_sequence = mem.stats().max_sequence();
             let file_id = FileId::random();
             let iter = mem.iter(None, None)?;
             let source = Source::Iter(iter);
@@ -357,6 +359,7 @@ impl RegionFlushTask {
                 source,
                 cache_manager: self.cache_manager.clone(),
                 storage: version.options.storage.clone(),
+                max_sequence: Some(max_sequence),
                 index_options: self.index_options.clone(),
                 inverted_index_config: self.engine_config.inverted_index.clone(),
                 fulltext_index_config: self.engine_config.fulltext_index.clone(),
@@ -382,6 +385,7 @@ impl RegionFlushTask {
                 index_file_size: sst_info.index_metadata.file_size,
                 num_rows: sst_info.num_rows as u64,
                 num_row_groups: sst_info.num_row_groups,
+                sequence: NonZeroU64::new(max_sequence),
             };
             file_metas.push(file_meta);
         }

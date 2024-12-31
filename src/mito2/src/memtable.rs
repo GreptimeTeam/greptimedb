@@ -23,7 +23,7 @@ pub use bulk::part::BulkPart;
 use common_time::Timestamp;
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::config::MitoConfig;
@@ -77,6 +77,8 @@ pub struct MemtableStats {
     num_rows: usize,
     /// Total number of ranges in the memtable.
     num_ranges: usize,
+    /// The maximum sequence number in the memtable.
+    max_sequence: SequenceNumber,
 }
 
 impl MemtableStats {
@@ -105,6 +107,11 @@ impl MemtableStats {
     /// Returns the number of ranges in the memtable.
     pub fn num_ranges(&self) -> usize {
         self.num_ranges
+    }
+
+    /// Returns the maximum sequence number in the memtable.
+    pub fn max_sequence(&self) -> SequenceNumber {
+        self.max_sequence
     }
 }
 

@@ -24,7 +24,7 @@ mod shard_builder;
 mod tree;
 
 use std::fmt;
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
@@ -113,6 +113,7 @@ pub struct PartitionTreeMemtable {
     alloc_tracker: AllocTracker,
     max_timestamp: AtomicI64,
     min_timestamp: AtomicI64,
+    max_sequence: AtomicU64,
     /// Total written rows in memtable. This also includes deleted and duplicated rows.
     num_rows: AtomicUsize,
 }
@@ -131,6 +132,10 @@ impl Memtable for PartitionTreeMemtable {
     }
 
     fn write(&self, kvs: &KeyValues) -> Result<()> {
+        if kvs.is_empty() {
+            return Ok(());
+        }
+
         // TODO(yingwen): Validate schema while inserting rows.
 
         let mut metrics = WriteMetrics::default();
@@ -139,6 +144,12 @@ impl Memtable for PartitionTreeMemtable {
         let res = self.tree.write(kvs, &mut pk_buffer, &mut metrics);
 
         self.update_stats(&metrics);
+
+        // update max_sequence
+        if res.is_ok() {
+            let sequence = kvs.max_sequence();
+            self.max_sequence.fetch_max(sequence, Ordering::Relaxed);
+        }
 
         self.num_rows.fetch_add(kvs.num_rows(), Ordering::Relaxed);
         res
@@ -151,6 +162,12 @@ impl Memtable for PartitionTreeMemtable {
         let res = self.tree.write_one(key_value, &mut pk_buffer, &mut metrics);
 
         self.update_stats(&metrics);
+
+        // update max_sequence
+        if res.is_ok() {
+            self.max_sequence
+                .fetch_max(key_value.sequence(), Ordering::Relaxed);
+        }
 
         self.num_rows.fetch_add(1, Ordering::Relaxed);
         res
@@ -210,6 +227,7 @@ impl Memtable for PartitionTreeMemtable {
                 time_range: None,
                 num_rows: 0,
                 num_ranges: 0,
+                max_sequence: 0,
             };
         }
 
@@ -229,6 +247,7 @@ impl Memtable for PartitionTreeMemtable {
             time_range: Some((min_timestamp, max_timestamp)),
             num_rows: self.num_rows.load(Ordering::Relaxed),
             num_ranges: 1,
+            max_sequence: self.max_sequence.load(Ordering::Relaxed),
         }
     }
 
@@ -267,6 +286,7 @@ impl PartitionTreeMemtable {
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
             num_rows: AtomicUsize::new(0),
+            max_sequence: AtomicU64::new(0),
         }
     }
 
