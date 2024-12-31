@@ -30,8 +30,8 @@ pub struct LogQuery {
     pub time_filter: TimeFilter,
     /// Columns with filters to query.
     pub columns: Vec<ColumnFilters>,
-    /// Maximum number of logs to return. If not provided, it will return all matched logs.
-    pub limit: Option<usize>,
+    /// Controls row skipping and fetch count for logs.
+    pub limit: Limit,
     /// Adjacent lines to return.
     pub context: Context,
 }
@@ -42,7 +42,7 @@ impl Default for LogQuery {
             table: TableName::new("", "", ""),
             time_filter: Default::default(),
             columns: vec![],
-            limit: None,
+            limit: Limit::default(),
             context: Default::default(),
         }
     }
@@ -264,6 +264,15 @@ pub enum Context {
     Lines(usize, usize),
     /// Specify the number of seconds before and after the matched line occurred.
     Seconds(usize, usize),
+}
+
+/// Represents limit and offset parameters for query pagination.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Limit {
+    /// Optional number of items to skip before starting to return results
+    pub skip: Option<usize>,
+    /// Optional number of items to return after skipping
+    pub fetch: Option<usize>,
 }
 
 #[cfg(test)]
