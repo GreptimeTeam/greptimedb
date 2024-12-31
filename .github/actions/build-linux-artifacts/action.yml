@@ -48,19 +48,7 @@ runs:
         path: /tmp/greptime-*.log
         retention-days: 3
 
-    - name: Build standard greptime
-      uses: ./.github/actions/build-greptime-binary
-      with:
-        base-image: ubuntu
-        features: pyo3_backend,servers/dashboard
-        cargo-profile: ${{ inputs.cargo-profile }}
-        artifacts-dir: greptime-linux-${{ inputs.arch }}-pyo3-${{ inputs.version }}
-        version: ${{ inputs.version }}
-        working-dir: ${{ inputs.working-dir }}
-        image-registry: ${{ inputs.image-registry }}
-        image-namespace: ${{ inputs.image-namespace }}
-
-    - name: Build greptime without pyo3
+    - name: Build greptime
       if: ${{ inputs.dev-mode == 'false' }}
       uses: ./.github/actions/build-greptime-binary
       with:

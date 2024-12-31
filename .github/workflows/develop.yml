@@ -668,12 +668,6 @@ jobs:
         uses: taiki-e/install-action@nextest
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Install Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - name: Install PyArrow Package
-        run: pip install pyarrow numpy
       - name: Setup etcd server
         working-directory: tests-integration/fixtures/etcd
         run: docker compose -f docker-compose-standalone.yml up -d --wait
@@ -687,7 +681,7 @@ jobs:
         working-directory: tests-integration/fixtures/postgres
         run: docker compose -f docker-compose-standalone.yml up -d --wait
       - name: Run nextest cases
-        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F pyo3_backend -F dashboard -F pg_kvbackend
+        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend
         env:
           CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
           RUST_BACKTRACE: 1
