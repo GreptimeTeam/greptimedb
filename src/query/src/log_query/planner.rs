@@ -93,7 +93,10 @@ impl LogQueryPlanner {
 
         // Apply limit
         plan_builder = plan_builder
-            .limit(0, query.limit.or(Some(DEFAULT_LIMIT)))
+            .limit(
+                query.limit.skip.unwrap_or(0),
+                Some(query.limit.fetch.unwrap_or(DEFAULT_LIMIT)),
+            )
             .context(DataFusionPlanningSnafu)?;
 
         // Build the final plan
@@ -179,7 +182,7 @@ mod tests {
     use common_query::test_util::DummyDecoder;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaRef};
-    use log_query::{ContentFilter, Context};
+    use log_query::{ContentFilter, Context, Limit};
     use session::context::QueryContext;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
     use table::table_name::TableName;
@@ -268,7 +271,10 @@ mod tests {
                 column_name: "message".to_string(),
                 filters: vec![ContentFilter::Contains("error".to_string())],
             }],
-            limit: Some(100),
+            limit: Limit {
+                skip: None,
+                fetch: Some(100),
+            },
             context: Context::None,
         };
 
@@ -359,6 +365,72 @@ mod tests {
             .and(col("message").like(lit(ScalarValue::Utf8(Some("WARN%".to_string())))));
 
         assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
+    }
+
+    #[tokio::test]
+    async fn test_query_to_plan_with_only_skip() {
+        let table_provider =
+            build_test_table_provider(&[("public".to_string(), "test_table".to_string())]).await;
+        let mut planner = LogQueryPlanner::new(table_provider);
+
+        let log_query = LogQuery {
+            table: TableName::new(DEFAULT_CATALOG_NAME, "public", "test_table"),
+            time_filter: TimeFilter {
+                start: Some("2021-01-01T00:00:00Z".to_string()),
+                end: Some("2021-01-02T00:00:00Z".to_string()),
+                span: None,
+            },
+            columns: vec![ColumnFilters {
+                column_name: "message".to_string(),
+                filters: vec![ContentFilter::Contains("error".to_string())],
+            }],
+            limit: Limit {
+                skip: Some(10),
+                fetch: None,
+            },
+            context: Context::None,
+        };
+
+        let plan = planner.query_to_plan(log_query).await.unwrap();
+        let expected = "Limit: skip=10, fetch=1000 [message:Utf8]\
+\n  Projection: greptime.public.test_table.message [message:Utf8]\
+\n    Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp <= Utf8(\"2021-01-02T00:00:00Z\") AND greptime.public.test_table.message LIKE Utf8(\"%error%\") [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]\
+\n      TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]";
+
+        assert_eq!(plan.display_indent_schema().to_string(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_query_to_plan_without_limit() {
+        let table_provider =
+            build_test_table_provider(&[("public".to_string(), "test_table".to_string())]).await;
+        let mut planner = LogQueryPlanner::new(table_provider);
+
+        let log_query = LogQuery {
+            table: TableName::new(DEFAULT_CATALOG_NAME, "public", "test_table"),
+            time_filter: TimeFilter {
+                start: Some("2021-01-01T00:00:00Z".to_string()),
+                end: Some("2021-01-02T00:00:00Z".to_string()),
+                span: None,
+            },
+            columns: vec![ColumnFilters {
+                column_name: "message".to_string(),
+                filters: vec![ContentFilter::Contains("error".to_string())],
+            }],
+            limit: Limit {
+                skip: None,
+                fetch: None,
+            },
+            context: Context::None,
+        };
+
+        let plan = planner.query_to_plan(log_query).await.unwrap();
+        let expected = "Limit: skip=0, fetch=1000 [message:Utf8]\
+\n  Projection: greptime.public.test_table.message [message:Utf8]\
+\n    Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp <= Utf8(\"2021-01-02T00:00:00Z\") AND greptime.public.test_table.message LIKE Utf8(\"%error%\") [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]\
+\n      TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]";
+
+        assert_eq!(plan.display_indent_schema().to_string(), expected);
     }
 
     #[test]
