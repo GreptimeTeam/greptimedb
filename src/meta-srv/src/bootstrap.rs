@@ -232,6 +232,7 @@ pub async fn metasrv_builder(
             let kv_backend = PgStore::with_pg_pool(pool)
                 .await
                 .context(error::KvBackendSnafu)?;
+            // Client for election should be created separately since we need a different session keep-alive idle time.
             let election_client = create_postgres_client(opts).await?;
             let election = PgElection::with_pg_client(
                 opts.server_addr.clone(),

@@ -36,7 +36,6 @@ use crate::rpc::KeyValue;
 
 /// Posgres backend store for metasrv
 pub struct PgStore {
-    // TODO: Consider using sqlx crate.
     pool: Pool,
 }
 

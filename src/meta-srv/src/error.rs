@@ -722,7 +722,7 @@ pub enum Error {
     },
 
     #[cfg(feature = "pg_kvbackend")]
-    #[snafu(display("Failed to get connection from Postgres pool, reason: {}", reason))]
+    #[snafu(display("Failed to get connection from Postgres pool: {}", reason))]
     GetPostgresConnection {
         reason: String,
         #[snafu(implicit)]
