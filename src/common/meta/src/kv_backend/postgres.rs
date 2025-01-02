@@ -118,7 +118,7 @@ impl PgStore {
             }
         };
         client
-            .query(METADKV_CREATION, &[])
+            .execute(METADKV_CREATION, &[])
             .await
             .context(PostgresExecutionSnafu)?;
         Ok(Arc::new(Self { pool }))
@@ -591,6 +591,12 @@ mod tests {
         let pool = cfg
             .create_pool(Some(Runtime::Tokio1), NoTls)
             .context(CreatePostgresPoolSnafu)
+            .unwrap();
+        let client = pool.get().await.unwrap();
+        client
+            .execute(METADKV_CREATION, &[])
+            .await
+            .context(PostgresExecutionSnafu)
             .unwrap();
         Some(PgStore { pool })
     }
