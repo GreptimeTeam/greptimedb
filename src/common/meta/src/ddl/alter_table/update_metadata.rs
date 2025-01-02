@@ -23,7 +23,9 @@ use crate::key::table_info::TableInfoValue;
 use crate::key::{DeserializedValueWithBytes, RegionDistribution};
 
 impl AlterTableProcedure {
-    /// Builds new_meta
+    /// Builds new table info after alteration.
+    /// It bumps the column id of the table by the number of the add column requests.
+    /// So there may be holes in the column id sequence.
     pub(crate) fn build_new_table_info(&self, table_info: &RawTableInfo) -> Result<TableInfo> {
         let table_info =
             TableInfo::try_from(table_info.clone()).context(error::ConvertRawTableInfoSnafu)?;

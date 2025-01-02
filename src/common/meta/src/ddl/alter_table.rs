@@ -28,7 +28,7 @@ use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSn
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, Status, StringKey,
 };
-use common_telemetry::{debug, info};
+use common_telemetry::{debug, error, info};
 use futures::future;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -123,6 +123,14 @@ impl AlterTableProcedure {
 
         let leaders = find_leaders(&physical_table_route.region_routes);
         let mut alter_region_tasks = Vec::with_capacity(leaders.len());
+        let alter_kind = self.make_region_alter_kind()?;
+
+        info!(
+            "Submitting alter region requests for table {}, table_id: {}, alter_kind: {:?}",
+            self.data.table_ref(),
+            table_id,
+            alter_kind,
+        );
 
         for datanode in leaders {
             let requester = self.context.node_manager.datanode(&datanode).await;
@@ -130,7 +138,7 @@ impl AlterTableProcedure {
 
             for region in regions {
                 let region_id = RegionId::new(table_id, region);
-                let request = self.make_alter_region_request(region_id)?;
+                let request = self.make_alter_region_request(region_id, alter_kind.clone())?;
                 debug!("Submitting {request:?} to {datanode}");
 
                 let datanode = datanode.clone();
@@ -170,7 +178,11 @@ impl AlterTableProcedure {
         // Gets the table info from the cache or builds it.
         let new_info = match &self.new_table_info {
             Some(cached) => cached.clone(),
-            None => self.build_new_table_info(&table_info_value.table_info)?,
+            None => self.build_new_table_info(&table_info_value.table_info)
+                .inspect_err(|e| {
+                    // We already check the table info in the prepare step so this should not happen.
+                    error!(e; "Unable to build info for table {} in update metadata step, table_id: {}", table_ref, table_id);
+                })?,
         };
 
         debug!(

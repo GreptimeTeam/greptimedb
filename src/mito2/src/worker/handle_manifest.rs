@@ -101,10 +101,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .version_control
                 .alter_schema(change_result.new_meta, &region.memtable_builder);
 
+            let version = region.version();
             info!(
-                "Region {} is altered, schema version is {}",
-                region.region_id,
-                region.metadata().schema_version
+                "Region {} is altered, metadata is {:?}, options: {:?}",
+                region.region_id, version.metadata, version.options,
             );
         }
 

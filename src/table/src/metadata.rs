@@ -414,8 +414,8 @@ impl TableMeta {
                     error::InvalidAlterRequestSnafu {
                         table: table_name,
                         err: format!(
-                            "column {} already exists with different type",
-                            col_to_add.column_schema.name
+                            "column {} already exists with different type {:?}",
+                            col_to_add.column_schema.name, column_schema.data_type,
                         ),
                     }
                 );

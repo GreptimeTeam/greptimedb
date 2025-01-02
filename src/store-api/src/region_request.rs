@@ -625,8 +625,8 @@ impl AddColumn {
                 InvalidRegionRequestSnafu {
                     region_id: metadata.region_id,
                     err: format!(
-                        "column {} already exists with different metadata",
-                        self.column_metadata.column_schema.name
+                        "column {} already exists with different metadata, existing: {:?}, got: {:?}",
+                        self.column_metadata.column_schema.name, existing_column, self.column_metadata,
                     ),
                 }
             );
