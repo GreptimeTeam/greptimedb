@@ -176,7 +176,7 @@ impl TypedPlan {
                 }
                 .fail()?,
             };
-            let table = ctx.table(&table_reference)?;
+            let table = ctx.table(&table_reference).await?;
             let get_table = Plan::Get {
                 id: crate::expr::Id::Global(table.0),
             };
