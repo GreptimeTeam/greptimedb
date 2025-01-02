@@ -17,7 +17,7 @@ use hashbrown::HashMap;
 use lazy_static::lazy_static;
 use loki_api::prost_types::Timestamp;
 use prost::Message;
-use session::context::{Channel, QueryContext};
+use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::{ensure, ResultExt};
 
 use crate::error::{DecodeOtlpRequestSnafu, ParseJson5Snafu, Result, UnsupportedContentTypeSnafu};
@@ -64,16 +64,26 @@ pub async fn loki_ingest(
 ) -> Result<HttpResponse> {
     ctx.set_channel(Channel::Loki);
     let ctx = Arc::new(ctx);
+    let table_name = table_name.unwrap_or_else(|| LOKI_TABLE_NAME.to_string());
+
+    match content_type {
+        c if c.to_string() == CONTENT_TYPE_PROTOBUF_STR => {
+            handle_pb_req(bytes, table_name, log_state, ctx).await
+        }
+        _ => UnsupportedContentTypeSnafu { content_type }.fail(),
+    }
+}
+
+async fn handle_pb_req(
+    bytes: Bytes,
+    table_name: String,
+    log_state: LogState,
+    ctx: QueryContextRef,
+) -> Result<HttpResponse> {
     let db = ctx.get_db_string();
     let db_str = db.as_str();
-    let table_name = table_name.unwrap_or_else(|| LOKI_TABLE_NAME.to_string());
     let exec_timer = Instant::now();
 
-    // decompress req
-    ensure!(
-        content_type.to_string() == CONTENT_TYPE_PROTOBUF_STR,
-        UnsupportedContentTypeSnafu { content_type }
-    );
     let decompressed = prom_store::snappy_decompress(&bytes).unwrap();
     let req = loki_api::logproto::PushRequest::decode(&decompressed[..])
         .context(DecodeOtlpRequestSnafu)?;
