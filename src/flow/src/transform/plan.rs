@@ -176,7 +176,7 @@ impl TypedPlan {
                 }
                 .fail()?,
             };
-            let table = ctx.table(&table_reference)?;
+            let table = ctx.table(&table_reference).await?;
             let get_table = Plan::Get {
                 id: crate::expr::Id::Global(table.0),
             };
@@ -238,7 +238,7 @@ mod test {
     use crate::expr::GlobalId;
     use crate::plan::{Plan, TypedPlan};
     use crate::repr::{ColumnType, RelationType};
-    use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
+    use crate::test_utils::{create_test_ctx, create_test_query_engine, sql_to_substrait};
     use crate::transform::CDT;
 
     #[tokio::test]

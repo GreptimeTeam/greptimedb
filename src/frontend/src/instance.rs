@@ -196,6 +196,10 @@ impl Instance {
     pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
         &self.table_metadata_manager
     }
+
+    pub fn query_engine(&self) -> QueryEngineRef {
+        self.query_engine.clone()
+    }
 }
 
 #[async_trait]

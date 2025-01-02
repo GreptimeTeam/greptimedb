@@ -76,10 +76,10 @@ use tokio::sync::{broadcast, RwLock};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
-    BuildCacheRegistrySnafu, CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu,
-    InitMetadataSnafu, InitTimezoneSnafu, LoadLayeredConfigSnafu, OtherSnafu, Result,
-    ShutdownDatanodeSnafu, ShutdownFlownodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu,
-    StartFlownodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
+    BuildCacheRegistrySnafu, BuildCliSnafu, CreateDirSnafu, IllegalConfigSnafu,
+    InitDdlManagerSnafu, InitMetadataSnafu, InitTimezoneSnafu, LoadLayeredConfigSnafu, OtherSnafu,
+    Result, ShutdownDatanodeSnafu, ShutdownFlownodeSnafu, ShutdownFrontendSnafu,
+    StartDatanodeSnafu, StartFlownodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
     StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
@@ -580,7 +580,7 @@ impl StartCommand {
             layered_cache_registry.clone(),
             table_metadata_manager,
             table_meta_allocator,
-            flow_metadata_manager,
+            flow_metadata_manager.clone(),
             flow_meta_allocator,
         )
         .await?;
@@ -602,7 +602,7 @@ impl StartCommand {
         let flow_worker_manager = flownode.flow_worker_manager();
         // flow server need to be able to use frontend to write insert requests back
         let invoker = FrontendInvoker::build_from(
-            flow_worker_manager.clone(),
+            Some(frontend.query_engine()),
             catalog_manager.clone(),
             kv_backend.clone(),
             layered_cache_registry.clone(),
@@ -612,6 +612,15 @@ impl StartCommand {
         .await
         .context(StartFlownodeSnafu)?;
         flow_worker_manager.set_frontend_invoker(invoker).await;
+
+        if let Err(err) = flow_worker_manager
+            .create_and_start_refill_flow_tasks(&flow_metadata_manager, &(catalog_manager as _))
+            .await
+            .map_err(BoxedError::new)
+            .context(BuildCliSnafu)
+        {
+            common_telemetry::error!(err; "failed to refill flow");
+        }
 
         let (tx, _rx) = broadcast::channel(1);
 

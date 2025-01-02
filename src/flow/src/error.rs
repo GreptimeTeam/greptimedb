@@ -21,7 +21,7 @@ use common_error::{define_into_tonic_status, from_err_code_msg_to_header};
 use common_macro::stack_trace_debug;
 use common_telemetry::common_error::ext::ErrorExt;
 use common_telemetry::common_error::status_code::StatusCode;
-use snafu::{Location, Snafu};
+use snafu::{Location, ResultExt, Snafu};
 use tonic::metadata::MetadataMap;
 
 use crate::adapter::FlowId;
@@ -44,6 +44,21 @@ pub enum Error {
         reason: String,
         #[snafu(implicit)]
         location: Location,
+    },
+
+    #[snafu(display("Failed to query"))]
+    RequestQuery {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to find table route for table id {}", table_id))]
+    FindTableRoute {
+        table_id: u32,
+        #[snafu(implicit)]
+        location: Location,
+        source: partition::error::Error,
     },
 
     /// TODO(discord9): add detailed location of column
@@ -221,6 +236,11 @@ impl ErrorExt for Error {
             Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
                 StatusCode::Unsupported
             }
+
+            Self::FindTableRoute { source, .. } => source.status_code(),
+
+            Self::RequestQuery { source, .. } => source.status_code(),
+
             Self::External { source, .. } => source.status_code(),
             Self::Internal { .. } | Self::CacheRequired { .. } => StatusCode::Internal,
             Self::StartServer { source, .. } | Self::ShutdownServer { source, .. } => {
@@ -237,3 +257,9 @@ impl ErrorExt for Error {
 }
 
 define_into_tonic_status!(Error);
+
+impl From<EvalError> for Error {
+    fn from(e: EvalError) -> Self {
+        Err::<(), _>(e).context(EvalSnafu).unwrap_err()
+    }
+}

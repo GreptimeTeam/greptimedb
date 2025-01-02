@@ -545,7 +545,7 @@ mod test {
     use crate::expr::{GlobalId, MapFilterProject};
     use crate::plan::{Plan, TypedPlan};
     use crate::repr::{self, ColumnType, RelationType};
-    use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
+    use crate::test_utils::{create_test_ctx, create_test_query_engine, sql_to_substrait};
 
     /// test if `WHERE` condition can be converted to Flow's ScalarExpr in mfp's filter
     #[tokio::test]

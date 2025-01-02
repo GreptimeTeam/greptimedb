@@ -22,6 +22,7 @@ mod linear;
 pub(crate) mod relation;
 mod scalar;
 mod signature;
+mod utils;
 
 use arrow::compute::FilterBuilder;
 use datatypes::prelude::{ConcreteDataType, DataType};
@@ -36,6 +37,7 @@ pub(crate) use linear::{MapFilterProject, MfpPlan, SafeMfpPlan};
 pub(crate) use relation::{Accum, Accumulator, AggregateExpr, AggregateFunc};
 pub(crate) use scalar::{ScalarExpr, TypedExpr};
 use snafu::{ensure, ResultExt};
+pub(crate) use utils::find_plan_time_window_expr_lower_bound;
 
 use crate::expr::error::{ArrowSnafu, DataTypeSnafu};
 use crate::repr::Diff;
@@ -52,6 +54,16 @@ pub struct Batch {
     row_count: usize,
     /// describe if corresponding rows in batch is insert or delete, None means all rows are insert
     diffs: Option<VectorRef>,
+}
+
+impl From<common_recordbatch::RecordBatch> for Batch {
+    fn from(value: common_recordbatch::RecordBatch) -> Self {
+        Self {
+            batch: value.columns().to_vec(),
+            row_count: value.num_rows(),
+            diffs: None,
+        }
+    }
 }
 
 impl PartialEq for Batch {

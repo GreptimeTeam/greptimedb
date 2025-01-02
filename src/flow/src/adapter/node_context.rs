@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use common_recordbatch::RecordBatch;
 use common_telemetry::trace;
 use datatypes::prelude::ConcreteDataType;
 use session::context::QueryContext;
@@ -25,20 +26,23 @@ use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
 use tokio::sync::{broadcast, mpsc, RwLock};
 
-use crate::adapter::{FlowId, TableName, TableSource};
+use crate::adapter::table_source::FlowTableSource;
+use crate::adapter::{FlowId, ManagedTableSource, TableName};
 use crate::error::{Error, EvalSnafu, TableNotFoundSnafu};
 use crate::expr::error::InternalSnafu;
 use crate::expr::{Batch, GlobalId};
 use crate::metrics::METRIC_FLOW_INPUT_BUF_SIZE;
+use crate::plan::TypedPlan;
 use crate::repr::{DiffRow, RelationDesc, BATCH_SIZE, BROADCAST_CAP, SEND_BUF_CAP};
 
 /// A context that holds the information of the dataflow
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct FlownodeContext {
     /// mapping from source table to tasks, useful for schedule which task to run when a source table is updated
     pub source_to_tasks: BTreeMap<TableId, BTreeSet<FlowId>>,
     /// mapping from task to sink table, useful for sending data back to the client when a task is done running
     pub flow_to_sink: BTreeMap<FlowId, TableName>,
+    pub flow_plans: BTreeMap<FlowId, TypedPlan>,
     pub sink_to_flow: BTreeMap<TableName, FlowId>,
     /// broadcast sender for source table, any incoming write request will be sent to the source table's corresponding sender
     ///
@@ -50,11 +54,27 @@ pub struct FlownodeContext {
     /// note that the sink receiver should only have one, and we are using broadcast as mpsc channel here
     pub sink_receiver:
         BTreeMap<TableName, (mpsc::UnboundedSender<Batch>, mpsc::UnboundedReceiver<Batch>)>,
-    /// the schema of the table, query from metasrv or inferred from TypedPlan
-    pub schema: HashMap<GlobalId, RelationDesc>,
+    /// can query the schema of the table source, from metasrv with local cache
+    pub table_source: Box<dyn FlowTableSource>,
     /// All the tables that have been registered in the worker
     pub table_repr: IdToNameMap,
     pub query_context: Option<Arc<QueryContext>>,
+}
+
+impl FlownodeContext {
+    pub fn new(table_source: Box<dyn FlowTableSource>) -> Self {
+        Self {
+            source_to_tasks: Default::default(),
+            flow_to_sink: Default::default(),
+            sink_to_flow: Default::default(),
+            flow_plans: Default::default(),
+            source_sender: Default::default(),
+            sink_receiver: Default::default(),
+            table_source,
+            table_repr: Default::default(),
+            query_context: Default::default(),
+        }
+    }
 }
 
 /// a simple broadcast sender with backpressure, bounded capacity and blocking on send when send buf is full
@@ -106,7 +126,17 @@ impl SourceSender {
             // TODO(discord9): send rows instead so it's just moving a point
             if let Some(batch) = send_buf.recv().await {
                 let len = batch.row_count();
-                self.send_buf_row_cnt.fetch_sub(len, Ordering::SeqCst);
+                let prev = self.send_buf_row_cnt.fetch_sub(len, Ordering::SeqCst);
+                if prev < len {
+                    InternalSnafu {
+                        reason: format!(
+                            "send_buf_row_cnt underflow, prev = {}, current = {}",
+                            prev,
+                            prev.wrapping_sub(len)
+                        ),
+                    }
+                    .fail()?
+                }
                 row_cnt += len;
                 self.sender
                     .send(batch)
@@ -137,13 +167,28 @@ impl SourceSender {
         rows: Vec<DiffRow>,
         batch_datatypes: &[ConcreteDataType],
     ) -> Result<usize, Error> {
-        METRIC_FLOW_INPUT_BUF_SIZE.add(rows.len() as _);
-        while self.send_buf_row_cnt.load(Ordering::SeqCst) >= BATCH_SIZE * 4 {
+        let rows_len = rows.len();
+        METRIC_FLOW_INPUT_BUF_SIZE.add(rows_len as _);
+        let mut retry = 0;
+        let max_retry = 100;
+        while self.send_buf_row_cnt.load(Ordering::SeqCst) >= BATCH_SIZE * 4 && retry < max_retry {
+            common_telemetry::debug!("Send buf is full, waiting for it to be flushed");
+            retry += 1;
             tokio::task::yield_now().await;
         }
+
+        if retry >= max_retry {
+            return crate::error::InternalSnafu {
+                reason: format!(
+                    "Send buf is full(len={}), fail to send",
+                    self.send_buf_row_cnt.load(Ordering::SeqCst)
+                ),
+            }
+            .fail()?;
+        }
+
         // row count metrics is approx so relaxed order is ok
-        self.send_buf_row_cnt
-            .fetch_add(rows.len(), Ordering::SeqCst);
+        self.send_buf_row_cnt.fetch_add(rows_len, Ordering::SeqCst);
         let batch = Batch::try_from_rows_with_types(
             rows.into_iter().map(|(row, _, _)| row).collect(),
             batch_datatypes,
@@ -157,7 +202,23 @@ impl SourceSender {
             .build()
         })?;
 
-        Ok(0)
+        Ok(rows_len)
+    }
+
+    /// send record batch
+    pub async fn send_record_batch(&self, batch: RecordBatch) -> Result<usize, Error> {
+        let row_cnt = batch.num_rows();
+        let batch = Batch::from(batch);
+
+        self.send_buf_row_cnt.fetch_add(row_cnt, Ordering::SeqCst);
+
+        self.send_buf_tx.send(batch).await.map_err(|e| {
+            crate::error::InternalSnafu {
+                reason: format!("Failed to send batch, error = {:?}", e),
+            }
+            .build()
+        })?;
+        Ok(row_cnt)
     }
 }
 
@@ -178,6 +239,16 @@ impl FlownodeContext {
                 name: table_id.to_string(),
             })?;
         sender.send_rows(rows, batch_datatypes).await
+    }
+
+    pub async fn send_rb(&self, table_id: TableId, batch: RecordBatch) -> Result<usize, Error> {
+        let sender = self
+            .source_sender
+            .get(&table_id)
+            .with_context(|| TableNotFoundSnafu {
+                name: table_id.to_string(),
+            })?;
+        sender.send_record_batch(batch).await
     }
 
     /// flush all sender's buf
@@ -215,6 +286,15 @@ impl FlownodeContext {
         self.sink_to_flow.insert(sink_table_name, task_id);
     }
 
+    /// add flow plan to worker context
+    pub fn add_flow_plan(&mut self, task_id: FlowId, plan: TypedPlan) {
+        self.flow_plans.insert(task_id, plan);
+    }
+
+    pub fn get_flow_plan(&self, task_id: &FlowId) -> Option<TypedPlan> {
+        self.flow_plans.get(task_id).cloned()
+    }
+
     /// remove flow from worker context
     pub fn remove_flow(&mut self, task_id: FlowId) {
         if let Some(sink_table_name) = self.flow_to_sink.remove(&task_id) {
@@ -226,6 +306,7 @@ impl FlownodeContext {
                 self.source_sender.remove(source_table_id);
             }
         }
+        self.flow_plans.remove(&task_id);
     }
 
     /// try add source sender, if already exist, do nothing
@@ -284,7 +365,7 @@ impl FlownodeContext {
     /// Retrieves a GlobalId and table schema representing a table previously registered by calling the [register_table] function.
     ///
     /// Returns an error if no table has been registered with the provided names
-    pub fn table(&self, name: &TableName) -> Result<(GlobalId, RelationDesc), Error> {
+    pub async fn table(&self, name: &TableName) -> Result<(GlobalId, RelationDesc), Error> {
         let id = self
             .table_repr
             .get_by_name(name)
@@ -292,13 +373,7 @@ impl FlownodeContext {
             .with_context(|| TableNotFoundSnafu {
                 name: name.join("."),
             })?;
-        let schema = self
-            .schema
-            .get(&id)
-            .cloned()
-            .with_context(|| TableNotFoundSnafu {
-                name: name.join("."),
-            })?;
+        let schema = self.table_source.table(name).await?;
         Ok((id, schema))
     }
 
@@ -312,7 +387,7 @@ impl FlownodeContext {
     /// merely creating a mapping from table id to global id
     pub async fn assign_global_id_to_table(
         &mut self,
-        srv_map: &TableSource,
+        srv_map: &ManagedTableSource,
         mut table_name: Option<TableName>,
         table_id: Option<TableId>,
     ) -> Result<GlobalId, Error> {
@@ -333,35 +408,14 @@ impl FlownodeContext {
 
             // table id is Some meaning db must have created the table
             if let Some(table_id) = table_id {
-                let (known_table_name, schema) = srv_map.get_table_name_schema(&table_id).await?;
+                let known_table_name = srv_map.get_table_name(&table_id).await?;
                 table_name = table_name.or(Some(known_table_name));
-                self.schema.insert(global_id, schema);
             } // if we don't have table id, it means database haven't assign one yet or we don't need it
 
             // still update the mapping with new global id
             self.table_repr.insert(table_name, table_id, global_id);
             Ok(global_id)
         }
-    }
-
-    /// Assign a schema to a table
-    ///
-    pub fn assign_table_schema(
-        &mut self,
-        table_name: &TableName,
-        schema: RelationDesc,
-    ) -> Result<(), Error> {
-        let gid = self
-            .table_repr
-            .get_by_name(table_name)
-            .map(|(_, gid)| gid)
-            .context(TableNotFoundSnafu {
-                name: format!("Table not found: {:?} in flownode cache", table_name),
-            })?;
-
-        self.schema.insert(gid, schema);
-
-        Ok(())
     }
 
     /// Get a new global id

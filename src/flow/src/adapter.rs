@@ -23,6 +23,7 @@ use std::time::{Duration, Instant, SystemTime};
 use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRequests};
 use common_config::Configurable;
 use common_error::ext::BoxedError;
+use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_meta::key::TableMetadataManagerRef;
 use common_runtime::JoinHandle;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
@@ -37,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::Mode;
-use session::context::QueryContext;
+use session::context::{QueryContext, QueryContextBuilder};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{ConcreteDataType, RegionId};
 use table::metadata::TableId;
@@ -45,10 +46,9 @@ use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 pub(crate) use crate::adapter::node_context::FlownodeContext;
-use crate::adapter::table_source::TableSource;
-use crate::adapter::util::{
-    relation_desc_to_column_schemas_with_fallback, table_info_value_to_relation_desc,
-};
+use crate::adapter::refill::RefillTask;
+use crate::adapter::table_source::ManagedTableSource;
+use crate::adapter::util::relation_desc_to_column_schemas_with_fallback;
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
 use crate::df_optimizer::sql_to_flow_plan;
@@ -58,6 +58,7 @@ use crate::error::{
 };
 use crate::expr::Batch;
 use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_ROWS, METRIC_FLOW_RUN_INTERVAL_MS};
+use crate::plan::{fix_time_index_for_flow_plan, TypedPlan};
 use crate::repr::{self, DiffRow, RelationDesc, Row, BATCH_SIZE};
 
 mod flownode_impl;
@@ -68,8 +69,10 @@ mod tests;
 mod util;
 mod worker;
 
+mod refill;
+
 pub(crate) mod node_context;
-mod table_source;
+pub(crate) mod table_source;
 
 use crate::error::Error;
 use crate::utils::StateReportHandler;
@@ -129,11 +132,14 @@ pub struct FlowWorkerManager {
     /// The query engine that will be used to parse the query and convert it to a dataflow plan
     pub query_engine: Arc<dyn QueryEngine>,
     /// Getting table name and table schema from table info manager
-    table_info_source: TableSource,
+    table_info_source: ManagedTableSource,
     frontend_invoker: RwLock<Option<FrontendInvoker>>,
     /// contains mapping from table name to global id, and table schema
     node_context: RwLock<FlownodeContext>,
+    /// Contains all refill tasks
+    refill_tasks: RwLock<BTreeMap<FlowId, RefillTask>>,
     flow_err_collectors: RwLock<BTreeMap<FlowId, ErrCollector>>,
+    /// Contains the length of send buffer for each source table
     src_send_buf_lens: RwLock<BTreeMap<TableId, watch::Receiver<usize>>>,
     tick_manager: FlowTickManager,
     node_id: Option<u32>,
@@ -158,11 +164,11 @@ impl FlowWorkerManager {
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
     ) -> Self {
-        let srv_map = TableSource::new(
+        let srv_map = ManagedTableSource::new(
             table_meta.table_info_manager().clone(),
             table_meta.table_name_manager().clone(),
         );
-        let node_context = FlownodeContext::default();
+        let node_context = FlownodeContext::new(Box::new(srv_map.clone()) as _);
         let tick_manager = FlowTickManager::new();
         let worker_handles = Vec::new();
         FlowWorkerManager {
@@ -171,6 +177,7 @@ impl FlowWorkerManager {
             table_info_source: srv_map,
             frontend_invoker: RwLock::new(None),
             node_context: RwLock::new(node_context),
+            refill_tasks: Default::default(),
             flow_err_collectors: Default::default(),
             src_send_buf_lens: Default::default(),
             tick_manager,
@@ -409,7 +416,7 @@ impl FlowWorkerManager {
     ) -> Result<Option<(Vec<String>, Option<usize>, Vec<ColumnSchema>)>, Error> {
         if let Some(table_id) = self
             .table_info_source
-            .get_table_id_from_name(table_name)
+            .get_opt_table_id_from_name(table_name)
             .await?
         {
             let table_info = self
@@ -694,8 +701,45 @@ pub struct CreateFlowArgs {
     pub query_ctx: Option<QueryContext>,
 }
 
+impl CreateFlowArgs {
+    pub fn from_flow_info(
+        flow_id: FlowId,
+        info: FlowInfoValue,
+        create_if_not_exists: bool,
+        or_replace: bool,
+    ) -> Self {
+        let sink_table_name = [
+            info.sink_table_name().catalog_name.clone(),
+            info.sink_table_name().schema_name.clone(),
+            info.sink_table_name().table_name.clone(),
+        ];
+        let args = CreateFlowArgs {
+            flow_id: flow_id as _,
+            sink_table_name,
+            source_table_ids: info.source_table_ids().to_vec(),
+            create_if_not_exists,
+            or_replace,
+            expire_after: info.expire_after(),
+            comment: Some(info.comment().clone()),
+            sql: info.raw_sql().clone(),
+            flow_options: info.options().clone(),
+            query_ctx: Some(
+                QueryContextBuilder::default()
+                    .current_catalog(info.catalog_name().clone())
+                    .build(),
+            ),
+        };
+        args
+    }
+}
+
 /// Create&Remove flow
 impl FlowWorkerManager {
+    /// Get table info source
+    pub fn table_info_source(&self) -> &ManagedTableSource {
+        &self.table_info_source
+    }
+
     /// remove a flow by it's id
     pub async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
         for handle in self.worker_handles.iter() {
@@ -706,6 +750,87 @@ impl FlowWorkerManager {
             }
         }
         self.node_context.write().await.remove_flow(flow_id);
+        Ok(())
+    }
+
+    ///// check schema against actual table schema if exists
+    /// if not exist create sink table immediately
+    ///
+    /// will also fix flow plan's time index if needed if sink table already exists
+    async fn valid_or_create_sink_table(
+        &self,
+        flow_id: FlowId,
+        flow_plan: &mut TypedPlan,
+        sink_table_name: &TableName,
+        node_ctx: &mut FlownodeContext,
+    ) -> Result<(), Error> {
+        if let Some((_, _, real_schema)) = self.fetch_table_pk_schema(sink_table_name).await? {
+            let auto_schema = relation_desc_to_column_schemas_with_fallback(&flow_plan.schema);
+
+            // for column schema, only `data_type` need to be check for equality
+            // since one can omit flow's column name when write flow query
+            // print a user friendly error message about mismatch and how to correct them
+            for (idx, zipped) in auto_schema
+                .iter()
+                .zip_longest(real_schema.iter())
+                .enumerate()
+            {
+                match zipped {
+                    EitherOrBoth::Both(auto, real) => {
+                        if auto.data_type != real.data_type {
+                            InvalidQuerySnafu {
+                                    reason: format!(
+                                        "Column {}(name is '{}', flow inferred name is '{}')'s data type mismatch, expect {:?} got {:?}",
+                                        idx,
+                                        real.name,
+                                        auto.name,
+                                        real.data_type,
+                                        auto.data_type
+                                    ),
+                                }
+                                .fail()?;
+                        }
+                    }
+                    EitherOrBoth::Right(real) if real.data_type.is_timestamp() => {
+                        // if table is auto created, the last one or two column should be timestamp(update at and ts placeholder)
+                        continue;
+                    }
+                    _ => InvalidQuerySnafu {
+                        reason: format!(
+                            "schema length mismatched, expected {} found {}",
+                            real_schema.len(),
+                            auto_schema.len()
+                        ),
+                    }
+                    .fail()?,
+                }
+            }
+
+            // only use useful length of schema, which is the flow's schema length
+            let useful_len = real_schema.len().min(auto_schema.len());
+            let fixed_plan = fix_time_index_for_flow_plan(flow_plan, &real_schema[0..useful_len])?;
+            *flow_plan = fixed_plan;
+        } else {
+            // create sink table
+            let did_create = self
+                .create_table_from_relation(
+                    &format!("flow-id={flow_id}"),
+                    sink_table_name,
+                    &flow_plan.schema,
+                )
+                .await?;
+            if !did_create {
+                UnexpectedSnafu {
+                    reason: format!("Failed to create table {:?}", sink_table_name),
+                }
+                .fail()?;
+            }
+        }
+
+        node_ctx.add_flow_plan(flow_id, flow_plan.clone());
+
+        debug!("Flow {:?}'s Plan is {:?}", flow_id, flow_plan);
+
         Ok(())
     }
 
@@ -781,88 +906,14 @@ impl FlowWorkerManager {
 
         node_ctx.query_context = query_ctx.map(Arc::new);
         // construct a active dataflow state with it
-        let flow_plan = sql_to_flow_plan(&mut node_ctx, &self.query_engine, &sql).await?;
-
-        debug!("Flow {:?}'s Plan is {:?}", flow_id, flow_plan);
+        let mut flow_plan = sql_to_flow_plan(&mut node_ctx, &self.query_engine, &sql).await?;
 
         // check schema against actual table schema if exists
         // if not exist create sink table immediately
-        if let Some((_, _, real_schema)) = self.fetch_table_pk_schema(&sink_table_name).await? {
-            let auto_schema = relation_desc_to_column_schemas_with_fallback(&flow_plan.schema);
+        self.valid_or_create_sink_table(flow_id, &mut flow_plan, &sink_table_name, &mut node_ctx)
+            .await?;
 
-            // for column schema, only `data_type` need to be check for equality
-            // since one can omit flow's column name when write flow query
-            // print a user friendly error message about mismatch and how to correct them
-            for (idx, zipped) in auto_schema
-                .iter()
-                .zip_longest(real_schema.iter())
-                .enumerate()
-            {
-                match zipped {
-                    EitherOrBoth::Both(auto, real) => {
-                        if auto.data_type != real.data_type {
-                            InvalidQuerySnafu {
-                                    reason: format!(
-                                        "Column {}(name is '{}', flow inferred name is '{}')'s data type mismatch, expect {:?} got {:?}",
-                                        idx,
-                                        real.name,
-                                        auto.name,
-                                        real.data_type,
-                                        auto.data_type
-                                    ),
-                                }
-                                .fail()?;
-                        }
-                    }
-                    EitherOrBoth::Right(real) if real.data_type.is_timestamp() => {
-                        // if table is auto created, the last one or two column should be timestamp(update at and ts placeholder)
-                        continue;
-                    }
-                    _ => InvalidQuerySnafu {
-                        reason: format!(
-                            "schema length mismatched, expected {} found {}",
-                            real_schema.len(),
-                            auto_schema.len()
-                        ),
-                    }
-                    .fail()?,
-                }
-            }
-
-            let table_id = self
-                .table_info_source
-                .get_table_id_from_name(&sink_table_name)
-                .await?
-                .context(UnexpectedSnafu {
-                    reason: format!("Can't get table id for table name {:?}", sink_table_name),
-                })?;
-            let table_info_value = self
-                .table_info_source
-                .get_table_info_value(&table_id)
-                .await?
-                .context(UnexpectedSnafu {
-                    reason: format!("Can't get table info value for table id {:?}", table_id),
-                })?;
-            let real_schema = table_info_value_to_relation_desc(table_info_value)?;
-            node_ctx.assign_table_schema(&sink_table_name, real_schema.clone())?;
-        } else {
-            // assign inferred schema to sink table
-            // create sink table
-            node_ctx.assign_table_schema(&sink_table_name, flow_plan.schema.clone())?;
-            let did_create = self
-                .create_table_from_relation(
-                    &format!("flow-id={flow_id}"),
-                    &sink_table_name,
-                    &flow_plan.schema,
-                )
-                .await?;
-            if !did_create {
-                UnexpectedSnafu {
-                    reason: format!("Failed to create table {:?}", sink_table_name),
-                }
-                .fail()?;
-            }
-        }
+        let flow_plan = flow_plan;
 
         let _ = comment;
         let _ = flow_options;

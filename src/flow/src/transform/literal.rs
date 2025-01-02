@@ -346,7 +346,7 @@ mod test {
     use super::*;
     use crate::plan::{Plan, TypedPlan};
     use crate::repr::{self, ColumnType, RelationType};
-    use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
+    use crate::test_utils::{create_test_ctx, create_test_query_engine, sql_to_substrait};
     /// test if literal in substrait plan can be correctly converted to flow plan
     #[tokio::test]
     async fn test_literal() {

@@ -463,7 +463,7 @@ SELECT wildcard FROM out_basic;
 +----------+
 | wildcard |
 +----------+
-| 3        |
+| 6        |
 +----------+
 
 DROP TABLE input_basic;
@@ -561,7 +561,7 @@ SELECT wildcard FROM out_basic;
 +----------+
 | wildcard |
 +----------+
-| 3        |
+| 5        |
 +----------+
 
 DROP FLOW test_wildcard_basic;

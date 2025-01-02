@@ -17,9 +17,14 @@
 
 mod join;
 mod reduce;
+mod utils;
+
+use std::collections::BTreeSet;
+
+pub(crate) use utils::fix_time_index_for_flow_plan;
 
 use crate::error::Error;
-use crate::expr::{Id, LocalId, MapFilterProject, SafeMfpPlan, TypedExpr};
+use crate::expr::{GlobalId, Id, LocalId, MapFilterProject, SafeMfpPlan, ScalarExpr, TypedExpr};
 use crate::plan::join::JoinPlan;
 pub(crate) use crate::plan::reduce::{AccumulablePlan, AggrWithIndex, KeyValPlan, ReducePlan};
 use crate::repr::{DiffRow, RelationDesc};
@@ -182,6 +187,81 @@ pub enum Plan {
         /// Whether to consolidate the output, e.g., cancel negated records.
         consolidate_output: bool,
     },
+}
+
+impl Plan {
+    /// Get nth expr using column ref
+    pub fn get_nth_expr(&self, n: usize) -> Option<ScalarExpr> {
+        match self {
+            Self::Mfp { mfp, .. } => mfp.get_nth_expr(n),
+            Self::Reduce { key_val_plan, .. } => key_val_plan.get_nth_expr(n),
+            _ => None,
+        }
+    }
+
+    /// Get the first input plan if exists
+    pub fn get_first_input_plan(&self) -> Option<&TypedPlan> {
+        match self {
+            Plan::Let { value, .. } => Some(value),
+            Plan::Mfp { input, .. } => Some(input),
+            Plan::Reduce { input, .. } => Some(input),
+            Plan::Join { inputs, .. } => inputs.first(),
+            Plan::Union { inputs, .. } => inputs.first(),
+            _ => None,
+        }
+    }
+
+    /// Get mutable ref to the first input plan if exists
+    pub fn get_mut_first_input_plan(&mut self) -> Option<&mut TypedPlan> {
+        match self {
+            Plan::Let { value, .. } => Some(value),
+            Plan::Mfp { input, .. } => Some(input),
+            Plan::Reduce { input, .. } => Some(input),
+            Plan::Join { inputs, .. } => inputs.first_mut(),
+            Plan::Union { inputs, .. } => inputs.first_mut(),
+            _ => None,
+        }
+    }
+
+    /// Find all the used collection in the plan
+    pub fn find_used_collection(&self) -> BTreeSet<GlobalId> {
+        fn recur_find_use(plan: &Plan, used: &mut BTreeSet<GlobalId>) {
+            match plan {
+                Plan::Get { id } => {
+                    match id {
+                        Id::Local(_) => (),
+                        Id::Global(g) => {
+                            used.insert(*g);
+                        }
+                    };
+                }
+                Plan::Let { value, body, .. } => {
+                    recur_find_use(&value.plan, used);
+                    recur_find_use(&body.plan, used);
+                }
+                Plan::Mfp { input, .. } => {
+                    recur_find_use(&input.plan, used);
+                }
+                Plan::Reduce { input, .. } => {
+                    recur_find_use(&input.plan, used);
+                }
+                Plan::Join { inputs, .. } => {
+                    for input in inputs {
+                        recur_find_use(&input.plan, used);
+                    }
+                }
+                Plan::Union { inputs, .. } => {
+                    for input in inputs {
+                        recur_find_use(&input.plan, used);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut ret = Default::default();
+        recur_find_use(self, &mut ret);
+        ret
+    }
 }
 
 impl Plan {
