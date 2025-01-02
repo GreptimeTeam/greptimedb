@@ -443,7 +443,7 @@ impl Default for InvertedIndexConfig {
             intermediate_path: String::new(),
             metadata_cache_size: ReadableSize::mb(64),
             content_cache_size: ReadableSize::mb(128),
-            content_cache_page_size: ReadableSize::mb(8),
+            content_cache_page_size: ReadableSize::kb(128),
         };
 
         if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {

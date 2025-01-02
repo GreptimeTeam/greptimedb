@@ -546,11 +546,11 @@ intermediate_path = ""
 ## Cache size for inverted index metadata.
 metadata_cache_size = "64MiB"
 
-## Cache size for inverted index content.
-content_cache_size = "128MiB"
+## Cache size for index content.
+content_cache_size = "128KiB"
 
 ## Page size for inverted index content cache.
-content_cache_page_size = "8MiB"
+content_cache_page_size = "128KiB"
 
 ## The options for full-text index in Mito engine.
 [region_engine.mito.fulltext_index]
