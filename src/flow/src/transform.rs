@@ -156,11 +156,6 @@ mod test {
     use query::parser::QueryLanguageParser;
     use session::context::QueryContext;
 
-    use super::*;
-    use crate::adapter::node_context::IdToNameMap;
-    use crate::adapter::table_source::test::FlowDummyTableSource;
-    use crate::df_optimizer::apply_df_optimizer;
-    use crate::expr::GlobalId;
     use crate::df_optimizer::apply_df_optimizer;
     use crate::test_utils::create_test_query_engine;
 

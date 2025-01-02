@@ -46,9 +46,8 @@ use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 pub(crate) use crate::adapter::node_context::FlownodeContext;
-use crate::adapter::table_source::ManagedTableSource;
 use crate::adapter::refill::RefillTask;
-use crate::adapter::table_source::KvBackendTableSource;
+use crate::adapter::table_source::ManagedTableSource;
 use crate::adapter::util::relation_desc_to_column_schemas_with_fallback;
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
@@ -737,7 +736,7 @@ impl CreateFlowArgs {
 /// Create&Remove flow
 impl FlowWorkerManager {
     /// Get table info source
-    pub fn table_info_source(&self) -> &KvBackendTableSource {
+    pub fn table_info_source(&self) -> &ManagedTableSource {
         &self.table_info_source
     }
 
