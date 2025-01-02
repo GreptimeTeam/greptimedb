@@ -484,7 +484,7 @@
 | `region_engine.mito.inverted_index.mem_threshold_on_create` | String | `auto` | Memory threshold for performing an external sort during index creation.<br/>- `auto`: automatically determine the threshold based on the system memory size (default)<br/>- `unlimited`: no memory limit<br/>- `[size]` e.g. `64MB`: fixed memory threshold |
 | `region_engine.mito.inverted_index.intermediate_path` | String | `""` | Deprecated, use `region_engine.mito.index.aux_path` instead. |
 | `region_engine.mito.inverted_index.metadata_cache_size` | String | `64MiB` | Cache size for inverted index metadata. |
-| `region_engine.mito.inverted_index.content_cache_size` | String | `128MiB` | Cache size for index content. |
+| `region_engine.mito.inverted_index.content_cache_size` | String | `128MiB` | Cache size for inverted index content. |```
 | `region_engine.mito.inverted_index.content_cache_page_size` | String | `128KiB` | Page size for inverted index content cache. |
 | `region_engine.mito.fulltext_index` | -- | -- | The options for full-text index in Mito engine. |
 | `region_engine.mito.fulltext_index.create_on_flush` | String | `auto` | Whether to create the index on flush.<br/>- `auto`: automatically (default)<br/>- `disable`: never |
