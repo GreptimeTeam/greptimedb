@@ -29,6 +29,8 @@ use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 #[cfg(feature = "pg_kvbackend")]
 use common_telemetry::error;
 use common_telemetry::info;
+#[cfg(feature = "pg_kvbackend")]
+use deadpool_postgres::{Config, Runtime};
 use etcd_client::Client;
 use futures::future;
 use servers::configurator::ConfiguratorRef;
@@ -51,9 +53,6 @@ use crate::election::etcd::EtcdElection;
 use crate::election::postgres::PgElection;
 #[cfg(feature = "pg_kvbackend")]
 use crate::election::CANDIDATE_LEASE_SECS;
-#[cfg(feature = "pg_kvbackend")]
-use crate::error::InvalidArgumentsSnafu;
-use crate::error::{InitExportMetricsTaskSnafu, TomlFormatSnafu};
 use crate::metasrv::builder::MetasrvBuilder;
 use crate::metasrv::{BackendImpl, Metasrv, MetasrvOptions, SelectorRef};
 use crate::selector::lease_based::LeaseBasedSelector;
@@ -86,14 +85,14 @@ impl MetasrvInstance {
         let httpsrv = Arc::new(
             HttpServerBuilder::new(opts.http.clone())
                 .with_metrics_handler(MetricsHandler)
-                .with_greptime_config_options(opts.to_toml().context(TomlFormatSnafu)?)
+                .with_greptime_config_options(opts.to_toml().context(error::TomlFormatSnafu)?)
                 .build(),
         );
         let metasrv = Arc::new(metasrv);
         // put metasrv into plugins for later use
         plugins.insert::<Arc<Metasrv>>(metasrv.clone());
         let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
-            .context(InitExportMetricsTaskSnafu)?;
+            .context(error::InitExportMetricsTaskSnafu)?;
         Ok(MetasrvInstance {
             metasrv,
             httpsrv,
@@ -108,7 +107,7 @@ impl MetasrvInstance {
         self.metasrv.try_start().await?;
 
         if let Some(t) = self.export_metrics_task.as_ref() {
-            t.start(None).context(InitExportMetricsTaskSnafu)?
+            t.start(None).context(error::InitExportMetricsTaskSnafu)?
         }
 
         let (tx, rx) = mpsc::channel::<()>(1);
@@ -229,10 +228,11 @@ pub async fn metasrv_builder(
         }
         #[cfg(feature = "pg_kvbackend")]
         (None, BackendImpl::PostgresStore) => {
-            let pg_client = create_postgres_client(opts).await?;
-            let kv_backend = PgStore::with_pg_client(pg_client)
+            let pool = create_postgres_pool(opts).await?;
+            let kv_backend = PgStore::with_pg_pool(pool)
                 .await
                 .context(error::KvBackendSnafu)?;
+            // Client for election should be created separately since we need a different session keep-alive idle time.
             let election_client = create_postgres_client(opts).await?;
             let election = PgElection::with_pg_client(
                 opts.server_addr.clone(),
@@ -287,9 +287,12 @@ async fn create_etcd_client(opts: &MetasrvOptions) -> Result<Client> {
 
 #[cfg(feature = "pg_kvbackend")]
 async fn create_postgres_client(opts: &MetasrvOptions) -> Result<tokio_postgres::Client> {
-    let postgres_url = opts.store_addrs.first().context(InvalidArgumentsSnafu {
-        err_msg: "empty store addrs",
-    })?;
+    let postgres_url = opts
+        .store_addrs
+        .first()
+        .context(error::InvalidArgumentsSnafu {
+            err_msg: "empty store addrs",
+        })?;
     let (client, connection) = tokio_postgres::connect(postgres_url, NoTls)
         .await
         .context(error::ConnectPostgresSnafu)?;
@@ -300,4 +303,20 @@ async fn create_postgres_client(opts: &MetasrvOptions) -> Result<tokio_postgres:
         }
     });
     Ok(client)
+}
+
+#[cfg(feature = "pg_kvbackend")]
+async fn create_postgres_pool(opts: &MetasrvOptions) -> Result<deadpool_postgres::Pool> {
+    let postgres_url = opts
+        .store_addrs
+        .first()
+        .context(error::InvalidArgumentsSnafu {
+            err_msg: "empty store addrs",
+        })?;
+    let mut cfg = Config::new();
+    cfg.url = Some(postgres_url.to_string());
+    let pool = cfg
+        .create_pool(Some(Runtime::Tokio1), NoTls)
+        .context(error::CreatePostgresPoolSnafu)?;
+    Ok(pool)
 }

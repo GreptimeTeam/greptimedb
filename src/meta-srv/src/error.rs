@@ -704,10 +704,27 @@ pub enum Error {
     },
 
     #[cfg(feature = "pg_kvbackend")]
-    #[snafu(display("Failed to connect to PostgresSQL"))]
+    #[snafu(display("Failed to connect to Postgres"))]
     ConnectPostgres {
         #[snafu(source)]
         error: tokio_postgres::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Failed to create connection pool for Postgres"))]
+    CreatePostgresPool {
+        #[snafu(source)]
+        error: deadpool_postgres::CreatePoolError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Failed to get connection from Postgres pool: {}", reason))]
+    GetPostgresConnection {
+        reason: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -843,9 +860,10 @@ impl ErrorExt for Error {
             Error::Other { source, .. } => source.status_code(),
             Error::LookupPeer { source, .. } => source.status_code(),
             #[cfg(feature = "pg_kvbackend")]
-            Error::ConnectPostgres { .. } => StatusCode::Internal,
-            #[cfg(feature = "pg_kvbackend")]
-            Error::PostgresExecution { .. } => StatusCode::Internal,
+            Error::CreatePostgresPool { .. }
+            | Error::GetPostgresConnection { .. }
+            | Error::PostgresExecution { .. }
+            | Error::ConnectPostgres { .. } => StatusCode::Internal,
         }
     }
 
