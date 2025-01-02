@@ -119,6 +119,7 @@ async fn test_compaction_region() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -190,6 +191,7 @@ async fn test_compaction_region_with_overlapping() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -245,6 +247,7 @@ async fn test_compaction_region_with_overlapping_delete_all() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -319,6 +322,7 @@ async fn test_readonly_during_compaction() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -390,6 +394,7 @@ async fn test_compaction_update_time_window() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 

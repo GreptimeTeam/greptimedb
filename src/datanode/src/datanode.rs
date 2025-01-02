@@ -224,7 +224,6 @@ impl DatanodeBuilder {
             cache_registry.get().context(MissingCacheSnafu)?;
 
         let schema_metadata_manager = Arc::new(SchemaMetadataManager::new(
-            kv_backend.clone(),
             table_id_schema_cache,
             schema_cache,
         ));

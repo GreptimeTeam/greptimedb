@@ -52,6 +52,7 @@ async fn test_manual_flush() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -109,6 +110,7 @@ async fn test_flush_engine() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -178,6 +180,7 @@ async fn test_write_stall() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
     let request = CreateRequestBuilder::new().build();
@@ -251,6 +254,7 @@ async fn test_flush_empty() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
     let request = CreateRequestBuilder::new().build();
@@ -295,6 +299,7 @@ async fn test_flush_reopen_region(factory: Option<LogStoreFactory>) {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -415,6 +420,7 @@ async fn test_auto_flush_engine() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -484,6 +490,7 @@ async fn test_flush_workers() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 

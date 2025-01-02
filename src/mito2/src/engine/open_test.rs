@@ -252,6 +252,7 @@ async fn test_open_region_skip_wal_replay() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -441,6 +442,7 @@ async fn test_open_compaction_region() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
     let request = CreateRequestBuilder::new().build();
