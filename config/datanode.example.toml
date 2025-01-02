@@ -547,7 +547,7 @@ intermediate_path = ""
 metadata_cache_size = "64MiB"
 
 ## Cache size for index content.
-content_cache_size = "128KiB"
+content_cache_size = "128MiB"
 
 ## Page size for inverted index content cache.
 content_cache_page_size = "128KiB"
