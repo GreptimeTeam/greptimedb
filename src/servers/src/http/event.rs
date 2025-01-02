@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::result::Result as StdResult;
 use std::sync::Arc;
 use std::time::Instant;
@@ -35,6 +35,7 @@ use common_query::prelude::GREPTIME_TIMESTAMP;
 use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
 use datatypes::value::column_data_to_json;
+use hashbrown::HashMap;
 use lazy_static::lazy_static;
 use loki_api::prost_types::Timestamp;
 use pipeline::error::PipelineTransformSnafu;
@@ -511,11 +512,12 @@ pub async fn loki_ingest(
     // init schemas
     let mut schemas = LOKI_INIT_SCHEMAS.clone();
 
-    let mut global_label_key_index: HashMap<String, i32> = HashMap::new();
+    let mut global_label_key_index: HashMap<String, u16> = HashMap::new();
     global_label_key_index.insert(GREPTIME_TIMESTAMP.to_string(), 0);
     global_label_key_index.insert(LOKI_LINE_COLUMN.to_string(), 1);
 
-    let mut rows = vec![];
+    let cnt = req.streams.iter().map(|s| s.entries.len()).sum::<usize>();
+    let mut rows = Vec::with_capacity(cnt);
 
     for stream in req.streams {
         // parse labels for each row
@@ -536,16 +538,17 @@ pub async fn loki_ingest(
 
             // create and init row
             let mut row = Vec::with_capacity(schemas.len());
-            for _ in 0..schemas.len() {
+            // set ts and line
+            row.push(GreptimeValue {
+                value_data: Some(ValueData::TimestampNanosecondValue(prost_ts_to_nano(&ts))),
+            });
+            row.push(GreptimeValue {
+                value_data: Some(ValueData::StringValue(line)),
+            });
+            for _ in 0..(schemas.len() - 2) {
                 row.push(GreptimeValue { value_data: None });
             }
-            // insert ts and line
-            row[0] = GreptimeValue {
-                value_data: Some(ValueData::TimestampNanosecondValue(prost_ts_to_nano(&ts))),
-            };
-            row[1] = GreptimeValue {
-                value_data: Some(ValueData::StringValue(line)),
-            };
+
             // insert labels
             for (k, v) in labels.iter() {
                 if let Some(index) = global_label_key_index.get(k) {
@@ -564,7 +567,7 @@ pub async fn loki_ingest(
                         datatype_extension: None,
                         options: None,
                     });
-                    global_label_key_index.insert(k.clone(), (schemas.len() - 1) as i32);
+                    global_label_key_index.insert(k.clone(), (schemas.len() - 1) as u16);
 
                     row.push(GreptimeValue {
                         value_data: Some(ValueData::StringValue(v.clone())),
