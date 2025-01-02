@@ -168,6 +168,7 @@ mod tests {
     use crate::rpc::router::{Region, RegionRoute};
     use crate::test_util::{new_ddl_context, MockDatanodeManager};
 
+    /// Prepares a region with schema `[ts: Timestamp, host: Tag, cpu: Field]`.
     async fn prepare_ddl_context() -> (DdlContext, u64, TableId, RegionId, String) {
         let datanode_manager = Arc::new(MockDatanodeManager::new(()));
         let ddl_context = new_ddl_context(datanode_manager);
@@ -196,6 +197,7 @@ mod tests {
                     .name("cpu")
                     .data_type(ColumnDataType::Float64)
                     .semantic_type(SemanticType::Field)
+                    .is_nullable(true)
                     .build()
                     .unwrap()
                     .into(),
@@ -250,14 +252,14 @@ mod tests {
                             name: "my_tag3".to_string(),
                             data_type: ColumnDataType::String as i32,
                             is_nullable: true,
-                            default_constraint: b"hello".to_vec(),
+                            default_constraint: Vec::new(),
                             semantic_type: SemanticType::Tag as i32,
                             comment: String::new(),
                             ..Default::default()
                         }),
                         location: Some(AddColumnLocation {
                             location_type: LocationType::After as i32,
-                            after_column_name: "my_tag2".to_string(),
+                            after_column_name: "host".to_string(),
                         }),
                         add_if_not_exists: false,
                     }],
@@ -288,7 +290,7 @@ mod tests {
                                 name: "my_tag3".to_string(),
                                 data_type: ColumnDataType::String as i32,
                                 is_nullable: true,
-                                default_constraint: b"hello".to_vec(),
+                                default_constraint: Vec::new(),
                                 semantic_type: SemanticType::Tag as i32,
                                 comment: String::new(),
                                 ..Default::default()
@@ -297,7 +299,7 @@ mod tests {
                         }),
                         location: Some(AddColumnLocation {
                             location_type: LocationType::After as i32,
-                            after_column_name: "my_tag2".to_string(),
+                            after_column_name: "host".to_string(),
                         }),
                     }]
                 }

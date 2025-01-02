@@ -30,6 +30,8 @@ pub struct TestAlterTableExpr {
     add_columns: Vec<ColumnDef>,
     #[builder(setter(into, strip_option))]
     new_table_name: Option<String>,
+    #[builder(setter)]
+    add_if_not_exists: bool,
 }
 
 impl From<TestAlterTableExpr> for AlterTableExpr {
@@ -53,7 +55,7 @@ impl From<TestAlterTableExpr> for AlterTableExpr {
                         .map(|col| AddColumn {
                             column_def: Some(col),
                             location: None,
-                            add_if_not_exists: false,
+                            add_if_not_exists: value.add_if_not_exists,
                         })
                         .collect(),
                 })),
