@@ -57,7 +57,7 @@ pub const BROADCAST_CAP: usize = 1024;
 /// The maximum capacity of the send buffer, to prevent the buffer from growing too large
 pub const SEND_BUF_CAP: usize = BROADCAST_CAP * 2;
 
-/// Flow worker will try to at least accumulate this many rows before processing them(if one second havn't passed)
+/// Flow worker will try to at least accumulate this many rows before processing them(if one second haven't passed)
 pub const BATCH_SIZE: usize = 32 * 16384;
 
 /// Convert a value that is or can be converted to Datetime to internal timestamp

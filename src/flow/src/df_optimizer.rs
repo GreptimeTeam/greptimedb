@@ -492,7 +492,7 @@ impl ScalarUDFImpl for TumbleExpand {
                 if let Some(start_time) = opt{
                     if !matches!(start_time,  Utf8 | Date32 | Date64 | Timestamp(_, _)){
                         return Err(DataFusionError::Plan(
-                            format!("Expect start_time to either be date, timestampe or string, found {:?}", start_time)
+                            format!("Expect start_time to either be date, timestamp or string, found {:?}", start_time)
                         ));
                     }
                 }

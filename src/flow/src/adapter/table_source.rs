@@ -62,7 +62,7 @@ impl TableSource {
             .map(|id| id.table_id())
     }
 
-    /// If the table havn't been created in database, the tableId returned would be null
+    /// If the table haven't been created in database, the tableId returned would be null
     pub async fn get_table_id_from_name(&self, name: &TableName) -> Result<Option<TableId>, Error> {
         let ret = self
             .table_name_manager
