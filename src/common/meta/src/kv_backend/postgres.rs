@@ -35,6 +35,43 @@ use crate::rpc::store::{
 };
 use crate::rpc::KeyValue;
 
+type PgClient = deadpool::managed::Object<deadpool_postgres::Manager>;
+
+enum PgQueryExecutor<'a> {
+    Client(PgClient),
+    Transaction(deadpool_postgres::Transaction<'a>),
+}
+
+impl PgQueryExecutor<'_> {
+    async fn query(
+        &self,
+        query: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<Vec<tokio_postgres::Row>> {
+        match self {
+            PgQueryExecutor::Client(client) => client
+                .query(query, params)
+                .await
+                .context(PostgresExecutionSnafu),
+            PgQueryExecutor::Transaction(txn) => txn
+                .query(query, params)
+                .await
+                .context(PostgresExecutionSnafu),
+        }
+    }
+
+    async fn commit(self) -> Result<()> {
+        match self {
+            PgQueryExecutor::Client(_) => Ok(()),
+            PgQueryExecutor::Transaction(txn) => {
+                txn.commit().await.context(PostgresTransactionSnafu {
+                    operation: "commit".to_string(),
+                })
+            }
+        }
+    }
+}
+
 /// Posgres backend store for metasrv
 pub struct PgStore {
     pool: Pool,
@@ -126,7 +163,7 @@ impl PgStore {
         Ok(Arc::new(Self { pool, max_txn_ops }))
     }
 
-    async fn get_client(&self) -> Result<deadpool::managed::Object<deadpool_postgres::Manager>> {
+    async fn get_client(&self) -> Result<PgClient> {
         match self.pool.get().await {
             Ok(client) => Ok(client),
             Err(e) => GetPostgresConnectionSnafu {
@@ -136,13 +173,15 @@ impl PgStore {
         }
     }
 
-    async fn put_if_not_exists(&self, key: &str, value: &str) -> Result<bool> {
-        let res = self
-            .get_client()
-            .await?
+    async fn put_if_not_exists_with_query_executor(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        key: &str,
+        value: &str,
+    ) -> Result<bool> {
+        let res = query_executor
             .query(PUT_IF_NOT_EXISTS, &[&key, &value])
-            .await
-            .context(PostgresExecutionSnafu)?;
+            .await?;
         Ok(res.is_empty())
     }
 }
@@ -249,6 +288,68 @@ impl KvBackend for PgStore {
     }
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
+        let client = self.get_client().await?;
+        self.range_with_query_executor(&PgQueryExecutor::Client(client), req)
+            .await
+    }
+
+    async fn put(&self, req: PutRequest) -> Result<PutResponse> {
+        let client = self.get_client().await?;
+        self.put_with_query_executor(&PgQueryExecutor::Client(client), req)
+            .await
+    }
+
+    async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
+        let client = self.get_client().await?;
+        self.batch_put_with_query_executor(&PgQueryExecutor::Client(client), req)
+            .await
+    }
+
+    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
+        let client = self.get_client().await?;
+        self.batch_get_with_query_executor(&PgQueryExecutor::Client(client), req)
+            .await
+    }
+
+    async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
+        let client = self.get_client().await?;
+        self.delete_range_with_query_executor(&PgQueryExecutor::Client(client), req)
+            .await
+    }
+
+    async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+        let client = self.get_client().await?;
+        self.batch_delete_with_query_executor(&PgQueryExecutor::Client(client), req)
+            .await
+    }
+
+    async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
+        let client = self.get_client().await?;
+        self.compare_and_put_with_query_executor(&PgQueryExecutor::Client(client), req)
+            .await
+    }
+}
+
+impl PgStore {
+    /// Point get with certain client. It's needed for a client with transaction.
+    async fn point_get_with_query_executor(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        let key = process_bytes(key, "pointGetKey")?;
+        let res = query_executor.query(POINT_GET, &[&key]).await?;
+        match res.is_empty() {
+            true => Ok(None),
+            false => Ok(Some(res[0].get::<_, Vec<u8>>(1))),
+        }
+    }
+
+    async fn range_with_query_executor(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        req: RangeRequest,
+    ) -> Result<RangeResponse> {
         let mut params = vec![];
         let template = select_range_template(&req);
         if req.key != EMPTY {
@@ -277,12 +378,7 @@ impl KvBackend for PgStore {
                 Cow::Owned(owned) => owned as &(dyn ToSql + Sync),
             })
             .collect();
-        let res = self
-            .get_client()
-            .await?
-            .query(&template, &params)
-            .await
-            .context(PostgresExecutionSnafu)?;
+        let res = query_executor.query(&template, &params).await?;
         let kvs: Vec<KeyValue> = res
             .into_iter()
             .map(|r| {
@@ -310,16 +406,23 @@ impl KvBackend for PgStore {
         })
     }
 
-    async fn put(&self, req: PutRequest) -> Result<PutResponse> {
+    async fn put_with_query_executor(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        req: PutRequest,
+    ) -> Result<PutResponse> {
         let kv = KeyValue {
             key: req.key,
             value: req.value,
         };
         let mut res = self
-            .batch_put(BatchPutRequest {
-                kvs: vec![kv],
-                prev_kv: req.prev_kv,
-            })
+            .batch_put_with_query_executor(
+                query_executor,
+                BatchPutRequest {
+                    kvs: vec![kv],
+                    prev_kv: req.prev_kv,
+                },
+            )
             .await?;
 
         if !res.prev_kvs.is_empty() {
@@ -330,7 +433,11 @@ impl KvBackend for PgStore {
         Ok(PutResponse { prev_kv: None })
     }
 
-    async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
+    async fn batch_put_with_query_executor(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        req: BatchPutRequest,
+    ) -> Result<BatchPutResponse> {
         let mut in_params = Vec::with_capacity(req.kvs.len());
         let mut values_params = Vec::with_capacity(req.kvs.len() * 2);
 
@@ -348,12 +455,7 @@ impl KvBackend for PgStore {
 
         let query = generate_batch_upsert_query(req.kvs.len());
 
-        let res = self
-            .get_client()
-            .await?
-            .query(&query, &params)
-            .await
-            .context(PostgresExecutionSnafu)?;
+        let res = query_executor.query(&query, &params).await?;
         if req.prev_kv {
             let kvs: Vec<KeyValue> = res
                 .into_iter()
@@ -373,7 +475,12 @@ impl KvBackend for PgStore {
         Ok(BatchPutResponse { prev_kvs: vec![] })
     }
 
-    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
+    /// Batch get with certain client. It's needed for a client with transaction.
+    async fn batch_get_with_query_executor(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        req: BatchGetRequest,
+    ) -> Result<BatchGetResponse> {
         if req.keys.is_empty() {
             return Ok(BatchGetResponse { kvs: vec![] });
         }
@@ -388,12 +495,7 @@ impl KvBackend for PgStore {
             .map(|x| x as &(dyn ToSql + Sync))
             .collect();
 
-        let res = self
-            .get_client()
-            .await?
-            .query(&query, &params)
-            .await
-            .context(PostgresExecutionSnafu)?;
+        let res = query_executor.query(&query, &params).await?;
         let kvs: Vec<KeyValue> = res
             .into_iter()
             .map(|r| {
@@ -408,7 +510,11 @@ impl KvBackend for PgStore {
         Ok(BatchGetResponse { kvs })
     }
 
-    async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
+    async fn delete_range_with_query_executor(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        req: DeleteRangeRequest,
+    ) -> Result<DeleteRangeResponse> {
         let mut params = vec![];
         let template = select_range_delete_template(&req);
         if req.key != EMPTY {
@@ -432,12 +538,7 @@ impl KvBackend for PgStore {
             })
             .collect();
 
-        let res = self
-            .get_client()
-            .await?
-            .query(template, &params)
-            .await
-            .context(PostgresExecutionSnafu)?;
+        let res = query_executor.query(template, &params).await?;
         let deleted = res.len() as i64;
         if !req.prev_kv {
             return Ok({
@@ -464,7 +565,11 @@ impl KvBackend for PgStore {
         })
     }
 
-    async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+    async fn batch_delete_with_query_executor(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        req: BatchDeleteRequest,
+    ) -> Result<BatchDeleteResponse> {
         if req.keys.is_empty() {
             return Ok(BatchDeleteResponse { prev_kvs: vec![] });
         }
@@ -479,12 +584,7 @@ impl KvBackend for PgStore {
             .map(|x| x as &(dyn ToSql + Sync))
             .collect();
 
-        let res = self
-            .get_client()
-            .await?
-            .query(&query, &params)
-            .await
-            .context(PostgresExecutionSnafu)?;
+        let res = query_executor.query(&query, &params).await?;
         if !req.prev_kv {
             return Ok(BatchDeleteResponse { prev_kvs: vec![] });
         }
@@ -502,11 +602,17 @@ impl KvBackend for PgStore {
         Ok(BatchDeleteResponse { prev_kvs: kvs })
     }
 
-    async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
+    async fn compare_and_put_with_query_executor(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        req: CompareAndPutRequest,
+    ) -> Result<CompareAndPutResponse> {
         let key = process_bytes(&req.key, "CASKey")?;
         let value = process_bytes(&req.value, "CASValue")?;
         if req.expect.is_empty() {
-            let put_res = self.put_if_not_exists(key, value).await?;
+            let put_res = self
+                .put_if_not_exists_with_query_executor(query_executor, key, value)
+                .await?;
             return Ok(CompareAndPutResponse {
                 success: put_res,
                 prev_kv: None,
@@ -514,12 +620,7 @@ impl KvBackend for PgStore {
         }
         let expect = process_bytes(&req.expect, "CASExpect")?;
 
-        let res = self
-            .get_client()
-            .await?
-            .query(CAS, &[&key, &value, &expect])
-            .await
-            .context(PostgresExecutionSnafu)?;
+        let res = query_executor.query(CAS, &[&key, &value, &expect]).await?;
         match res.is_empty() {
             true => Ok(CompareAndPutResponse {
                 success: false,
@@ -544,53 +645,50 @@ impl KvBackend for PgStore {
             }
         }
     }
-}
 
-impl PgStore {
-    async fn point_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let key = process_bytes(key, "pointGetKey")?;
-        let res = self
-            .get_client()
-            .await?
-            .query(POINT_GET, &[&key])
-            .await
-            .context(PostgresExecutionSnafu)?;
-        match res.is_empty() {
-            true => Ok(None),
-            false => Ok(Some(res[0].get::<_, Vec<u8>>(1))),
-        }
-    }
-
-    async fn execute_txn_op(&self, op: TxnOp) -> Result<TxnOpResponse> {
+    async fn execute_txn_op(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        op: TxnOp,
+    ) -> Result<TxnOpResponse> {
         match op {
             TxnOp::Put(key, value) => {
                 let res = self
-                    .put(PutRequest {
-                        key,
-                        value,
-                        prev_kv: false,
-                    })
+                    .put_with_query_executor(
+                        query_executor,
+                        PutRequest {
+                            key,
+                            value,
+                            prev_kv: false,
+                        },
+                    )
                     .await?;
                 Ok(TxnOpResponse::ResponsePut(res))
             }
             TxnOp::Get(key) => {
                 let res = self
-                    .range(RangeRequest {
-                        key,
-                        range_end: vec![],
-                        limit: 1,
-                        keys_only: false,
-                    })
+                    .range_with_query_executor(
+                        query_executor,
+                        RangeRequest {
+                            key,
+                            range_end: vec![],
+                            limit: 1,
+                            keys_only: false,
+                        },
+                    )
                     .await?;
                 Ok(TxnOpResponse::ResponseGet(res))
             }
             TxnOp::Delete(key) => {
                 let res = self
-                    .delete_range(DeleteRangeRequest {
-                        key,
-                        range_end: vec![],
-                        prev_kv: false,
-                    })
+                    .delete_range_with_query_executor(
+                        query_executor,
+                        DeleteRangeRequest {
+                            key,
+                            range_end: vec![],
+                            prev_kv: false,
+                        },
+                    )
                     .await?;
                 Ok(TxnOpResponse::ResponseDelete(res))
             }
@@ -608,16 +706,17 @@ impl TxnService for PgStore {
             .start_timer();
 
         let mut client = self.get_client().await?;
-        let pg_txn = client
-            .transaction()
-            .await
-            .context(PostgresTransactionSnafu {
+        let pg_txn = PgQueryExecutor::Transaction(client.transaction().await.context(
+            PostgresTransactionSnafu {
                 operation: "start".to_string(),
-            })?;
+            },
+        )?);
         let mut success = true;
         if txn.c_when {
             for cmp in txn.req.compare {
-                let value = self.point_get(&cmp.key).await?;
+                let value = self
+                    .point_get_with_query_executor(&pg_txn, &cmp.key)
+                    .await?;
                 if cmp.compare_value(value.as_ref()) {
                     success = true;
                 } else {
@@ -629,19 +728,17 @@ impl TxnService for PgStore {
         let mut responses = vec![];
         if success && txn.c_then {
             for txnop in txn.req.success {
-                let res = self.execute_txn_op(txnop).await?;
+                let res = self.execute_txn_op(&pg_txn, txnop).await?;
                 responses.push(res);
             }
         } else if !success && txn.c_else {
             for txnop in txn.req.failure {
-                let res = self.execute_txn_op(txnop).await?;
+                let res = self.execute_txn_op(&pg_txn, txnop).await?;
                 responses.push(res);
             }
         }
 
-        pg_txn.commit().await.context(PostgresTransactionSnafu {
-            operation: "commit".to_string(),
-        })?;
+        pg_txn.commit().await?;
         Ok(KvTxnResponse {
             responses,
             succeeded: success,
