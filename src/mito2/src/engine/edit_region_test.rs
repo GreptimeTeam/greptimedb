@@ -72,6 +72,7 @@ async fn test_edit_region_schedule_compaction() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
     engine

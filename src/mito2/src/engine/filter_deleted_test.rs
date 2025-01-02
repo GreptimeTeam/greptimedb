@@ -40,6 +40,7 @@ async fn test_scan_without_filtering_deleted() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
     let request = CreateRequestBuilder::new()
