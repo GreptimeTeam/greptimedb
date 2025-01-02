@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -18,7 +19,7 @@ use lazy_static::lazy_static;
 use loki_api::prost_types::Timestamp;
 use prost::Message;
 use session::context::{Channel, QueryContext, QueryContextRef};
-use snafu::{ensure, ResultExt};
+use snafu::ResultExt;
 
 use crate::error::{DecodeOtlpRequestSnafu, ParseJson5Snafu, Result, UnsupportedContentTypeSnafu};
 use crate::http::event::LogState;
@@ -36,6 +37,8 @@ const LOKI_TABLE_NAME: &str = "loki_logs";
 const LOKI_LINE_COLUMN: &str = "line";
 
 lazy_static! {
+    static ref PB_CONTENT_TYPE: ContentType =
+        ContentType::from_str(CONTENT_TYPE_PROTOBUF_STR).unwrap();
     static ref LOKI_INIT_SCHEMAS: Vec<ColumnSchema> = vec![
         ColumnSchema {
             column_name: GREPTIME_TIMESTAMP.to_string(),
@@ -67,9 +70,7 @@ pub async fn loki_ingest(
     let table_name = table_name.unwrap_or_else(|| LOKI_TABLE_NAME.to_string());
 
     match content_type {
-        c if c.to_string() == CONTENT_TYPE_PROTOBUF_STR => {
-            handle_pb_req(bytes, table_name, log_state, ctx).await
-        }
+        x if x == *PB_CONTENT_TYPE => handle_pb_req(bytes, table_name, log_state, ctx).await,
         _ => UnsupportedContentTypeSnafu { content_type }.fail(),
     }
 }
