@@ -22,11 +22,12 @@ use tokio_postgres::types::ToSql;
 use tokio_postgres::NoTls;
 
 use crate::error::{
-    CreatePostgresPoolSnafu, Error, GetPostgresConnectionSnafu, PostgresExecutionSnafu, Result,
-    StrFromUtf8Snafu,
+    CreatePostgresPoolSnafu, Error, GetPostgresConnectionSnafu, PostgresExecutionSnafu,
+    PostgresTransactionSnafu, Result, StrFromUtf8Snafu,
 };
-use crate::kv_backend::txn::{Txn as KvTxn, TxnResponse as KvTxnResponse};
+use crate::kv_backend::txn::{Txn as KvTxn, TxnOp, TxnOpResponse, TxnResponse as KvTxnResponse};
 use crate::kv_backend::{KvBackend, KvBackendRef, TxnService};
+use crate::metrics::METRIC_META_TXN_REQUEST;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
@@ -37,6 +38,7 @@ use crate::rpc::KeyValue;
 /// Posgres backend store for metasrv
 pub struct PgStore {
     pool: Pool,
+    max_txn_ops: usize,
 }
 
 const EMPTY: &[u8] = &[0];
@@ -94,17 +96,17 @@ SELECT k, v FROM prev;"#;
 
 impl PgStore {
     /// Create pgstore impl of KvBackendRef from url.
-    pub async fn with_url(url: &str) -> Result<KvBackendRef> {
+    pub async fn with_url(url: &str, max_txn_ops: usize) -> Result<KvBackendRef> {
         let mut cfg = Config::new();
         cfg.url = Some(url.to_string());
         let pool = cfg
             .create_pool(Some(Runtime::Tokio1), NoTls)
             .context(CreatePostgresPoolSnafu)?;
-        Self::with_pg_pool(pool).await
+        Self::with_pg_pool(pool, max_txn_ops).await
     }
 
     /// Create pgstore impl of KvBackendRef from tokio-postgres client.
-    pub async fn with_pg_pool(pool: Pool) -> Result<KvBackendRef> {
+    pub async fn with_pg_pool(pool: Pool, max_txn_ops: usize) -> Result<KvBackendRef> {
         // This step ensures the postgres metadata backend is ready to use.
         // We check if greptime_metakv table exists, and we will create a new table
         // if it does not exist.
@@ -121,7 +123,7 @@ impl PgStore {
             .execute(METADKV_CREATION, &[])
             .await
             .context(PostgresExecutionSnafu)?;
-        Ok(Arc::new(Self { pool }))
+        Ok(Arc::new(Self { pool, max_txn_ops }))
     }
 
     async fn get_client(&self) -> Result<deadpool::managed::Object<deadpool_postgres::Manager>> {
@@ -544,17 +546,110 @@ impl KvBackend for PgStore {
     }
 }
 
+impl PgStore {
+    async fn point_get(&self, key: &Vec<u8>) -> Result<Option<Vec<u8>>> {
+        let key = process_bytes(key, "pointGetKey")?;
+        let res = self
+            .get_client()
+            .await?
+            .query(POINT_GET, &[&key])
+            .await
+            .context(PostgresExecutionSnafu)?;
+        match res.is_empty() {
+            true => Ok(None),
+            false => Ok(Some(res[0].get::<_, Vec<u8>>(1))),
+        }
+    }
+
+    async fn execute_txn_op(&self, op: TxnOp) -> Result<TxnOpResponse> {
+        match op {
+            TxnOp::Put(key, value) => {
+                let res = self
+                    .put(PutRequest {
+                        key: key,
+                        value: value,
+                        prev_kv: false,
+                    })
+                    .await?;
+                Ok(TxnOpResponse::ResponsePut(res))
+            }
+            TxnOp::Get(key) => {
+                let res = self
+                    .range(RangeRequest {
+                        key: key,
+                        range_end: vec![],
+                        limit: 1,
+                        keys_only: false,
+                    })
+                    .await?;
+                Ok(TxnOpResponse::ResponseGet(res))
+            }
+            TxnOp::Delete(key) => {
+                let res = self
+                    .delete_range(DeleteRangeRequest {
+                        key: key,
+                        range_end: vec![],
+                        prev_kv: false,
+                    })
+                    .await?;
+                Ok(TxnOpResponse::ResponseDelete(res))
+            }
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl TxnService for PgStore {
     type Error = Error;
 
-    async fn txn(&self, _txn: KvTxn) -> Result<KvTxnResponse> {
-        // TODO: implement txn for pg kv backend.
-        unimplemented!()
+    async fn txn(&self, txn: KvTxn) -> Result<KvTxnResponse> {
+        let _timer = METRIC_META_TXN_REQUEST
+            .with_label_values(&["etcd", "txn"])
+            .start_timer();
+
+        let mut client = self.get_client().await?;
+        let pg_txn = client
+            .transaction()
+            .await
+            .context(PostgresTransactionSnafu {
+                operation: "start".to_string(),
+            })?;
+        let mut success = true;
+        if txn.c_when {
+            for cmp in txn.req.compare {
+                let value = self.point_get(&cmp.key).await?;
+                if cmp.compare_value(value.as_ref()) {
+                    success = true;
+                } else {
+                    success = false;
+                    break;
+                }
+            }
+        }
+        let mut responses = vec![];
+        if success && txn.c_then {
+            for txnop in txn.req.success {
+                let res = self.execute_txn_op(txnop).await?;
+                responses.push(res);
+            }
+        } else if !success && txn.c_else {
+            for txnop in txn.req.failure {
+                let res = self.execute_txn_op(txnop).await?;
+                responses.push(res);
+            }
+        }
+
+        pg_txn.commit().await.context(PostgresTransactionSnafu {
+            operation: "commit".to_string(),
+        })?;
+        Ok(KvTxnResponse {
+            responses,
+            succeeded: success,
+        })
     }
 
     fn max_txn_ops(&self) -> usize {
-        unreachable!("postgres backend does not support max_txn_ops!")
+        self.max_txn_ops
     }
 }
 
@@ -598,7 +693,10 @@ mod tests {
             .await
             .context(PostgresExecutionSnafu)
             .unwrap();
-        Some(PgStore { pool })
+        Some(PgStore {
+            pool,
+            max_txn_ops: 128,
+        })
     }
 
     #[tokio::test]

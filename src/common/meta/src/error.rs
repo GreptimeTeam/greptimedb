@@ -683,6 +683,16 @@ pub enum Error {
         location: Location,
     },
 
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Failed to {} Postgres transaction", operation))]
+    PostgresTransaction {
+        #[snafu(source)]
+        error: tokio_postgres::Error,
+        #[snafu(implicit)]
+        location: Location,
+        operation: String,
+    },
+
     #[snafu(display(
         "Datanode table info not found, table id: {}, datanode id: {}",
         table_id,
@@ -794,9 +804,10 @@ impl ErrorExt for Error {
             | EmptyDdlTasks { .. } => StatusCode::InvalidArguments,
 
             #[cfg(feature = "pg_kvbackend")]
-            PostgresExecution { .. } | CreatePostgresPool { .. } | GetPostgresConnection { .. } => {
-                StatusCode::Internal
-            }
+            PostgresExecution { .. }
+            | CreatePostgresPool { .. }
+            | GetPostgresConnection { .. }
+            | PostgresTransaction { .. } => StatusCode::Internal,
             Error::DatanodeTableInfoNotFound { .. } => StatusCode::Internal,
         }
     }

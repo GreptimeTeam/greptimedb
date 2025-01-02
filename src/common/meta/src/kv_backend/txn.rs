@@ -131,9 +131,9 @@ pub struct TxnResponse {
 pub struct Txn {
     // HACK - chroot would modify this field
     pub(super) req: TxnRequest,
-    c_when: bool,
-    c_then: bool,
-    c_else: bool,
+    pub(super) c_when: bool,
+    pub(super) c_then: bool,
+    pub(super) c_else: bool,
 }
 
 #[cfg(any(test, feature = "testing"))]
