@@ -14,12 +14,9 @@
 
 //! How to query table information from database
 
-use std::collections::HashMap;
-
 use common_error::ext::BoxedError;
 use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
 use common_meta::key::table_name::{TableNameKey, TableNameManager};
-use datatypes::data_type::ConcreteDataType as CDT;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
 
@@ -28,7 +25,7 @@ use crate::adapter::TableName;
 use crate::error::{
     Error, ExternalSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu, UnexpectedSnafu,
 };
-use crate::repr::{ColumnType, RelationDesc, RelationType};
+use crate::repr::RelationDesc;
 
 /// Table source but for flow, provide table schema by table name/id
 #[async_trait::async_trait]
@@ -179,100 +176,110 @@ impl std::fmt::Debug for ManagedTableSource {
     }
 }
 
-pub struct FlowDummyTableSource {
-    pub id_names_to_desc: Vec<(TableId, TableName, RelationDesc)>,
-    id_to_idx: HashMap<TableId, usize>,
-    name_to_idx: HashMap<TableName, usize>,
-}
+#[cfg(test)]
+pub(crate) mod test {
+    use std::collections::HashMap;
 
-impl Default for FlowDummyTableSource {
-    fn default() -> Self {
-        let id_names_to_desc = vec![
-            (
-                1024,
-                [
-                    "greptime".to_string(),
-                    "public".to_string(),
-                    "numbers".to_string(),
-                ],
-                RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)])
-                    .into_named(vec![Some("number".to_string())]),
-            ),
-            (
-                1025,
-                [
-                    "greptime".to_string(),
-                    "public".to_string(),
-                    "numbers_with_ts".to_string(),
-                ],
-                RelationType::new(vec![
-                    ColumnType::new(CDT::uint32_datatype(), false),
-                    ColumnType::new(CDT::timestamp_millisecond_datatype(), false),
-                ])
-                .into_named(vec![Some("number".to_string()), Some("ts".to_string())]),
-            ),
-        ];
-        let id_to_idx = id_names_to_desc
-            .iter()
-            .enumerate()
-            .map(|(idx, (id, _name, _desc))| (*id, idx))
-            .collect();
-        let name_to_idx = id_names_to_desc
-            .iter()
-            .enumerate()
-            .map(|(idx, (_id, name, _desc))| (name.clone(), idx))
-            .collect();
-        Self {
-            id_names_to_desc,
-            id_to_idx,
-            name_to_idx,
-        }
-    }
-}
+    use datatypes::data_type::ConcreteDataType as CDT;
 
-#[async_trait::async_trait]
-impl FlowTableSource for FlowDummyTableSource {
-    async fn table_from_id(&self, table_id: &TableId) -> Result<RelationDesc, Error> {
-        let idx = self.id_to_idx.get(table_id).context(TableNotFoundSnafu {
-            name: format!("Table id = {:?}, couldn't found table desc", table_id),
-        })?;
-        let desc = self
-            .id_names_to_desc
-            .get(*idx)
-            .map(|x| x.2.clone())
-            .context(TableNotFoundSnafu {
-                name: format!("Table id = {:?}, couldn't found table desc", table_id),
-            })?;
-        Ok(desc)
+    use super::*;
+    use crate::repr::{ColumnType, RelationType};
+
+    pub struct FlowDummyTableSource {
+        pub id_names_to_desc: Vec<(TableId, TableName, RelationDesc)>,
+        id_to_idx: HashMap<TableId, usize>,
+        name_to_idx: HashMap<TableName, usize>,
     }
 
-    async fn table_name_from_id(&self, table_id: &TableId) -> Result<TableName, Error> {
-        let idx = self.id_to_idx.get(table_id).context(TableNotFoundSnafu {
-            name: format!("Table id = {:?}, couldn't found table desc", table_id),
-        })?;
-        self.id_names_to_desc
-            .get(*idx)
-            .map(|x| x.1.clone())
-            .context(TableNotFoundSnafu {
-                name: format!("Table id = {:?}, couldn't found table desc", table_id),
-            })
-    }
-
-    async fn table_id_from_name(&self, name: &TableName) -> Result<TableId, Error> {
-        for (id, table_name, _desc) in &self.id_names_to_desc {
-            if name == table_name {
-                return Ok(*id);
+    impl Default for FlowDummyTableSource {
+        fn default() -> Self {
+            let id_names_to_desc = vec![
+                (
+                    1024,
+                    [
+                        "greptime".to_string(),
+                        "public".to_string(),
+                        "numbers".to_string(),
+                    ],
+                    RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)])
+                        .into_named(vec![Some("number".to_string())]),
+                ),
+                (
+                    1025,
+                    [
+                        "greptime".to_string(),
+                        "public".to_string(),
+                        "numbers_with_ts".to_string(),
+                    ],
+                    RelationType::new(vec![
+                        ColumnType::new(CDT::uint32_datatype(), false),
+                        ColumnType::new(CDT::timestamp_millisecond_datatype(), false),
+                    ])
+                    .into_named(vec![Some("number".to_string()), Some("ts".to_string())]),
+                ),
+            ];
+            let id_to_idx = id_names_to_desc
+                .iter()
+                .enumerate()
+                .map(|(idx, (id, _name, _desc))| (*id, idx))
+                .collect();
+            let name_to_idx = id_names_to_desc
+                .iter()
+                .enumerate()
+                .map(|(idx, (_id, name, _desc))| (name.clone(), idx))
+                .collect();
+            Self {
+                id_names_to_desc,
+                id_to_idx,
+                name_to_idx,
             }
         }
-        TableNotFoundSnafu {
-            name: format!("Table name = {:?}, couldn't found table id", name),
-        }
-        .fail()?
     }
-}
 
-impl std::fmt::Debug for FlowDummyTableSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DummyTableSource").finish()
+    #[async_trait::async_trait]
+    impl FlowTableSource for FlowDummyTableSource {
+        async fn table_from_id(&self, table_id: &TableId) -> Result<RelationDesc, Error> {
+            let idx = self.id_to_idx.get(table_id).context(TableNotFoundSnafu {
+                name: format!("Table id = {:?}, couldn't found table desc", table_id),
+            })?;
+            let desc = self
+                .id_names_to_desc
+                .get(*idx)
+                .map(|x| x.2.clone())
+                .context(TableNotFoundSnafu {
+                    name: format!("Table id = {:?}, couldn't found table desc", table_id),
+                })?;
+            Ok(desc)
+        }
+
+        async fn table_name_from_id(&self, table_id: &TableId) -> Result<TableName, Error> {
+            let idx = self.id_to_idx.get(table_id).context(TableNotFoundSnafu {
+                name: format!("Table id = {:?}, couldn't found table desc", table_id),
+            })?;
+            self.id_names_to_desc
+                .get(*idx)
+                .map(|x| x.1.clone())
+                .context(TableNotFoundSnafu {
+                    name: format!("Table id = {:?}, couldn't found table desc", table_id),
+                })
+        }
+
+        async fn table_id_from_name(&self, name: &TableName) -> Result<TableId, Error> {
+            for (id, table_name, _desc) in &self.id_names_to_desc {
+                if name == table_name {
+                    return Ok(*id);
+                }
+            }
+            TableNotFoundSnafu {
+                name: format!("Table name = {:?}, couldn't found table id", name),
+            }
+            .fail()?
+        }
+    }
+
+    impl std::fmt::Debug for FlowDummyTableSource {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("DummyTableSource").finish()
+        }
     }
 }

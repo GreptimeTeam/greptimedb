@@ -1,4 +1,4 @@
--- test if flow can get table schema correctly after table have benn altered
+-- test if flow can get table schema correctly after table have been altered
 
 CREATE TABLE bytes_log (
     byte INT,

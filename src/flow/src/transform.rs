@@ -173,7 +173,7 @@ mod test {
 
     use super::*;
     use crate::adapter::node_context::IdToNameMap;
-    use crate::adapter::table_source::FlowDummyTableSource;
+    use crate::adapter::table_source::test::FlowDummyTableSource;
     use crate::df_optimizer::apply_df_optimizer;
     use crate::expr::GlobalId;
 
