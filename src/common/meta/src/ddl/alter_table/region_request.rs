@@ -94,7 +94,7 @@ fn create_proto_alter_kind(
                         err_msg: "'column_def' is absent",
                     })?;
 
-                // Skips exisitng columns.
+                // Skips existing columns.
                 if existing_columns.contains(&column_def.name) {
                     continue;
                 }
