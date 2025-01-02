@@ -39,3 +39,7 @@ tokio-util.workspace = true
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+[target.'cfg(tokio_unstable)'.dependencies]
+tokio-metrics = { version = "0.3" }
+tokio-metrics-collector = { version = "0.2" }
