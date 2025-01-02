@@ -48,9 +48,9 @@ const LEASE_SEP: &str = r#"||__metadata_lease_sep||"#;
 // SQL to put a value with expire time. Parameters: key, value, LEASE_SEP, expire_time
 const PUT_IF_NOT_EXISTS_WITH_EXPIRE_TIME: &str = r#"
 WITH prev AS (
-    SELECT k, v FROM greptime_metakv WHERE k = $1
+    SELECT k, v FROM {} WHERE k = $1
 ), insert AS (
-    INSERT INTO greptime_metakv
+    INSERT INTO {}
     VALUES($1, $2 || $3 || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $4, 'YYYY-MM-DD HH24:MI:SS.MS'))
     ON CONFLICT (k) DO NOTHING
 )
@@ -60,18 +60,24 @@ SELECT k, v FROM prev;
 
 // SQL to update a value with expire time. Parameters: key, prev_value_with_lease, updated_value, LEASE_SEP, expire_time
 const CAS_WITH_EXPIRE_TIME: &str = r#"
-UPDATE greptime_metakv
+UPDATE {}
 SET k=$1,
 v=$3 || $4 || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $5, 'YYYY-MM-DD HH24:MI:SS.MS')
 WHERE 
     k=$1 AND v=$2
 "#;
 
-const GET_WITH_CURRENT_TIMESTAMP: &str = r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM greptime_metakv WHERE k = $1"#;
+const GET_WITH_CURRENT_TIMESTAMP: &str =
+    r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM {} WHERE k = $1"#;
 
-const PREFIX_GET_WITH_CURRENT_TIMESTAMP: &str = r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM greptime_metakv WHERE k LIKE $1"#;
+const PREFIX_GET_WITH_CURRENT_TIMESTAMP: &str =
+    r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM {} WHERE k LIKE $1"#;
 
-const POINT_DELETE: &str = "DELETE FROM greptime_metakv WHERE k = $1 RETURNING k,v;";
+const POINT_DELETE: &str = "DELETE FROM {} WHERE k = $1 RETURNING k,v;";
+
+fn replace_table_name(template: &str, table_name: &str) -> String {
+    template.replace("{}", table_name)
+}
 
 /// Parse the value and expire time from the given string. The value should be in the format "value || LEASE_SEP || expire_time".
 fn parse_value_and_expire_time(value: &str) -> Result<(String, Timestamp)> {
@@ -130,6 +136,7 @@ pub struct PgElection {
     leader_watcher: broadcast::Sender<LeaderChangeMessage>,
     store_key_prefix: String,
     candidate_lease_ttl_secs: u64,
+    table_name: String,
 }
 
 impl PgElection {
@@ -138,6 +145,7 @@ impl PgElection {
         client: Client,
         store_key_prefix: String,
         candidate_lease_ttl_secs: u64,
+        table_name: String,
     ) -> Result<ElectionRef> {
         // Set idle session timeout to IDLE_SESSION_TIMEOUT to avoid dead advisory lock.
         client
@@ -154,6 +162,7 @@ impl PgElection {
             leader_watcher: tx,
             store_key_prefix,
             candidate_lease_ttl_secs,
+            table_name,
         }))
     }
 
@@ -324,7 +333,10 @@ impl PgElection {
     ) -> Result<Option<(String, Timestamp, Timestamp, Option<String>)>> {
         let res = self
             .client
-            .query(GET_WITH_CURRENT_TIMESTAMP, &[&key])
+            .query(
+                &replace_table_name(GET_WITH_CURRENT_TIMESTAMP, &self.table_name),
+                &[&key],
+            )
             .await
             .context(PostgresExecutionSnafu)?;
 
@@ -365,7 +377,10 @@ impl PgElection {
         let key_prefix = format!("{}%", key_prefix);
         let res = self
             .client
-            .query(PREFIX_GET_WITH_CURRENT_TIMESTAMP, &[&key_prefix])
+            .query(
+                &replace_table_name(PREFIX_GET_WITH_CURRENT_TIMESTAMP, &self.table_name),
+                &[&key_prefix],
+            )
             .await
             .context(PostgresExecutionSnafu)?;
 
@@ -393,7 +408,7 @@ impl PgElection {
         let res = self
             .client
             .execute(
-                CAS_WITH_EXPIRE_TIME,
+                &replace_table_name(CAS_WITH_EXPIRE_TIME, &self.table_name),
                 &[
                     &key,
                     &prev,
@@ -425,7 +440,7 @@ impl PgElection {
         let res = self
             .client
             .query(
-                PUT_IF_NOT_EXISTS_WITH_EXPIRE_TIME,
+                &replace_table_name(PUT_IF_NOT_EXISTS_WITH_EXPIRE_TIME, &self.table_name),
                 &[&key, &value, &LEASE_SEP, &(lease_ttl_secs as f64)],
             )
             .await
@@ -438,7 +453,7 @@ impl PgElection {
     async fn delete_value(&self, key: &String) -> Result<bool> {
         let res = self
             .client
-            .query(POINT_DELETE, &[&key])
+            .query(&replace_table_name(POINT_DELETE, &self.table_name), &[&key])
             .await
             .context(PostgresExecutionSnafu)?;
 
@@ -640,6 +655,13 @@ mod tests {
         tokio::spawn(async move {
             connection.await.context(PostgresExecutionSnafu).unwrap();
         });
+        let _ = client
+            .execute(
+                "CREATE TABLE IF NOT EXISTS greptime_metakv(k varchar PRIMARY KEY, v varchar)",
+                &[],
+            )
+            .await
+            .context(PostgresExecutionSnafu)?;
         Ok(client)
     }
 
@@ -659,6 +681,7 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
             candidate_lease_ttl_secs: 10,
+            table_name: "greptime_metakv".to_string(),
         };
 
         let res = pg_election
@@ -728,6 +751,7 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
             candidate_lease_ttl_secs,
+            table_name: "greptime_metakv".to_string(),
         };
 
         let node_info = MetasrvNodeInfo {
@@ -764,6 +788,7 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
             candidate_lease_ttl_secs,
+            table_name: "greptime_metakv".to_string(),
         };
 
         let candidates = pg_election.all_candidates().await.unwrap();
@@ -804,6 +829,7 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
             candidate_lease_ttl_secs,
+            table_name: "greptime_metakv".to_string(),
         };
 
         leader_pg_election.elected().await.unwrap();
@@ -911,6 +937,7 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
             candidate_lease_ttl_secs,
+            table_name: "greptime_metakv".to_string(),
         };
 
         // Step 1: No leader exists, campaign and elected.
@@ -1132,6 +1159,7 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
             candidate_lease_ttl_secs,
+            table_name: "greptime_metakv".to_string(),
         };
 
         let leader_client = create_postgres_client().await.unwrap();
@@ -1144,6 +1172,7 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
             candidate_lease_ttl_secs,
+            table_name: "greptime_metakv".to_string(),
         };
 
         leader_pg_election

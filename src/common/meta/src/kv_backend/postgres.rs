@@ -36,41 +36,40 @@ use crate::rpc::KeyValue;
 pub struct PgStore {
     // TODO: Consider using sqlx crate.
     client: Client,
+    // Name of the table to store key-value pairs.
+    table_name: String,
 }
 
 const EMPTY: &[u8] = &[0];
 
 // TODO: allow users to configure metadata table name.
-const METADKV_CREATION: &str =
-    "CREATE TABLE IF NOT EXISTS greptime_metakv(k varchar PRIMARY KEY, v varchar)";
+const METADKV_CREATION: &str = "CREATE TABLE IF NOT EXISTS {}(k varchar PRIMARY KEY, v varchar)";
 
-const FULL_TABLE_SCAN: &str = "SELECT k, v FROM greptime_metakv $1 ORDER BY K";
+const FULL_TABLE_SCAN: &str = "SELECT k, v FROM {} $1 ORDER BY K";
 
-const POINT_GET: &str = "SELECT k, v FROM greptime_metakv WHERE k = $1";
+const POINT_GET: &str = "SELECT k, v FROM {} WHERE k = $1";
 
-const PREFIX_SCAN: &str = "SELECT k, v FROM greptime_metakv WHERE k LIKE $1 ORDER BY K";
+const PREFIX_SCAN: &str = "SELECT k, v FROM {} WHERE k LIKE $1 ORDER BY K";
 
-const RANGE_SCAN_LEFT_BOUNDED: &str = "SELECT k, v FROM greptime_metakv WHERE k >= $1 ORDER BY K";
+const RANGE_SCAN_LEFT_BOUNDED: &str = "SELECT k, v FROM {} WHERE k >= $1 ORDER BY K";
 
-const RANGE_SCAN_FULL_RANGE: &str =
-    "SELECT k, v FROM greptime_metakv WHERE k >= $1 AND K < $2 ORDER BY K";
+const RANGE_SCAN_FULL_RANGE: &str = "SELECT k, v FROM {} WHERE k >= $1 AND K < $2 ORDER BY K";
 
-const FULL_TABLE_DELETE: &str = "DELETE FROM greptime_metakv RETURNING k,v";
+const FULL_TABLE_DELETE: &str = "DELETE FROM {} RETURNING k,v";
 
-const POINT_DELETE: &str = "DELETE FROM greptime_metakv WHERE K = $1 RETURNING k,v;";
+const POINT_DELETE: &str = "DELETE FROM {} WHERE K = $1 RETURNING k,v;";
 
-const PREFIX_DELETE: &str = "DELETE FROM greptime_metakv WHERE k LIKE $1 RETURNING k,v;";
+const PREFIX_DELETE: &str = "DELETE FROM {} WHERE k LIKE $1 RETURNING k,v;";
 
-const RANGE_DELETE_LEFT_BOUNDED: &str = "DELETE FROM greptime_metakv WHERE k >= $1 RETURNING k,v;";
+const RANGE_DELETE_LEFT_BOUNDED: &str = "DELETE FROM {} WHERE k >= $1 RETURNING k,v;";
 
-const RANGE_DELETE_FULL_RANGE: &str =
-    "DELETE FROM greptime_metakv WHERE k >= $1 AND K < $2 RETURNING k,v;";
+const RANGE_DELETE_FULL_RANGE: &str = "DELETE FROM {} WHERE k >= $1 AND K < $2 RETURNING k,v;";
 
 const CAS: &str = r#"
 WITH prev AS (
-    SELECT k,v FROM greptime_metakv WHERE k = $1 AND v = $2
+    SELECT k,v FROM {} WHERE k = $1 AND v = $2
 ), update AS (
-UPDATE greptime_metakv
+UPDATE {}
 SET k=$1,
 v=$2
 WHERE 
@@ -80,20 +79,24 @@ WHERE
 SELECT k, v FROM prev;
 "#;
 
-const PUT_IF_NOT_EXISTS: &str = r#"    
+const PUT_IF_NOT_EXISTS: &str = r#"
 WITH prev AS (
-    select k,v from greptime_metakv where k = $1
+    select k,v from {} where k = $1
 ), insert AS (
-    INSERT INTO greptime_metakv
+    INSERT INTO {}
     VALUES ($1, $2)
     ON CONFLICT (k) DO NOTHING
 )
 
 SELECT k, v FROM prev;"#;
 
+fn replace_table_name(template: &str, table_name: &str) -> String {
+    template.replace("{}", table_name)
+}
+
 impl PgStore {
     /// Create pgstore impl of KvBackendRef from url.
-    pub async fn with_url(url: &str) -> Result<KvBackendRef> {
+    pub async fn with_url(url: &str, table_name: String) -> Result<KvBackendRef> {
         // TODO: support tls.
         let (client, conn) = tokio_postgres::connect(url, NoTls)
             .await
@@ -103,100 +106,102 @@ impl PgStore {
                 error!(e; "connection error");
             }
         });
-        Self::with_pg_client(client).await
+        Self::with_pg_client(client, table_name).await
     }
 
     /// Create pgstore impl of KvBackendRef from tokio-postgres client.
-    pub async fn with_pg_client(client: Client) -> Result<KvBackendRef> {
+    pub async fn with_pg_client(client: Client, table_name: String) -> Result<KvBackendRef> {
         // This step ensures the postgres metadata backend is ready to use.
-        // We check if greptime_metakv table exists, and we will create a new table
+        // We check if table exists, and we will create a new table
         // if it does not exist.
         client
-            .execute(METADKV_CREATION, &[])
+            .execute(&replace_table_name(METADKV_CREATION, &table_name), &[])
             .await
             .context(PostgresExecutionSnafu)?;
-        Ok(Arc::new(Self { client }))
+        Ok(Arc::new(Self { client, table_name }))
     }
 
     async fn put_if_not_exists(&self, key: &str, value: &str) -> Result<bool> {
         let res = self
             .client
-            .query(PUT_IF_NOT_EXISTS, &[&key, &value])
+            .query(
+                &replace_table_name(PUT_IF_NOT_EXISTS, &self.table_name),
+                &[&key, &value],
+            )
             .await
             .context(PostgresExecutionSnafu)?;
         Ok(res.is_empty())
     }
-}
 
-fn select_range_template(req: &RangeRequest) -> &str {
-    if req.range_end.is_empty() {
-        return POINT_GET;
+    fn select_range_template(&self, req: &RangeRequest) -> String {
+        if req.range_end.is_empty() {
+            return replace_table_name(POINT_GET, &self.table_name);
+        }
+        if req.key == EMPTY && req.range_end == EMPTY {
+            replace_table_name(FULL_TABLE_SCAN, &self.table_name)
+        } else if req.range_end == EMPTY {
+            replace_table_name(RANGE_SCAN_LEFT_BOUNDED, &self.table_name)
+        } else if is_prefix_range(&req.key, &req.range_end) {
+            replace_table_name(PREFIX_SCAN, &self.table_name)
+        } else {
+            replace_table_name(RANGE_SCAN_FULL_RANGE, &self.table_name)
+        }
     }
-    if req.key == EMPTY && req.range_end == EMPTY {
-        FULL_TABLE_SCAN
-    } else if req.range_end == EMPTY {
-        RANGE_SCAN_LEFT_BOUNDED
-    } else if is_prefix_range(&req.key, &req.range_end) {
-        PREFIX_SCAN
-    } else {
-        RANGE_SCAN_FULL_RANGE
+
+    fn select_range_delete_template(&self, req: &DeleteRangeRequest) -> String {
+        if req.range_end.is_empty() {
+            return replace_table_name(POINT_DELETE, &self.table_name);
+        }
+        if req.key == EMPTY && req.range_end == EMPTY {
+            replace_table_name(FULL_TABLE_DELETE, &self.table_name)
+        } else if req.range_end == EMPTY {
+            replace_table_name(RANGE_DELETE_LEFT_BOUNDED, &self.table_name)
+        } else if is_prefix_range(&req.key, &req.range_end) {
+            replace_table_name(PREFIX_DELETE, &self.table_name)
+        } else {
+            replace_table_name(RANGE_DELETE_FULL_RANGE, &self.table_name)
+        }
     }
-}
 
-fn select_range_delete_template(req: &DeleteRangeRequest) -> &str {
-    if req.range_end.is_empty() {
-        return POINT_DELETE;
+    // Generate dynamic parameterized sql for batch get.
+    fn generate_batch_get_query(&self, key_len: usize) -> String {
+        let in_placeholders: Vec<String> = (1..=key_len).map(|i| format!("${}", i)).collect();
+        let in_clause = in_placeholders.join(", ");
+        format!(
+            "SELECT k, v FROM {} WHERE k in ({});",
+            self.table_name, in_clause
+        )
     }
-    if req.key == EMPTY && req.range_end == EMPTY {
-        FULL_TABLE_DELETE
-    } else if req.range_end == EMPTY {
-        RANGE_DELETE_LEFT_BOUNDED
-    } else if is_prefix_range(&req.key, &req.range_end) {
-        PREFIX_DELETE
-    } else {
-        RANGE_DELETE_FULL_RANGE
+
+    // Generate dynamic parameterized sql for batch delete.
+    fn generate_batch_delete_query(&self, key_len: usize) -> String {
+        let in_placeholders: Vec<String> = (1..=key_len).map(|i| format!("${}", i)).collect();
+        let in_clause = in_placeholders.join(", ");
+        format!(
+            "DELETE FROM {} WHERE k in ({}) RETURNING k, v;",
+            self.table_name, in_clause
+        )
     }
-}
 
-// Generate dynamic parameterized sql for batch get.
-fn generate_batch_get_query(key_len: usize) -> String {
-    let in_placeholders: Vec<String> = (1..=key_len).map(|i| format!("${}", i)).collect();
-    let in_clause = in_placeholders.join(", ");
-    format!(
-        "SELECT k, v FROM greptime_metakv WHERE k in ({});",
-        in_clause
-    )
-}
+    // Generate dynamic parameterized sql for batch upsert.
+    fn generate_batch_upsert_query(&self, kv_len: usize) -> String {
+        let in_placeholders: Vec<String> = (1..=kv_len).map(|i| format!("${}", i)).collect();
+        let in_clause = in_placeholders.join(", ");
+        let mut param_index = kv_len + 1;
+        let mut values_placeholders = Vec::new();
+        for _ in 0..kv_len {
+            values_placeholders.push(format!("(${0}, ${1})", param_index, param_index + 1));
+            param_index += 2;
+        }
+        let values_clause = values_placeholders.join(", ");
 
-// Generate dynamic parameterized sql for batch delete.
-fn generate_batch_delete_query(key_len: usize) -> String {
-    let in_placeholders: Vec<String> = (1..=key_len).map(|i| format!("${}", i)).collect();
-    let in_clause = in_placeholders.join(", ");
-    format!(
-        "DELETE FROM greptime_metakv WHERE k in ({}) RETURNING k, v;",
-        in_clause
-    )
-}
-
-// Generate dynamic parameterized sql for batch upsert.
-fn generate_batch_upsert_query(kv_len: usize) -> String {
-    let in_placeholders: Vec<String> = (1..=kv_len).map(|i| format!("${}", i)).collect();
-    let in_clause = in_placeholders.join(", ");
-    let mut param_index = kv_len + 1;
-    let mut values_placeholders = Vec::new();
-    for _ in 0..kv_len {
-        values_placeholders.push(format!("(${0}, ${1})", param_index, param_index + 1));
-        param_index += 2;
-    }
-    let values_clause = values_placeholders.join(", ");
-
-    format!(
-        r#"
+        format!(
+            r#"
     WITH prev AS (
-        SELECT k,v FROM greptime_metakv WHERE k IN ({in_clause})
+        SELECT k,v FROM {} WHERE k IN ({})
     ), update AS (
-    INSERT INTO greptime_metakv (k, v) VALUES
-        {values_clause}
+    INSERT INTO {} (k, v) VALUES
+        {}
     ON CONFLICT (
         k
     ) DO UPDATE SET
@@ -204,8 +209,10 @@ fn generate_batch_upsert_query(kv_len: usize) -> String {
     )
 
     SELECT k, v FROM prev;
-    "#
-    )
+    "#,
+            self.table_name, in_clause, self.table_name, values_clause
+        )
+    }
 }
 
 //  Trim null byte at the end and convert bytes to string.
@@ -231,17 +238,19 @@ impl KvBackend for PgStore {
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
         let mut params = vec![];
-        let template = select_range_template(&req);
+        let template = self.select_range_template(&req);
         if req.key != EMPTY {
             let key = process_bytes(&req.key, "rangeKey")?;
-            if template == PREFIX_SCAN {
+            if template == replace_table_name(PREFIX_SCAN, &self.table_name) {
                 let prefix = format!("{key}%");
                 params.push(Cow::Owned(prefix))
             } else {
                 params.push(Cow::Borrowed(key))
             }
         }
-        if template == RANGE_SCAN_FULL_RANGE && req.range_end != EMPTY {
+        if template == replace_table_name(RANGE_SCAN_FULL_RANGE, &self.table_name)
+            && req.range_end != EMPTY
+        {
             let range_end = process_bytes(&req.range_end, "rangeEnd")?;
             params.push(Cow::Borrowed(range_end));
         }
@@ -326,7 +335,7 @@ impl KvBackend for PgStore {
         let params: Vec<&(dyn ToSql + Sync)> =
             in_params.iter().map(|x| x as &(dyn ToSql + Sync)).collect();
 
-        let query = generate_batch_upsert_query(req.kvs.len());
+        let query = self.generate_batch_upsert_query(req.kvs.len());
         let res = self
             .client
             .query(&query, &params)
@@ -355,7 +364,7 @@ impl KvBackend for PgStore {
         if req.keys.is_empty() {
             return Ok(BatchGetResponse { kvs: vec![] });
         }
-        let query = generate_batch_get_query(req.keys.len());
+        let query = self.generate_batch_get_query(req.keys.len());
         let value_params = req
             .keys
             .iter()
@@ -386,17 +395,19 @@ impl KvBackend for PgStore {
 
     async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
         let mut params = vec![];
-        let template = select_range_delete_template(&req);
+        let template = self.select_range_delete_template(&req);
         if req.key != EMPTY {
             let key = process_bytes(&req.key, "deleteRangeKey")?;
-            if template == PREFIX_DELETE {
+            if template == replace_table_name(PREFIX_DELETE, &self.table_name) {
                 let prefix = format!("{key}%");
                 params.push(Cow::Owned(prefix));
             } else {
                 params.push(Cow::Borrowed(key));
             }
         }
-        if template == RANGE_DELETE_FULL_RANGE && req.range_end != EMPTY {
+        if template == replace_table_name(RANGE_DELETE_FULL_RANGE, &self.table_name)
+            && req.range_end != EMPTY
+        {
             let range_end = process_bytes(&req.range_end, "deleteRangeEnd")?;
             params.push(Cow::Borrowed(range_end));
         }
@@ -410,7 +421,7 @@ impl KvBackend for PgStore {
 
         let res = self
             .client
-            .query(template, &params)
+            .query(&template, &params)
             .await
             .context(PostgresExecutionSnafu)?;
         let deleted = res.len() as i64;
@@ -443,7 +454,7 @@ impl KvBackend for PgStore {
         if req.keys.is_empty() {
             return Ok(BatchDeleteResponse { prev_kvs: vec![] });
         }
-        let query = generate_batch_delete_query(req.keys.len());
+        let query = self.generate_batch_delete_query(req.keys.len());
         let value_params = req
             .keys
             .iter()
@@ -476,8 +487,11 @@ impl KvBackend for PgStore {
     }
 
     async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
-        let key = process_bytes(&req.key, "CASKey")?;
-        let value = process_bytes(&req.value, "CASValue")?;
+        let key = process_bytes(&req.key, "&replace_table_name(CAS, &self.table_name)Key")?;
+        let value = process_bytes(
+            &req.value,
+            "&replace_table_name(CAS, &self.table_name)Value",
+        )?;
         if req.expect.is_empty() {
             let put_res = self.put_if_not_exists(key, value).await?;
             return Ok(CompareAndPutResponse {
@@ -485,11 +499,17 @@ impl KvBackend for PgStore {
                 prev_kv: None,
             });
         }
-        let expect = process_bytes(&req.expect, "CASExpect")?;
+        let expect = process_bytes(
+            &req.expect,
+            "&replace_table_name(CAS, &self.table_name)Expect",
+        )?;
 
         let res = self
             .client
-            .query(CAS, &[&key, &value, &expect])
+            .query(
+                &replace_table_name(CAS, &self.table_name),
+                &[&key, &value, &expect],
+            )
             .await
             .context(PostgresExecutionSnafu)?;
         match res.is_empty() {
@@ -562,8 +582,16 @@ mod tests {
 
         let (client, connection) = tokio_postgres::connect(&endpoints, NoTls).await.unwrap();
         tokio::spawn(connection);
-        let _ = client.execute(METADKV_CREATION, &[]).await;
-        Some(PgStore { client })
+        let _ = client
+            .execute(
+                &replace_table_name(METADKV_CREATION, "greptime_metakv"),
+                &[],
+            )
+            .await;
+        Some(PgStore {
+            client,
+            table_name: "greptime_metakv".to_string(),
+        })
     }
 
     #[tokio::test]

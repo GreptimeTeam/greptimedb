@@ -230,7 +230,7 @@ pub async fn metasrv_builder(
         #[cfg(feature = "pg_kvbackend")]
         (None, BackendImpl::PostgresStore) => {
             let pg_client = create_postgres_client(opts).await?;
-            let kv_backend = PgStore::with_pg_client(pg_client)
+            let kv_backend = PgStore::with_pg_client(pg_client, opts.meta_table_name.clone())
                 .await
                 .context(error::KvBackendSnafu)?;
             let election_client = create_postgres_client(opts).await?;
@@ -239,6 +239,7 @@ pub async fn metasrv_builder(
                 election_client,
                 opts.store_key_prefix.clone(),
                 CANDIDATE_LEASE_SECS,
+                opts.meta_table_name.clone(),
             )
             .await?;
             (kv_backend, Some(election))
