@@ -32,7 +32,7 @@ pub mod error;
 mod expr;
 pub mod heartbeat;
 mod metrics;
-mod plan;
+pub(crate) mod plan;
 mod repr;
 mod server;
 mod transform;

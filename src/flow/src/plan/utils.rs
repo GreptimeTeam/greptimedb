@@ -38,10 +38,8 @@ pub fn fix_time_index_for_flow_plan(
         match outer_time_index {
             Some(outer) => outer,
             None => {
-                return UnexpectedSnafu {
-                    reason: "No time index found in real schema".to_string(),
-                }
-                .fail()?
+                // meaning auto created table, return early
+                return Ok(flow_plan.clone());
             }
         }
     };
@@ -55,13 +53,14 @@ pub fn fix_time_index_for_flow_plan(
         if let Some(ty) = cur_plan.schema.typ.column_types.get(time_index)
             && ty.scalar_type.is_timestamp()
         {
-            let is_key = cur_plan
+            let is_key_or_ti = cur_plan
                 .schema
                 .typ
                 .keys
                 .iter()
-                .any(|k| k.column_indices.contains(&time_index));
-            if !is_key {
+                .any(|k| k.column_indices.contains(&time_index))
+                || cur_plan.schema.typ.time_index == Some(time_index);
+            if !is_key_or_ti {
                 InvalidQuerySnafu {
                     reason: format!(
                         "The time index column in the sink table is not a key column in the flow's SQL. It is expected to be a key column (i.e. included in the `GROUP BY` clause). The column's name in the flow is {:?}",
@@ -203,6 +202,38 @@ mod test {
         assert_eq!(
             find_all_nested_relation(&fixed_plan)[1].typ().time_index,
             Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_normal_ts_case_column() {
+        let sql = "SELECT count(number), date_bin('10 minutes', ts) as tw2 FROM numbers_with_ts GROUP BY tw2";
+
+        let engine = create_test_query_engine();
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
+            .await
+            .unwrap();
+
+        let real_schema = vec![
+            ColumnSchema::new("number", ConcreteDataType::uint64_datatype(), false),
+            ColumnSchema::new(
+                "tw2",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ];
+        assert_eq!(
+            find_all_nested_relation(&flow_plan)[1].typ().time_index,
+            Some(0)
+        );
+        let fixed_plan = fix_time_index_for_flow_plan(&flow_plan, &real_schema).unwrap();
+        assert_eq!(
+            find_all_nested_relation(&fixed_plan)[1].typ().time_index,
+            Some(0)
         );
     }
 }

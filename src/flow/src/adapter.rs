@@ -29,7 +29,6 @@ use common_runtime::JoinHandle;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_telemetry::{debug, info, trace};
 use datatypes::schema::ColumnSchema;
-use datatypes::time;
 use datatypes::value::Value;
 use greptime_proto::v1;
 use itertools::{EitherOrBoth, Itertools};
@@ -58,9 +57,9 @@ use crate::error::{
     EvalSnafu, ExternalSnafu, FlowAlreadyExistSnafu, InternalSnafu, InvalidQuerySnafu,
     UnexpectedSnafu,
 };
-use crate::expr::{Batch, ScalarExpr};
+use crate::expr::Batch;
 use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_ROWS, METRIC_FLOW_RUN_INTERVAL_MS};
-use crate::plan::TypedPlan;
+use crate::plan::{fix_time_index_for_flow_plan, TypedPlan};
 use crate::repr::{self, DiffRow, RelationDesc, Row, BATCH_SIZE};
 
 mod flownode_impl;
@@ -757,10 +756,12 @@ impl FlowWorkerManager {
 
     ///// check schema against actual table schema if exists
     /// if not exist create sink table immediately
+    ///
+    /// will also fix flow plan's time index if needed if sink table already exists
     async fn valid_or_create_sink_table(
         &self,
         flow_id: FlowId,
-        flow_plan: &TypedPlan,
+        flow_plan: &mut TypedPlan,
         sink_table_name: &TableName,
         node_ctx: &mut FlownodeContext,
     ) -> Result<(), Error> {
@@ -805,6 +806,11 @@ impl FlowWorkerManager {
                     .fail()?,
                 }
             }
+
+            // only use useful length of schema, which is the flow's schema length
+            let useful_len = real_schema.len().min(auto_schema.len());
+            let fixed_plan = fix_time_index_for_flow_plan(flow_plan, &real_schema[0..useful_len])?;
+            *flow_plan = fixed_plan;
         } else {
             // create sink table
             let did_create = self
@@ -901,12 +907,14 @@ impl FlowWorkerManager {
 
         node_ctx.query_context = query_ctx.map(Arc::new);
         // construct a active dataflow state with it
-        let flow_plan = sql_to_flow_plan(&mut node_ctx, &self.query_engine, &sql).await?;
+        let mut flow_plan = sql_to_flow_plan(&mut node_ctx, &self.query_engine, &sql).await?;
 
         // check schema against actual table schema if exists
         // if not exist create sink table immediately
-        self.valid_or_create_sink_table(flow_id, &flow_plan, &sink_table_name, &mut node_ctx)
+        self.valid_or_create_sink_table(flow_id, &mut flow_plan, &sink_table_name, &mut node_ctx)
             .await?;
+
+        let flow_plan = flow_plan;
 
         let _ = comment;
         let _ = flow_options;
