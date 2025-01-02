@@ -25,7 +25,8 @@ use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
 use tokio::sync::{broadcast, mpsc, RwLock};
 
-use crate::adapter::{FlowId, TableName, TableSource};
+use crate::adapter::table_source::FlowTableSource;
+use crate::adapter::{FlowId, ManagedTableSource, TableName};
 use crate::error::{Error, EvalSnafu, TableNotFoundSnafu};
 use crate::expr::error::InternalSnafu;
 use crate::expr::{Batch, GlobalId};
@@ -33,7 +34,7 @@ use crate::metrics::METRIC_FLOW_INPUT_BUF_SIZE;
 use crate::repr::{DiffRow, RelationDesc, BATCH_SIZE, BROADCAST_CAP, SEND_BUF_CAP};
 
 /// A context that holds the information of the dataflow
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct FlownodeContext {
     /// mapping from source table to tasks, useful for schedule which task to run when a source table is updated
     pub source_to_tasks: BTreeMap<TableId, BTreeSet<FlowId>>,
@@ -50,11 +51,26 @@ pub struct FlownodeContext {
     /// note that the sink receiver should only have one, and we are using broadcast as mpsc channel here
     pub sink_receiver:
         BTreeMap<TableName, (mpsc::UnboundedSender<Batch>, mpsc::UnboundedReceiver<Batch>)>,
-    /// the schema of the table, query from metasrv or inferred from TypedPlan
-    pub schema: HashMap<GlobalId, RelationDesc>,
+    /// can query the schema of the table source, from metasrv with local cache
+    pub table_source: Box<dyn FlowTableSource>,
     /// All the tables that have been registered in the worker
     pub table_repr: IdToNameMap,
     pub query_context: Option<Arc<QueryContext>>,
+}
+
+impl FlownodeContext {
+    pub fn new(table_source: Box<dyn FlowTableSource>) -> Self {
+        Self {
+            source_to_tasks: Default::default(),
+            flow_to_sink: Default::default(),
+            sink_to_flow: Default::default(),
+            source_sender: Default::default(),
+            sink_receiver: Default::default(),
+            table_source,
+            table_repr: Default::default(),
+            query_context: Default::default(),
+        }
+    }
 }
 
 /// a simple broadcast sender with backpressure, bounded capacity and blocking on send when send buf is full
@@ -284,7 +300,7 @@ impl FlownodeContext {
     /// Retrieves a GlobalId and table schema representing a table previously registered by calling the [register_table] function.
     ///
     /// Returns an error if no table has been registered with the provided names
-    pub fn table(&self, name: &TableName) -> Result<(GlobalId, RelationDesc), Error> {
+    pub async fn table(&self, name: &TableName) -> Result<(GlobalId, RelationDesc), Error> {
         let id = self
             .table_repr
             .get_by_name(name)
@@ -292,13 +308,7 @@ impl FlownodeContext {
             .with_context(|| TableNotFoundSnafu {
                 name: name.join("."),
             })?;
-        let schema = self
-            .schema
-            .get(&id)
-            .cloned()
-            .with_context(|| TableNotFoundSnafu {
-                name: name.join("."),
-            })?;
+        let schema = self.table_source.table(name).await?;
         Ok((id, schema))
     }
 
@@ -312,7 +322,7 @@ impl FlownodeContext {
     /// merely creating a mapping from table id to global id
     pub async fn assign_global_id_to_table(
         &mut self,
-        srv_map: &TableSource,
+        srv_map: &ManagedTableSource,
         mut table_name: Option<TableName>,
         table_id: Option<TableId>,
     ) -> Result<GlobalId, Error> {
@@ -333,35 +343,14 @@ impl FlownodeContext {
 
             // table id is Some meaning db must have created the table
             if let Some(table_id) = table_id {
-                let (known_table_name, schema) = srv_map.get_table_name_schema(&table_id).await?;
+                let known_table_name = srv_map.get_table_name(&table_id).await?;
                 table_name = table_name.or(Some(known_table_name));
-                self.schema.insert(global_id, schema);
             } // if we don't have table id, it means database haven't assign one yet or we don't need it
 
             // still update the mapping with new global id
             self.table_repr.insert(table_name, table_id, global_id);
             Ok(global_id)
         }
-    }
-
-    /// Assign a schema to a table
-    ///
-    pub fn assign_table_schema(
-        &mut self,
-        table_name: &TableName,
-        schema: RelationDesc,
-    ) -> Result<(), Error> {
-        let gid = self
-            .table_repr
-            .get_by_name(table_name)
-            .map(|(_, gid)| gid)
-            .context(TableNotFoundSnafu {
-                name: format!("Table not found: {:?} in flownode cache", table_name),
-            })?;
-
-        self.schema.insert(gid, schema);
-
-        Ok(())
     }
 
     /// Get a new global id

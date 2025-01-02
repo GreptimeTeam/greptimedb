@@ -34,11 +34,16 @@ use crate::error::InternalSnafu;
 use crate::metrics::METRIC_FLOW_TASK_COUNT;
 use crate::repr::{self, DiffRow};
 
-fn to_meta_err(err: crate::error::Error) -> common_meta::error::Error {
-    // TODO(discord9): refactor this
-    Err::<(), _>(BoxedError::new(err))
-        .with_context(|_| ExternalSnafu)
-        .unwrap_err()
+/// return a function to convert `crate::error::Error` to `common_meta::error::Error`
+fn to_meta_err(
+    location: snafu::Location,
+) -> impl FnOnce(crate::error::Error) -> common_meta::error::Error {
+    move |err: crate::error::Error| -> common_meta::error::Error {
+        common_meta::error::Error::External {
+            location,
+            source: BoxedError::new(err),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -79,7 +84,10 @@ impl Flownode for FlowWorkerManager {
                     flow_options,
                     query_ctx,
                 };
-                let ret = self.create_flow(args).await.map_err(to_meta_err)?;
+                let ret = self
+                    .create_flow(args)
+                    .await
+                    .map_err(to_meta_err(snafu::location!()))?;
                 METRIC_FLOW_TASK_COUNT.inc();
                 Ok(FlowResponse {
                     affected_flows: ret
@@ -94,7 +102,7 @@ impl Flownode for FlowWorkerManager {
             })) => {
                 self.remove_flow(flow_id.id as u64)
                     .await
-                    .map_err(to_meta_err)?;
+                    .map_err(to_meta_err(snafu::location!()))?;
                 METRIC_FLOW_TASK_COUNT.dec();
                 Ok(Default::default())
             }
@@ -112,9 +120,15 @@ impl Flownode for FlowWorkerManager {
                     .await
                     .flush_all_sender()
                     .await
-                    .map_err(to_meta_err)?;
-                let rows_send = self.run_available(true).await.map_err(to_meta_err)?;
-                let row = self.send_writeback_requests().await.map_err(to_meta_err)?;
+                    .map_err(to_meta_err(snafu::location!()))?;
+                let rows_send = self
+                    .run_available(true)
+                    .await
+                    .map_err(to_meta_err(snafu::location!()))?;
+                let row = self
+                    .send_writeback_requests()
+                    .await
+                    .map_err(to_meta_err(snafu::location!()))?;
 
                 debug!(
                     "Done to flush flow_id={:?} with {} input rows flushed, {} rows sended and {} output rows flushed",
@@ -156,15 +170,14 @@ impl Flownode for FlowWorkerManager {
 
             let fetch_order = {
                 let ctx = self.node_context.read().await;
-                let table_col_names = ctx
-                    .table_repr
-                    .get_by_table_id(&table_id)
-                    .map(|r| r.1)
-                    .and_then(|id| ctx.schema.get(&id))
-                    .map(|desc| &desc.names)
-                    .context(UnexpectedSnafu {
-                        err_msg: format!("Table not found: {}", table_id),
-                    })?;
+
+                // TODO(discord9): also check schema version so that altered table can be reported
+                let table_schema = ctx
+                    .table_source
+                    .table_from_id(&table_id)
+                    .await
+                    .map_err(to_meta_err(snafu::location!()))?;
+                let table_col_names = table_schema.names;
                 let table_col_names = table_col_names
                     .iter().enumerate()
                     .map(|(idx,name)| match name {
@@ -211,12 +224,12 @@ impl Flownode for FlowWorkerManager {
                 .iter()
                 .map(from_proto_to_data_type)
                 .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(to_meta_err)?;
+                .map_err(to_meta_err(snafu::location!()))?;
             self.handle_write_request(region_id.into(), rows, &batch_datatypes)
                 .await
                 .map_err(|err| {
                     common_telemetry::error!(err;"Failed to handle write request");
-                    to_meta_err(err)
+                    to_meta_err(snafu::location!())(err)
                 })?;
         }
         Ok(Default::default())

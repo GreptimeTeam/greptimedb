@@ -45,10 +45,8 @@ use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 pub(crate) use crate::adapter::node_context::FlownodeContext;
-use crate::adapter::table_source::TableSource;
-use crate::adapter::util::{
-    relation_desc_to_column_schemas_with_fallback, table_info_value_to_relation_desc,
-};
+use crate::adapter::table_source::ManagedTableSource;
+use crate::adapter::util::relation_desc_to_column_schemas_with_fallback;
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
 use crate::df_optimizer::sql_to_flow_plan;
@@ -69,7 +67,7 @@ mod util;
 mod worker;
 
 pub(crate) mod node_context;
-mod table_source;
+pub(crate) mod table_source;
 
 use crate::error::Error;
 use crate::utils::StateReportHandler;
@@ -129,7 +127,7 @@ pub struct FlowWorkerManager {
     /// The query engine that will be used to parse the query and convert it to a dataflow plan
     pub query_engine: Arc<dyn QueryEngine>,
     /// Getting table name and table schema from table info manager
-    table_info_source: TableSource,
+    table_info_source: ManagedTableSource,
     frontend_invoker: RwLock<Option<FrontendInvoker>>,
     /// contains mapping from table name to global id, and table schema
     node_context: RwLock<FlownodeContext>,
@@ -158,11 +156,11 @@ impl FlowWorkerManager {
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
     ) -> Self {
-        let srv_map = TableSource::new(
+        let srv_map = ManagedTableSource::new(
             table_meta.table_info_manager().clone(),
             table_meta.table_name_manager().clone(),
         );
-        let node_context = FlownodeContext::default();
+        let node_context = FlownodeContext::new(Box::new(srv_map.clone()) as _);
         let tick_manager = FlowTickManager::new();
         let worker_handles = Vec::new();
         FlowWorkerManager {
@@ -409,7 +407,7 @@ impl FlowWorkerManager {
     ) -> Result<Option<(Vec<String>, Option<usize>, Vec<ColumnSchema>)>, Error> {
         if let Some(table_id) = self
             .table_info_source
-            .get_table_id_from_name(table_name)
+            .get_opt_table_id_from_name(table_name)
             .await?
         {
             let table_info = self
@@ -828,27 +826,9 @@ impl FlowWorkerManager {
                     .fail()?,
                 }
             }
-
-            let table_id = self
-                .table_info_source
-                .get_table_id_from_name(&sink_table_name)
-                .await?
-                .context(UnexpectedSnafu {
-                    reason: format!("Can't get table id for table name {:?}", sink_table_name),
-                })?;
-            let table_info_value = self
-                .table_info_source
-                .get_table_info_value(&table_id)
-                .await?
-                .context(UnexpectedSnafu {
-                    reason: format!("Can't get table info value for table id {:?}", table_id),
-                })?;
-            let real_schema = table_info_value_to_relation_desc(table_info_value)?;
-            node_ctx.assign_table_schema(&sink_table_name, real_schema.clone())?;
         } else {
             // assign inferred schema to sink table
             // create sink table
-            node_ctx.assign_table_schema(&sink_table_name, flow_plan.schema.clone())?;
             let did_create = self
                 .create_table_from_relation(
                     &format!("flow-id={flow_id}"),
