@@ -44,16 +44,16 @@ pub trait FlowTableSource: Send + Sync + std::fmt::Debug {
     async fn table_from_id(&self, table_id: &TableId) -> Result<RelationDesc, Error>;
 }
 
-/// mapping of table name <-> table id should be query from tableinfo manager
+/// managed table source information, query from table info manager and table name manager
 #[derive(Clone)]
-pub struct KvBackendTableSource {
+pub struct ManagedTableSource {
     /// for query `TableId -> TableName` mapping
     table_info_manager: TableInfoManager,
     table_name_manager: TableNameManager,
 }
 
 #[async_trait::async_trait]
-impl FlowTableSource for KvBackendTableSource {
+impl FlowTableSource for ManagedTableSource {
     async fn table_from_id(&self, table_id: &TableId) -> Result<RelationDesc, Error> {
         let table_info_value = self
             .get_table_info_value(table_id)
@@ -77,9 +77,9 @@ impl FlowTableSource for KvBackendTableSource {
     }
 }
 
-impl KvBackendTableSource {
+impl ManagedTableSource {
     pub fn new(table_info_manager: TableInfoManager, table_name_manager: TableNameManager) -> Self {
-        KvBackendTableSource {
+        ManagedTableSource {
             table_info_manager,
             table_name_manager,
         }
@@ -173,7 +173,7 @@ impl KvBackendTableSource {
     }
 }
 
-impl std::fmt::Debug for KvBackendTableSource {
+impl std::fmt::Debug for ManagedTableSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KvBackendTableSource").finish()
     }

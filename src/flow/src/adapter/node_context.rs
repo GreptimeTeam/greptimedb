@@ -26,7 +26,7 @@ use table::metadata::TableId;
 use tokio::sync::{broadcast, mpsc, RwLock};
 
 use crate::adapter::table_source::FlowTableSource;
-use crate::adapter::{FlowId, KvBackendTableSource, TableName};
+use crate::adapter::{FlowId, ManagedTableSource, TableName};
 use crate::error::{Error, EvalSnafu, TableNotFoundSnafu};
 use crate::expr::error::InternalSnafu;
 use crate::expr::{Batch, GlobalId};
@@ -322,7 +322,7 @@ impl FlownodeContext {
     /// merely creating a mapping from table id to global id
     pub async fn assign_global_id_to_table(
         &mut self,
-        srv_map: &KvBackendTableSource,
+        srv_map: &ManagedTableSource,
         mut table_name: Option<TableName>,
         table_id: Option<TableId>,
     ) -> Result<GlobalId, Error> {
