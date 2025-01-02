@@ -104,6 +104,7 @@ async fn test_merge_mode_compaction() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 

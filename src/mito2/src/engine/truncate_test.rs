@@ -159,6 +159,7 @@ async fn test_engine_truncate_after_flush() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
