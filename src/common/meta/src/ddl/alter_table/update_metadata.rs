@@ -34,7 +34,7 @@ impl AlterTableProcedure {
 
         let new_meta = table_info
             .meta
-            .builder_with_alter_kind(table_ref.table, &request.alter_kind, false)
+            .builder_with_alter_kind(table_ref.table, &request.alter_kind)
             .context(error::TableSnafu)?
             .build()
             .with_context(|_| error::BuildTableMetaSnafu {
@@ -46,6 +46,9 @@ impl AlterTableProcedure {
         new_info.ident.version = table_info.ident.version + 1;
         match request.alter_kind {
             AlterKind::AddColumns { columns } => {
+                // Bumps the column id for the new columns.
+                // It may bump more than the actual number of columns added if there are
+                // existing columns, but it's fine.
                 new_info.meta.next_column_id += columns.len() as u32;
             }
             AlterKind::RenameTable { new_table_name } => {

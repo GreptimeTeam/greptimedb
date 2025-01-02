@@ -53,6 +53,7 @@ impl From<TestAlterTableExpr> for AlterTableExpr {
                         .map(|col| AddColumn {
                             column_def: Some(col),
                             location: None,
+                            add_if_not_exists: false,
                         })
                         .collect(),
                 })),

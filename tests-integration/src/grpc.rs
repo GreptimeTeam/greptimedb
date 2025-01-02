@@ -161,6 +161,7 @@ mod test {
                                 ..Default::default()
                             }),
                             location: None,
+                            add_if_not_exists: true,
                         },
                         AddColumn {
                             column_def: Some(ColumnDef {
@@ -172,6 +173,7 @@ mod test {
                                 ..Default::default()
                             }),
                             location: None,
+                            add_if_not_exists: true,
                         },
                     ],
                 })),
@@ -196,6 +198,7 @@ mod test {
                                 ..Default::default()
                             }),
                             location: None,
+                            add_if_not_exists: true,
                         },
                         AddColumn {
                             column_def: Some(ColumnDef {
@@ -207,6 +210,7 @@ mod test {
                                 ..Default::default()
                             }),
                             location: None,
+                            add_if_not_exists: true,
                         },
                     ],
                 })),
@@ -310,6 +314,7 @@ mod test {
                             ..Default::default()
                         }),
                         location: None,
+                        add_if_not_exists: false,
                     }],
                 })),
             })),

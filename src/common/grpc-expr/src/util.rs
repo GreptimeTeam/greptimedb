@@ -192,6 +192,9 @@ pub fn build_create_table_expr(
     Ok(expr)
 }
 
+/// Find columns that are not present in the schema and return them as `AddColumns`
+/// for adding columns automatically.
+/// It always sets `add_if_not_exists` to `true` for now.
 pub fn extract_new_columns(
     schema: &Schema,
     column_exprs: Vec<ColumnExpr>,
@@ -213,6 +216,7 @@ pub fn extract_new_columns(
             AddColumn {
                 column_def,
                 location: None,
+                add_if_not_exists: true,
             }
         })
         .collect::<Vec<_>>();

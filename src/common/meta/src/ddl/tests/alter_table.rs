@@ -330,6 +330,7 @@ async fn test_on_update_metadata_add_columns() {
                         ..Default::default()
                     }),
                     location: None,
+                    add_if_not_exists: false,
                 }],
             })),
         },

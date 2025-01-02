@@ -60,6 +60,7 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<
                         column_schema: schema,
                         is_key: column_def.semantic_type == SemanticType::Tag as i32,
                         location: parse_location(ac.location)?,
+                        add_if_not_exists: ac.add_if_not_exists,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -220,6 +221,7 @@ mod tests {
                         ..Default::default()
                     }),
                     location: None,
+                    add_if_not_exists: true,
                 }],
             })),
         };
@@ -240,6 +242,7 @@ mod tests {
             add_column.column_schema.data_type
         );
         assert_eq!(None, add_column.location);
+        assert!(add_column.add_if_not_exists);
     }
 
     #[test]
@@ -265,6 +268,7 @@ mod tests {
                             location_type: LocationType::First.into(),
                             after_column_name: String::default(),
                         }),
+                        add_if_not_exists: false,
                     },
                     AddColumn {
                         column_def: Some(ColumnDef {
@@ -280,6 +284,7 @@ mod tests {
                             location_type: LocationType::After.into(),
                             after_column_name: "ts".to_string(),
                         }),
+                        add_if_not_exists: true,
                     },
                 ],
             })),
@@ -308,6 +313,7 @@ mod tests {
             }),
             add_column.location
         );
+        assert!(add_column.add_if_not_exists);
 
         let add_column = add_columns.pop().unwrap();
         assert!(!add_column.is_key);
@@ -317,6 +323,7 @@ mod tests {
             add_column.column_schema.data_type
         );
         assert_eq!(Some(AddColumnLocation::First), add_column.location);
+        assert!(!add_column.add_if_not_exists);
     }
 
     #[test]

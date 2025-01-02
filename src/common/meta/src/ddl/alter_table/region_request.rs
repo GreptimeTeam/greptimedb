@@ -28,6 +28,7 @@ use crate::error::{InvalidProtoMsgSnafu, Result};
 
 impl AlterTableProcedure {
     /// Makes alter region request.
+    /// Region alter request always add columns if not exist.
     pub(crate) fn make_alter_region_request(&self, region_id: RegionId) -> Result<RegionRequest> {
         // Safety: Checked in `AlterTableProcedure::new`.
         let alter_kind = self.data.task.alter_table.kind.as_ref().unwrap();
@@ -51,7 +52,7 @@ impl AlterTableProcedure {
 
 /// Creates region proto alter kind from `table_info` and `alter_kind`.
 ///
-/// Returns the kind and next column id if it adds new columns.
+/// It always adds column if not exists and drops column if exists.
 fn create_proto_alter_kind(
     table_info: &RawTableInfo,
     alter_kind: &Kind,
@@ -234,6 +235,7 @@ mod tests {
                             location_type: LocationType::After as i32,
                             after_column_name: "my_tag2".to_string(),
                         }),
+                        add_if_not_exists: false,
                     }],
                 })),
             },
