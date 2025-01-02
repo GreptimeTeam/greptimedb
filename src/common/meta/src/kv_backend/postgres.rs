@@ -547,7 +547,7 @@ impl KvBackend for PgStore {
 }
 
 impl PgStore {
-    async fn point_get(&self, key: &Vec<u8>) -> Result<Option<Vec<u8>>> {
+    async fn point_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let key = process_bytes(key, "pointGetKey")?;
         let res = self
             .get_client()
@@ -566,8 +566,8 @@ impl PgStore {
             TxnOp::Put(key, value) => {
                 let res = self
                     .put(PutRequest {
-                        key: key,
-                        value: value,
+                        key,
+                        value,
                         prev_kv: false,
                     })
                     .await?;
@@ -576,7 +576,7 @@ impl PgStore {
             TxnOp::Get(key) => {
                 let res = self
                     .range(RangeRequest {
-                        key: key,
+                        key,
                         range_end: vec![],
                         limit: 1,
                         keys_only: false,
@@ -587,7 +587,7 @@ impl PgStore {
             TxnOp::Delete(key) => {
                 let res = self
                     .delete_range(DeleteRangeRequest {
-                        key: key,
+                        key,
                         range_end: vec![],
                         prev_kv: false,
                     })
