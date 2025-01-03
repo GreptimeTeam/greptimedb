@@ -175,6 +175,21 @@ impl PgStore {
         }
     }
 
+    async fn get_client_executor(&self) -> Result<PgQueryExecutor<'_>> {
+        let client = self.get_client().await?;
+        Ok(PgQueryExecutor::Client(client))
+    }
+
+    async fn get_txn_executor<'a>(&self, client: &'a mut PgClient) -> Result<PgQueryExecutor<'a>> {
+        let txn = client
+            .transaction()
+            .await
+            .context(PostgresTransactionSnafu {
+                operation: "start".to_string(),
+            })?;
+        Ok(PgQueryExecutor::Transaction(txn))
+    }
+
     async fn put_if_not_exists_with_query_executor(
         &self,
         query_executor: &PgQueryExecutor<'_>,
@@ -290,45 +305,38 @@ impl KvBackend for PgStore {
     }
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
-        let client = self.get_client().await?;
-        self.range_with_query_executor(&PgQueryExecutor::Client(client), req)
-            .await
+        let client = self.get_client_executor().await?;
+        self.range_with_query_executor(&client, req).await
     }
 
     async fn put(&self, req: PutRequest) -> Result<PutResponse> {
-        let client = self.get_client().await?;
-        self.put_with_query_executor(&PgQueryExecutor::Client(client), req)
-            .await
+        let client = self.get_client_executor().await?;
+        self.put_with_query_executor(&client, req).await
     }
 
     async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
-        let client = self.get_client().await?;
-        self.batch_put_with_query_executor(&PgQueryExecutor::Client(client), req)
-            .await
+        let client = self.get_client_executor().await?;
+        self.batch_put_with_query_executor(&client, req).await
     }
 
     async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
-        let client = self.get_client().await?;
-        self.batch_get_with_query_executor(&PgQueryExecutor::Client(client), req)
-            .await
+        let client = self.get_client_executor().await?;
+        self.batch_get_with_query_executor(&client, req).await
     }
 
     async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
-        let client = self.get_client().await?;
-        self.delete_range_with_query_executor(&PgQueryExecutor::Client(client), req)
-            .await
+        let client = self.get_client_executor().await?;
+        self.delete_range_with_query_executor(&client, req).await
     }
 
     async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
-        let client = self.get_client().await?;
-        self.batch_delete_with_query_executor(&PgQueryExecutor::Client(client), req)
-            .await
+        let client = self.get_client_executor().await?;
+        self.batch_delete_with_query_executor(&client, req).await
     }
 
     async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
-        let client = self.get_client().await?;
-        self.compare_and_put_with_query_executor(&PgQueryExecutor::Client(client), req)
-            .await
+        let client = self.get_client_executor().await?;
+        self.compare_and_put_with_query_executor(&client, req).await
     }
 }
 
@@ -659,6 +667,135 @@ impl PgStore {
         Ok(true)
     }
 
+    /// Execute a batch of transaction operations. This function is only used for transactions with the same operation type.
+    async fn try_batch_txn(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        txn_ops: &[TxnOp],
+    ) -> Result<Option<Vec<TxnOpResponse>>> {
+        if !check_txn_ops(txn_ops)? {
+            return Ok(None);
+        }
+        match txn_ops.first() {
+            Some(TxnOp::Delete(_)) => {
+                let mut batch_del_req = BatchDeleteRequest {
+                    keys: vec![],
+                    prev_kv: false,
+                };
+                for op in txn_ops {
+                    if let TxnOp::Delete(key) = op {
+                        batch_del_req.keys.push(key.clone());
+                    }
+                }
+                let res = self
+                    .batch_delete_with_query_executor(query_executor, batch_del_req)
+                    .await?;
+                let res_map = res
+                    .prev_kvs
+                    .into_iter()
+                    .map(|kv| (kv.key, kv.value))
+                    .collect::<std::collections::HashMap<Vec<u8>, Vec<u8>>>();
+                let mut resps = Vec::with_capacity(txn_ops.len());
+                for op in txn_ops {
+                    if let TxnOp::Delete(key) = op {
+                        let value = res_map.get(key);
+                        resps.push(TxnOpResponse::ResponseDelete(DeleteRangeResponse {
+                            deleted: if value.is_some() { 1 } else { 0 },
+                            prev_kvs: value
+                                .map(|v| {
+                                    vec![KeyValue {
+                                        key: key.clone(),
+                                        value: v.clone(),
+                                    }]
+                                })
+                                .unwrap_or_default(),
+                        }));
+                    }
+                }
+                Ok(Some(resps))
+            }
+            Some(TxnOp::Put(_, _)) => {
+                let mut batch_put_req = BatchPutRequest {
+                    kvs: vec![],
+                    prev_kv: false,
+                };
+                for op in txn_ops {
+                    if let TxnOp::Put(key, value) = op {
+                        batch_put_req.kvs.push(KeyValue {
+                            key: key.clone(),
+                            value: value.clone(),
+                        });
+                    }
+                }
+                let res = self
+                    .batch_put_with_query_executor(query_executor, batch_put_req)
+                    .await?;
+                let res_map = res
+                    .prev_kvs
+                    .into_iter()
+                    .map(|kv| (kv.key, kv.value))
+                    .collect::<std::collections::HashMap<Vec<u8>, Vec<u8>>>();
+                let mut resps = Vec::with_capacity(txn_ops.len());
+                for op in txn_ops {
+                    if let TxnOp::Put(key, _) = op {
+                        let prev_kv = res_map.get(key);
+                        match prev_kv {
+                            Some(v) => {
+                                resps.push(TxnOpResponse::ResponsePut(PutResponse {
+                                    prev_kv: Some(KeyValue {
+                                        key: key.clone(),
+                                        value: v.clone(),
+                                    }),
+                                }));
+                            }
+                            None => {
+                                resps.push(TxnOpResponse::ResponsePut(PutResponse {
+                                    prev_kv: None,
+                                }));
+                            }
+                        }
+                    }
+                }
+                Ok(Some(resps))
+            }
+            Some(TxnOp::Get(_)) => {
+                let mut batch_get_req = BatchGetRequest { keys: vec![] };
+                for op in txn_ops {
+                    if let TxnOp::Get(key) = op {
+                        batch_get_req.keys.push(key.clone());
+                    }
+                }
+                let res = self
+                    .batch_get_with_query_executor(query_executor, batch_get_req)
+                    .await?;
+                let res_map = res
+                    .kvs
+                    .into_iter()
+                    .map(|kv| (kv.key, kv.value))
+                    .collect::<std::collections::HashMap<Vec<u8>, Vec<u8>>>();
+                let mut resps = Vec::with_capacity(txn_ops.len());
+                for op in txn_ops {
+                    if let TxnOp::Get(key) = op {
+                        let value = res_map.get(key);
+                        resps.push(TxnOpResponse::ResponseGet(RangeResponse {
+                            kvs: value
+                                .map(|v| {
+                                    vec![KeyValue {
+                                        key: key.clone(),
+                                        value: v.clone(),
+                                    }]
+                                })
+                                .unwrap_or_default(),
+                            more: false,
+                        }));
+                    }
+                }
+                Ok(Some(resps))
+            }
+            None => Ok(Some(vec![])),
+        }
+    }
+
     async fn execute_txn_op(
         &self,
         query_executor: &PgQueryExecutor<'_>,
@@ -719,25 +856,31 @@ impl TxnService for PgStore {
             .start_timer();
 
         let mut client = self.get_client().await?;
-        let pg_txn = PgQueryExecutor::Transaction(client.transaction().await.context(
-            PostgresTransactionSnafu {
-                operation: "start".to_string(),
-            },
-        )?);
+        let pg_txn = self.get_txn_executor(&mut client).await?;
         let mut success = true;
         if txn.c_when {
             success = self.execute_txn_cmp(&pg_txn, &txn.req.compare).await?;
         }
         let mut responses = vec![];
         if success && txn.c_then {
-            for txnop in txn.req.success {
-                let res = self.execute_txn_op(&pg_txn, txnop).await?;
-                responses.push(res);
+            match self.try_batch_txn(&pg_txn, &txn.req.success).await? {
+                Some(res) => responses.extend(res),
+                None => {
+                    for txnop in txn.req.success {
+                        let res = self.execute_txn_op(&pg_txn, txnop).await?;
+                        responses.push(res);
+                    }
+                }
             }
         } else if !success && txn.c_else {
-            for txnop in txn.req.failure {
-                let res = self.execute_txn_op(&pg_txn, txnop).await?;
-                responses.push(res);
+            match self.try_batch_txn(&pg_txn, &txn.req.failure).await? {
+                Some(res) => responses.extend(res),
+                None => {
+                    for txnop in txn.req.failure {
+                        let res = self.execute_txn_op(&pg_txn, txnop).await?;
+                        responses.push(res);
+                    }
+                }
             }
         }
 
@@ -763,6 +906,25 @@ fn is_prefix_range(start: &[u8], end: &[u8]) -> bool {
         return same_prefix && (*rhs + 1) == *lhs;
     }
     false
+}
+
+/// Check if the transaction operations are the same type.
+fn check_txn_ops(txn_ops: &[TxnOp]) -> Result<bool> {
+    if txn_ops.is_empty() {
+        return Ok(false);
+    }
+    let first_op = &txn_ops[0];
+    for op in txn_ops {
+        match (op, first_op) {
+            (TxnOp::Put(_, _), TxnOp::Put(_, _)) => {}
+            (TxnOp::Get(_), TxnOp::Get(_)) => {}
+            (TxnOp::Delete(_), TxnOp::Delete(_)) => {}
+            _ => {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
