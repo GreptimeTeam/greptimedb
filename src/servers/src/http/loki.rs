@@ -14,14 +14,18 @@ use axum::{Extension, TypedHeader};
 use bytes::Bytes;
 use common_query::prelude::GREPTIME_TIMESTAMP;
 use common_query::{Output, OutputData};
+use common_telemetry::warn;
 use hashbrown::HashMap;
 use lazy_static::lazy_static;
 use loki_api::prost_types::Timestamp;
 use prost::Message;
-use session::context::{Channel, QueryContext, QueryContextRef};
-use snafu::ResultExt;
+use session::context::{Channel, QueryContext};
+use snafu::{OptionExt, ResultExt};
 
-use crate::error::{DecodeOtlpRequestSnafu, ParseJson5Snafu, Result, UnsupportedContentTypeSnafu};
+use crate::error::{
+    DecodeOtlpRequestSnafu, InvalidLokiPayloadSnafu, ParseJson5Snafu, ParseJsonSnafu, Result,
+    UnsupportedContentTypeSnafu,
+};
 use crate::http::event::LogState;
 use crate::http::extractor::LogTableName;
 use crate::http::header::CONTENT_TYPE_PROTOBUF_STR;
@@ -31,10 +35,14 @@ use crate::metrics::{
     METRIC_FAILURE_VALUE, METRIC_LOKI_LOGS_INGESTION_COUNTER, METRIC_LOKI_LOGS_INGESTION_ELAPSED,
     METRIC_SUCCESS_VALUE,
 };
-use crate::prom_store;
+use crate::{prom_store, unwrap_or_warn_continue};
 
 const LOKI_TABLE_NAME: &str = "loki_logs";
 const LOKI_LINE_COLUMN: &str = "line";
+
+const STREAMS_KEY: &str = "streams";
+const LABEL_KEY: &str = "stream";
+const LINES_KEY: &str = "values";
 
 lazy_static! {
     static ref PB_CONTENT_TYPE: ContentType =
@@ -68,96 +76,18 @@ pub async fn loki_ingest(
     ctx.set_channel(Channel::Loki);
     let ctx = Arc::new(ctx);
     let table_name = table_name.unwrap_or_else(|| LOKI_TABLE_NAME.to_string());
-
-    match content_type {
-        x if x == *PB_CONTENT_TYPE => handle_pb_req(bytes, table_name, log_state, ctx).await,
-        _ => UnsupportedContentTypeSnafu { content_type }.fail(),
-    }
-}
-
-async fn handle_pb_req(
-    bytes: Bytes,
-    table_name: String,
-    log_state: LogState,
-    ctx: QueryContextRef,
-) -> Result<HttpResponse> {
     let db = ctx.get_db_string();
     let db_str = db.as_str();
     let exec_timer = Instant::now();
 
-    let decompressed = prom_store::snappy_decompress(&bytes).unwrap();
-    let req = loki_api::logproto::PushRequest::decode(&decompressed[..])
-        .context(DecodeOtlpRequestSnafu)?;
-
     // init schemas
     let mut schemas = LOKI_INIT_SCHEMAS.clone();
 
-    let mut global_label_key_index: HashMap<String, u16> = HashMap::new();
-    global_label_key_index.insert(GREPTIME_TIMESTAMP.to_string(), 0);
-    global_label_key_index.insert(LOKI_LINE_COLUMN.to_string(), 1);
-
-    let cnt = req.streams.iter().map(|s| s.entries.len()).sum::<usize>();
-    let mut rows = Vec::with_capacity(cnt);
-
-    for stream in req.streams {
-        // parse labels for each row
-        // encoding: https://github.com/grafana/alloy/blob/be34410b9e841cc0c37c153f9550d9086a304bca/internal/component/common/loki/client/batch.go#L114-L145
-        // use very dirty hack to parse labels
-        let labels = stream.labels.replace("=", ":");
-        // use btreemap to keep order
-        let labels: BTreeMap<String, String> = json5::from_str(&labels).context(ParseJson5Snafu)?;
-
-        // process entries
-        for entry in stream.entries {
-            let ts = if let Some(ts) = entry.timestamp {
-                ts
-            } else {
-                continue;
-            };
-            let line = entry.line;
-
-            // create and init row
-            let mut row = Vec::with_capacity(schemas.len());
-            // set ts and line
-            row.push(GreptimeValue {
-                value_data: Some(ValueData::TimestampNanosecondValue(prost_ts_to_nano(&ts))),
-            });
-            row.push(GreptimeValue {
-                value_data: Some(ValueData::StringValue(line)),
-            });
-            for _ in 0..(schemas.len() - 2) {
-                row.push(GreptimeValue { value_data: None });
-            }
-
-            // insert labels
-            for (k, v) in labels.iter() {
-                if let Some(index) = global_label_key_index.get(k) {
-                    // exist in schema
-                    // insert value using index
-                    row[*index as usize] = GreptimeValue {
-                        value_data: Some(ValueData::StringValue(v.clone())),
-                    };
-                } else {
-                    // not exist
-                    // add schema and append to values
-                    schemas.push(ColumnSchema {
-                        column_name: k.clone(),
-                        datatype: ColumnDataType::String.into(),
-                        semantic_type: SemanticType::Tag.into(),
-                        datatype_extension: None,
-                        options: None,
-                    });
-                    global_label_key_index.insert(k.clone(), (schemas.len() - 1) as u16);
-
-                    row.push(GreptimeValue {
-                        value_data: Some(ValueData::StringValue(v.clone())),
-                    });
-                }
-            }
-
-            rows.push(row);
-        }
-    }
+    let mut rows = match content_type {
+        x if x == ContentType::json() => handle_json_req(bytes, &mut schemas).await,
+        x if x == *PB_CONTENT_TYPE => handle_pb_req(bytes, &mut schemas).await,
+        _ => UnsupportedContentTypeSnafu { content_type }.fail(),
+    }?;
 
     // fill Null for missing values
     for row in rows.iter_mut() {
@@ -172,7 +102,6 @@ async fn handle_pb_req(
         rows: rows.into_iter().map(|values| Row { values }).collect(),
         schema: schemas,
     };
-
     let ins_req = RowInsertRequest {
         table_name,
         rows: Some(rows),
@@ -207,9 +136,225 @@ async fn handle_pb_req(
     Ok(response)
 }
 
+async fn handle_json_req(
+    bytes: Bytes,
+    schemas: &mut Vec<ColumnSchema>,
+) -> Result<Vec<Vec<GreptimeValue>>> {
+    let mut global_label_key_index: HashMap<String, u16> = HashMap::new();
+    global_label_key_index.insert(GREPTIME_TIMESTAMP.to_string(), 0);
+    global_label_key_index.insert(LOKI_LINE_COLUMN.to_string(), 1);
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(bytes.as_ref()).context(ParseJsonSnafu)?;
+
+    let streams = payload
+        .get(STREAMS_KEY)
+        .context(InvalidLokiPayloadSnafu {
+            msg: "missing streams",
+        })?
+        .as_array()
+        .context(InvalidLokiPayloadSnafu {
+            msg: "streams is not an array",
+        })?;
+
+    let mut rows = Vec::with_capacity(1000);
+
+    for (stream_index, stream) in streams.iter().enumerate() {
+        // parse lines first
+        // do not use `?` in case there are multiple streams
+        let lines = unwrap_or_warn_continue!(
+            stream.get(LINES_KEY),
+            "missing values on stream {}",
+            stream_index
+        );
+        let lines = unwrap_or_warn_continue!(
+            lines.as_array(),
+            "values is not an array on stream {}",
+            stream_index
+        );
+
+        // get labels
+        let labels = stream
+            .get(LABEL_KEY)
+            .and_then(|label| label.as_object())
+            .map(|l| {
+                l.iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect::<BTreeMap<String, String>>()
+            })
+            .unwrap_or_default();
+
+        // process each line
+        for (line_index, line) in lines.iter().enumerate() {
+            let line = unwrap_or_warn_continue!(
+                line.as_array(),
+                "missing line on stream {} index {}",
+                stream_index,
+                line_index
+            );
+            if line.len() <= 2 {
+                warn!(
+                    "line on stream {} index {} is too short",
+                    stream_index, line_index
+                );
+                continue;
+            }
+            // get ts
+            let ts = unwrap_or_warn_continue!(
+                line.first()
+                    .and_then(|ts| ts.as_str())
+                    .and_then(|ts| ts.parse::<i64>().ok()),
+                "missing or invalid timestamp on stream {} index {}",
+                stream_index,
+                line_index
+            );
+            // get line
+            let line_text = unwrap_or_warn_continue!(
+                line.get(1)
+                    .and_then(|line| line.as_str())
+                    .map(|line| line.to_string()),
+                "missing or invalid line on stream {} index {}",
+                stream_index,
+                line_index
+            );
+            // TODO(shuiyisong): we'll ignore structured metadata for now
+
+            let mut row = init_row(schemas.len(), ts, line_text);
+            process_lables(
+                &mut global_label_key_index,
+                schemas,
+                &mut row,
+                labels.iter(),
+            );
+
+            rows.push(row);
+        }
+    }
+
+    Ok(rows)
+}
+
+async fn handle_pb_req(
+    bytes: Bytes,
+    schemas: &mut Vec<ColumnSchema>,
+) -> Result<Vec<Vec<GreptimeValue>>> {
+    let decompressed = prom_store::snappy_decompress(&bytes).unwrap();
+    let req = loki_api::logproto::PushRequest::decode(&decompressed[..])
+        .context(DecodeOtlpRequestSnafu)?;
+
+    let mut global_label_key_index: HashMap<String, u16> = HashMap::new();
+    global_label_key_index.insert(GREPTIME_TIMESTAMP.to_string(), 0);
+    global_label_key_index.insert(LOKI_LINE_COLUMN.to_string(), 1);
+
+    let cnt = req.streams.iter().map(|s| s.entries.len()).sum::<usize>();
+    let mut rows = Vec::with_capacity(cnt);
+
+    for stream in req.streams {
+        // parse labels for each row
+        // encoding: https://github.com/grafana/alloy/blob/be34410b9e841cc0c37c153f9550d9086a304bca/internal/component/common/loki/client/batch.go#L114-L145
+        // use very dirty hack to parse labels
+        // TODO(shuiyisong): remove json5 and parse the string directly
+        let labels = stream.labels.replace("=", ":");
+        // use btreemap to keep order
+        let labels: BTreeMap<String, String> = json5::from_str(&labels).context(ParseJson5Snafu)?;
+
+        // process entries
+        for entry in stream.entries {
+            let ts = if let Some(ts) = entry.timestamp {
+                ts
+            } else {
+                continue;
+            };
+            let line = entry.line;
+
+            let mut row = init_row(schemas.len(), prost_ts_to_nano(&ts), line);
+            process_lables(
+                &mut global_label_key_index,
+                schemas,
+                &mut row,
+                labels.iter(),
+            );
+
+            rows.push(row);
+        }
+    }
+
+    Ok(rows)
+}
+
 #[inline]
 fn prost_ts_to_nano(ts: &Timestamp) -> i64 {
     ts.seconds * 1_000_000_000 + ts.nanos as i64
+}
+
+fn init_row(schema_len: usize, ts: i64, line: String) -> Vec<GreptimeValue> {
+    // create and init row
+    let mut row = Vec::with_capacity(schema_len);
+    // set ts and line
+    row.push(GreptimeValue {
+        value_data: Some(ValueData::TimestampNanosecondValue(ts)),
+    });
+    row.push(GreptimeValue {
+        value_data: Some(ValueData::StringValue(line)),
+    });
+    for _ in 0..(schema_len - 2) {
+        row.push(GreptimeValue { value_data: None });
+    }
+    row
+}
+
+fn process_lables<'a>(
+    global_label_key_index: &mut HashMap<String, u16>,
+    schemas: &mut Vec<ColumnSchema>,
+    row: &mut Vec<GreptimeValue>,
+    labels: impl Iterator<Item = (&'a String, &'a String)>,
+) {
+    // insert labels
+    for (k, v) in labels {
+        if let Some(index) = global_label_key_index.get(k) {
+            // exist in schema
+            // insert value using index
+            row[*index as usize] = GreptimeValue {
+                value_data: Some(ValueData::StringValue(v.clone())),
+            };
+        } else {
+            // not exist
+            // add schema and append to values
+            schemas.push(ColumnSchema {
+                column_name: k.clone(),
+                datatype: ColumnDataType::String.into(),
+                semantic_type: SemanticType::Tag.into(),
+                datatype_extension: None,
+                options: None,
+            });
+            global_label_key_index.insert(k.clone(), (schemas.len() - 1) as u16);
+
+            row.push(GreptimeValue {
+                value_data: Some(ValueData::StringValue(v.clone())),
+            });
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! unwrap_or_warn_continue {
+    ($expr:expr, $msg:expr) => {
+        if let Some(value) = $expr {
+            value
+        } else {
+            warn!($msg);
+            continue;
+        }
+    };
+
+    ($expr:expr, $fmt:expr, $($arg:tt)*) => {
+        if let Some(value) = $expr {
+            value
+        } else {
+            warn!($fmt, $($arg)*);
+            continue;
+        }
+    };
 }
 
 #[cfg(test)]
