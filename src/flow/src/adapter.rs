@@ -50,10 +50,7 @@ use crate::adapter::util::relation_desc_to_column_schemas_with_fallback;
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
 use crate::df_optimizer::sql_to_flow_plan;
-use crate::error::{
-    EvalSnafu, ExternalSnafu, FlowAlreadyExistSnafu, InternalSnafu, InvalidQuerySnafu,
-    UnexpectedSnafu,
-};
+use crate::error::{EvalSnafu, ExternalSnafu, InternalSnafu, InvalidQuerySnafu, UnexpectedSnafu};
 use crate::expr::Batch;
 use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_ROWS, METRIC_FLOW_RUN_INTERVAL_MS};
 use crate::repr::{self, DiffRow, RelationDesc, Row, BATCH_SIZE};
@@ -727,43 +724,6 @@ impl FlowWorkerManager {
             query_ctx,
         } = args;
 
-        let already_exist = {
-            let mut flag = false;
-
-            // check if the task already exists
-            for handle in self.worker_handles.iter() {
-                if handle.lock().await.contains_flow(flow_id).await? {
-                    flag = true;
-                    break;
-                }
-            }
-            flag
-        };
-        match (create_if_not_exists, or_replace, already_exist) {
-            // do replace
-            (_, true, true) => {
-                info!("Replacing flow with id={}", flow_id);
-                self.remove_flow(flow_id).await?;
-            }
-            (false, false, true) => FlowAlreadyExistSnafu { id: flow_id }.fail()?,
-            // do nothing if exists
-            (true, false, true) => {
-                info!("Flow with id={} already exists, do nothing", flow_id);
-                return Ok(None);
-            }
-            // create if not exists
-            (_, _, false) => (),
-        }
-
-        if create_if_not_exists {
-            // check if the task already exists
-            for handle in self.worker_handles.iter() {
-                if handle.lock().await.contains_flow(flow_id).await? {
-                    return Ok(None);
-                }
-            }
-        }
-
         let mut node_ctx = self.node_context.write().await;
         // assign global id to source and sink table
         for source in &source_table_ids {
@@ -877,9 +837,11 @@ impl FlowWorkerManager {
             source_ids,
             src_recvs: source_receivers,
             expire_after,
+            or_replace,
             create_if_not_exists,
             err_collector,
         };
+
         handle.create_flow(create_request).await?;
         info!("Successfully create flow with id={}", flow_id);
         Ok(Some(flow_id))
