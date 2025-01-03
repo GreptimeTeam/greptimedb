@@ -729,7 +729,11 @@ mod tests {
         assert!(current == Timestamp::default());
     }
 
-    async fn candidate(leader_value: String, candidate_lease_ttl_secs: u64) {
+    async fn candidate(
+        leader_value: String,
+        candidate_lease_ttl_secs: u64,
+        store_key_prefix: String,
+    ) {
         let client = create_postgres_client().await.unwrap();
 
         let (tx, _) = broadcast::channel(100);
@@ -739,7 +743,7 @@ mod tests {
             is_leader: AtomicBool::new(false),
             leader_infancy: AtomicBool::new(true),
             leader_watcher: tx,
-            store_key_prefix: rand::thread_rng().gen::<u64>().to_string(),
+            store_key_prefix,
             candidate_lease_ttl_secs,
             lock_id: 28319,
         };
@@ -757,17 +761,21 @@ mod tests {
     async fn test_candidate_registration() {
         let leader_value_prefix = "test_leader".to_string();
         let candidate_lease_ttl_secs = 5;
+        let store_key_prefix = rand::thread_rng().gen::<u64>().to_string();
         let mut handles = vec![];
         for i in 0..10 {
             let leader_value = format!("{}{}", leader_value_prefix, i);
-            let handle = tokio::spawn(candidate(leader_value, candidate_lease_ttl_secs));
+            let handle = tokio::spawn(candidate(
+                leader_value,
+                candidate_lease_ttl_secs,
+                store_key_prefix.clone(),
+            ));
             handles.push(handle);
         }
         // Wait for candidates to registrate themselves and renew their leases at least once.
         tokio::time::sleep(Duration::from_secs(3)).await;
 
         let client = create_postgres_client().await.unwrap();
-        let store_key_prefix = rand::thread_rng().gen::<u64>().to_string();
 
         let (tx, _) = broadcast::channel(100);
         let leader_value = "test_leader".to_string();
