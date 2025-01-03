@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::result::Result as StdResult;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -28,6 +29,7 @@ use common_error::ext::ErrorExt;
 use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
 use datatypes::value::column_data_to_json;
+use lazy_static::lazy_static;
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
 use pipeline::{GreptimeTransformer, PipelineVersion};
@@ -40,6 +42,7 @@ use crate::error::{
     status_code_to_http_status, CatalogSnafu, Error, InvalidParameterSnafu, ParseJsonSnafu,
     PipelineSnafu, Result, UnsupportedContentTypeSnafu,
 };
+use crate::http::header::CONTENT_TYPE_PROTOBUF_STR;
 use crate::http::result::greptime_manage_resp::GreptimedbManageResponse;
 use crate::http::result::greptime_result_v1::GreptimedbV1Response;
 use crate::http::HttpResponse;
@@ -52,6 +55,14 @@ use crate::query_handler::PipelineHandlerRef;
 
 const GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX: &str = "greptime_";
 const GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME: &str = "greptime_identity";
+
+lazy_static! {
+    pub static ref JSON_CONTENT_TYPE: ContentType = ContentType::json();
+    pub static ref TEXT_CONTENT_TYPE: ContentType = ContentType::text();
+    pub static ref TEXT_UTF8_CONTENT_TYPE: ContentType = ContentType::text_utf8();
+    pub static ref PB_CONTENT_TYPE: ContentType =
+        ContentType::from_str(CONTENT_TYPE_PROTOBUF_STR).unwrap();
+}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct LogIngesterQueryParams {
@@ -506,11 +517,11 @@ fn extract_pipeline_value_by_content_type(
     ignore_errors: bool,
 ) -> Result<Vec<Value>> {
     Ok(match content_type {
-        ct if ct == ContentType::json() => transform_ndjson_array_factory(
+        ct if ct == *JSON_CONTENT_TYPE => transform_ndjson_array_factory(
             Deserializer::from_str(&payload).into_iter(),
             ignore_errors,
         )?,
-        ct if ct == ContentType::text() || ct == ContentType::text_utf8() => payload
+        ct if ct == *TEXT_CONTENT_TYPE || ct == *TEXT_UTF8_CONTENT_TYPE => payload
             .lines()
             .filter(|line| !line.is_empty())
             .map(|line| Value::String(line.to_string()))
