@@ -1117,9 +1117,16 @@ mod tests {
             _ => panic!("Expected LeaderChangeMessage::StepDown"),
         }
 
+        // Clean up
         leader_pg_election
             .client
             .query(STEP_DOWN, &[])
+            .await
+            .unwrap();
+
+        leader_pg_election
+            .client
+            .query("DELETE FROM greptime_metakv", &[])
             .await
             .unwrap();
     }
@@ -1192,9 +1199,16 @@ mod tests {
             _ => panic!("Expected LeaderChangeMessage::StepDown"),
         }
 
+        // Clean up
         leader_pg_election
             .client
             .query(STEP_DOWN, &[])
+            .await
+            .unwrap();
+
+        leader_pg_election
+            .client
+            .query("DELETE FROM greptime_metakv", &[])
             .await
             .unwrap();
     }

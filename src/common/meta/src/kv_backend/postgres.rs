@@ -875,7 +875,15 @@ mod tests {
             test_txn_compare_equal(kv_backend_ref.clone()).await;
             test_txn_compare_greater(kv_backend_ref.clone()).await;
             test_txn_compare_less(kv_backend_ref.clone()).await;
-            test_txn_compare_not_equal(kv_backend_ref).await;
+            test_txn_compare_not_equal(kv_backend_ref.clone()).await;
+            // Clean up
+            kv_backend_ref
+                .get_client()
+                .await
+                .unwrap()
+                .execute("DELETE FROM greptime_metakv", &[])
+                .await
+                .unwrap();
         }
     }
 }
