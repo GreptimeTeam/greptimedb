@@ -56,6 +56,7 @@ fn make_alter_logical_table_add_column_task(
     let alter_table = alter_table
         .table_name(table.to_string())
         .add_columns(add_columns)
+        .add_if_not_exists(true)
         .build()
         .unwrap();
 

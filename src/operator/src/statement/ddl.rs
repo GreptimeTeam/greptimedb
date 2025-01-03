@@ -911,7 +911,7 @@ impl StatementExecutor {
 
         let _ = table_info
             .meta
-            .builder_with_alter_kind(table_name, &request.alter_kind, false)
+            .builder_with_alter_kind(table_name, &request.alter_kind)
             .context(error::TableSnafu)?
             .build()
             .context(error::BuildTableMetaSnafu { table_name })?;
