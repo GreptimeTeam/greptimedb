@@ -230,7 +230,8 @@ mod tests {
         });
 
         mock_reader.expect_bitmap_vec().returning(|range| {
-            assert_eq!(range, &[2..3]);
+            assert_eq!(range.len(), 1);
+            assert_eq!(range[0], 2..3);
             Ok(VecDeque::from([bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1, 0]]))
         });
         let output = applier
