@@ -742,7 +742,7 @@ impl Inserter {
     }
 
     /// Returns an alter table expression if it finds new columns in the request.
-    /// It always add columns if not exist.
+    /// It always adds columns if not exist.
     fn get_alter_table_expr_on_demand(
         &self,
         req: &RowInsertRequest,

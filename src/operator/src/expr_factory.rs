@@ -505,7 +505,7 @@ pub(crate) fn to_alter_table_expr(
                         .context(ExternalSnafu)?,
                 ),
                 location: location.as_ref().map(From::from),
-                // We don't support `IF NOT EXISTS` for `ADD COLUMN` yet.
+                // TODO(yingwen): We don't support `IF NOT EXISTS` for `ADD COLUMN` yet.
                 add_if_not_exists: false,
             }],
         }),
