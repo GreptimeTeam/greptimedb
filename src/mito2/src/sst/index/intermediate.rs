@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use futures::{AsyncRead, AsyncWrite};
 use index::error as index_error;
 use index::error::Result as IndexResult;
@@ -189,7 +189,8 @@ impl ExternalTempFileProvider for TempFileProvider {
 
         for entry in entries {
             if entry.metadata().is_dir() {
-                warn!("Unexpected entry in index creation dir: {:?}", entry.path());
+                // todo(hl): we can keep this warning once we find a way to filter self in list result.
+                debug!("Unexpected entry in index creation dir: {:?}", entry.path());
                 continue;
             }
 
