@@ -65,6 +65,7 @@ tonic.workspace = true
 tower.workspace = true
 typetag.workspace = true
 url = "2.3"
+uuid.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true

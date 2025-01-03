@@ -632,7 +632,6 @@ impl PgElection {
 mod tests {
     use std::env;
 
-    use rand::Rng;
     use tokio_postgres::{Client, NoTls};
 
     use super::*;
@@ -669,7 +668,7 @@ mod tests {
             is_leader: AtomicBool::new(false),
             leader_infancy: AtomicBool::new(true),
             leader_watcher: tx,
-            store_key_prefix: rand::thread_rng().gen::<u64>().to_string(),
+            store_key_prefix: uuid::Uuid::new_v4().to_string(),
             candidate_lease_ttl_secs: 10,
             lock_id: 28319,
         };
@@ -761,7 +760,7 @@ mod tests {
     async fn test_candidate_registration() {
         let leader_value_prefix = "test_leader".to_string();
         let candidate_lease_ttl_secs = 5;
-        let store_key_prefix = rand::thread_rng().gen::<u64>().to_string();
+        let store_key_prefix = uuid::Uuid::new_v4().to_string();
         let mut handles = vec![];
         for i in 0..10 {
             let leader_value = format!("{}{}", leader_value_prefix, i);
@@ -826,7 +825,7 @@ mod tests {
             is_leader: AtomicBool::new(false),
             leader_infancy: AtomicBool::new(true),
             leader_watcher: tx,
-            store_key_prefix: rand::thread_rng().gen::<u64>().to_string(),
+            store_key_prefix: uuid::Uuid::new_v4().to_string(),
             candidate_lease_ttl_secs,
             lock_id: 28320,
         };
@@ -924,7 +923,7 @@ mod tests {
     #[tokio::test]
     async fn test_leader_action() {
         let leader_value = "test_leader".to_string();
-        let store_key_prefix = rand::thread_rng().gen::<u64>().to_string();
+        let store_key_prefix = uuid::Uuid::new_v4().to_string();
         let candidate_lease_ttl_secs = 5;
         let client = create_postgres_client().await.unwrap();
 
@@ -1155,7 +1154,7 @@ mod tests {
     #[tokio::test]
     async fn test_follower_action() {
         let candidate_lease_ttl_secs = 5;
-        let store_key_prefix = rand::thread_rng().gen::<u64>().to_string();
+        let store_key_prefix = uuid::Uuid::new_v4().to_string();
 
         let follower_client = create_postgres_client().await.unwrap();
         let (tx, mut rx) = broadcast::channel(100);
