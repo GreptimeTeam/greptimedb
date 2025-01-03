@@ -179,7 +179,7 @@ async fn handle_json_req(
             .and_then(|label| label.as_object())
             .map(|l| {
                 l.iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
                     .collect::<BTreeMap<String, String>>()
             })
             .unwrap_or_default();
