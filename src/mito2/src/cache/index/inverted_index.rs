@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use core::ops::Range;
 use std::sync::Arc;
 
 use api::v1::index::InvertedIndexMetas;
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::future::try_join_all;
 use index::inverted_index::error::Result;
 use index::inverted_index::format::reader::InvertedIndexReader;
 use prost::Message;
@@ -88,6 +90,24 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
                 move |ranges| async move { inner.read_vec(&ranges).await },
             )
             .await
+    }
+
+    async fn read_vec(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+        let fetch = ranges.iter().map(|range| {
+            let inner = &self.inner;
+            self.cache.get_or_load(
+                self.file_id,
+                self.blob_size,
+                range.start,
+                (range.end - range.start) as u32,
+                move |ranges| async move { inner.read_vec(&ranges).await },
+            )
+        });
+        Ok(try_join_all(fetch)
+            .await?
+            .into_iter()
+            .map(Bytes::from)
+            .collect::<Vec<_>>())
     }
 
     async fn metadata(&self) -> Result<Arc<InvertedIndexMetas>> {
@@ -220,7 +240,7 @@ mod test {
             .unwrap();
 
         let reader = InvertedIndexBlobReader::new(range_reader);
-        let mut cached_reader = CachedInvertedIndexBlobReader::new(
+        let cached_reader = CachedInvertedIndexBlobReader::new(
             FileId::random(),
             file_size,
             reader,
@@ -304,7 +324,7 @@ mod test {
             let offset = rng.gen_range(0..file_size);
             let size = rng.gen_range(0..file_size as u32 - offset as u32);
             let expected = cached_reader.range_read(offset, size).await.unwrap();
-            let inner = &mut cached_reader.inner;
+            let inner = &cached_reader.inner;
             let read = cached_reader
                 .cache
                 .get_or_load(

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -56,8 +57,25 @@ pub trait InvertedIndexReader: Send + Sync {
         FstMap::new(fst_data).context(DecodeFstSnafu)
     }
 
+    async fn fst_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<FstMap>> {
+        self.read_vec(ranges)
+            .await?
+            .into_iter()
+            .map(|bytes| FstMap::new(bytes.to_vec()).context(DecodeFstSnafu))
+            .collect::<Result<Vec<_>>>()
+    }
+
     /// Retrieves the bitmap from the given offset and size.
     async fn bitmap(&self, offset: u64, size: u32) -> Result<BitVec> {
         self.range_read(offset, size).await.map(BitVec::from_vec)
+    }
+
+    async fn bitmap_vec(&mut self, ranges: &[Range<u64>]) -> Result<VecDeque<BitVec>> {
+        Ok(self
+            .read_vec(ranges)
+            .await?
+            .into_iter()
+            .map(|bytes| BitVec::from_slice(bytes.as_ref()))
+            .collect::<VecDeque<_>>())
     }
 }

@@ -23,7 +23,7 @@ use crate::inverted_index::format::reader::InvertedIndexReader;
 use crate::inverted_index::search::fst_apply::{
     FstApplier, IntersectionFstApplier, KeysFstApplier,
 };
-use crate::inverted_index::search::fst_values_mapper::FstValuesMapper;
+use crate::inverted_index::search::fst_values_mapper::ParallelFstValuesMapper;
 use crate::inverted_index::search::index_apply::{
     ApplyOutput, IndexApplier, IndexNotFoundStrategy, SearchContext,
 };
@@ -57,11 +57,10 @@ impl IndexApplier for PredicatesIndexApplier {
 
         let mut bitmap = Self::bitmap_full_range(&metadata);
         // TODO(zhongzc): optimize the order of applying to make it quicker to return empty.
-        for (name, fst_applier) in &self.fst_appliers {
-            if bitmap.count_ones() == 0 {
-                break;
-            }
+        let mut appliers = Vec::with_capacity(self.fst_appliers.len());
+        let mut fst_ranges = Vec::with_capacity(self.fst_appliers.len());
 
+        for (name, fst_applier) in &self.fst_appliers {
             let Some(meta) = metadata.metas.get(name) else {
                 match context.index_not_found_strategy {
                     IndexNotFoundStrategy::ReturnEmpty => {
@@ -75,14 +74,31 @@ impl IndexApplier for PredicatesIndexApplier {
                     }
                 }
             };
-
             let fst_offset = meta.base_offset + meta.relative_fst_offset as u64;
-            let fst_size = meta.fst_size;
-            let fst = reader.fst(fst_offset, fst_size).await?;
-            let values = fst_applier.apply(&fst);
+            let fst_size = meta.fst_size as u64;
+            appliers.push((fst_applier, meta));
+            fst_ranges.push(fst_offset..fst_offset + fst_size);
+        }
 
-            let mut mapper = FstValuesMapper::new(&mut *reader, meta);
-            let bm = mapper.map_values(&values).await?;
+        if fst_ranges.is_empty() {
+            output.matched_segment_ids = bitmap;
+            return Ok(output);
+        }
+
+        let fsts = reader.fst_vec(&fst_ranges).await?;
+        let value_and_meta_vec = fsts
+            .into_iter()
+            .zip(appliers)
+            .map(|(fst, (fst_applier, meta))| (fst_applier.apply(&fst), meta))
+            .collect::<Vec<_>>();
+
+        let mut mapper = ParallelFstValuesMapper::new(reader);
+        let bm_vec = mapper.map_values_vec(&value_and_meta_vec).await?;
+
+        for bm in bm_vec {
+            if bitmap.count_ones() == 0 {
+                break;
+            }
 
             bitmap &= bm;
         }
@@ -148,6 +164,7 @@ impl TryFrom<Vec<(String, Vec<Predicate>)>> for PredicatesIndexApplier {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::Arc;
 
     use common_base::bit_vec::prelude::*;
@@ -204,15 +221,18 @@ mod tests {
         mock_reader
             .expect_metadata()
             .returning(|| Ok(mock_metas([("tag-0", 0)])));
-        mock_reader.expect_fst().returning(|_offset, _size| {
-            Ok(FstMap::from_iter([(b"tag-0_value-0", fst_value(2, 1))]).unwrap())
+        mock_reader.expect_fst_vec().returning(|_ranges| {
+            Ok(vec![FstMap::from_iter([(
+                b"tag-0_value-0",
+                fst_value(2, 1),
+            )])
+            .unwrap()])
         });
-        mock_reader
-            .expect_bitmap()
-            .returning(|offset, size| match (offset, size) {
-                (2, 1) => Ok(bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1, 0]),
-                _ => unreachable!(),
-            });
+
+        mock_reader.expect_bitmap_vec().returning(|range| {
+            assert_eq!(range, &[2..3]);
+            Ok(VecDeque::from([bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1, 0]]))
+        });
         let output = applier
             .apply(SearchContext::default(), &mut mock_reader)
             .await
@@ -227,8 +247,12 @@ mod tests {
         mock_reader
             .expect_metadata()
             .returning(|| Ok(mock_metas([("tag-0", 0)])));
-        mock_reader.expect_fst().returning(|_offset, _size| {
-            Ok(FstMap::from_iter([(b"tag-0_value-1", fst_value(2, 1))]).unwrap())
+        mock_reader.expect_fst_vec().returning(|_range| {
+            Ok(vec![FstMap::from_iter([(
+                b"tag-0_value-1",
+                fst_value(2, 1),
+            )])
+            .unwrap()])
         });
         let output = applier
             .apply(SearchContext::default(), &mut mock_reader)
@@ -252,20 +276,33 @@ mod tests {
         mock_reader
             .expect_metadata()
             .returning(|| Ok(mock_metas([("tag-0", 0), ("tag-1", 1)])));
-        mock_reader
-            .expect_fst()
-            .returning(|offset, _size| match offset {
-                0 => Ok(FstMap::from_iter([(b"tag-0_value-0", fst_value(1, 1))]).unwrap()),
-                1 => Ok(FstMap::from_iter([(b"tag-1_value-a", fst_value(2, 1))]).unwrap()),
-                _ => unreachable!(),
-            });
-        mock_reader
-            .expect_bitmap()
-            .returning(|offset, size| match (offset, size) {
-                (1, 1) => Ok(bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1, 0]),
-                (2, 1) => Ok(bitvec![u8, Lsb0; 1, 1, 0, 1, 1, 0, 1, 1]),
-                _ => unreachable!(),
-            });
+        mock_reader.expect_fst_vec().returning(|ranges| {
+            let mut output = vec![];
+            for range in ranges {
+                match range.start {
+                    0 => output
+                        .push(FstMap::from_iter([(b"tag-0_value-0", fst_value(1, 1))]).unwrap()),
+                    1 => output
+                        .push(FstMap::from_iter([(b"tag-1_value-a", fst_value(2, 1))]).unwrap()),
+                    _ => unreachable!(),
+                }
+            }
+            Ok(output)
+        });
+        mock_reader.expect_bitmap_vec().returning(|ranges| {
+            let mut output = VecDeque::new();
+            for range in ranges {
+                let offset = range.start;
+                let size = range.end - range.start;
+                match (offset, size) {
+                    (1, 1) => output.push_back(bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1, 0]),
+                    (2, 1) => output.push_back(bitvec![u8, Lsb0; 1, 1, 0, 1, 1, 0, 1, 1]),
+                    _ => unreachable!(),
+                }
+            }
+
+            Ok(output)
+        });
 
         let output = applier
             .apply(SearchContext::default(), &mut mock_reader)

@@ -65,8 +65,66 @@ impl<'a> FstValuesMapper<'a> {
     }
 }
 
+pub struct ParallelFstValuesMapper<'a> {
+    reader: &'a mut dyn InvertedIndexReader,
+}
+
+impl<'a> ParallelFstValuesMapper<'a> {
+    pub fn new(reader: &'a mut dyn InvertedIndexReader) -> Self {
+        Self { reader }
+    }
+
+    pub async fn map_values_vec(
+        &mut self,
+        value_and_meta_vec: &[(Vec<u64>, &'a InvertedIndexMeta)],
+    ) -> Result<Vec<BitVec>> {
+        let groups = value_and_meta_vec
+            .iter()
+            .map(|(values, _)| values.len())
+            .collect::<Vec<_>>();
+        let len = groups.iter().sum::<usize>();
+        let mut fetch_ranges = Vec::with_capacity(len);
+
+        for (values, meta) in value_and_meta_vec {
+            for value in values {
+                let [relative_offset, size] = bytemuck::cast::<u64, [u32; 2]>(*value);
+                fetch_ranges.push(
+                    meta.base_offset + relative_offset as u64
+                        ..meta.base_offset + relative_offset as u64 + size as u64,
+                );
+            }
+        }
+
+        if fetch_ranges.is_empty() {
+            return Ok(vec![BitVec::new()]);
+        }
+
+        common_telemetry::debug!("fetch ranges: {:?}", fetch_ranges);
+        let mut bitmaps = self.reader.bitmap_vec(&fetch_ranges).await?;
+        let mut output = Vec::with_capacity(groups.len());
+
+        for counter in groups {
+            let mut bitmap = BitVec::new();
+            for _ in 0..counter {
+                let bm = bitmaps.pop_front().unwrap();
+                if bm.len() > bitmap.len() {
+                    bitmap = bm | bitmap
+                } else {
+                    bitmap |= bm
+                }
+            }
+
+            output.push(bitmap);
+        }
+
+        Ok(output)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use common_base::bit_vec::prelude::*;
 
     use super::*;
@@ -110,5 +168,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, bitvec![u8, Lsb0; 1, 1, 1, 1, 1, 1, 1, 1]);
+    }
+
+    #[tokio::test]
+    async fn test_map_values_vec() {
+        let mut mock_reader = MockInvertedIndexReader::new();
+        mock_reader.expect_bitmap_vec().returning(|ranges| {
+            let mut output = VecDeque::new();
+            for range in ranges {
+                let offset = range.start;
+                let size = range.end - range.start;
+                match (offset, size) {
+                    (1, 1) => output.push_back(bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1]),
+                    (2, 1) => output.push_back(bitvec![u8, Lsb0; 0, 1, 0, 1, 0, 1, 0, 1]),
+                    _ => unreachable!(),
+                }
+            }
+            Ok(output)
+        });
+
+        let meta = InvertedIndexMeta::default();
+        let mut values_mapper = ParallelFstValuesMapper::new(&mut mock_reader);
+
+        let result = values_mapper
+            .map_values_vec(&[(vec![], &meta)])
+            .await
+            .unwrap();
+        assert_eq!(result[0].count_ones(), 0);
+
+        let result = values_mapper
+            .map_values_vec(&[(vec![value(1, 1)], &meta)])
+            .await
+            .unwrap();
+        assert_eq!(result[0], bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1]);
+
+        let result = values_mapper
+            .map_values_vec(&[(vec![value(2, 1)], &meta)])
+            .await
+            .unwrap();
+        assert_eq!(result[0], bitvec![u8, Lsb0; 0, 1, 0, 1, 0, 1, 0, 1]);
+
+        let result = values_mapper
+            .map_values_vec(&[(vec![value(1, 1), value(2, 1)], &meta)])
+            .await
+            .unwrap();
+        assert_eq!(result[0], bitvec![u8, Lsb0; 1, 1, 1, 1, 1, 1, 1, 1]);
+
+        let result = values_mapper
+            .map_values_vec(&[(vec![value(2, 1), value(1, 1)], &meta)])
+            .await
+            .unwrap();
+        assert_eq!(result[0], bitvec![u8, Lsb0; 1, 1, 1, 1, 1, 1, 1, 1]);
     }
 }
