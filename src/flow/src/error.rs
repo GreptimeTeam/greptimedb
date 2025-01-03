@@ -32,6 +32,19 @@ use crate::expr::EvalError;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display(
+        "Failed to insert into flow: region_id={}, flow_ids={:?}",
+        region_id,
+        flow_ids
+    ))]
+    InsertIntoFlow {
+        region_id: u64,
+        flow_ids: Vec<u64>,
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Error encountered while creating flow: {sql}"))]
     CreateFlow {
         sql: String,
@@ -215,9 +228,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Self::Eval { .. } | Self::JoinTask { .. } | Self::Datafusion { .. } => {
-                StatusCode::Internal
-            }
+            Self::Eval { .. }
+            | Self::JoinTask { .. }
+            | Self::Datafusion { .. }
+            | Self::InsertIntoFlow { .. } => StatusCode::Internal,
             Self::FlowAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Self::TableNotFound { .. }
             | Self::TableNotFoundMeta { .. }

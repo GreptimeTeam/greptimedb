@@ -25,11 +25,11 @@ use common_meta::error::{ExternalSnafu, Result, UnexpectedSnafu};
 use common_meta::node_manager::Flownode;
 use common_telemetry::{debug, trace};
 use itertools::Itertools;
-use snafu::{OptionExt, ResultExt};
+use snafu::{IntoError, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
 use crate::adapter::{CreateFlowArgs, FlowWorkerManager};
-use crate::error::{CreateFlowSnafu, InternalSnafu};
+use crate::error::{CreateFlowSnafu, InsertIntoFlowSnafu, InternalSnafu};
 use crate::metrics::METRIC_FLOW_TASK_COUNT;
 use crate::repr::{self, DiffRow};
 
@@ -231,13 +231,29 @@ impl Flownode for FlowWorkerManager {
                 })
                 .map(|r| (r, now, 1))
                 .collect_vec();
-
-            self.handle_write_request(region_id.into(), rows, &table_types)
+            if let Err(err) = self
+                .handle_write_request(region_id.into(), rows, &table_types)
                 .await
-                .map_err(|err| {
-                    common_telemetry::error!(err;"Failed to handle write request");
-                    to_meta_err(snafu::location!())(err)
-                })?;
+            {
+                let err = BoxedError::new(err);
+                let flow_ids = self
+                    .node_context
+                    .read()
+                    .await
+                    .get_flow_ids(table_id)
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+                    .collect_vec();
+                let err = InsertIntoFlowSnafu {
+                    region_id,
+                    flow_ids,
+                }
+                .into_error(err);
+                common_telemetry::error!(err;"Failed to handle write request");
+                let err = to_meta_err(snafu::location!())(err);
+                return Err(err);
+            }
         }
         Ok(Default::default())
     }
