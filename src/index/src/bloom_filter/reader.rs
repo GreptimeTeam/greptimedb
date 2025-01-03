@@ -29,7 +29,7 @@ use crate::bloom_filter::{BloomFilterMeta, BloomFilterSegmentLocation, SEED};
 const BLOOM_META_LEN_SIZE: u64 = 4;
 
 /// Default prefetch size of bloom filter meta.
-pub const DEFAULT_PREFETCH_SIZE: u64 = 1024; // 1KiB
+pub const DEFAULT_PREFETCH_SIZE: u64 = 8192; // 8KiB
 
 /// `BloomFilterReader` reads the bloom filter from the file.
 #[async_trait]

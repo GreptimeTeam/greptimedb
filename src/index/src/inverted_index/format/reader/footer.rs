@@ -24,7 +24,7 @@ use crate::inverted_index::error::{
 };
 use crate::inverted_index::format::FOOTER_PAYLOAD_SIZE_SIZE;
 
-pub const DEFAULT_PREFETCH_SIZE: u64 = 1024; // 1KiB
+pub const DEFAULT_PREFETCH_SIZE: u64 = 8192; // 8KiB
 
 /// InvertedIndexFooterReader is for reading the footer section of the blob.
 pub struct InvertedIndexFooterReader<R> {
