@@ -29,7 +29,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
 use crate::adapter::{CreateFlowArgs, FlowWorkerManager};
-use crate::error::InternalSnafu;
+use crate::error::{CreateFlowSnafu, InternalSnafu};
 use crate::metrics::METRIC_FLOW_TASK_COUNT;
 use crate::repr::{self, DiffRow};
 
@@ -79,13 +79,15 @@ impl Flownode for FlowWorkerManager {
                     or_replace,
                     expire_after,
                     comment: Some(comment),
-                    sql,
+                    sql: sql.clone(),
                     flow_options,
                     query_ctx,
                 };
                 let ret = self
                     .create_flow(args)
                     .await
+                    .map_err(BoxedError::new)
+                    .with_context(|_| CreateFlowSnafu { sql: sql.clone() })
                     .map_err(to_meta_err(snafu::location!()))?;
                 METRIC_FLOW_TASK_COUNT.inc();
                 Ok(FlowResponse {

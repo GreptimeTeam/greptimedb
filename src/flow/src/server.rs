@@ -50,8 +50,8 @@ use tonic::{Request, Response, Status};
 
 use crate::adapter::{CreateFlowArgs, FlowWorkerManagerRef};
 use crate::error::{
-    to_status_with_last_err, CacheRequiredSnafu, ExternalSnafu, FlowNotFoundSnafu, ListFlowsSnafu,
-    ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
+    to_status_with_last_err, CacheRequiredSnafu, CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu,
+    ListFlowsSnafu, ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::metrics::{METRIC_FLOW_PROCESSING_TIME, METRIC_FLOW_ROWS};
@@ -392,7 +392,13 @@ impl FlownodeBuilder {
                         .build(),
                 ),
             };
-            manager.create_flow(args).await?;
+            manager
+                .create_flow(args)
+                .await
+                .map_err(BoxedError::new)
+                .with_context(|_| CreateFlowSnafu {
+                    sql: info.raw_sql().clone(),
+                })?;
         }
 
         Ok(cnt)
