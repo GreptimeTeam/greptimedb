@@ -32,7 +32,10 @@ use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId, RegionId};
 
 use crate::error::{self, Result};
-use crate::requests::{AddColumnRequest, AlterKind, ModifyColumnTypeRequest, TableOptions};
+use crate::requests::{
+    AddColumnRequest, AlterKind, ModifyColumnTypeRequest, SetIndexOptions, TableOptions,
+    UnsetIndexOptions,
+};
 
 pub type TableId = u32;
 pub type TableVersion = u64;
@@ -208,13 +211,28 @@ impl TableMeta {
             AlterKind::RenameTable { .. } => Ok(self.new_meta_builder()),
             AlterKind::SetTableOptions { options } => self.set_table_options(options),
             AlterKind::UnsetTableOptions { keys } => self.unset_table_options(keys),
-            AlterKind::SetColumnFulltext {
-                column_name,
-                options,
-            } => self.change_column_fulltext_options(table_name, column_name, true, Some(options)),
-            AlterKind::UnsetColumnFulltext { column_name } => {
-                self.change_column_fulltext_options(table_name, column_name, false, None)
-            }
+            AlterKind::SetIndex { options } => match options {
+                SetIndexOptions::Fulltext {
+                    column_name,
+                    options,
+                } => self.change_column_fulltext_options(
+                    table_name,
+                    column_name,
+                    true,
+                    Some(options),
+                ),
+                SetIndexOptions::Inverted { column_name } => {
+                    self.change_column_modify_inverted_index(table_name, column_name, true)
+                }
+            },
+            AlterKind::UnsetIndex { options } => match options {
+                UnsetIndexOptions::Fulltext { column_name } => {
+                    self.change_column_fulltext_options(table_name, column_name, false, None)
+                }
+                UnsetIndexOptions::Inverted { column_name } => {
+                    self.change_column_modify_inverted_index(table_name, column_name, false)
+                }
+            },
         }
     }
 
@@ -253,6 +271,66 @@ impl TableMeta {
     fn unset_table_options(&self, requests: &[UnsetRegionOption]) -> Result<TableMetaBuilder> {
         let requests = requests.iter().map(Into::into).collect::<Vec<_>>();
         self.set_table_options(&requests)
+    }
+
+    /// Creates a [TableMetaBuilder] with modified column inverted index.
+    fn change_column_modify_inverted_index(
+        &self,
+        table_name: &str,
+        column_name: &str,
+        value: bool,
+    ) -> Result<TableMetaBuilder> {
+        let table_schema = &self.schema;
+        let mut meta_builder = self.new_meta_builder();
+
+        let column = &table_schema
+            .column_schema_by_name(column_name)
+            .with_context(|| error::ColumnNotExistsSnafu {
+                column_name,
+                table_name,
+            })?;
+
+        ensure!(
+            column.data_type.is_string(),
+            error::InvalidColumnOptionSnafu {
+                column_name,
+                msg: "INVERTED index only supports string type",
+            }
+        );
+
+        let mut columns = Vec::with_capacity(table_schema.column_schemas().len());
+        for column_schema in table_schema.column_schemas() {
+            if column_schema.name == column_name {
+                let mut new_column_schema = column_schema.clone();
+                new_column_schema.update_inverted_index(value);
+                columns.push(new_column_schema);
+            } else {
+                columns.push(column_schema.clone());
+            }
+        }
+
+        // TODO(CookiePieWw): This part for all alter table operations is similar. We can refactor it.
+        let mut builder = SchemaBuilder::try_from_columns(columns)
+            .with_context(|_| error::SchemaBuildSnafu {
+                msg: format!("Failed to convert column schemas into schema for table {table_name}"),
+            })?
+            .version(table_schema.version() + 1);
+
+        for (k, v) in table_schema.metadata().iter() {
+            builder = builder.add_metadata(k, v);
+        }
+
+        let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
+            msg: format!(
+                "Table {table_name} cannot change fulltext options for column {column_name}",
+            ),
+        })?;
+
+        let _ = meta_builder
+            .schema(Arc::new(new_schema))
+            .primary_key_indices(self.primary_key_indices.clone());
+
+        Ok(meta_builder)
     }
 
     /// Creates a [TableMetaBuilder] with modified column fulltext options.
@@ -1526,9 +1604,11 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::SetColumnFulltext {
-            column_name: "col1".to_string(),
-            options: FulltextOptions::default(),
+        let alter_kind = AlterKind::SetIndex {
+            options: SetIndexOptions::Fulltext {
+                column_name: "col1".to_string(),
+                options: FulltextOptions::default(),
+            },
         };
         let err = meta
             .builder_with_alter_kind("my_table", &alter_kind, false)
@@ -1543,12 +1623,14 @@ mod tests {
         let new_meta = add_columns_to_meta_with_location(&meta);
         assert_eq!(meta.region_numbers, new_meta.region_numbers);
 
-        let alter_kind = AlterKind::SetColumnFulltext {
-            column_name: "my_tag_first".to_string(),
-            options: FulltextOptions {
-                enable: true,
-                analyzer: datatypes::schema::FulltextAnalyzer::Chinese,
-                case_sensitive: true,
+        let alter_kind = AlterKind::SetIndex {
+            options: SetIndexOptions::Fulltext {
+                column_name: "my_tag_first".to_string(),
+                options: FulltextOptions {
+                    enable: true,
+                    analyzer: datatypes::schema::FulltextAnalyzer::Chinese,
+                    case_sensitive: true,
+                },
             },
         };
         let new_meta = new_meta
@@ -1568,8 +1650,10 @@ mod tests {
         );
         assert!(fulltext_options.case_sensitive);
 
-        let alter_kind = AlterKind::UnsetColumnFulltext {
-            column_name: "my_tag_first".to_string(),
+        let alter_kind = AlterKind::UnsetIndex {
+            options: UnsetIndexOptions::Fulltext {
+                column_name: "my_tag_first".to_string(),
+            },
         };
         let new_meta = new_meta
             .builder_with_alter_kind("my_table", &alter_kind, false)

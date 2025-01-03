@@ -157,6 +157,19 @@ impl ColumnSchema {
         self
     }
 
+    pub fn update_inverted_index(&mut self, value: bool) {
+        match value {
+            true => {
+                self.metadata
+                    .insert(INVERTED_INDEX_KEY.to_string(), value.to_string());
+            }
+
+            false => {
+                self.metadata.remove(INVERTED_INDEX_KEY);
+            }
+        }
+    }
+
     pub fn is_inverted_indexed(&self) -> bool {
         self.metadata
             .get(INVERTED_INDEX_KEY)
