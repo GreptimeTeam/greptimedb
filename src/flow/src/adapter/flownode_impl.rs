@@ -203,9 +203,12 @@ impl Flownode for FlowWorkerManager {
                 let fetch_order: Vec<usize> = table_col_names
                     .iter()
                     .map(|col_name| {
-                        name_to_col.get(col_name).copied().context(UnexpectedSnafu {
-                            err_msg: format!("Column not found: {}", col_name),
-                        })
+                        name_to_col
+                            .get(col_name)
+                            .copied()
+                            .with_context(|| UnexpectedSnafu {
+                                err_msg: format!("Column not found: {}", col_name),
+                            })
                     })
                     .try_collect()?;
                 if !fetch_order.iter().enumerate().all(|(i, &v)| i == v) {
