@@ -64,9 +64,9 @@ use crate::metrics::{
 use crate::prom_store;
 use crate::query_handler::PipelineHandlerRef;
 
-const GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX: &str = "greptime_";
-const GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME: &str = "greptime_identity";
+pub const GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME: &str = "greptime_identity";
 
+const GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX: &str = "greptime_";
 const LOKI_TABLE_NAME: &str = "loki_logs";
 const LOKI_LINE_COLUMN: &str = "line";
 
@@ -695,7 +695,7 @@ fn extract_pipeline_value_by_content_type(
     })
 }
 
-async fn ingest_logs_inner(
+pub(crate) async fn ingest_logs_inner(
     state: PipelineHandlerRef,
     pipeline_name: String,
     version: PipelineVersion,
