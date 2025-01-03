@@ -514,6 +514,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid Loki JSON request: {}", msg))]
+    InvalidLokiPayload {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unsupported content type: {:?}", content_type))]
     UnsupportedContentType {
         content_type: ContentType,
@@ -660,6 +667,7 @@ impl ErrorExt for Error {
             | MysqlValueConversion { .. }
             | ParseJson { .. }
             | ParseJson5 { .. }
+            | InvalidLokiPayload { .. }
             | UnsupportedContentType { .. }
             | TimestampOverflow { .. }
             | OpenTelemetryLog { .. }
