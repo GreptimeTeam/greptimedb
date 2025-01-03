@@ -25,7 +25,9 @@ use crate::error::{
     CreatePostgresPoolSnafu, Error, GetPostgresConnectionSnafu, PostgresExecutionSnafu,
     PostgresTransactionSnafu, Result, StrFromUtf8Snafu,
 };
-use crate::kv_backend::txn::{Txn as KvTxn, TxnOp, TxnOpResponse, TxnResponse as KvTxnResponse};
+use crate::kv_backend::txn::{
+    Compare, Txn as KvTxn, TxnOp, TxnOpResponse, TxnResponse as KvTxnResponse,
+};
 use crate::kv_backend::{KvBackend, KvBackendRef, TxnService};
 use crate::metrics::METRIC_META_TXN_REQUEST;
 use crate::rpc::store::{
@@ -331,25 +333,6 @@ impl KvBackend for PgStore {
 }
 
 impl PgStore {
-    /// Point get with certain client. It's needed for a client with transaction.
-    async fn point_get_with_query_executor(
-        &self,
-        query_executor: &PgQueryExecutor<'_>,
-        key: &[u8],
-    ) -> Result<Option<Vec<u8>>> {
-        let key = process_bytes(key, "pointGetKey")?;
-        let res = query_executor.query(POINT_GET, &[&key]).await?;
-        match res.is_empty() {
-            true => Ok(None),
-            false => {
-                // Safety: We are sure that the row is not empty.
-                let row = res.first().unwrap();
-                let value: String = row.try_get(1).context(PostgresExecutionSnafu)?;
-                Ok(Some(value.into_bytes()))
-            }
-        }
-    }
-
     async fn range_with_query_executor(
         &self,
         query_executor: &PgQueryExecutor<'_>,
@@ -651,6 +634,31 @@ impl PgStore {
         }
     }
 
+    async fn execute_txn_cmp(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        cmp: &[Compare],
+    ) -> Result<bool> {
+        let batch_get_req = BatchGetRequest {
+            keys: cmp.iter().map(|c| c.key.clone()).collect(),
+        };
+        let res = self
+            .batch_get_with_query_executor(query_executor, batch_get_req)
+            .await?;
+        let res_map = res
+            .kvs
+            .into_iter()
+            .map(|kv| (kv.key, kv.value))
+            .collect::<std::collections::HashMap<Vec<u8>, Vec<u8>>>();
+        for c in cmp {
+            let value = res_map.get(&c.key);
+            if !c.compare_value(value) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     async fn execute_txn_op(
         &self,
         query_executor: &PgQueryExecutor<'_>,
@@ -707,7 +715,7 @@ impl TxnService for PgStore {
 
     async fn txn(&self, txn: KvTxn) -> Result<KvTxnResponse> {
         let _timer = METRIC_META_TXN_REQUEST
-            .with_label_values(&["etcd", "txn"])
+            .with_label_values(&["postgres", "txn"])
             .start_timer();
 
         let mut client = self.get_client().await?;
@@ -718,17 +726,7 @@ impl TxnService for PgStore {
         )?);
         let mut success = true;
         if txn.c_when {
-            for cmp in txn.req.compare {
-                let value = self
-                    .point_get_with_query_executor(&pg_txn, &cmp.key)
-                    .await?;
-                if cmp.compare_value(value.as_ref()) {
-                    success = true;
-                } else {
-                    success = false;
-                    break;
-                }
-            }
+            success = self.execute_txn_cmp(&pg_txn, &txn.req.compare).await?;
         }
         let mut responses = vec![];
         if success && txn.c_then {
