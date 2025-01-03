@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 use api::v1::flow::flow_request::Body as PbFlowRequest;
 use api::v1::flow::{CreateRequest, FlowRequest, FlowRequestHeader};
-use api::v1::ExpireAfter;
+use api::v1::{ExpireAfter, QueryContext};
 use async_trait::async_trait;
 use common_catalog::format_full_flow_name;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
@@ -35,9 +35,8 @@ use snafu::{ensure, ResultExt};
 use strum::AsRefStr;
 use table::metadata::TableId;
 
-use super::utils::add_peer_context_if_needed;
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::handle_retry_error;
+use crate::ddl::utils::{add_peer_context_if_needed, handle_retry_error};
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::instruction::{CacheIdent, CreateFlow};
@@ -47,7 +46,7 @@ use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId};
 use crate::lock_key::{CatalogLock, FlowNameLock, TableNameLock};
 use crate::peer::Peer;
-use crate::rpc::ddl::{CreateFlowTask, QueryContext};
+use crate::rpc::ddl::CreateFlowTask;
 use crate::{metrics, ClusterId};
 
 /// The procedure of flow creation.
@@ -187,7 +186,7 @@ impl CreateFlowProcedure {
             let request = FlowRequest {
                 header: Some(FlowRequestHeader {
                     tracing_context: TracingContext::from_current_span().to_w3c(),
-                    query_context: Some(self.data.query_context.clone().into()),
+                    query_context: Some(self.data.query_context.clone()),
                 }),
                 body: Some(PbFlowRequest::Create((&self.data).into())),
             };

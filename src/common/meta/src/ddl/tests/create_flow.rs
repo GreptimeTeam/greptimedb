@@ -64,8 +64,8 @@ async fn test_create_flow_source_table_not_found() {
     let task = test_create_flow_task("my_flow", source_table_names, sink_table_name, false);
     let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
     let ddl_context = new_ddl_context(node_manager);
-    let query_ctx = QueryContext::arc().into();
-    let mut procedure = CreateFlowProcedure::new(cluster_id, task, query_ctx, ddl_context);
+    let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+    let mut procedure = CreateFlowProcedure::new(cluster_id, task, query_ctx.into(), ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, error::Error::TableNotFound { .. });
 }
@@ -83,9 +83,13 @@ pub(crate) async fn create_test_flow(
         sink_table_name.clone(),
         false,
     );
-    let query_ctx = QueryContext::arc().into();
-    let mut procedure =
-        CreateFlowProcedure::new(cluster_id, task.clone(), query_ctx, ddl_context.clone());
+    let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+    let mut procedure = CreateFlowProcedure::new(
+        cluster_id,
+        task.clone(),
+        query_ctx.into(),
+        ddl_context.clone(),
+    );
     let output = execute_procedure_until_done(&mut procedure).await.unwrap();
     let flow_id = output.downcast_ref::<FlowId>().unwrap();
 
@@ -133,17 +137,22 @@ async fn test_create_flow() {
         sink_table_name.clone(),
         true,
     );
-    let query_ctx = QueryContext::arc().into();
-    let mut procedure =
-        CreateFlowProcedure::new(cluster_id, task.clone(), query_ctx, ddl_context.clone());
+    let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+    let mut procedure = CreateFlowProcedure::new(
+        cluster_id,
+        task.clone(),
+        query_ctx.into(),
+        ddl_context.clone(),
+    );
     let output = execute_procedure_until_done(&mut procedure).await.unwrap();
     let flow_id = output.downcast_ref::<FlowId>().unwrap();
     assert_eq!(*flow_id, 1024);
 
     // Creates again
     let task = test_create_flow_task("my_flow", source_table_names, sink_table_name, false);
-    let query_ctx = QueryContext::arc().into();
-    let mut procedure = CreateFlowProcedure::new(cluster_id, task.clone(), query_ctx, ddl_context);
+    let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+    let mut procedure =
+        CreateFlowProcedure::new(cluster_id, task.clone(), query_ctx.into(), ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, error::Error::FlowAlreadyExists { .. });
 }
