@@ -128,7 +128,11 @@ impl AggregateExpr {
         }
 
         if args.len() != 1 {
-            return not_impl_err!("Aggregated function with multiple arguments is not supported");
+            let fn_name = extensions.get(&f.function_reference).cloned();
+            return not_impl_err!(
+                "Aggregated function (name={:?}) with multiple arguments is not supported",
+                fn_name
+            );
         }
 
         let arg = if let Some(first) = args.first() {
