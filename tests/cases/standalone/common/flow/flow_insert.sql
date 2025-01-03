@@ -25,6 +25,7 @@ GROUP BY
 
 SHOW CREATE TABLE approx_rate;
 
+-- reordered insert
 INSERT INTO
     bytes_log (ts, byte) 
 VALUES
@@ -40,6 +41,7 @@ SELECT
 FROM
     approx_rate;
 
+-- reordered insert
 INSERT INTO
     bytes_log (ts, byte) 
 VALUES
@@ -55,6 +57,7 @@ SELECT
 FROM
     approx_rate;
 
+-- reordered insert
 INSERT INTO
     bytes_log (ts, byte) 
 VALUES
@@ -70,6 +73,7 @@ SELECT
 FROM
     approx_rate;
 
+-- reordered insert
 INSERT INTO
     bytes_log (ts, byte) 
 VALUES

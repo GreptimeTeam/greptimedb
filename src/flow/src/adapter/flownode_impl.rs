@@ -226,8 +226,8 @@ impl Flownode for FlowWorkerManager {
                 })
                 .map(|r| (r, now, 1))
                 .collect_vec();
-            let batch_datatypes = table_types;
-            self.handle_write_request(region_id.into(), rows, &batch_datatypes)
+
+            self.handle_write_request(region_id.into(), rows, &table_types)
                 .await
                 .map_err(|err| {
                     common_telemetry::error!(err;"Failed to handle write request");
