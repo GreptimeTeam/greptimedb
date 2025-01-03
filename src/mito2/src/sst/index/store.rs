@@ -19,7 +19,7 @@ use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes};
-use common_base::range_read::{Metadata, RangeReader};
+use common_base::range_read::{Metadata, RangeReader, SizeAwareRangeReader};
 use futures::{AsyncRead, AsyncSeek, AsyncWrite};
 use object_store::ObjectStore;
 use pin_project::pin_project;
@@ -266,13 +266,15 @@ pub(crate) struct InstrumentedRangeReader<'a> {
     file_size_hint: Option<u64>,
 }
 
-#[async_trait]
-impl RangeReader for InstrumentedRangeReader<'_> {
+impl SizeAwareRangeReader for InstrumentedRangeReader<'_> {
     fn with_file_size_hint(&mut self, file_size_hint: u64) {
         self.file_size_hint = Some(file_size_hint);
     }
+}
 
-    async fn metadata(&mut self) -> io::Result<Metadata> {
+#[async_trait]
+impl RangeReader for InstrumentedRangeReader<'_> {
+    async fn metadata(&self) -> io::Result<Metadata> {
         match self.file_size_hint {
             Some(file_size_hint) => Ok(Metadata {
                 content_length: file_size_hint,
@@ -286,18 +288,14 @@ impl RangeReader for InstrumentedRangeReader<'_> {
         }
     }
 
-    async fn read(&mut self, range: Range<u64>) -> io::Result<Bytes> {
+    async fn read(&self, range: Range<u64>) -> io::Result<Bytes> {
         let buf = self.store.reader(&self.path).await?.read(range).await?;
         self.read_byte_count.inc_by(buf.len() as _);
         self.read_count.inc_by(1);
         Ok(buf.to_bytes())
     }
 
-    async fn read_into(
-        &mut self,
-        range: Range<u64>,
-        buf: &mut (impl BufMut + Send),
-    ) -> io::Result<()> {
+    async fn read_into(&self, range: Range<u64>, buf: &mut (impl BufMut + Send)) -> io::Result<()> {
         let reader = self.store.reader(&self.path).await?;
         let size = reader.read_into(buf, range).await?;
         self.read_byte_count.inc_by(size as _);
@@ -305,7 +303,7 @@ impl RangeReader for InstrumentedRangeReader<'_> {
         Ok(())
     }
 
-    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> io::Result<Vec<Bytes>> {
+    async fn read_vec(&self, ranges: &[Range<u64>]) -> io::Result<Vec<Bytes>> {
         let bufs = self
             .store
             .reader(&self.path)

@@ -96,7 +96,7 @@ impl<R: RangeReader> BloomFilterReader for BloomFilterReaderImpl<R> {
         let file_size = metadata.content_length;
 
         let mut meta_reader =
-            BloomFilterMetaReader::new(&mut self.reader, file_size, Some(DEFAULT_PREFETCH_SIZE));
+            BloomFilterMetaReader::new(&self.reader, file_size, Some(DEFAULT_PREFETCH_SIZE));
         meta_reader.metadata().await
     }
 }

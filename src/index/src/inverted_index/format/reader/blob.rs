@@ -70,7 +70,7 @@ impl<R: RangeReader + Sync> InvertedIndexReader for InvertedIndexBlobReader<R> {
         let blob_size = metadata.content_length;
         Self::validate_blob_size(blob_size)?;
 
-        let mut footer_reader = InvertedIndexFooterReader::new(&mut self.source, blob_size)
+        let mut footer_reader = InvertedIndexFooterReader::new(&self.source, blob_size)
             .with_prefetch_size(DEFAULT_PREFETCH_SIZE);
         footer_reader.metadata().await.map(Arc::new)
     }

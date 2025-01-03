@@ -126,7 +126,7 @@ impl InvertedIndexApplier {
             index_not_found_strategy: IndexNotFoundStrategy::ReturnEmpty,
         };
 
-        let mut blob = match self.cached_blob_reader(file_id).await {
+        let blob = match self.cached_blob_reader(file_id).await {
             Ok(Some(puffin_reader)) => puffin_reader,
             other => {
                 if let Err(err) = other {
