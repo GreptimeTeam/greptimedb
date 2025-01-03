@@ -145,10 +145,8 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         info!(
-            "Try to alter region {} from version {} to {}",
-            region_id,
-            version.metadata.schema_version,
-            region.metadata().schema_version
+            "Try to alter region {}, version.metadata: {:?}, request: {:?}",
+            region_id, version.metadata, request,
         );
         self.handle_alter_region_metadata(region, version, request, sender);
     }

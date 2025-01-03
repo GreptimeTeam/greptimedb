@@ -105,7 +105,7 @@ impl AlterLogicalTablesProcedure {
                 .context(ConvertAlterTableRequestSnafu)?;
         let new_meta = table_info
             .meta
-            .builder_with_alter_kind(table_ref.table, &request.alter_kind, true)
+            .builder_with_alter_kind(table_ref.table, &request.alter_kind)
             .context(error::TableSnafu)?
             .build()
             .with_context(|_| error::BuildTableMetaSnafu {

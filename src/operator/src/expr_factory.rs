@@ -477,6 +477,7 @@ pub fn column_schemas_to_defs(
         .collect()
 }
 
+/// Converts a SQL alter table statement into a gRPC alter table expression.
 pub(crate) fn to_alter_table_expr(
     alter_table: AlterTable,
     query_ctx: &QueryContextRef,
@@ -504,6 +505,8 @@ pub(crate) fn to_alter_table_expr(
                         .context(ExternalSnafu)?,
                 ),
                 location: location.as_ref().map(From::from),
+                // TODO(yingwen): We don't support `IF NOT EXISTS` for `ADD COLUMN` yet.
+                add_if_not_exists: false,
             }],
         }),
         AlterTableOperation::ModifyColumnType {
