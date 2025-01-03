@@ -57,6 +57,7 @@ pub trait InvertedIndexReader: Send + Sync {
         FstMap::new(fst_data).context(DecodeFstSnafu)
     }
 
+    /// Retrieves the multiple finite state transducer (FST) maps from the given ranges.
     async fn fst_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<FstMap>> {
         self.read_vec(ranges)
             .await?
@@ -70,6 +71,7 @@ pub trait InvertedIndexReader: Send + Sync {
         self.range_read(offset, size).await.map(BitVec::from_vec)
     }
 
+    /// Retrieves the multiple bitmaps from the given ranges.
     async fn bitmap_vec(&mut self, ranges: &[Range<u64>]) -> Result<VecDeque<BitVec>> {
         Ok(self
             .read_vec(ranges)
