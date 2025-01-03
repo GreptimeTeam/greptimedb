@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -99,6 +100,11 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
             )
             .await
             .map(|b| b.into())
+    }
+
+    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+        // TODO(zhongzc): wait for #5276 to make it utilize cache.
+        Ok(self.inner.read_vec(ranges).await?)
     }
 
     /// Reads the meta information of the bloom filter.
