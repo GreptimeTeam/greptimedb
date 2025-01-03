@@ -77,8 +77,8 @@ impl<R> CachedInvertedIndexBlobReader<R> {
 
 #[async_trait]
 impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobReader<R> {
-    async fn range_read(&mut self, offset: u64, size: u32) -> Result<Vec<u8>> {
-        let inner = &mut self.inner;
+    async fn range_read(&self, offset: u64, size: u32) -> Result<Vec<u8>> {
+        let inner = &self.inner;
         self.cache
             .get_or_load(
                 self.file_id,
@@ -90,7 +90,7 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
             .await
     }
 
-    async fn metadata(&mut self) -> Result<Arc<InvertedIndexMetas>> {
+    async fn metadata(&self) -> Result<Arc<InvertedIndexMetas>> {
         if let Some(cached) = self.cache.get_metadata(self.file_id) {
             CACHE_HIT.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             Ok(cached)
