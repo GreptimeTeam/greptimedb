@@ -573,9 +573,9 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .is_some_and(|err| err.eq_ignore_ascii_case("Table not found: greptime.public.up")));
 
     // label values
-    // fetch all values for label `instance`
+    // fetch all values for label `host`
     let res = client
-        .get("/v1/prometheus/api/v1/label/instance/values")
+        .get("/v1/prometheus/api/v1/label/host/values")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
