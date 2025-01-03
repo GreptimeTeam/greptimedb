@@ -35,9 +35,22 @@ data = {
     "bigint_other": [5, -5, 1, 5, 5],
     "utf8_increase": ["a", "bb", "ccc", "dddd", "eeeee"],
     "utf8_decrease": ["eeeee", "dddd", "ccc", "bb", "a"],
-    "timestamp_simple": [datetime.datetime(2023, 4, 1, 20, 15, 30, 2000), datetime.datetime.fromtimestamp(int('1629617204525777000')/1000000000), datetime.datetime(2023, 1, 1), datetime.datetime(2023, 2, 1), datetime.datetime(2023, 3, 1)],
-    "date_simple": [datetime.date(2023, 4, 1), datetime.date(2023, 3, 1), datetime.date(2023, 1, 1), datetime.date(2023, 2, 1), datetime.date(2023, 3, 1)]
+    "timestamp_simple": [
+        datetime.datetime(2023, 4, 1, 20, 15, 30, 2000),
+        datetime.datetime.fromtimestamp(int("1629617204525777000") / 1000000000),
+        datetime.datetime(2023, 1, 1),
+        datetime.datetime(2023, 2, 1),
+        datetime.datetime(2023, 3, 1),
+    ],
+    "date_simple": [
+        datetime.date(2023, 4, 1),
+        datetime.date(2023, 3, 1),
+        datetime.date(2023, 1, 1),
+        datetime.date(2023, 2, 1),
+        datetime.date(2023, 3, 1),
+    ],
 }
+
 
 def infer_schema(data):
     schema = "struct<"
@@ -56,7 +69,7 @@ def infer_schema(data):
         elif key.startswith("date"):
             dt = "date"
         else:
-            print(key,value,dt)
+            print(key, value, dt)
             raise NotImplementedError
         if key.startswith("double"):
             dt = "double"
@@ -66,7 +79,6 @@ def infer_schema(data):
 
     schema = schema[:-1] + ">"
     return schema
-
 
 
 def _write(
