@@ -250,7 +250,7 @@ impl Flownode for FlowWorkerManager {
                     flow_ids,
                 }
                 .into_error(err);
-                common_telemetry::error!(err;"Failed to handle write request");
+                common_telemetry::error!(err; "Failed to handle write request");
                 let err = to_meta_err(snafu::location!())(err);
                 return Err(err);
             }
