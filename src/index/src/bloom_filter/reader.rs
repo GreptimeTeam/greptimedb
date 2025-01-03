@@ -33,12 +33,12 @@ pub const DEFAULT_PREFETCH_SIZE: u64 = 1024; // 1KiB
 
 /// `BloomFilterReader` reads the bloom filter from the file.
 #[async_trait]
-pub trait BloomFilterReader {
+pub trait BloomFilterReader: Sync {
     /// Reads range of bytes from the file.
-    async fn range_read(&mut self, offset: u64, size: u32) -> Result<Bytes>;
+    async fn range_read(&self, offset: u64, size: u32) -> Result<Bytes>;
 
     /// Reads bunch of ranges from the file.
-    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+    async fn read_vec(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
         let mut results = Vec::with_capacity(ranges.len());
         for range in ranges {
             let size = (range.end - range.start) as u32;
@@ -49,10 +49,10 @@ pub trait BloomFilterReader {
     }
 
     /// Reads the meta information of the bloom filter.
-    async fn metadata(&mut self) -> Result<BloomFilterMeta>;
+    async fn metadata(&self) -> Result<BloomFilterMeta>;
 
     /// Reads a bloom filter with the given location.
-    async fn bloom_filter(&mut self, loc: &BloomFilterSegmentLocation) -> Result<BloomFilter> {
+    async fn bloom_filter(&self, loc: &BloomFilterSegmentLocation) -> Result<BloomFilter> {
         let bytes = self.range_read(loc.offset, loc.size as _).await?;
         let vec = bytes
             .chunks_exact(std::mem::size_of::<u64>())
@@ -80,18 +80,18 @@ impl<R: RangeReader> BloomFilterReaderImpl<R> {
 
 #[async_trait]
 impl<R: RangeReader> BloomFilterReader for BloomFilterReaderImpl<R> {
-    async fn range_read(&mut self, offset: u64, size: u32) -> Result<Bytes> {
+    async fn range_read(&self, offset: u64, size: u32) -> Result<Bytes> {
         self.reader
             .read(offset..offset + size as u64)
             .await
             .context(IoSnafu)
     }
 
-    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+    async fn read_vec(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
         self.reader.read_vec(ranges).await.context(IoSnafu)
     }
 
-    async fn metadata(&mut self) -> Result<BloomFilterMeta> {
+    async fn metadata(&self) -> Result<BloomFilterMeta> {
         let metadata = self.reader.metadata().await.context(IoSnafu)?;
         let file_size = metadata.content_length;
 
@@ -250,7 +250,7 @@ mod tests {
     async fn test_bloom_filter_reader() {
         let bytes = mock_bloom_filter_bytes().await;
 
-        let mut reader = BloomFilterReaderImpl::new(bytes);
+        let reader = BloomFilterReaderImpl::new(bytes);
         let meta = reader.metadata().await.unwrap();
 
         assert_eq!(meta.bloom_filter_segments.len(), 2);
