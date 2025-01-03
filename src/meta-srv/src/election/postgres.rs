@@ -632,6 +632,7 @@ impl PgElection {
 mod tests {
     use std::env;
 
+    use rand::Rng;
     use tokio_postgres::{Client, NoTls};
 
     use super::*;
@@ -668,7 +669,7 @@ mod tests {
             is_leader: AtomicBool::new(false),
             leader_infancy: AtomicBool::new(true),
             leader_watcher: tx,
-            store_key_prefix: "test_prefix".to_string(),
+            store_key_prefix: rand::thread_rng().gen::<u64>().to_string(),
             candidate_lease_ttl_secs: 10,
             lock_id: 28319,
         };
@@ -738,7 +739,7 @@ mod tests {
             is_leader: AtomicBool::new(false),
             leader_infancy: AtomicBool::new(true),
             leader_watcher: tx,
-            store_key_prefix: "test_prefix".to_string(),
+            store_key_prefix: rand::thread_rng().gen::<u64>().to_string(),
             candidate_lease_ttl_secs,
             lock_id: 28319,
         };
@@ -766,6 +767,7 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(3)).await;
 
         let client = create_postgres_client().await.unwrap();
+        let store_key_prefix = rand::thread_rng().gen::<u64>().to_string();
 
         let (tx, _) = broadcast::channel(100);
         let leader_value = "test_leader".to_string();
@@ -775,7 +777,7 @@ mod tests {
             is_leader: AtomicBool::new(false),
             leader_infancy: AtomicBool::new(true),
             leader_watcher: tx,
-            store_key_prefix: "test_prefix".to_string(),
+            store_key_prefix: store_key_prefix.clone(),
             candidate_lease_ttl_secs,
             lock_id: 28319,
         };
@@ -796,7 +798,7 @@ mod tests {
         for i in 0..10 {
             let key = format!(
                 "{}{}{}{}",
-                "test_prefix", CANDIDATES_ROOT, leader_value_prefix, i
+                store_key_prefix, CANDIDATES_ROOT, leader_value_prefix, i
             );
             let res = pg_election.delete_value(&key).await.unwrap();
             assert!(res);
@@ -816,7 +818,7 @@ mod tests {
             is_leader: AtomicBool::new(false),
             leader_infancy: AtomicBool::new(true),
             leader_watcher: tx,
-            store_key_prefix: "test_prefix".to_string(),
+            store_key_prefix: rand::thread_rng().gen::<u64>().to_string(),
             candidate_lease_ttl_secs,
             lock_id: 28320,
         };
@@ -914,6 +916,7 @@ mod tests {
     #[tokio::test]
     async fn test_leader_action() {
         let leader_value = "test_leader".to_string();
+        let store_key_prefix = rand::thread_rng().gen::<u64>().to_string();
         let candidate_lease_ttl_secs = 5;
         let client = create_postgres_client().await.unwrap();
 
@@ -924,7 +927,7 @@ mod tests {
             is_leader: AtomicBool::new(false),
             leader_infancy: AtomicBool::new(true),
             leader_watcher: tx,
-            store_key_prefix: "test_prefix".to_string(),
+            store_key_prefix,
             candidate_lease_ttl_secs,
             lock_id: 28321,
         };
@@ -1139,17 +1142,12 @@ mod tests {
             .query(&step_down_sql(leader_pg_election.lock_id), &[])
             .await
             .unwrap();
-
-        leader_pg_election
-            .client
-            .query("DELETE FROM greptime_metakv", &[])
-            .await
-            .unwrap();
     }
 
     #[tokio::test]
     async fn test_follower_action() {
         let candidate_lease_ttl_secs = 5;
+        let store_key_prefix = rand::thread_rng().gen::<u64>().to_string();
 
         let follower_client = create_postgres_client().await.unwrap();
         let (tx, mut rx) = broadcast::channel(100);
@@ -1159,7 +1157,7 @@ mod tests {
             is_leader: AtomicBool::new(false),
             leader_infancy: AtomicBool::new(true),
             leader_watcher: tx,
-            store_key_prefix: "test_prefix".to_string(),
+            store_key_prefix: store_key_prefix.clone(),
             candidate_lease_ttl_secs,
             lock_id: 28322,
         };
@@ -1172,7 +1170,7 @@ mod tests {
             is_leader: AtomicBool::new(false),
             leader_infancy: AtomicBool::new(true),
             leader_watcher: tx,
-            store_key_prefix: "test_prefix".to_string(),
+            store_key_prefix,
             candidate_lease_ttl_secs,
             lock_id: 28322,
         };
@@ -1221,12 +1219,6 @@ mod tests {
         leader_pg_election
             .client
             .query(&step_down_sql(leader_pg_election.lock_id), &[])
-            .await
-            .unwrap();
-
-        leader_pg_election
-            .client
-            .query("DELETE FROM greptime_metakv", &[])
             .await
             .unwrap();
     }
