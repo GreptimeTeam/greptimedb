@@ -1116,6 +1116,12 @@ mod tests {
             }
             _ => panic!("Expected LeaderChangeMessage::StepDown"),
         }
+
+        leader_pg_election
+            .client
+            .query(STEP_DOWN, &[])
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1185,5 +1191,11 @@ mod tests {
             }
             _ => panic!("Expected LeaderChangeMessage::StepDown"),
         }
+
+        leader_pg_election
+            .client
+            .query(STEP_DOWN, &[])
+            .await
+            .unwrap();
     }
 }

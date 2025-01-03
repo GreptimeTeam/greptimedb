@@ -341,7 +341,12 @@ impl PgStore {
         let res = query_executor.query(POINT_GET, &[&key]).await?;
         match res.is_empty() {
             true => Ok(None),
-            false => Ok(Some(res[0].get::<_, Vec<u8>>(1))),
+            false => {
+                // Safety: We are sure that the row is not empty.
+                let row = res.first().unwrap();
+                let value: String = row.try_get(1).context(PostgresExecutionSnafu)?;
+                Ok(Some(value.into_bytes()))
+            }
         }
     }
 
@@ -769,6 +774,8 @@ mod tests {
         prepare_kv_with_prefix, test_kv_batch_delete_with_prefix, test_kv_batch_get_with_prefix,
         test_kv_compare_and_put_with_prefix, test_kv_delete_range_with_prefix,
         test_kv_put_with_prefix, test_kv_range_2_with_prefix, test_kv_range_with_prefix,
+        test_txn_compare_equal, test_txn_compare_greater, test_txn_compare_less,
+        test_txn_compare_not_equal, test_txn_one_compare_op, text_txn_multi_compare_op,
         unprepare_kv,
     };
 
@@ -856,6 +863,19 @@ mod tests {
             let prefix = b"batchDelete/";
             prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
             test_kv_batch_delete_with_prefix(kv_backend, prefix.to_vec()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pg_txn() {
+        if let Some(kv_backend) = build_pg_kv_backend().await {
+            let kv_backend_ref = Arc::new(kv_backend);
+            test_txn_one_compare_op(kv_backend_ref.clone()).await;
+            text_txn_multi_compare_op(kv_backend_ref.clone()).await;
+            test_txn_compare_equal(kv_backend_ref.clone()).await;
+            test_txn_compare_greater(kv_backend_ref.clone()).await;
+            test_txn_compare_less(kv_backend_ref.clone()).await;
+            test_txn_compare_not_equal(kv_backend_ref).await;
         }
     }
 }
