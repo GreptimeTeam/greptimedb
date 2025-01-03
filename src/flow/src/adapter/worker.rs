@@ -247,15 +247,25 @@ impl<'s> Worker<'s> {
         src_recvs: Vec<broadcast::Receiver<Batch>>,
         // TODO(discord9): set expire duration for all arrangement and compare to sys timestamp instead
         expire_after: Option<repr::Duration>,
+        or_replace: bool,
         create_if_not_exists: bool,
         err_collector: ErrCollector,
     ) -> Result<Option<FlowId>, Error> {
-        let already_exists = self.task_states.contains_key(&flow_id);
-        match (already_exists, create_if_not_exists) {
-            (true, true) => return Ok(None),
-            (true, false) => FlowAlreadyExistSnafu { id: flow_id }.fail()?,
-            (false, _) => (),
-        };
+        let already_exist = self.task_states.contains_key(&flow_id);
+        match (create_if_not_exists, or_replace, already_exist) {
+            // if replace, ignore that old flow exists
+            (_, true, true) => {
+                info!("Replacing flow with id={}", flow_id);
+            }
+            (false, false, true) => FlowAlreadyExistSnafu { id: flow_id }.fail()?,
+            // already exists, and not replace, return None
+            (true, false, true) => {
+                info!("Flow with id={} already exists, do nothing", flow_id);
+                return Ok(None);
+            }
+            // continue as normal
+            (_, _, false) => (),
+        }
 
         let mut cur_task_state = ActiveDataflowState::<'s> {
             err_collector,
@@ -341,6 +351,7 @@ impl<'s> Worker<'s> {
                 source_ids,
                 src_recvs,
                 expire_after,
+                or_replace,
                 create_if_not_exists,
                 err_collector,
             } => {
@@ -352,6 +363,7 @@ impl<'s> Worker<'s> {
                     &source_ids,
                     src_recvs,
                     expire_after,
+                    or_replace,
                     create_if_not_exists,
                     err_collector,
                 );
@@ -398,6 +410,7 @@ pub enum Request {
         source_ids: Vec<GlobalId>,
         src_recvs: Vec<broadcast::Receiver<Batch>>,
         expire_after: Option<repr::Duration>,
+        or_replace: bool,
         create_if_not_exists: bool,
         err_collector: ErrCollector,
     },
@@ -547,6 +560,7 @@ mod test {
             source_ids: src_ids,
             src_recvs: vec![rx],
             expire_after: None,
+            or_replace: false,
             create_if_not_exists: true,
             err_collector: ErrCollector::default(),
         };

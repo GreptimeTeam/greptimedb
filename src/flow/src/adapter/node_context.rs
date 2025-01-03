@@ -71,6 +71,10 @@ impl FlownodeContext {
             query_context: Default::default(),
         }
     }
+
+    pub fn get_flow_ids(&self, table_id: TableId) -> Option<&BTreeSet<FlowId>> {
+        self.source_to_tasks.get(&table_id)
+    }
 }
 
 /// a simple broadcast sender with backpressure, bounded capacity and blocking on send when send buf is full
