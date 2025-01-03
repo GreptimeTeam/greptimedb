@@ -804,70 +804,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_put() {
+    async fn test_pg_crud() {
         if let Some(kv_backend) = build_pg_kv_backend().await {
             let prefix = b"put/";
             prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
             test_kv_put_with_prefix(&kv_backend, prefix.to_vec()).await;
             unprepare_kv(&kv_backend, prefix).await;
-        }
-    }
 
-    #[tokio::test]
-    async fn test_range() {
-        if let Some(kv_backend) = build_pg_kv_backend().await {
             let prefix = b"range/";
             prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
             test_kv_range_with_prefix(&kv_backend, prefix.to_vec()).await;
             unprepare_kv(&kv_backend, prefix).await;
-        }
-    }
 
-    #[tokio::test]
-    async fn test_range_2() {
-        if let Some(kv_backend) = build_pg_kv_backend().await {
-            test_kv_range_2_with_prefix(kv_backend, b"range2/".to_vec()).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn test_batch_get() {
-        if let Some(kv_backend) = build_pg_kv_backend().await {
             let prefix = b"batchGet/";
             prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
             test_kv_batch_get_with_prefix(&kv_backend, prefix.to_vec()).await;
             unprepare_kv(&kv_backend, prefix).await;
-        }
-    }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_compare_and_put() {
-        if let Some(kv_backend) = build_pg_kv_backend().await {
-            let kv_backend = Arc::new(kv_backend);
-            test_kv_compare_and_put_with_prefix(kv_backend, b"compareAndPut/".to_vec()).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn test_delete_range() {
-        if let Some(kv_backend) = build_pg_kv_backend().await {
             let prefix = b"deleteRange/";
             prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
             test_kv_delete_range_with_prefix(kv_backend, prefix.to_vec()).await;
         }
-    }
 
-    #[tokio::test]
-    async fn test_batch_delete() {
+        if let Some(kv_backend) = build_pg_kv_backend().await {
+            test_kv_range_2_with_prefix(kv_backend, b"range2/".to_vec()).await;
+        }
+
+        if let Some(kv_backend) = build_pg_kv_backend().await {
+            let kv_backend = Arc::new(kv_backend);
+            test_kv_compare_and_put_with_prefix(kv_backend, b"compareAndPut/".to_vec()).await;
+        }
+
         if let Some(kv_backend) = build_pg_kv_backend().await {
             let prefix = b"batchDelete/";
             prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
             test_kv_batch_delete_with_prefix(kv_backend, prefix.to_vec()).await;
         }
-    }
 
-    #[tokio::test]
-    async fn test_pg_txn() {
         if let Some(kv_backend) = build_pg_kv_backend().await {
             let kv_backend_ref = Arc::new(kv_backend);
             test_txn_one_compare_op(kv_backend_ref.clone()).await;
