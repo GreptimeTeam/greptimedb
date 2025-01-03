@@ -216,7 +216,7 @@ async fn handle_json_req(
             // TODO(shuiyisong): we'll ignore structured metadata for now
 
             let mut row = init_row(schemas.len(), ts, line_text);
-            process_lables(
+            process_labels(
                 &mut global_label_key_index,
                 schemas,
                 &mut row,
@@ -264,7 +264,7 @@ async fn handle_pb_req(
             let line = entry.line;
 
             let mut row = init_row(schemas.len(), prost_ts_to_nano(&ts), line);
-            process_lables(
+            process_labels(
                 &mut global_label_key_index,
                 schemas,
                 &mut row,
@@ -299,7 +299,7 @@ fn init_row(schema_len: usize, ts: i64, line: String) -> Vec<GreptimeValue> {
     row
 }
 
-fn process_lables<'a>(
+fn process_labels<'a>(
     global_label_key_index: &mut HashMap<String, u16>,
     schemas: &mut Vec<ColumnSchema>,
     row: &mut Vec<GreptimeValue>,
