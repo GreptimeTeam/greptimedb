@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -26,9 +25,8 @@ use crate::error::{
     DecodeOtlpRequestSnafu, InvalidLokiPayloadSnafu, ParseJson5Snafu, ParseJsonSnafu, Result,
     UnsupportedContentTypeSnafu,
 };
-use crate::http::event::LogState;
+use crate::http::event::{LogState, JSON_CONTENT_TYPE, PB_CONTENT_TYPE};
 use crate::http::extractor::LogTableName;
-use crate::http::header::CONTENT_TYPE_PROTOBUF_STR;
 use crate::http::result::greptime_result_v1::GreptimedbV1Response;
 use crate::http::HttpResponse;
 use crate::metrics::{
@@ -45,8 +43,6 @@ const LABEL_KEY: &str = "stream";
 const LINES_KEY: &str = "values";
 
 lazy_static! {
-    static ref PB_CONTENT_TYPE: ContentType =
-        ContentType::from_str(CONTENT_TYPE_PROTOBUF_STR).unwrap();
     static ref LOKI_INIT_SCHEMAS: Vec<ColumnSchema> = vec![
         ColumnSchema {
             column_name: GREPTIME_TIMESTAMP.to_string(),
@@ -84,7 +80,7 @@ pub async fn loki_ingest(
     let mut schemas = LOKI_INIT_SCHEMAS.clone();
 
     let mut rows = match content_type {
-        x if x == ContentType::json() => handle_json_req(bytes, &mut schemas).await,
+        x if x == *JSON_CONTENT_TYPE => handle_json_req(bytes, &mut schemas).await,
         x if x == *PB_CONTENT_TYPE => handle_pb_req(bytes, &mut schemas).await,
         _ => UnsupportedContentTypeSnafu { content_type }.fail(),
     }?;
@@ -192,7 +188,7 @@ async fn handle_json_req(
                 stream_index,
                 line_index
             );
-            if line.len() <= 2 {
+            if line.len() < 2 {
                 warn!(
                     "line on stream {} index {} is too short",
                     stream_index, line_index
