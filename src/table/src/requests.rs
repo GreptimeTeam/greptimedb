@@ -185,6 +185,8 @@ pub struct AddColumnRequest {
     pub column_schema: ColumnSchema,
     pub is_key: bool,
     pub location: Option<AddColumnLocation>,
+    /// Add column if not exists.
+    pub add_if_not_exists: bool,
 }
 
 /// Change column datatype request

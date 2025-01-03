@@ -299,6 +299,7 @@ mod tests {
                 .unwrap()
             )
         );
+        assert!(host_column.add_if_not_exists);
 
         let memory_column = &add_columns.add_columns[1];
         assert_eq!(
@@ -311,6 +312,7 @@ mod tests {
                 .unwrap()
             )
         );
+        assert!(host_column.add_if_not_exists);
 
         let time_column = &add_columns.add_columns[2];
         assert_eq!(
@@ -323,6 +325,7 @@ mod tests {
                 .unwrap()
             )
         );
+        assert!(host_column.add_if_not_exists);
 
         let interval_column = &add_columns.add_columns[3];
         assert_eq!(
@@ -335,6 +338,7 @@ mod tests {
                 .unwrap()
             )
         );
+        assert!(host_column.add_if_not_exists);
 
         let decimal_column = &add_columns.add_columns[4];
         assert_eq!(
@@ -352,6 +356,7 @@ mod tests {
                 .unwrap()
             )
         );
+        assert!(host_column.add_if_not_exists);
     }
 
     #[test]

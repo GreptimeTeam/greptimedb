@@ -139,7 +139,7 @@ async fn test_on_submit_alter_request() {
             table_name: table_name.to_string(),
             kind: Some(Kind::DropColumns(DropColumns {
                 drop_columns: vec![DropColumn {
-                    name: "my_field_column".to_string(),
+                    name: "cpu".to_string(),
                 }],
             })),
         },
@@ -225,7 +225,7 @@ async fn test_on_submit_alter_request_with_outdated_request() {
             table_name: table_name.to_string(),
             kind: Some(Kind::DropColumns(DropColumns {
                 drop_columns: vec![DropColumn {
-                    name: "my_field_column".to_string(),
+                    name: "cpu".to_string(),
                 }],
             })),
         },
@@ -330,6 +330,7 @@ async fn test_on_update_metadata_add_columns() {
                         ..Default::default()
                     }),
                     location: None,
+                    add_if_not_exists: false,
                 }],
             })),
         },
