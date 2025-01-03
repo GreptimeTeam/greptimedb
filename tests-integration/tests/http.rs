@@ -573,20 +573,18 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .is_some_and(|err| err.eq_ignore_ascii_case("Table not found: greptime.public.up")));
 
     // label values
-    // should return error if there is no match[]
+    // fetch all values for label `instance`
     let res = client
         .get("/v1/prometheus/api/v1/label/instance/values")
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-    let prom_resp = res.json::<PrometheusJsonResponse>().await;
-    assert_eq!(prom_resp.status, "error");
-    assert!(prom_resp
-        .error
-        .is_some_and(|err| err.eq_ignore_ascii_case("match[] parameter is required")));
-    assert!(prom_resp
-        .error_type
-        .is_some_and(|err| err.eq_ignore_ascii_case("InvalidArguments")));
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["host1", "host2"])).unwrap()
+    );
 
     // single match[]
     let res = client
