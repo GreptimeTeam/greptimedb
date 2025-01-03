@@ -143,19 +143,18 @@ impl StatementExecutor {
             connection,
             ..
         } = &req;
-        self.copy_to_file(&format, output, location, connection, |path| {
-            debug!("Copy table: {table_id} to path: {path}")
-        })
-        .await
+
+        debug!("Copy table: {table_id} to location: {location}");
+        self.copy_to_file(&format, output, location, connection)
+            .await
     }
 
-    pub(crate) async fn copy_to_file<F: FnOnce(String)>(
+    pub(crate) async fn copy_to_file(
         &self,
         format: &Format,
         output: Output,
         location: &str,
         connection: &HashMap<String, String>,
-        fn_debug: F,
     ) -> Result<usize> {
         let stream = match output.data {
             OutputData::Stream(stream) => stream,
@@ -169,7 +168,6 @@ impl StatementExecutor {
             violated: format!("Expected filename, path: {path}"),
         })?;
         let object_store = build_backend(location, connection).context(error::BuildBackendSnafu)?;
-        fn_debug(path);
         self.stream_to_file(stream, format, object_store, &filename)
             .await
     }

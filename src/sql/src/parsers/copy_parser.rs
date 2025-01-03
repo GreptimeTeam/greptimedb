@@ -532,4 +532,28 @@ mod tests {
             stmt.arg.connection.to_str_map()
         );
     }
+
+    #[test]
+    fn test_invalid_copy_query_to() {
+        {
+            let sql = "COPY SELECT * FROM tbl WHERE ts > 10) TO 'tbl_file.parquet' WITH (FORMAT = 'parquet') CONNECTION (FOO='Bar', ONE='two')";
+
+            assert!(ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default()
+            )
+            .is_err())
+        }
+        {
+            let sql = "COPY (SELECT * FROM tbl WHERE ts > 10 TO 'tbl_file.parquet' WITH (FORMAT = 'parquet') CONNECTION (FOO='Bar', ONE='two')";
+
+            assert!(ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default()
+            )
+            .is_err())
+        }
+    }
 }

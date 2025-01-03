@@ -46,7 +46,7 @@ pub struct CopyQueryTo {
 
 impl Display for CopyQueryTo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "COPY {} TO {}", &self.query, &self.arg.location)?;
+        write!(f, "COPY ({}) TO {}", &self.query, &self.arg.location)?;
         if !self.arg.with.is_empty() {
             let options = self.arg.with.kv_pairs();
             write!(f, " WITH ({})", options.join(", "))?;
@@ -261,6 +261,31 @@ mod tests {
                 let new_sql = format!("{}", copy);
                 assert_eq!(
                     r#"COPY DATABASE db1 TO s3://my-bucket/data.parquet WITH (format = 'parquet', pattern = '.*parquet.*') CONNECTION (region = 'us-west-2', secret_access_key = '******')"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+    }
+
+    #[test]
+    fn test_display_copy_query_to() {
+        let sql = r"copy (SELECT * FROM tbl WHERE ts > 10) to 's3://my-bucket/data.parquet'
+            with (format = 'parquet', pattern = '.*parquet.*')
+            connection(region = 'us-west-2', secret_access_key = '12345678');";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::Copy { .. });
+
+        match &stmts[0] {
+            Statement::Copy(copy) => {
+                let new_sql = format!("{}", copy);
+                assert_eq!(
+                    r#"COPY (SELECT * FROM tbl WHERE ts > 10) TO s3://my-bucket/data.parquet WITH (format = 'parquet', pattern = '.*parquet.*') CONNECTION (region = 'us-west-2', secret_access_key = '******')"#,
                     &new_sql
                 );
             }
