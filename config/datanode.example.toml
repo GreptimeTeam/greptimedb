@@ -550,7 +550,7 @@ metadata_cache_size = "64MiB"
 content_cache_size = "128MiB"
 
 ## Page size for inverted index content cache.
-content_cache_page_size = "128KiB"
+content_cache_page_size = "64KiB"
 
 ## The options for full-text index in Mito engine.
 [region_engine.mito.fulltext_index]
