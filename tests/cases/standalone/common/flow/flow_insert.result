@@ -45,7 +45,7 @@ SHOW CREATE TABLE approx_rate;
 |             |                                            |
 +-------------+--------------------------------------------+
 
--- reordered insert
+-- reordered insert, also test if null is handled correctly
 INSERT INTO
     bytes_log (ts, byte) 
 VALUES
@@ -75,7 +75,7 @@ FROM
 | 0.0  | 2023-01-01T00:00:00 |
 +------+---------------------+
 
--- reordered insert
+-- reordered insert, also test if null is handled correctly
 INSERT INTO
     bytes_log (ts, byte) 
 VALUES
