@@ -35,8 +35,8 @@ use crate::error::{
 use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
 
 // TODO(CookiePie): The lock id should be configurable.
-const CAMPAIGN: &str = "SELECT pg_try_advisory_lock(28319)";
-const STEP_DOWN: &str = "SELECT pg_advisory_unlock(28319)";
+const CAMPAIGN: &str = "SELECT pg_try_advisory_lock({})";
+const STEP_DOWN: &str = "SELECT pg_advisory_unlock({})";
 const SET_IDLE_SESSION_TIMEOUT: &str = "SET idle_in_transaction_session_timeout = $1";
 // Currently the session timeout is longer than the leader lease time, so the leader lease may expire while the session is still alive.
 // Either the leader reconnects and step down or the session expires and the lock is released.
@@ -72,6 +72,14 @@ const GET_WITH_CURRENT_TIMESTAMP: &str = r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP,
 const PREFIX_GET_WITH_CURRENT_TIMESTAMP: &str = r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM greptime_metakv WHERE k LIKE $1"#;
 
 const POINT_DELETE: &str = "DELETE FROM greptime_metakv WHERE k = $1 RETURNING k,v;";
+
+fn campaign_sql(lock_id: u64) -> String {
+    CAMPAIGN.replace("{}", &lock_id.to_string())
+}
+
+fn step_down_sql(lock_id: u64) -> String {
+    STEP_DOWN.replace("{}", &lock_id.to_string())
+}
 
 /// Parse the value and expire time from the given string. The value should be in the format "value || LEASE_SEP || expire_time".
 fn parse_value_and_expire_time(value: &str) -> Result<(String, Timestamp)> {
@@ -130,6 +138,7 @@ pub struct PgElection {
     leader_watcher: broadcast::Sender<LeaderChangeMessage>,
     store_key_prefix: String,
     candidate_lease_ttl_secs: u64,
+    lock_id: u64,
 }
 
 impl PgElection {
@@ -154,6 +163,8 @@ impl PgElection {
             leader_watcher: tx,
             store_key_prefix,
             candidate_lease_ttl_secs,
+            // TODO(CookiePie): The lock id should be configurable.
+            lock_id: 28319,
         }))
     }
 
@@ -265,7 +276,7 @@ impl Election for PgElection {
         loop {
             let res = self
                 .client
-                .query(CAMPAIGN, &[])
+                .query(&campaign_sql(self.lock_id), &[])
                 .await
                 .context(PostgresExecutionSnafu)?;
             if let Some(row) = res.first() {
@@ -550,7 +561,7 @@ impl PgElection {
         {
             self.delete_value(&key).await?;
             self.client
-                .query(STEP_DOWN, &[])
+                .query(&step_down_sql(self.lock_id), &[])
                 .await
                 .context(PostgresExecutionSnafu)?;
             if let Err(e) = self
@@ -659,6 +670,7 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
             candidate_lease_ttl_secs: 10,
+            lock_id: 28319,
         };
 
         let res = pg_election
@@ -728,6 +740,7 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
             candidate_lease_ttl_secs,
+            lock_id: 28319,
         };
 
         let node_info = MetasrvNodeInfo {
@@ -764,6 +777,7 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
             candidate_lease_ttl_secs,
+            lock_id: 28319,
         };
 
         let candidates = pg_election.all_candidates().await.unwrap();
@@ -804,6 +818,7 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
             candidate_lease_ttl_secs,
+            lock_id: 28320,
         };
 
         leader_pg_election.elected().await.unwrap();
@@ -911,12 +926,13 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
             candidate_lease_ttl_secs,
+            lock_id: 28321,
         };
 
         // Step 1: No leader exists, campaign and elected.
         let res = leader_pg_election
             .client
-            .query(CAMPAIGN, &[])
+            .query(&campaign_sql(leader_pg_election.lock_id), &[])
             .await
             .unwrap();
         let res: bool = res[0].get(0);
@@ -947,7 +963,7 @@ mod tests {
         // Step 2: As a leader, renew the lease.
         let res = leader_pg_election
             .client
-            .query(CAMPAIGN, &[])
+            .query(&campaign_sql(leader_pg_election.lock_id), &[])
             .await
             .unwrap();
         let res: bool = res[0].get(0);
@@ -967,7 +983,7 @@ mod tests {
 
         let res = leader_pg_election
             .client
-            .query(CAMPAIGN, &[])
+            .query(&campaign_sql(leader_pg_election.lock_id), &[])
             .await
             .unwrap();
         let res: bool = res[0].get(0);
@@ -995,7 +1011,7 @@ mod tests {
         // Step 4: Re-campaign and elected.
         let res = leader_pg_election
             .client
-            .query(CAMPAIGN, &[])
+            .query(&campaign_sql(leader_pg_election.lock_id), &[])
             .await
             .unwrap();
         let res: bool = res[0].get(0);
@@ -1052,7 +1068,7 @@ mod tests {
         // Step 6: Re-campaign and elected.
         let res = leader_pg_election
             .client
-            .query(CAMPAIGN, &[])
+            .query(&campaign_sql(leader_pg_election.lock_id), &[])
             .await
             .unwrap();
         let res: bool = res[0].get(0);
@@ -1083,7 +1099,7 @@ mod tests {
         // Step 7: Something wrong, the leader key changed by others.
         let res = leader_pg_election
             .client
-            .query(CAMPAIGN, &[])
+            .query(&campaign_sql(leader_pg_election.lock_id), &[])
             .await
             .unwrap();
         let res: bool = res[0].get(0);
@@ -1120,7 +1136,7 @@ mod tests {
         // Clean up
         leader_pg_election
             .client
-            .query(STEP_DOWN, &[])
+            .query(&step_down_sql(leader_pg_election.lock_id), &[])
             .await
             .unwrap();
 
@@ -1145,6 +1161,7 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
             candidate_lease_ttl_secs,
+            lock_id: 28322,
         };
 
         let leader_client = create_postgres_client().await.unwrap();
@@ -1157,11 +1174,12 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: "test_prefix".to_string(),
             candidate_lease_ttl_secs,
+            lock_id: 28322,
         };
 
         leader_pg_election
             .client
-            .query(CAMPAIGN, &[])
+            .query(&campaign_sql(leader_pg_election.lock_id), &[])
             .await
             .unwrap();
         leader_pg_election.elected().await.unwrap();
@@ -1202,7 +1220,7 @@ mod tests {
         // Clean up
         leader_pg_election
             .client
-            .query(STEP_DOWN, &[])
+            .query(&step_down_sql(leader_pg_election.lock_id), &[])
             .await
             .unwrap();
 
