@@ -104,6 +104,25 @@ DESC TABLE test;
 | IdC    | String               | PRI | YES  | idc     | TAG           |
 +--------+----------------------+-----+------+---------+---------------+
 
+ALTER TABLE test ADD COLUMN "foo" STRING default 'foo' PRIMARY KEY, "bar" STRING default 'bar' PRIMARY KEY;
+
+Affected Rows: 0
+
+DESC TABLE test;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| i      | Int32                |     | YES  |         | FIELD         |
+| j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| k      | Int32                |     | YES  |         | FIELD         |
+| host   | String               | PRI | YES  |         | TAG           |
+| idc    | String               | PRI | YES  | idc     | TAG           |
+| IdC    | String               | PRI | YES  | idc     | TAG           |
+| foo    | String               | PRI | YES  | foo     | TAG           |
+| bar    | String               | PRI | YES  | bar     | TAG           |
++--------+----------------------+-----+------+---------+---------------+
+
 DROP TABLE test;
 
 Affected Rows: 0

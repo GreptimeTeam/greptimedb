@@ -494,20 +494,24 @@ pub(crate) fn to_alter_table_expr(
             }
             .fail();
         }
-        AlterTableOperation::AddColumn {
-            column_def,
-            location,
-        } => AlterTableKind::AddColumns(AddColumns {
-            add_columns: vec![AddColumn {
-                column_def: Some(
-                    sql_column_def_to_grpc_column_def(&column_def, Some(&query_ctx.timezone()))
-                        .map_err(BoxedError::new)
-                        .context(ExternalSnafu)?,
-                ),
-                location: location.as_ref().map(From::from),
-                // TODO(yingwen): We don't support `IF NOT EXISTS` for `ADD COLUMN` yet.
-                add_if_not_exists: false,
-            }],
+        AlterTableOperation::AddColumns { add_columns } => AlterTableKind::AddColumns(AddColumns {
+            add_columns: add_columns
+                .into_iter()
+                .map(|add_column| {
+                    let column_def = sql_column_def_to_grpc_column_def(
+                        &add_column.column_def,
+                        Some(&query_ctx.timezone()),
+                    )
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+                    Ok(AddColumn {
+                        column_def: Some(column_def),
+                        location: add_column.location.as_ref().map(From::from),
+                        // TODO(yingwen): We don't support `IF NOT EXISTS` for `ADD COLUMN` yet.
+                        add_if_not_exists: false,
+                    })
+                })
+                .collect::<Result<Vec<AddColumn>>>()?,
         }),
         AlterTableOperation::ModifyColumnType {
             column_name,

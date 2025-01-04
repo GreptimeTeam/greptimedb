@@ -26,4 +26,8 @@ ALTER TABLE test ADD COLUMN "IdC" STRING default 'idc' PRIMARY KEY;
 
 DESC TABLE test;
 
+ALTER TABLE test ADD COLUMN "foo" STRING default 'foo' PRIMARY KEY, "bar" STRING default 'bar' PRIMARY KEY;
+
+DESC TABLE test;
+
 DROP TABLE test;
