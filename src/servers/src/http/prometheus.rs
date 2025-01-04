@@ -719,22 +719,63 @@ pub async fn label_values_query(
     }
 
     let queries = params.matches.0;
-    if queries.is_empty() {
-        return PrometheusJsonResponse::error(
-            StatusCode::InvalidArguments,
-            "match[] parameter is required",
-        );
-    }
-
     let start = params.start.unwrap_or_else(yesterday_rfc3339);
     let end = params.end.unwrap_or_else(current_time_rfc3339);
     let lookback = params
         .lookback
         .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string());
 
-    let mut label_values = HashSet::new();
+    // If no match[] is specified, collect label values from all tables.
+    if queries.is_empty() {
+        let mut label_values = HashSet::new();
+        let mut merge_map = HashMap::new();
+        let table_names = match handler
+            .catalog_manager()
+            .table_names(&catalog, &schema, Some(&query_ctx))
+            .await
+        {
+            Ok(tables) => tables,
+            Err(e) => return PrometheusJsonResponse::error(e.status_code(), e.output_msg()),
+        };
 
+        for table_name in table_names {
+            let prom_query = PromQuery {
+                query: table_name,
+                start: start.clone(),
+                end: end.clone(),
+                step: DEFAULT_LOOKBACK_STRING.to_string(),
+                lookback: lookback.clone(),
+            };
+            let result = handler.do_query(&prom_query, query_ctx.clone()).await;
+            if let Err(err) =
+                retrieve_label_values(result, &label_name, &mut label_values, &mut merge_map).await
+            {
+                // skip non-existent tables, columns, or time index errors
+                if err.status_code() != StatusCode::TableNotFound
+                    && err.status_code() != StatusCode::TableColumnNotFound
+                    && err.status_code() != StatusCode::InvalidArguments
+                {
+                    return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
+                }
+            }
+        }
+
+        let merge_map = merge_map
+            .into_iter()
+            .map(|(k, v)| (k, Value::from(v)))
+            .collect();
+        let mut label_values: Vec<_> = label_values.into_iter().collect();
+        label_values.sort_unstable();
+
+        let mut resp =
+            PrometheusJsonResponse::success(PrometheusResponse::LabelValues(label_values));
+        resp.resp_metrics = merge_map;
+        return resp;
+    }
+
+    let mut label_values = HashSet::new();
     let mut merge_map = HashMap::new();
+
     for query in queries {
         let prom_query = PromQuery {
             query,
