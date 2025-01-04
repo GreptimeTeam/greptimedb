@@ -57,7 +57,7 @@ async fn test_read_puffin_file_metadata_async() {
         "src/tests/resources/sample-metric-data-uncompressed.puffin",
     ];
     for path in paths {
-        let mut reader = FileReader::new(path).await.unwrap();
+        let reader = FileReader::new(path).await.unwrap();
         let file_size = reader.metadata().await.unwrap().content_length;
         let mut reader = PuffinFileReader::new(reader);
         let metadata = reader.metadata().await.unwrap();

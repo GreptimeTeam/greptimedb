@@ -52,7 +52,7 @@ impl<R> InvertedIndexBlobReader<R> {
 
 #[async_trait]
 impl<R: RangeReader + Sync> InvertedIndexReader for InvertedIndexBlobReader<R> {
-    async fn range_read(&mut self, offset: u64, size: u32) -> Result<Vec<u8>> {
+    async fn range_read(&self, offset: u64, size: u32) -> Result<Vec<u8>> {
         let buf = self
             .source
             .read(offset..offset + size as u64)
@@ -61,16 +61,16 @@ impl<R: RangeReader + Sync> InvertedIndexReader for InvertedIndexBlobReader<R> {
         Ok(buf.into())
     }
 
-    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+    async fn read_vec(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
         self.source.read_vec(ranges).await.context(CommonIoSnafu)
     }
 
-    async fn metadata(&mut self) -> Result<Arc<InvertedIndexMetas>> {
+    async fn metadata(&self) -> Result<Arc<InvertedIndexMetas>> {
         let metadata = self.source.metadata().await.context(CommonIoSnafu)?;
         let blob_size = metadata.content_length;
         Self::validate_blob_size(blob_size)?;
 
-        let mut footer_reader = InvertedIndexFooterReader::new(&mut self.source, blob_size)
+        let mut footer_reader = InvertedIndexFooterReader::new(&self.source, blob_size)
             .with_prefetch_size(DEFAULT_PREFETCH_SIZE);
         footer_reader.metadata().await.map(Arc::new)
     }
@@ -160,7 +160,7 @@ mod tests {
     #[tokio::test]
     async fn test_inverted_index_blob_reader_metadata() {
         let blob = create_inverted_index_blob();
-        let mut blob_reader = InvertedIndexBlobReader::new(blob);
+        let blob_reader = InvertedIndexBlobReader::new(blob);
 
         let metas = blob_reader.metadata().await.unwrap();
         assert_eq!(metas.metas.len(), 2);
@@ -187,7 +187,7 @@ mod tests {
     #[tokio::test]
     async fn test_inverted_index_blob_reader_fst() {
         let blob = create_inverted_index_blob();
-        let mut blob_reader = InvertedIndexBlobReader::new(blob);
+        let blob_reader = InvertedIndexBlobReader::new(blob);
 
         let metas = blob_reader.metadata().await.unwrap();
         let meta = metas.metas.get("tag0").unwrap();
@@ -219,7 +219,7 @@ mod tests {
     #[tokio::test]
     async fn test_inverted_index_blob_reader_bitmap() {
         let blob = create_inverted_index_blob();
-        let mut blob_reader = InvertedIndexBlobReader::new(blob);
+        let blob_reader = InvertedIndexBlobReader::new(blob);
 
         let metas = blob_reader.metadata().await.unwrap();
         let meta = metas.metas.get("tag0").unwrap();

@@ -118,7 +118,7 @@ impl BloomFilterIndexApplier {
             .start_timer();
 
         for (column_id, predicates) in &self.filters {
-            let mut blob = match self
+            let blob = match self
                 .blob_reader(file_id, *column_id, file_size_hint)
                 .await?
             {

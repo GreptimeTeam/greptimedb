@@ -13,8 +13,6 @@
 // limitations under the License.
 
 mod r#async;
-mod position;
-mod sync;
 
 use pin_project::pin_project;
 
@@ -31,13 +29,6 @@ pub struct PartialReader<R> {
     /// The `offset` and `size` fields are used to determine the slice of `source` to read.
     #[pin]
     source: R,
-
-    /// The current position within the portion.
-    ///
-    /// A `None` value indicates that no read operations have been performed yet on this portion.
-    /// Before a read operation can be performed, the resource must be positioned at the correct offset in the portion.
-    /// After the first read operation, this field will be set to `Some(_)`, representing the current read position in the portion.
-    position_in_portion: Option<u64>,
 }
 
 impl<R> PartialReader<R> {
@@ -47,13 +38,7 @@ impl<R> PartialReader<R> {
             offset,
             size,
             source,
-            position_in_portion: None,
         }
-    }
-
-    /// Returns the current position in the portion.
-    pub fn position(&self) -> u64 {
-        self.position_in_portion.unwrap_or_default()
     }
 
     /// Returns the size of the portion in portion.
@@ -64,11 +49,6 @@ impl<R> PartialReader<R> {
     /// Returns whether the portion is empty.
     pub fn is_empty(&self) -> bool {
         self.size == 0
-    }
-
-    /// Returns whether the current position is at the end of the portion.
-    pub fn is_eof(&self) -> bool {
-        self.position() == self.size
     }
 }
 
@@ -83,7 +63,7 @@ mod tests {
         let data: Vec<u8> = (0..100).collect();
         let reader = PartialReader::new(Cursor::new(data), 10, 0);
         assert!(reader.is_empty());
-        assert!(reader.is_eof());
+        // assert!(reader.is_eof());
     }
 
     #[test]

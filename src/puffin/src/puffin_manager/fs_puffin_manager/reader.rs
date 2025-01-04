@@ -19,7 +19,7 @@ use std::sync::Arc;
 use async_compression::futures::bufread::ZstdDecoder;
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes};
-use common_base::range_read::{AsyncReadAdapter, Metadata, RangeReader};
+use common_base::range_read::{AsyncReadAdapter, Metadata, RangeReader, SizeAwareRangeReader};
 use futures::io::BufReader;
 use futures::{AsyncRead, AsyncWrite};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -202,7 +202,7 @@ where
             .find(|m| m.blob_type == key.as_str())
             .context(BlobNotFoundSnafu { blob: key })?;
 
-        let mut reader = file.blob_reader(blob_metadata)?;
+        let reader = file.blob_reader(blob_metadata)?;
         let meta = reader.metadata().await.context(MetadataSnafu)?;
         let buf = reader
             .read(0..meta.content_length)
@@ -315,36 +315,25 @@ where
     A: RangeReader,
     B: RangeReader,
 {
-    fn with_file_size_hint(&mut self, file_size_hint: u64) {
-        match self {
-            Either::L(a) => a.with_file_size_hint(file_size_hint),
-            Either::R(b) => b.with_file_size_hint(file_size_hint),
-        }
-    }
-
-    async fn metadata(&mut self) -> io::Result<Metadata> {
+    async fn metadata(&self) -> io::Result<Metadata> {
         match self {
             Either::L(a) => a.metadata().await,
             Either::R(b) => b.metadata().await,
         }
     }
-    async fn read(&mut self, range: Range<u64>) -> io::Result<Bytes> {
+    async fn read(&self, range: Range<u64>) -> io::Result<Bytes> {
         match self {
             Either::L(a) => a.read(range).await,
             Either::R(b) => b.read(range).await,
         }
     }
-    async fn read_into(
-        &mut self,
-        range: Range<u64>,
-        buf: &mut (impl BufMut + Send),
-    ) -> io::Result<()> {
+    async fn read_into(&self, range: Range<u64>, buf: &mut (impl BufMut + Send)) -> io::Result<()> {
         match self {
             Either::L(a) => a.read_into(range, buf).await,
             Either::R(b) => b.read_into(range, buf).await,
         }
     }
-    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> io::Result<Vec<Bytes>> {
+    async fn read_vec(&self, ranges: &[Range<u64>]) -> io::Result<Vec<Bytes>> {
         match self {
             Either::L(a) => a.read_vec(ranges).await,
             Either::R(b) => b.read_vec(ranges).await,

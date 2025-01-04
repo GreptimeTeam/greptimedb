@@ -25,7 +25,7 @@ use crate::file_format::{Flags, FLAGS_SIZE, MAGIC, MAGIC_SIZE, MIN_FILE_SIZE, PA
 use crate::file_metadata::FileMetadata;
 
 /// The default prefetch size for the footer reader.
-pub const DEFAULT_PREFETCH_SIZE: u64 = 1024; // 1KiB
+pub const DEFAULT_PREFETCH_SIZE: u64 = 8192; // 8KiB
 
 /// Reader for the footer of a Puffin data file
 ///

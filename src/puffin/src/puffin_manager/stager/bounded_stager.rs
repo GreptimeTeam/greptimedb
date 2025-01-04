@@ -548,7 +548,7 @@ mod tests {
 
         let puffin_file_name = "test_get_blob";
         let key = "key";
-        let mut reader = stager
+        let reader = stager
             .get_blob(
                 puffin_file_name,
                 key,
@@ -685,7 +685,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut reader = stager
+        let reader = stager
             .get_blob(
                 puffin_file_name,
                 blob_key,
@@ -732,7 +732,7 @@ mod tests {
         let blob_key = "blob_key";
 
         // First time to get the blob
-        let mut reader = stager
+        let reader = stager
             .get_blob(
                 puffin_file_name,
                 blob_key,
@@ -758,7 +758,7 @@ mod tests {
         assert_eq!(&*buf, b"Hello world");
 
         // Second time to get the blob, get from recycle bin
-        let mut reader = stager
+        let reader = stager
             .get_blob(
                 puffin_file_name,
                 blob_key,

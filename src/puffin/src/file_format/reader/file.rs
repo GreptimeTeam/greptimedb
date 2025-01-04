@@ -74,14 +74,14 @@ impl<R> PuffinFileReader<R> {
 
 #[async_trait]
 impl<'a, R: RangeReader + 'a> AsyncReader<'a> for PuffinFileReader<R> {
-    type Reader = PartialReader<&'a mut R>;
+    type Reader = PartialReader<&'a R>;
 
     async fn metadata(&'a mut self) -> Result<FileMetadata> {
         if let Some(metadata) = &self.metadata {
             return Ok(metadata.clone());
         }
         let file_size = self.get_file_size_async().await?;
-        let mut reader = PuffinFileFooterReader::new(&mut self.source, file_size)
+        let mut reader = PuffinFileFooterReader::new(&self.source, file_size)
             .with_prefetch_size(DEFAULT_PREFETCH_SIZE);
         let metadata = reader.metadata().await?;
         self.metadata = Some(metadata.clone());
@@ -90,7 +90,7 @@ impl<'a, R: RangeReader + 'a> AsyncReader<'a> for PuffinFileReader<R> {
 
     fn blob_reader(&'a mut self, blob_metadata: &BlobMetadata) -> Result<Self::Reader> {
         Ok(PartialReader::new(
-            &mut self.source,
+            &self.source,
             blob_metadata.offset as _,
             blob_metadata.length as _,
         ))

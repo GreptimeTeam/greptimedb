@@ -35,4 +35,5 @@ tokio-util.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+common-base = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true

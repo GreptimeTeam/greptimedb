@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use common_base::range_read::RangeReader;
+use common_base::range_read::SizeAwareRangeReader;
 use futures::AsyncWrite;
 
 use crate::error::Result;
@@ -22,7 +22,7 @@ use crate::error::Result;
 #[async_trait]
 #[auto_impl::auto_impl(Arc)]
 pub trait PuffinFileAccessor: Send + Sync + 'static {
-    type Reader: RangeReader + Sync;
+    type Reader: SizeAwareRangeReader + Sync;
     type Writer: AsyncWrite + Unpin + Send;
 
     /// Opens a reader for the given puffin file.
