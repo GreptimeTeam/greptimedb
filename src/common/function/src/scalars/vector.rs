@@ -16,6 +16,7 @@ mod convert;
 mod distance;
 mod elem_sum;
 pub mod impl_conv;
+pub(crate) mod product;
 mod scalar_add;
 mod scalar_mul;
 mod sub;
