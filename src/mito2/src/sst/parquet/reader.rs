@@ -570,6 +570,66 @@ impl ParquetReaderBuilder {
         true
     }
 
+    async fn prune_row_groups_by_bloom_filter(
+        &self,
+        parquet_meta: &ParquetMetaData,
+        output: &mut BTreeMap<usize, Option<RowSelection>>,
+        metrics: &mut ReaderFilterMetrics,
+    ) -> bool {
+        let Some(index_applier) = &self.bloom_filter_index_applier else {
+            return false;
+        };
+
+        if !self.file_handle.meta_ref().bloom_filter_index_available() {
+            return false;
+        }
+
+        let file_size_hint = self.file_handle.meta_ref().bloom_filter_index_size();
+        let apply_output = match index_applier
+            .apply(
+                self.file_handle.file_id(),
+                file_size_hint,
+                parquet_meta
+                    .row_groups()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, rg)| (rg.num_rows() as usize, output.contains_key(&i))),
+            )
+            .await
+        {
+            Ok(apply_output) => apply_output,
+            Err(err) => {
+                if cfg!(any(test, feature = "test")) {
+                    panic!(
+                        "Failed to apply bloom filter index, region_id: {}, file_id: {}, err: {:?}",
+                        self.file_handle.region_id(),
+                        self.file_handle.file_id(),
+                        err
+                    );
+                } else {
+                    warn!(
+                        err; "Failed to apply bloom filter index, region_id: {}, file_id: {}",
+                        self.file_handle.region_id(), self.file_handle.file_id()
+                    );
+                }
+
+                return false;
+            }
+        };
+
+        Self::prune_row_groups_by_ranges(
+            parquet_meta,
+            apply_output
+                .into_iter()
+                .map(|(rg, ranges)| (rg, ranges.into_iter())),
+            output,
+            &mut metrics.rg_bloom_filtered,
+            &mut metrics.rows_bloom_filtered,
+        );
+
+        true
+    }
+
     /// Prunes row groups by rows. The `rows_in_row_groups` is like a map from row group to
     /// a list of row ids to keep.
     fn prune_row_groups_by_rows(
@@ -621,56 +681,6 @@ impl ParquetReaderBuilder {
         *filtered_rows += rows_in_row_group_before - rows_in_row_group_after;
 
         *output = res;
-    }
-
-    async fn prune_row_groups_by_bloom_filter(
-        &self,
-        parquet_meta: &ParquetMetaData,
-        output: &mut BTreeMap<usize, Option<RowSelection>>,
-        metrics: &mut ReaderFilterMetrics,
-    ) -> bool {
-        let Some(index_applier) = &self.bloom_filter_index_applier else {
-            return false;
-        };
-
-        if !self.file_handle.meta_ref().bloom_filter_index_available() {
-            return false;
-        }
-
-        let before_rg = output.len();
-
-        let file_size_hint = self.file_handle.meta_ref().bloom_filter_index_size();
-        if let Err(err) = index_applier
-            .apply(
-                self.file_handle.file_id(),
-                file_size_hint,
-                parquet_meta.row_groups(),
-                output,
-            )
-            .await
-        {
-            if cfg!(any(test, feature = "test")) {
-                panic!(
-                    "Failed to apply bloom filter index, region_id: {}, file_id: {}, err: {:?}",
-                    self.file_handle.region_id(),
-                    self.file_handle.file_id(),
-                    err
-                );
-            } else {
-                warn!(
-                    err; "Failed to apply bloom filter index, region_id: {}, file_id: {}",
-                    self.file_handle.region_id(), self.file_handle.file_id()
-                );
-            }
-
-            return false;
-        };
-
-        let after_rg = output.len();
-        // Update metrics.
-        metrics.rg_bloom_filtered += before_rg - after_rg;
-
-        true
     }
 
     /// Prunes row groups by ranges. The `ranges_in_row_groups` is like a map from row group to

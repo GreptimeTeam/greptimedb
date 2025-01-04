@@ -14,7 +14,6 @@
 
 //! Utilities for testing SSTs.
 
-use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};

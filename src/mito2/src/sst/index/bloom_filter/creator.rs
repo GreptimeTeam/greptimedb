@@ -321,7 +321,7 @@ impl BloomFilterIndexer {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::iter;
 
     use api::v1::SemanticType;
@@ -341,11 +341,11 @@ mod tests {
     use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
-    fn mock_object_store() -> ObjectStore {
+    pub fn mock_object_store() -> ObjectStore {
         ObjectStore::new(Memory::default()).unwrap().finish()
     }
 
-    async fn new_intm_mgr(path: impl AsRef<str>) -> IntermediateManager {
+    pub async fn new_intm_mgr(path: impl AsRef<str>) -> IntermediateManager {
         IntermediateManager::init_fs(path).await.unwrap()
     }
 
@@ -365,7 +365,7 @@ mod tests {
     ///   - index: bloom filter
     ///   - granularity: 4
     ///   - column_id: 3
-    fn mock_region_metadata() -> RegionMetadataRef {
+    pub fn mock_region_metadata() -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
         builder
             .push_column_metadata(ColumnMetadata {
@@ -410,7 +410,7 @@ mod tests {
         Arc::new(builder.build().unwrap())
     }
 
-    fn new_batch(str_tag: impl AsRef<str>, u64_field: impl IntoIterator<Item = u64>) -> Batch {
+    pub fn new_batch(str_tag: impl AsRef<str>, u64_field: impl IntoIterator<Item = u64>) -> Batch {
         let fields = vec![SortField::new(ConcreteDataType::string_datatype())];
         let codec = McmpRowCodec::new(fields);
         let row: [ValueRef; 1] = [str_tag.as_ref().into()];
