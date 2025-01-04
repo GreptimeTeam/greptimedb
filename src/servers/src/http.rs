@@ -81,6 +81,7 @@ pub mod handler;
 pub mod header;
 pub mod influxdb;
 pub mod logs;
+pub mod loki;
 pub mod mem_prof;
 pub mod opentsdb;
 pub mod otlp;
@@ -742,7 +743,12 @@ impl HttpServer {
 
     fn route_loki<S>(log_state: LogState) -> Router<S> {
         Router::new()
-            .route("/api/v1/push", routing::post(event::loki_ingest))
+            .route("/api/v1/push", routing::post(loki::loki_ingest))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(handle_error))
+                    .layer(RequestDecompressionLayer::new()),
+            )
             .with_state(log_state)
     }
 
