@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["BackendType","Either"],"fn":["check_args_anno_real_type","exec_parsed","select_from_rb"],"mod":["compile","parse"],"struct":["AnnotationInfo","Coprocessor","PyQueryEngine","QueryEngineWeakRef"],"type":["CoprocessorRef"]};

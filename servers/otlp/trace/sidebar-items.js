@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["APPROXIMATE_COLUMN_COUNT","TRACE_TABLE_NAME"],"fn":["parse","to_grpc_insert_requests","write_span_to_row"],"mod":["attributes","span"]};

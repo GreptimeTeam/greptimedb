@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["convert","distance","elem_sum","impl_conv","scalar_add","scalar_mul","sub","sum","vector_div","vector_mul"],"struct":["VectorFunction"]};

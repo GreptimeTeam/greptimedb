@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["arrow_rfloordiv","arrow_rsub","arrow_rtruediv","cast","get_arrow_op","get_arrow_scalar_op","is_float","is_signed","is_unsigned","rspy_is_pyobj_scalar","to_type_error","val_to_pyobj","wrap_result"],"struct":["PyVector"],"type":["PyVectorRef"]};

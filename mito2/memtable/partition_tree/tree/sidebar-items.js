@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["FieldWithId","PartitionTree","SparseEncoder","TreeIter","TreeIterMetrics"]};

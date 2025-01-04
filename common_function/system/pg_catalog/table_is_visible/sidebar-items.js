@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["NAME"],"fn":["pg_table_is_visible"],"struct":["PGTableIsVisibleFunction"]};

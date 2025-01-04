@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_new_physical_table_info"]};
