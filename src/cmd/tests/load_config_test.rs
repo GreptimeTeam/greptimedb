@@ -69,7 +69,7 @@ fn test_load_datanode_example_config() {
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
                     auto_flush_interval: Duration::from_secs(3600),
-                    experimental_write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
+                    write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(EngineConfig {}),
@@ -203,7 +203,7 @@ fn test_load_standalone_example_config() {
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
                     auto_flush_interval: Duration::from_secs(3600),
-                    experimental_write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
+                    write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(EngineConfig {}),
