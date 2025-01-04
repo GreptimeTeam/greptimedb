@@ -14,6 +14,7 @@
 
 mod admin;
 mod copy_database;
+mod copy_query_to;
 mod copy_table_from;
 mod copy_table_to;
 mod cursor;
@@ -57,14 +58,16 @@ use session::context::{Channel, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
 use set::set_query_timeout;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::statements::copy::{CopyDatabase, CopyDatabaseArgument, CopyTable, CopyTableArgument};
+use sql::statements::copy::{
+    CopyDatabase, CopyDatabaseArgument, CopyQueryToArgument, CopyTable, CopyTableArgument,
+};
 use sql::statements::set_variables::SetVariables;
 use sql::statements::show::ShowCreateTableVariant;
 use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
 use sql::util::format_raw_object_name;
 use sqlparser::ast::ObjectName;
-use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
+use table::requests::{CopyDatabaseRequest, CopyDirection, CopyQueryToRequest, CopyTableRequest};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 use table::TableRef;
@@ -164,6 +167,17 @@ impl StatementExecutor {
             Statement::ShowViews(stmt) => self.show_views(stmt, query_ctx).await,
 
             Statement::ShowFlows(stmt) => self.show_flows(stmt, query_ctx).await,
+
+            Statement::Copy(sql::statements::copy::Copy::CopyQueryTo(stmt)) => {
+                let query_output = self
+                    .plan_exec(QueryStatement::Sql(*stmt.query), query_ctx)
+                    .await?;
+                let req = to_copy_query_request(stmt.arg)?;
+
+                self.copy_query_to(req, query_output)
+                    .await
+                    .map(Output::new_with_affected_rows)
+            }
 
             Statement::Copy(sql::statements::copy::Copy::CopyTable(stmt)) => {
                 let req = to_copy_table_request(stmt, query_ctx.clone())?;
@@ -514,6 +528,20 @@ fn derive_timeout(stmt: &QueryStatement, query_ctx: &QueryContextRef) -> Option<
         | (Channel::Postgres, QueryStatement::Sql(_)) => Some(query_timeout),
         (_, _) => None,
     }
+}
+
+fn to_copy_query_request(stmt: CopyQueryToArgument) -> Result<CopyQueryToRequest> {
+    let CopyQueryToArgument {
+        with,
+        connection,
+        location,
+    } = stmt;
+
+    Ok(CopyQueryToRequest {
+        location,
+        with: with.into_map(),
+        connection: connection.into_map(),
+    })
 }
 
 fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<CopyTableRequest> {

@@ -495,7 +495,8 @@ pub fn check_permission(
         | Statement::Explain(_)
         | Statement::Tql(_)
         | Statement::Delete(_)
-        | Statement::DeclareCursor(_) => {}
+        | Statement::DeclareCursor(_)
+        | Statement::Copy(sql::statements::copy::Copy::CopyQueryTo(_)) => {}
         // database ops won't be checked
         Statement::CreateDatabase(_)
         | Statement::ShowDatabases(_)
