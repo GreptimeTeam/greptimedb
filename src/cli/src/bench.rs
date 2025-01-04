@@ -22,6 +22,9 @@ use clap::Parser;
 use common_error::ext::BoxedError;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::etcd::EtcdStore;
+use common_meta::kv_backend::memory::MemoryKvBackend;
+#[cfg(feature = "pg_kvbackend")]
+use common_meta::kv_backend::postgres::PgStore;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_telemetry::info;
@@ -55,18 +58,32 @@ where
 #[derive(Debug, Default, Parser)]
 pub struct BenchTableMetadataCommand {
     #[clap(long)]
-    etcd_addr: String,
+    etcd_addr: Option<String>,
+    #[cfg(feature = "pg_kvbackend")]
+    #[clap(long)]
+    postgres_addr: Option<String>,
     #[clap(long)]
     count: u32,
 }
 
 impl BenchTableMetadataCommand {
     pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
-        let etcd_store = EtcdStore::with_endpoints([&self.etcd_addr], 128)
-            .await
-            .unwrap();
+        let kv_backend = if let Some(etcd_addr) = &self.etcd_addr {
+            info!("Using etcd as kv backend");
+            EtcdStore::with_endpoints([etcd_addr], 128).await.unwrap()
+        } else {
+            Arc::new(MemoryKvBackend::new())
+        };
 
-        let table_metadata_manager = Arc::new(TableMetadataManager::new(etcd_store));
+        #[cfg(feature = "pg_kvbackend")]
+        let kv_backend = if let Some(postgres_addr) = &self.postgres_addr {
+            info!("Using postgres as kv backend");
+            PgStore::with_url(postgres_addr, 128).await.unwrap()
+        } else {
+            kv_backend
+        };
+
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend));
 
         let tool = BenchTableMetadata {
             table_metadata_manager,

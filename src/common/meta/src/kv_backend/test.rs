@@ -15,6 +15,8 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
+use txn::{Compare, CompareOp, TxnOp};
+
 use super::{KvBackend, *};
 use crate::error::Error;
 use crate::rpc::store::{BatchGetRequest, PutRequest};
@@ -443,4 +445,208 @@ pub async fn test_kv_batch_delete_with_prefix(kv_backend: impl KvBackend, prefix
     assert!(kv_backend.get(&key2).await.unwrap().is_none());
     assert!(kv_backend.get(&key3).await.unwrap().is_none());
     assert!(kv_backend.get(&key11).await.unwrap().is_none());
+}
+
+pub async fn test_txn_one_compare_op(kv_backend: KvBackendRef) {
+    let _ = kv_backend
+        .put(PutRequest {
+            key: vec![11],
+            value: vec![3],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let txn = Txn::new()
+        .when(vec![Compare::with_value(
+            vec![11],
+            CompareOp::Greater,
+            vec![1],
+        )])
+        .and_then(vec![TxnOp::Put(vec![11], vec![1])])
+        .or_else(vec![TxnOp::Put(vec![11], vec![2])]);
+
+    let txn_response = kv_backend.txn(txn).await.unwrap();
+
+    assert!(txn_response.succeeded);
+    assert_eq!(txn_response.responses.len(), 1);
+}
+
+pub async fn text_txn_multi_compare_op(kv_backend: KvBackendRef) {
+    for i in 1..3 {
+        let _ = kv_backend
+            .put(PutRequest {
+                key: vec![i],
+                value: vec![i],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+
+    let when: Vec<_> = (1..3u8)
+        .map(|i| Compare::with_value(vec![i], CompareOp::Equal, vec![i]))
+        .collect();
+
+    let txn = Txn::new()
+        .when(when)
+        .and_then(vec![
+            TxnOp::Put(vec![1], vec![10]),
+            TxnOp::Put(vec![2], vec![20]),
+        ])
+        .or_else(vec![TxnOp::Put(vec![1], vec![11])]);
+
+    let txn_response = kv_backend.txn(txn).await.unwrap();
+
+    assert!(txn_response.succeeded);
+    assert_eq!(txn_response.responses.len(), 2);
+}
+
+pub async fn test_txn_compare_equal(kv_backend: KvBackendRef) {
+    let key = vec![101u8];
+    kv_backend.delete(&key, false).await.unwrap();
+
+    let txn = Txn::new()
+        .when(vec![Compare::with_value_not_exists(
+            key.clone(),
+            CompareOp::Equal,
+        )])
+        .and_then(vec![TxnOp::Put(key.clone(), vec![1])])
+        .or_else(vec![TxnOp::Put(key.clone(), vec![2])]);
+    let txn_response = kv_backend.txn(txn.clone()).await.unwrap();
+    assert!(txn_response.succeeded);
+
+    let txn_response = kv_backend.txn(txn).await.unwrap();
+    assert!(!txn_response.succeeded);
+
+    let txn = Txn::new()
+        .when(vec![Compare::with_value(
+            key.clone(),
+            CompareOp::Equal,
+            vec![2],
+        )])
+        .and_then(vec![TxnOp::Put(key.clone(), vec![3])])
+        .or_else(vec![TxnOp::Put(key, vec![4])]);
+    let txn_response = kv_backend.txn(txn).await.unwrap();
+    assert!(txn_response.succeeded);
+}
+
+pub async fn test_txn_compare_greater(kv_backend: KvBackendRef) {
+    let key = vec![102u8];
+    kv_backend.delete(&key, false).await.unwrap();
+
+    let txn = Txn::new()
+        .when(vec![Compare::with_value_not_exists(
+            key.clone(),
+            CompareOp::Greater,
+        )])
+        .and_then(vec![TxnOp::Put(key.clone(), vec![1])])
+        .or_else(vec![TxnOp::Put(key.clone(), vec![2])]);
+    let txn_response = kv_backend.txn(txn.clone()).await.unwrap();
+    assert!(!txn_response.succeeded);
+
+    let txn_response = kv_backend.txn(txn).await.unwrap();
+    assert!(txn_response.succeeded);
+
+    let txn = Txn::new()
+        .when(vec![Compare::with_value(
+            key.clone(),
+            CompareOp::Greater,
+            vec![1],
+        )])
+        .and_then(vec![TxnOp::Put(key.clone(), vec![3])])
+        .or_else(vec![TxnOp::Get(key.clone())]);
+    let mut txn_response = kv_backend.txn(txn).await.unwrap();
+    assert!(!txn_response.succeeded);
+    let res = txn_response.responses.pop().unwrap();
+    assert_eq!(
+        res,
+        TxnOpResponse::ResponseGet(RangeResponse {
+            kvs: vec![KeyValue {
+                key,
+                value: vec![1]
+            }],
+            more: false,
+        })
+    );
+}
+
+pub async fn test_txn_compare_less(kv_backend: KvBackendRef) {
+    let key = vec![103u8];
+    kv_backend.delete(&[3], false).await.unwrap();
+
+    let txn = Txn::new()
+        .when(vec![Compare::with_value_not_exists(
+            key.clone(),
+            CompareOp::Less,
+        )])
+        .and_then(vec![TxnOp::Put(key.clone(), vec![1])])
+        .or_else(vec![TxnOp::Put(key.clone(), vec![2])]);
+    let txn_response = kv_backend.txn(txn.clone()).await.unwrap();
+    assert!(!txn_response.succeeded);
+
+    let txn_response = kv_backend.txn(txn).await.unwrap();
+    assert!(!txn_response.succeeded);
+
+    let txn = Txn::new()
+        .when(vec![Compare::with_value(
+            key.clone(),
+            CompareOp::Less,
+            vec![2],
+        )])
+        .and_then(vec![TxnOp::Put(key.clone(), vec![3])])
+        .or_else(vec![TxnOp::Get(key.clone())]);
+    let mut txn_response = kv_backend.txn(txn).await.unwrap();
+    assert!(!txn_response.succeeded);
+    let res = txn_response.responses.pop().unwrap();
+    assert_eq!(
+        res,
+        TxnOpResponse::ResponseGet(RangeResponse {
+            kvs: vec![KeyValue {
+                key,
+                value: vec![2]
+            }],
+            more: false,
+        })
+    );
+}
+
+pub async fn test_txn_compare_not_equal(kv_backend: KvBackendRef) {
+    let key = vec![104u8];
+    kv_backend.delete(&key, false).await.unwrap();
+
+    let txn = Txn::new()
+        .when(vec![Compare::with_value_not_exists(
+            key.clone(),
+            CompareOp::NotEqual,
+        )])
+        .and_then(vec![TxnOp::Put(key.clone(), vec![1])])
+        .or_else(vec![TxnOp::Put(key.clone(), vec![2])]);
+    let txn_response = kv_backend.txn(txn.clone()).await.unwrap();
+    assert!(!txn_response.succeeded);
+
+    let txn_response = kv_backend.txn(txn).await.unwrap();
+    assert!(txn_response.succeeded);
+
+    let txn = Txn::new()
+        .when(vec![Compare::with_value(
+            key.clone(),
+            CompareOp::Equal,
+            vec![2],
+        )])
+        .and_then(vec![TxnOp::Put(key.clone(), vec![3])])
+        .or_else(vec![TxnOp::Get(key.clone())]);
+    let mut txn_response = kv_backend.txn(txn).await.unwrap();
+    assert!(!txn_response.succeeded);
+    let res = txn_response.responses.pop().unwrap();
+    assert_eq!(
+        res,
+        TxnOpResponse::ResponseGet(RangeResponse {
+            kvs: vec![KeyValue {
+                key,
+                value: vec![1]
+            }],
+            more: false,
+        })
+    );
 }

@@ -22,11 +22,14 @@ use tokio_postgres::types::ToSql;
 use tokio_postgres::NoTls;
 
 use crate::error::{
-    CreatePostgresPoolSnafu, Error, GetPostgresConnectionSnafu, PostgresExecutionSnafu, Result,
-    StrFromUtf8Snafu,
+    CreatePostgresPoolSnafu, Error, GetPostgresConnectionSnafu, PostgresExecutionSnafu,
+    PostgresTransactionSnafu, Result, StrFromUtf8Snafu,
 };
-use crate::kv_backend::txn::{Txn as KvTxn, TxnResponse as KvTxnResponse};
+use crate::kv_backend::txn::{
+    Compare, Txn as KvTxn, TxnOp, TxnOpResponse, TxnResponse as KvTxnResponse,
+};
 use crate::kv_backend::{KvBackend, KvBackendRef, TxnService};
+use crate::metrics::METRIC_META_TXN_REQUEST;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
@@ -34,9 +37,47 @@ use crate::rpc::store::{
 };
 use crate::rpc::KeyValue;
 
+type PgClient = deadpool::managed::Object<deadpool_postgres::Manager>;
+
+enum PgQueryExecutor<'a> {
+    Client(PgClient),
+    Transaction(deadpool_postgres::Transaction<'a>),
+}
+
+impl PgQueryExecutor<'_> {
+    async fn query(
+        &self,
+        query: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<Vec<tokio_postgres::Row>> {
+        match self {
+            PgQueryExecutor::Client(client) => client
+                .query(query, params)
+                .await
+                .context(PostgresExecutionSnafu),
+            PgQueryExecutor::Transaction(txn) => txn
+                .query(query, params)
+                .await
+                .context(PostgresExecutionSnafu),
+        }
+    }
+
+    async fn commit(self) -> Result<()> {
+        match self {
+            PgQueryExecutor::Client(_) => Ok(()),
+            PgQueryExecutor::Transaction(txn) => {
+                txn.commit().await.context(PostgresTransactionSnafu {
+                    operation: "commit".to_string(),
+                })
+            }
+        }
+    }
+}
+
 /// Posgres backend store for metasrv
 pub struct PgStore {
     pool: Pool,
+    max_txn_ops: usize,
 }
 
 const EMPTY: &[u8] = &[0];
@@ -94,17 +135,17 @@ SELECT k, v FROM prev;"#;
 
 impl PgStore {
     /// Create pgstore impl of KvBackendRef from url.
-    pub async fn with_url(url: &str) -> Result<KvBackendRef> {
+    pub async fn with_url(url: &str, max_txn_ops: usize) -> Result<KvBackendRef> {
         let mut cfg = Config::new();
         cfg.url = Some(url.to_string());
         let pool = cfg
             .create_pool(Some(Runtime::Tokio1), NoTls)
             .context(CreatePostgresPoolSnafu)?;
-        Self::with_pg_pool(pool).await
+        Self::with_pg_pool(pool, max_txn_ops).await
     }
 
     /// Create pgstore impl of KvBackendRef from tokio-postgres client.
-    pub async fn with_pg_pool(pool: Pool) -> Result<KvBackendRef> {
+    pub async fn with_pg_pool(pool: Pool, max_txn_ops: usize) -> Result<KvBackendRef> {
         // This step ensures the postgres metadata backend is ready to use.
         // We check if greptime_metakv table exists, and we will create a new table
         // if it does not exist.
@@ -121,10 +162,10 @@ impl PgStore {
             .execute(METADKV_CREATION, &[])
             .await
             .context(PostgresExecutionSnafu)?;
-        Ok(Arc::new(Self { pool }))
+        Ok(Arc::new(Self { pool, max_txn_ops }))
     }
 
-    async fn get_client(&self) -> Result<deadpool::managed::Object<deadpool_postgres::Manager>> {
+    async fn get_client(&self) -> Result<PgClient> {
         match self.pool.get().await {
             Ok(client) => Ok(client),
             Err(e) => GetPostgresConnectionSnafu {
@@ -134,13 +175,30 @@ impl PgStore {
         }
     }
 
-    async fn put_if_not_exists(&self, key: &str, value: &str) -> Result<bool> {
-        let res = self
-            .get_client()
-            .await?
-            .query(PUT_IF_NOT_EXISTS, &[&key, &value])
+    async fn get_client_executor(&self) -> Result<PgQueryExecutor<'_>> {
+        let client = self.get_client().await?;
+        Ok(PgQueryExecutor::Client(client))
+    }
+
+    async fn get_txn_executor<'a>(&self, client: &'a mut PgClient) -> Result<PgQueryExecutor<'a>> {
+        let txn = client
+            .transaction()
             .await
-            .context(PostgresExecutionSnafu)?;
+            .context(PostgresTransactionSnafu {
+                operation: "start".to_string(),
+            })?;
+        Ok(PgQueryExecutor::Transaction(txn))
+    }
+
+    async fn put_if_not_exists_with_query_executor(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        key: &str,
+        value: &str,
+    ) -> Result<bool> {
+        let res = query_executor
+            .query(PUT_IF_NOT_EXISTS, &[&key, &value])
+            .await?;
         Ok(res.is_empty())
     }
 }
@@ -247,6 +305,47 @@ impl KvBackend for PgStore {
     }
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
+        let client = self.get_client_executor().await?;
+        self.range_with_query_executor(&client, req).await
+    }
+
+    async fn put(&self, req: PutRequest) -> Result<PutResponse> {
+        let client = self.get_client_executor().await?;
+        self.put_with_query_executor(&client, req).await
+    }
+
+    async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
+        let client = self.get_client_executor().await?;
+        self.batch_put_with_query_executor(&client, req).await
+    }
+
+    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
+        let client = self.get_client_executor().await?;
+        self.batch_get_with_query_executor(&client, req).await
+    }
+
+    async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
+        let client = self.get_client_executor().await?;
+        self.delete_range_with_query_executor(&client, req).await
+    }
+
+    async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+        let client = self.get_client_executor().await?;
+        self.batch_delete_with_query_executor(&client, req).await
+    }
+
+    async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
+        let client = self.get_client_executor().await?;
+        self.compare_and_put_with_query_executor(&client, req).await
+    }
+}
+
+impl PgStore {
+    async fn range_with_query_executor(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        req: RangeRequest,
+    ) -> Result<RangeResponse> {
         let mut params = vec![];
         let template = select_range_template(&req);
         if req.key != EMPTY {
@@ -275,12 +374,7 @@ impl KvBackend for PgStore {
                 Cow::Owned(owned) => owned as &(dyn ToSql + Sync),
             })
             .collect();
-        let res = self
-            .get_client()
-            .await?
-            .query(&template, &params)
-            .await
-            .context(PostgresExecutionSnafu)?;
+        let res = query_executor.query(&template, &params).await?;
         let kvs: Vec<KeyValue> = res
             .into_iter()
             .map(|r| {
@@ -308,16 +402,23 @@ impl KvBackend for PgStore {
         })
     }
 
-    async fn put(&self, req: PutRequest) -> Result<PutResponse> {
+    async fn put_with_query_executor(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        req: PutRequest,
+    ) -> Result<PutResponse> {
         let kv = KeyValue {
             key: req.key,
             value: req.value,
         };
         let mut res = self
-            .batch_put(BatchPutRequest {
-                kvs: vec![kv],
-                prev_kv: req.prev_kv,
-            })
+            .batch_put_with_query_executor(
+                query_executor,
+                BatchPutRequest {
+                    kvs: vec![kv],
+                    prev_kv: req.prev_kv,
+                },
+            )
             .await?;
 
         if !res.prev_kvs.is_empty() {
@@ -328,7 +429,11 @@ impl KvBackend for PgStore {
         Ok(PutResponse { prev_kv: None })
     }
 
-    async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
+    async fn batch_put_with_query_executor(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        req: BatchPutRequest,
+    ) -> Result<BatchPutResponse> {
         let mut in_params = Vec::with_capacity(req.kvs.len());
         let mut values_params = Vec::with_capacity(req.kvs.len() * 2);
 
@@ -346,12 +451,7 @@ impl KvBackend for PgStore {
 
         let query = generate_batch_upsert_query(req.kvs.len());
 
-        let res = self
-            .get_client()
-            .await?
-            .query(&query, &params)
-            .await
-            .context(PostgresExecutionSnafu)?;
+        let res = query_executor.query(&query, &params).await?;
         if req.prev_kv {
             let kvs: Vec<KeyValue> = res
                 .into_iter()
@@ -371,7 +471,12 @@ impl KvBackend for PgStore {
         Ok(BatchPutResponse { prev_kvs: vec![] })
     }
 
-    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
+    /// Batch get with certain client. It's needed for a client with transaction.
+    async fn batch_get_with_query_executor(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        req: BatchGetRequest,
+    ) -> Result<BatchGetResponse> {
         if req.keys.is_empty() {
             return Ok(BatchGetResponse { kvs: vec![] });
         }
@@ -386,12 +491,7 @@ impl KvBackend for PgStore {
             .map(|x| x as &(dyn ToSql + Sync))
             .collect();
 
-        let res = self
-            .get_client()
-            .await?
-            .query(&query, &params)
-            .await
-            .context(PostgresExecutionSnafu)?;
+        let res = query_executor.query(&query, &params).await?;
         let kvs: Vec<KeyValue> = res
             .into_iter()
             .map(|r| {
@@ -406,7 +506,11 @@ impl KvBackend for PgStore {
         Ok(BatchGetResponse { kvs })
     }
 
-    async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
+    async fn delete_range_with_query_executor(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        req: DeleteRangeRequest,
+    ) -> Result<DeleteRangeResponse> {
         let mut params = vec![];
         let template = select_range_delete_template(&req);
         if req.key != EMPTY {
@@ -430,12 +534,7 @@ impl KvBackend for PgStore {
             })
             .collect();
 
-        let res = self
-            .get_client()
-            .await?
-            .query(template, &params)
-            .await
-            .context(PostgresExecutionSnafu)?;
+        let res = query_executor.query(template, &params).await?;
         let deleted = res.len() as i64;
         if !req.prev_kv {
             return Ok({
@@ -462,7 +561,11 @@ impl KvBackend for PgStore {
         })
     }
 
-    async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+    async fn batch_delete_with_query_executor(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        req: BatchDeleteRequest,
+    ) -> Result<BatchDeleteResponse> {
         if req.keys.is_empty() {
             return Ok(BatchDeleteResponse { prev_kvs: vec![] });
         }
@@ -477,12 +580,7 @@ impl KvBackend for PgStore {
             .map(|x| x as &(dyn ToSql + Sync))
             .collect();
 
-        let res = self
-            .get_client()
-            .await?
-            .query(&query, &params)
-            .await
-            .context(PostgresExecutionSnafu)?;
+        let res = query_executor.query(&query, &params).await?;
         if !req.prev_kv {
             return Ok(BatchDeleteResponse { prev_kvs: vec![] });
         }
@@ -500,11 +598,17 @@ impl KvBackend for PgStore {
         Ok(BatchDeleteResponse { prev_kvs: kvs })
     }
 
-    async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
+    async fn compare_and_put_with_query_executor(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        req: CompareAndPutRequest,
+    ) -> Result<CompareAndPutResponse> {
         let key = process_bytes(&req.key, "CASKey")?;
         let value = process_bytes(&req.value, "CASValue")?;
         if req.expect.is_empty() {
-            let put_res = self.put_if_not_exists(key, value).await?;
+            let put_res = self
+                .put_if_not_exists_with_query_executor(query_executor, key, value)
+                .await?;
             return Ok(CompareAndPutResponse {
                 success: put_res,
                 prev_kv: None,
@@ -512,12 +616,7 @@ impl KvBackend for PgStore {
         }
         let expect = process_bytes(&req.expect, "CASExpect")?;
 
-        let res = self
-            .get_client()
-            .await?
-            .query(CAS, &[&key, &value, &expect])
-            .await
-            .context(PostgresExecutionSnafu)?;
+        let res = query_executor.query(CAS, &[&key, &value, &expect]).await?;
         match res.is_empty() {
             true => Ok(CompareAndPutResponse {
                 success: false,
@@ -542,19 +641,258 @@ impl KvBackend for PgStore {
             }
         }
     }
+
+    async fn execute_txn_cmp(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        cmp: &[Compare],
+    ) -> Result<bool> {
+        let batch_get_req = BatchGetRequest {
+            keys: cmp.iter().map(|c| c.key.clone()).collect(),
+        };
+        let res = self
+            .batch_get_with_query_executor(query_executor, batch_get_req)
+            .await?;
+        let res_map = res
+            .kvs
+            .into_iter()
+            .map(|kv| (kv.key, kv.value))
+            .collect::<std::collections::HashMap<Vec<u8>, Vec<u8>>>();
+        for c in cmp {
+            let value = res_map.get(&c.key);
+            if !c.compare_value(value) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Execute a batch of transaction operations. This function is only used for transactions with the same operation type.
+    async fn try_batch_txn(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        txn_ops: &[TxnOp],
+    ) -> Result<Option<Vec<TxnOpResponse>>> {
+        if !check_txn_ops(txn_ops)? {
+            return Ok(None);
+        }
+        match txn_ops.first() {
+            Some(TxnOp::Delete(_)) => {
+                let mut batch_del_req = BatchDeleteRequest {
+                    keys: vec![],
+                    prev_kv: false,
+                };
+                for op in txn_ops {
+                    if let TxnOp::Delete(key) = op {
+                        batch_del_req.keys.push(key.clone());
+                    }
+                }
+                let res = self
+                    .batch_delete_with_query_executor(query_executor, batch_del_req)
+                    .await?;
+                let res_map = res
+                    .prev_kvs
+                    .into_iter()
+                    .map(|kv| (kv.key, kv.value))
+                    .collect::<std::collections::HashMap<Vec<u8>, Vec<u8>>>();
+                let mut resps = Vec::with_capacity(txn_ops.len());
+                for op in txn_ops {
+                    if let TxnOp::Delete(key) = op {
+                        let value = res_map.get(key);
+                        resps.push(TxnOpResponse::ResponseDelete(DeleteRangeResponse {
+                            deleted: if value.is_some() { 1 } else { 0 },
+                            prev_kvs: value
+                                .map(|v| {
+                                    vec![KeyValue {
+                                        key: key.clone(),
+                                        value: v.clone(),
+                                    }]
+                                })
+                                .unwrap_or_default(),
+                        }));
+                    }
+                }
+                Ok(Some(resps))
+            }
+            Some(TxnOp::Put(_, _)) => {
+                let mut batch_put_req = BatchPutRequest {
+                    kvs: vec![],
+                    prev_kv: false,
+                };
+                for op in txn_ops {
+                    if let TxnOp::Put(key, value) = op {
+                        batch_put_req.kvs.push(KeyValue {
+                            key: key.clone(),
+                            value: value.clone(),
+                        });
+                    }
+                }
+                let res = self
+                    .batch_put_with_query_executor(query_executor, batch_put_req)
+                    .await?;
+                let res_map = res
+                    .prev_kvs
+                    .into_iter()
+                    .map(|kv| (kv.key, kv.value))
+                    .collect::<std::collections::HashMap<Vec<u8>, Vec<u8>>>();
+                let mut resps = Vec::with_capacity(txn_ops.len());
+                for op in txn_ops {
+                    if let TxnOp::Put(key, _) = op {
+                        let prev_kv = res_map.get(key);
+                        match prev_kv {
+                            Some(v) => {
+                                resps.push(TxnOpResponse::ResponsePut(PutResponse {
+                                    prev_kv: Some(KeyValue {
+                                        key: key.clone(),
+                                        value: v.clone(),
+                                    }),
+                                }));
+                            }
+                            None => {
+                                resps.push(TxnOpResponse::ResponsePut(PutResponse {
+                                    prev_kv: None,
+                                }));
+                            }
+                        }
+                    }
+                }
+                Ok(Some(resps))
+            }
+            Some(TxnOp::Get(_)) => {
+                let mut batch_get_req = BatchGetRequest { keys: vec![] };
+                for op in txn_ops {
+                    if let TxnOp::Get(key) = op {
+                        batch_get_req.keys.push(key.clone());
+                    }
+                }
+                let res = self
+                    .batch_get_with_query_executor(query_executor, batch_get_req)
+                    .await?;
+                let res_map = res
+                    .kvs
+                    .into_iter()
+                    .map(|kv| (kv.key, kv.value))
+                    .collect::<std::collections::HashMap<Vec<u8>, Vec<u8>>>();
+                let mut resps = Vec::with_capacity(txn_ops.len());
+                for op in txn_ops {
+                    if let TxnOp::Get(key) = op {
+                        let value = res_map.get(key);
+                        resps.push(TxnOpResponse::ResponseGet(RangeResponse {
+                            kvs: value
+                                .map(|v| {
+                                    vec![KeyValue {
+                                        key: key.clone(),
+                                        value: v.clone(),
+                                    }]
+                                })
+                                .unwrap_or_default(),
+                            more: false,
+                        }));
+                    }
+                }
+                Ok(Some(resps))
+            }
+            None => Ok(Some(vec![])),
+        }
+    }
+
+    async fn execute_txn_op(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        op: TxnOp,
+    ) -> Result<TxnOpResponse> {
+        match op {
+            TxnOp::Put(key, value) => {
+                let res = self
+                    .put_with_query_executor(
+                        query_executor,
+                        PutRequest {
+                            key,
+                            value,
+                            prev_kv: false,
+                        },
+                    )
+                    .await?;
+                Ok(TxnOpResponse::ResponsePut(res))
+            }
+            TxnOp::Get(key) => {
+                let res = self
+                    .range_with_query_executor(
+                        query_executor,
+                        RangeRequest {
+                            key,
+                            range_end: vec![],
+                            limit: 1,
+                            keys_only: false,
+                        },
+                    )
+                    .await?;
+                Ok(TxnOpResponse::ResponseGet(res))
+            }
+            TxnOp::Delete(key) => {
+                let res = self
+                    .delete_range_with_query_executor(
+                        query_executor,
+                        DeleteRangeRequest {
+                            key,
+                            range_end: vec![],
+                            prev_kv: false,
+                        },
+                    )
+                    .await?;
+                Ok(TxnOpResponse::ResponseDelete(res))
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl TxnService for PgStore {
     type Error = Error;
 
-    async fn txn(&self, _txn: KvTxn) -> Result<KvTxnResponse> {
-        // TODO: implement txn for pg kv backend.
-        unimplemented!()
+    async fn txn(&self, txn: KvTxn) -> Result<KvTxnResponse> {
+        let _timer = METRIC_META_TXN_REQUEST
+            .with_label_values(&["postgres", "txn"])
+            .start_timer();
+
+        let mut client = self.get_client().await?;
+        let pg_txn = self.get_txn_executor(&mut client).await?;
+        let mut success = true;
+        if txn.c_when {
+            success = self.execute_txn_cmp(&pg_txn, &txn.req.compare).await?;
+        }
+        let mut responses = vec![];
+        if success && txn.c_then {
+            match self.try_batch_txn(&pg_txn, &txn.req.success).await? {
+                Some(res) => responses.extend(res),
+                None => {
+                    for txnop in txn.req.success {
+                        let res = self.execute_txn_op(&pg_txn, txnop).await?;
+                        responses.push(res);
+                    }
+                }
+            }
+        } else if !success && txn.c_else {
+            match self.try_batch_txn(&pg_txn, &txn.req.failure).await? {
+                Some(res) => responses.extend(res),
+                None => {
+                    for txnop in txn.req.failure {
+                        let res = self.execute_txn_op(&pg_txn, txnop).await?;
+                        responses.push(res);
+                    }
+                }
+            }
+        }
+
+        pg_txn.commit().await?;
+        Ok(KvTxnResponse {
+            responses,
+            succeeded: success,
+        })
     }
 
     fn max_txn_ops(&self) -> usize {
-        unreachable!("postgres backend does not support max_txn_ops!")
+        self.max_txn_ops
     }
 }
 
@@ -570,6 +908,25 @@ fn is_prefix_range(start: &[u8], end: &[u8]) -> bool {
     false
 }
 
+/// Check if the transaction operations are the same type.
+fn check_txn_ops(txn_ops: &[TxnOp]) -> Result<bool> {
+    if txn_ops.is_empty() {
+        return Ok(false);
+    }
+    let first_op = &txn_ops[0];
+    for op in txn_ops {
+        match (op, first_op) {
+            (TxnOp::Put(_, _), TxnOp::Put(_, _)) => {}
+            (TxnOp::Get(_), TxnOp::Get(_)) => {}
+            (TxnOp::Delete(_), TxnOp::Delete(_)) => {}
+            _ => {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,6 +934,8 @@ mod tests {
         prepare_kv_with_prefix, test_kv_batch_delete_with_prefix, test_kv_batch_get_with_prefix,
         test_kv_compare_and_put_with_prefix, test_kv_delete_range_with_prefix,
         test_kv_put_with_prefix, test_kv_range_2_with_prefix, test_kv_range_with_prefix,
+        test_txn_compare_equal, test_txn_compare_greater, test_txn_compare_less,
+        test_txn_compare_not_equal, test_txn_one_compare_op, text_txn_multi_compare_op,
         unprepare_kv,
     };
 
@@ -598,69 +957,66 @@ mod tests {
             .await
             .context(PostgresExecutionSnafu)
             .unwrap();
-        Some(PgStore { pool })
+        Some(PgStore {
+            pool,
+            max_txn_ops: 128,
+        })
     }
 
     #[tokio::test]
-    async fn test_put() {
+    async fn test_pg_crud() {
         if let Some(kv_backend) = build_pg_kv_backend().await {
             let prefix = b"put/";
             prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
             test_kv_put_with_prefix(&kv_backend, prefix.to_vec()).await;
             unprepare_kv(&kv_backend, prefix).await;
-        }
-    }
 
-    #[tokio::test]
-    async fn test_range() {
-        if let Some(kv_backend) = build_pg_kv_backend().await {
             let prefix = b"range/";
             prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
             test_kv_range_with_prefix(&kv_backend, prefix.to_vec()).await;
             unprepare_kv(&kv_backend, prefix).await;
-        }
-    }
 
-    #[tokio::test]
-    async fn test_range_2() {
-        if let Some(kv_backend) = build_pg_kv_backend().await {
-            test_kv_range_2_with_prefix(kv_backend, b"range2/".to_vec()).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn test_batch_get() {
-        if let Some(kv_backend) = build_pg_kv_backend().await {
             let prefix = b"batchGet/";
             prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
             test_kv_batch_get_with_prefix(&kv_backend, prefix.to_vec()).await;
             unprepare_kv(&kv_backend, prefix).await;
-        }
-    }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_compare_and_put() {
-        if let Some(kv_backend) = build_pg_kv_backend().await {
-            let kv_backend = Arc::new(kv_backend);
-            test_kv_compare_and_put_with_prefix(kv_backend, b"compareAndPut/".to_vec()).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn test_delete_range() {
-        if let Some(kv_backend) = build_pg_kv_backend().await {
             let prefix = b"deleteRange/";
             prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
             test_kv_delete_range_with_prefix(kv_backend, prefix.to_vec()).await;
         }
-    }
 
-    #[tokio::test]
-    async fn test_batch_delete() {
+        if let Some(kv_backend) = build_pg_kv_backend().await {
+            test_kv_range_2_with_prefix(kv_backend, b"range2/".to_vec()).await;
+        }
+
+        if let Some(kv_backend) = build_pg_kv_backend().await {
+            let kv_backend = Arc::new(kv_backend);
+            test_kv_compare_and_put_with_prefix(kv_backend, b"compareAndPut/".to_vec()).await;
+        }
+
         if let Some(kv_backend) = build_pg_kv_backend().await {
             let prefix = b"batchDelete/";
             prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
             test_kv_batch_delete_with_prefix(kv_backend, prefix.to_vec()).await;
+        }
+
+        if let Some(kv_backend) = build_pg_kv_backend().await {
+            let kv_backend_ref = Arc::new(kv_backend);
+            test_txn_one_compare_op(kv_backend_ref.clone()).await;
+            text_txn_multi_compare_op(kv_backend_ref.clone()).await;
+            test_txn_compare_equal(kv_backend_ref.clone()).await;
+            test_txn_compare_greater(kv_backend_ref.clone()).await;
+            test_txn_compare_less(kv_backend_ref.clone()).await;
+            test_txn_compare_not_equal(kv_backend_ref.clone()).await;
+            // Clean up
+            kv_backend_ref
+                .get_client()
+                .await
+                .unwrap()
+                .execute("DELETE FROM greptime_metakv", &[])
+                .await
+                .unwrap();
         }
     }
 }
