@@ -62,6 +62,11 @@ impl Instance {
     pub fn datanode(&self) -> &Datanode {
         &self.datanode
     }
+
+    /// allow customizing datanode for downstream projects
+    pub fn datanode_mut(&mut self) -> &mut Datanode {
+        &mut self.datanode
+    }
 }
 
 #[async_trait]

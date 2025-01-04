@@ -66,6 +66,11 @@ impl Instance {
     pub fn flownode(&self) -> &FlownodeInstance {
         &self.flownode
     }
+
+    /// allow customizing flownode for downstream projects
+    pub fn flownode_mut(&mut self) -> &mut FlownodeInstance {
+        &mut self.flownode
+    }
 }
 
 #[async_trait::async_trait]
