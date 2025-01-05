@@ -66,7 +66,7 @@ use crate::schedule::remote_job_scheduler::{
     CompactionJob, DefaultNotifier, RemoteJob, RemoteJobSchedulerRef,
 };
 use crate::schedule::scheduler::SchedulerRef;
-use crate::sst::file::{FileHandle, FileId, FileMeta, Level};
+use crate::sst::file::{FileHandle, FileMeta, Level};
 use crate::sst::version::LevelMeta;
 use crate::worker::WorkerListener;
 
@@ -548,7 +548,6 @@ impl CompactionStatus {
 
 #[derive(Debug, Clone)]
 pub struct CompactionOutput {
-    pub output_file_id: FileId,
     /// Compaction output file level.
     pub output_level: Level,
     /// Compaction input files.
@@ -562,7 +561,6 @@ pub struct CompactionOutput {
 /// SerializedCompactionOutput is a serialized version of [CompactionOutput] by replacing [FileHandle] with [FileMeta].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerializedCompactionOutput {
-    output_file_id: FileId,
     output_level: Level,
     inputs: Vec<FileMeta>,
     filter_deleted: bool,

@@ -45,7 +45,7 @@ use crate::request::{
     SenderWriteRequest, WorkerRequest,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
-use crate::sst::file::{FileId, FileMeta};
+use crate::sst::file::FileMeta;
 use crate::sst::parquet::WriteOptions;
 use crate::worker::WorkerListener;
 
@@ -347,14 +347,12 @@ impl RegionFlushTask {
             }
 
             let max_sequence = mem.stats().max_sequence();
-            let file_id = FileId::random();
             let iter = mem.iter(None, None)?;
             let source = Source::Iter(iter);
 
             // Flush to level 0.
             let write_request = SstWriteRequest {
                 op_type: OperationType::Flush,
-                file_id,
                 metadata: version.metadata.clone(),
                 source,
                 cache_manager: self.cache_manager.clone(),
@@ -365,29 +363,31 @@ impl RegionFlushTask {
                 fulltext_index_config: self.engine_config.fulltext_index.clone(),
                 bloom_filter_index_config: self.engine_config.bloom_filter_index.clone(),
             };
-            let Some(sst_info) = self
+
+            let ssts_written = self
                 .access_layer
                 .write_sst(write_request, &write_opts)
-                .await?
-            else {
+                .await?;
+            if ssts_written.is_empty() {
                 // No data written.
                 continue;
-            };
+            }
 
-            flushed_bytes += sst_info.file_size;
-            let file_meta = FileMeta {
-                region_id: self.region_id,
-                file_id,
-                time_range: sst_info.time_range,
-                level: 0,
-                file_size: sst_info.file_size,
-                available_indexes: sst_info.index_metadata.build_available_indexes(),
-                index_file_size: sst_info.index_metadata.file_size,
-                num_rows: sst_info.num_rows as u64,
-                num_row_groups: sst_info.num_row_groups,
-                sequence: NonZeroU64::new(max_sequence),
-            };
-            file_metas.push(file_meta);
+            file_metas.extend(ssts_written.into_iter().map(|sst_info| {
+                flushed_bytes += sst_info.file_size;
+                FileMeta {
+                    region_id: self.region_id,
+                    file_id: sst_info.file_id,
+                    time_range: sst_info.time_range,
+                    level: 0,
+                    file_size: sst_info.file_size,
+                    available_indexes: sst_info.index_metadata.build_available_indexes(),
+                    index_file_size: sst_info.index_metadata.file_size,
+                    num_rows: sst_info.num_rows as u64,
+                    num_row_groups: sst_info.num_row_groups,
+                    sequence: NonZeroU64::new(max_sequence),
+                }
+            }));
         }
 
         if !file_metas.is_empty() {
