@@ -15,11 +15,13 @@
 //! Parquet writer.
 
 use std::future::Future;
+use std::mem;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use common_telemetry::debug;
 use common_time::Timestamp;
 use datatypes::arrow::datatypes::SchemaRef;
 use object_store::{FuturesAsyncWriter, ObjectStore};
@@ -135,6 +137,54 @@ where
         }
     }
 
+    /// Finishes current SST file and index file.
+    async fn finish_current_file(
+        &mut self,
+        ssts: &mut SstInfoArray,
+        stats: &mut SourceStats,
+    ) -> Result<()> {
+        // maybe_init_writer will re-create a new file.
+        if let Some(mut current_writer) = mem::take(&mut self.writer) {
+            let stats = mem::take(stats);
+            // At least one row has been written.
+            assert!(stats.num_rows > 0);
+
+            debug!(
+                "Finishing current file {}, file size: {}, num rows: {}",
+                self.current_file,
+                self.bytes_written.load(Ordering::Relaxed),
+                stats.num_rows
+            );
+
+            // Finish indexer and writer.
+            // safety: writer and index can only be both present or not.
+            let index_output = self.current_indexer.as_mut().unwrap().finish().await;
+            current_writer.flush().await.context(WriteParquetSnafu)?;
+
+            let file_meta = current_writer.close().await.context(WriteParquetSnafu)?;
+            let file_size = self.bytes_written.load(Ordering::Relaxed) as u64;
+
+            // Safety: num rows > 0 so we must have min/max.
+            let time_range = stats.time_range.unwrap();
+
+            // convert FileMetaData to ParquetMetaData
+            let parquet_metadata = parse_parquet_metadata(file_meta)?;
+            ssts.push(SstInfo {
+                file_id: self.current_file,
+                time_range,
+                file_size,
+                num_rows: stats.num_rows,
+                num_row_groups: parquet_metadata.num_row_groups() as u64,
+                file_metadata: Some(Arc::new(parquet_metadata)),
+                index_metadata: index_output,
+            });
+            self.current_file = FileId::random();
+            self.bytes_written.store(0, Ordering::Relaxed)
+        };
+
+        Ok(())
+    }
+
     async fn get_or_create_indexer(&mut self) -> &mut Indexer {
         match self.current_indexer {
             None => {
@@ -157,6 +207,7 @@ where
         override_sequence: Option<SequenceNumber>, // override the `sequence` field from `Source`
         opts: &WriteOptions,
     ) -> Result<SstInfoArray> {
+        let mut results = smallvec![];
         let write_format =
             WriteFormat::new(self.metadata.clone()).with_override_sequence(override_sequence);
         let mut stats = SourceStats::default();
@@ -169,49 +220,29 @@ where
             match res {
                 Ok(mut batch) => {
                     stats.update(&batch);
-                    self.get_or_create_indexer().await.update(&mut batch).await;
+                    // safety: self.current_indexer must be set when first batch has been written.
+                    self.current_indexer.as_mut().unwrap().update(&batch).await;
+                    if let Some(max_file_size) = opts.max_file_size
+                        && self.bytes_written.load(Ordering::Relaxed) > max_file_size
+                    {
+                        self.finish_current_file(&mut results, &mut stats).await?;
+                    }
                 }
                 Err(e) => {
-                    self.get_or_create_indexer().await.abort().await;
+                    if let Some(indexer) = &mut self.current_indexer {
+                        indexer.abort().await;
+                    }
                     return Err(e);
                 }
             }
         }
 
-        let index_output = self.get_or_create_indexer().await.finish().await;
-
-        if stats.num_rows == 0 {
-            return Ok(smallvec![]);
-        }
-
-        let Some(mut arrow_writer) = self.writer.take() else {
-            // No batch actually written.
-            return Ok(smallvec![]);
-        };
-
-        arrow_writer.flush().await.context(WriteParquetSnafu)?;
-
-        let file_meta = arrow_writer.close().await.context(WriteParquetSnafu)?;
-        let file_size = self.bytes_written.load(Ordering::Relaxed) as u64;
-
-        // Safety: num rows > 0 so we must have min/max.
-        let time_range = stats.time_range.unwrap();
-
-        // convert FileMetaData to ParquetMetaData
-        let parquet_metadata = parse_parquet_metadata(file_meta)?;
+        self.finish_current_file(&mut results, &mut stats).await?;
 
         let file_id = self.current_file;
 
         // object_store.write will make sure all bytes are written or an error is raised.
-        Ok(smallvec![SstInfo {
-            file_id,
-            time_range,
-            file_size,
-            num_rows: stats.num_rows,
-            num_row_groups: parquet_metadata.num_row_groups() as u64,
-            file_metadata: Some(Arc::new(parquet_metadata)),
-            index_metadata: index_output,
-        }])
+        Ok(results)
     }
 
     /// Customizes per-column config according to schema and maybe column cardinality.
@@ -282,6 +313,14 @@ where
                 AsyncArrowWriter::try_new(writer, schema.clone(), Some(writer_props))
                     .context(WriteParquetSnafu)?;
             self.writer = Some(arrow_writer);
+
+            let index_file_path = self.path_provider.build_index_file_path(self.current_file);
+            let indexer = self
+                .indexer_builder
+                .build(self.current_file, index_file_path)
+                .await;
+            self.current_indexer = Some(indexer);
+
             // safety: self.writer is assigned above
             Ok(self.writer.as_mut().unwrap())
         }

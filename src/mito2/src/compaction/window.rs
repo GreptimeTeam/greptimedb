@@ -115,6 +115,7 @@ impl Picker for WindowedCompactionPicker {
             outputs,
             expired_ssts,
             time_window_size: time_window,
+            max_file_size: None, // todo (hl): we may need to support `max_file_size` parameter in manual compaction.
         })
     }
 }

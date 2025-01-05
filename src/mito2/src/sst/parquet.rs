@@ -50,6 +50,10 @@ pub struct WriteOptions {
     pub write_buffer_size: ReadableSize,
     /// Row group size.
     pub row_group_size: usize,
+    /// Max single output file size.
+    /// Note: This is not a hard limit as we can only observe the file size when
+    /// ArrowWrite writes to underlying writers.
+    pub max_file_size: Option<usize>,
 }
 
 impl Default for WriteOptions {
@@ -57,6 +61,7 @@ impl Default for WriteOptions {
         WriteOptions {
             write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             row_group_size: DEFAULT_ROW_GROUP_SIZE,
+            max_file_size: None,
         }
     }
 }
@@ -101,6 +106,7 @@ mod tests {
     use super::*;
     use crate::access_layer::FilePathProvider;
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
+    use crate::read::BatchReader;
     use crate::sst::index::{Indexer, IndexerBuilder};
     use crate::sst::parquet::format::WriteFormat;
     use crate::sst::parquet::reader::ParquetReaderBuilder;
@@ -108,7 +114,8 @@ mod tests {
     use crate::sst::{location, DEFAULT_WRITE_CONCURRENCY};
     use crate::test_util::sst_util::{
         assert_parquet_metadata_eq, build_test_binary_test_region_metadata, new_batch_by_range,
-        new_batch_with_binary, new_source, sst_file_handle, sst_region_metadata,
+        new_batch_with_binary, new_source, sst_file_handle, sst_file_handle_with_file_id,
+        sst_region_metadata,
     };
     use crate::test_util::{check_reader_result, TestEnv};
 
@@ -531,5 +538,59 @@ mod tests {
             ],
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_write_multiple_files() {
+        common_telemetry::init_default_ut_logging();
+        // create test env
+        let mut env = TestEnv::new();
+        let object_store = env.init_object_store_manager();
+        let metadata = Arc::new(sst_region_metadata());
+        let batches = &[
+            new_batch_by_range(&["a", "d"], 0, 1000),
+            new_batch_by_range(&["b", "f"], 0, 1000),
+            new_batch_by_range(&["b", "h"], 100, 200),
+            new_batch_by_range(&["b", "h"], 200, 300),
+            new_batch_by_range(&["b", "h"], 300, 1000),
+        ];
+        let total_rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+
+        let source = new_source(batches);
+        let write_opts = WriteOptions {
+            row_group_size: 50,
+            max_file_size: Some(1024 * 16),
+            ..Default::default()
+        };
+
+        let path_provider = RegionFilePathProvider {
+            region_dir: "test".to_string(),
+        };
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store.clone(),
+            metadata.clone(),
+            NoopIndexBuilder,
+            path_provider,
+        )
+        .await;
+
+        let files = writer.write_all(source, None, &write_opts).await.unwrap();
+        assert_eq!(2, files.len());
+
+        let mut rows_read = 0;
+        for f in &files {
+            let file_handle = sst_file_handle_with_file_id(
+                f.file_id,
+                f.time_range.0.value(),
+                f.time_range.1.value(),
+            );
+            let builder =
+                ParquetReaderBuilder::new("test".to_string(), file_handle, object_store.clone());
+            let mut reader = builder.build().await.unwrap();
+            while let Some(batch) = reader.next_batch().await.unwrap() {
+                rows_read += batch.num_rows();
+            }
+        }
+        assert_eq!(total_rows, rows_read);
     }
 }
