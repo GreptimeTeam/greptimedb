@@ -1899,6 +1899,14 @@ pub async fn test_loki_pb_logs(store_type: StorageType) {
                 HeaderValue::from_static("application/x-protobuf"),
             ),
             (
+                HeaderName::from_static("content-encoding"),
+                HeaderValue::from_static("snappy"),
+            ),
+            (
+                HeaderName::from_static("accept-encoding"),
+                HeaderValue::from_static("identity"),
+            ),
+            (
                 HeaderName::from_static(GREPTIME_LOG_TABLE_NAME_HEADER_NAME),
                 HeaderValue::from_static("loki_table_name"),
             ),

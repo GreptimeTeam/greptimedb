@@ -747,7 +747,7 @@ impl HttpServer {
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))
-                    .layer(RequestDecompressionLayer::new()),
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
             .with_state(log_state)
     }
@@ -767,7 +767,7 @@ impl HttpServer {
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))
-                    .layer(RequestDecompressionLayer::new()),
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
             .with_state(log_state)
     }
@@ -860,7 +860,7 @@ impl HttpServer {
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))
-                    .layer(RequestDecompressionLayer::new()),
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
             .route("/ping", routing::get(influxdb_ping))
             .route("/health", routing::get(influxdb_health))
@@ -881,7 +881,7 @@ impl HttpServer {
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))
-                    .layer(RequestDecompressionLayer::new()),
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
             .with_state(otlp_handler)
     }
