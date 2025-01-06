@@ -660,25 +660,17 @@ jobs:
         with:
           # Shares cross multiple jobs
           shared-key: "coverage-test"
-      - name: Docker Cache
-        uses: ScribeMD/docker-cache@0.3.7
-        with:
-          key: docker-${{ runner.os }}-coverage
+      # Disabled temporarily to see performance
+      # - name: Docker Cache
+      #   uses: ScribeMD/docker-cache@0.5.0
+      #   with:
+      #     key: docker-${{ runner.os }}-coverage
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Setup etcd server
-        working-directory: tests-integration/fixtures/etcd
-        run: docker compose -f docker-compose-standalone.yml up -d --wait
-      - name: Setup kafka server
-        working-directory: tests-integration/fixtures/kafka
-        run: docker compose -f docker-compose-standalone.yml up -d --wait
-      - name: Setup minio
-        working-directory: tests-integration/fixtures/minio
-        run: docker compose -f docker-compose-standalone.yml up -d --wait
-      - name: Setup postgres server
-        working-directory: tests-integration/fixtures/postgres
+      - name: Setup external services
+        working-directory: tests-integration/fixtures
         run: docker compose -f docker-compose-standalone.yml up -d --wait
       - name: Run nextest cases
         run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend
