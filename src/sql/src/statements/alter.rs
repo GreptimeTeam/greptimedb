@@ -91,6 +91,16 @@ pub struct AddColumn {
     pub location: Option<AddColumnLocation>,
 }
 
+impl Display for AddColumn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(location) = &self.location {
+            write!(f, "{} {location}", self.column_def)
+        } else {
+            write!(f, "{}", self.column_def)
+        }
+    }
+}
+
 impl Display for AlterTableOperation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -98,18 +108,7 @@ impl Display for AlterTableOperation {
             AlterTableOperation::AddColumns { add_columns } => {
                 let columns = add_columns
                     .iter()
-                    .map(
-                        |AddColumn {
-                             column_def,
-                             location,
-                         }| {
-                            if let Some(location) = location {
-                                format!(r#"{column_def} {location}"#)
-                            } else {
-                                format!(r#"{column_def}"#)
-                            }
-                        },
-                    )
+                    .map(|add_column| format!("{add_column}"))
                     .join(",");
                 write!(f, "ADD COLUMN {columns}")
             }
@@ -286,7 +285,8 @@ ALTER DATABASE db UNSET 'a','c'"#,
             }
         }
 
-        let sql = r"alter table monitor add column app string default 'shop' primary key, foo INT;";
+        let sql =
+            r"alter table monitor add column app string default 'shop' primary key, add foo INT;";
         let stmts =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();

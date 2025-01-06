@@ -121,7 +121,8 @@ impl ParserContext<'_> {
                                 .expect_keyword(Keyword::COLUMN)
                                 .context(error::SyntaxSnafu)?;
                             let name = Self::canonicalize_identifier(
-                                self.parse_identifier().context(error::SyntaxSnafu)?,
+                                Self::parse_identifier(&mut self.parser)
+                                    .context(error::SyntaxSnafu)?,
                             );
                             AlterTableOperation::DropColumn { name }
                         }
@@ -186,37 +187,11 @@ impl ParserContext<'_> {
         {
             Ok(AlterTableOperation::AddConstraint(constraint))
         } else {
-            let _ = self.parser.parse_keyword(Keyword::COLUMN);
-            let mut add_columns: Vec<AddColumn> = vec![];
-            loop {
-                let mut column_def = self.parser.parse_column_def().context(error::SyntaxSnafu)?;
-                column_def.name = Self::canonicalize_identifier(column_def.name);
-                let location = if self.parser.parse_keyword(Keyword::FIRST) {
-                    Some(AddColumnLocation::First)
-                } else if let Token::Word(word) = self.parser.peek_token().token {
-                    if word.value.eq_ignore_ascii_case("AFTER") {
-                        let _ = self.parser.next_token();
-                        let name = Self::canonicalize_identifier(
-                            self.parse_identifier().context(error::SyntaxSnafu)?,
-                        );
-                        Some(AddColumnLocation::After {
-                            column_name: name.value,
-                        })
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                add_columns.push(AddColumn {
-                    column_def,
-                    location,
-                });
-                let comma = self.parser.consume_token(&Token::Comma);
-                if !comma {
-                    break;
-                }
-            }
+            self.parser.prev_token();
+            let add_columns = self
+                .parser
+                .parse_comma_separated(parse_add_columns)
+                .context(error::SyntaxSnafu)?;
             Ok(AlterTableOperation::AddColumns { add_columns })
         }
     }
@@ -311,6 +286,33 @@ fn parse_string_options(parser: &mut Parser) -> std::result::Result<(String, Str
         )));
     };
     Ok((name, value))
+}
+
+fn parse_add_columns(parser: &mut Parser) -> std::result::Result<AddColumn, ParserError> {
+    parser.expect_keyword(Keyword::ADD)?;
+    let _ = parser.parse_keyword(Keyword::COLUMN);
+    let mut column_def = parser.parse_column_def()?;
+    column_def.name = ParserContext::canonicalize_identifier(column_def.name);
+    let location = if parser.parse_keyword(Keyword::FIRST) {
+        Some(AddColumnLocation::First)
+    } else if let Token::Word(word) = parser.peek_token().token {
+        if word.value.eq_ignore_ascii_case("AFTER") {
+            let _ = parser.next_token();
+            let name =
+                ParserContext::canonicalize_identifier(ParserContext::parse_identifier(parser)?);
+            Some(AddColumnLocation::After {
+                column_name: name.value,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    Ok(AddColumn {
+        column_def,
+        location,
+    })
 }
 
 /// Parses a comma separated list of string literals.
@@ -462,7 +464,8 @@ mod tests {
 
     #[test]
     fn test_parse_alter_add_column_with_after() {
-        let sql = "ALTER TABLE my_metric_1 ADD tagk_i STRING Null AFTER ts, tagl_i String;";
+        let sql =
+            "ALTER TABLE my_metric_1 ADD tagk_i STRING Null AFTER ts, add column tagl_i String;";
         let mut result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();

@@ -104,7 +104,7 @@ DESC TABLE test;
 | IdC    | String               | PRI | YES  | idc     | TAG           |
 +--------+----------------------+-----+------+---------+---------------+
 
-ALTER TABLE test ADD COLUMN "foo" STRING default 'foo' PRIMARY KEY, "bar" STRING default 'bar' PRIMARY KEY;
+ALTER TABLE test ADD COLUMN "foo" STRING default 'foo' PRIMARY KEY, ADD COLUMN "bar" STRING default 'bar' PRIMARY KEY;
 
 Affected Rows: 0
 

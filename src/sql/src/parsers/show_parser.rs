@@ -289,12 +289,14 @@ impl ParserContext<'_> {
             Token::Word(w) => match w.keyword {
                 Keyword::LIKE => {
                     self.parser.next_token();
-                    Ok(ShowKind::Like(self.parse_identifier().with_context(
-                        |_| error::UnexpectedSnafu {
-                            expected: "LIKE",
-                            actual: self.peek_token_as_string(),
-                        },
-                    )?))
+                    Ok(ShowKind::Like(
+                        Self::parse_identifier(&mut self.parser).with_context(|_| {
+                            error::UnexpectedSnafu {
+                                expected: "LIKE",
+                                actual: self.peek_token_as_string(),
+                            }
+                        })?,
+                    ))
                 }
                 Keyword::WHERE => {
                     self.parser.next_token();
@@ -433,12 +435,12 @@ impl ParserContext<'_> {
             ))),
             Token::Word(w) => match w.keyword {
                 Keyword::LIKE => Ok(Statement::ShowDatabases(ShowDatabases::new(
-                    ShowKind::Like(self.parse_identifier().with_context(|_| {
-                        error::UnexpectedSnafu {
+                    ShowKind::Like(Self::parse_identifier(&mut self.parser).with_context(
+                        |_| error::UnexpectedSnafu {
                             expected: "LIKE",
                             actual: tok.to_string(),
-                        }
-                    })?),
+                        },
+                    )?),
                     full,
                 ))),
                 Keyword::WHERE => Ok(Statement::ShowDatabases(ShowDatabases::new(

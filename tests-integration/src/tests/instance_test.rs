@@ -1349,7 +1349,7 @@ async fn test_alter_table(instance: Arc<dyn MockInstance>) {
     // Add column
     let output = execute_sql(
         &instance,
-        "alter table demo add my_tag1 string null, my_tag2 integer",
+        "alter table demo add my_tag1 string null, add my_tag2 integer",
     )
     .await
     .data;
