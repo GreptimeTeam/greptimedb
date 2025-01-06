@@ -63,7 +63,6 @@ mod tests {
         let data: Vec<u8> = (0..100).collect();
         let reader = PartialReader::new(Cursor::new(data), 10, 0);
         assert!(reader.is_empty());
-        // assert!(reader.is_eof());
     }
 
     #[test]

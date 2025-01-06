@@ -229,7 +229,7 @@ mod tests {
             .unwrap()])
         });
 
-        mock_reader.expect_bitmap_vec().returning(|range| {
+        mock_reader.expect_bitmap_deque().returning(|range| {
             assert_eq!(range.len(), 1);
             assert_eq!(range[0], 2..3);
             Ok(VecDeque::from([bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1, 0]]))
@@ -290,7 +290,7 @@ mod tests {
             }
             Ok(output)
         });
-        mock_reader.expect_bitmap_vec().returning(|ranges| {
+        mock_reader.expect_bitmap_deque().returning(|ranges| {
             let mut output = VecDeque::new();
             for range in ranges {
                 let offset = range.start;

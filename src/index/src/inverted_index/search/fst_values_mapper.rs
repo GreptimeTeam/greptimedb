@@ -62,7 +62,7 @@ impl<'a> ParallelFstValuesMapper<'a> {
         }
 
         common_telemetry::debug!("fetch ranges: {:?}", fetch_ranges);
-        let mut bitmaps = self.reader.bitmap_vec(&fetch_ranges).await?;
+        let mut bitmaps = self.reader.bitmap_deque(&fetch_ranges).await?;
         let mut output = Vec::with_capacity(groups.len());
 
         for counter in groups {
@@ -99,7 +99,7 @@ mod tests {
     #[tokio::test]
     async fn test_map_values_vec() {
         let mut mock_reader = MockInvertedIndexReader::new();
-        mock_reader.expect_bitmap_vec().returning(|ranges| {
+        mock_reader.expect_bitmap_deque().returning(|ranges| {
             let mut output = VecDeque::new();
             for range in ranges {
                 let offset = range.start;
@@ -145,5 +145,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result[0], bitvec![u8, Lsb0; 1, 1, 1, 1, 1, 1, 1, 1]);
+
+        let result = values_mapper
+            .map_values_vec(&[(vec![value(2, 1)], &meta), (vec![value(1, 1)], &meta)])
+            .await
+            .unwrap();
+        assert_eq!(result[0], bitvec![u8, Lsb0; 0, 1, 0, 1, 0, 1, 0, 1]);
+        assert_eq!(result[1], bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1]);
+
+        let result = values_mapper
+            .map_values_vec(&[
+                (vec![value(2, 1), value(1, 1)], &meta),
+                (vec![value(1, 1)], &meta),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(result[0], bitvec![u8, Lsb0; 1, 1, 1, 1, 1, 1, 1, 1]);
+        assert_eq!(result[1], bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1]);
     }
 }

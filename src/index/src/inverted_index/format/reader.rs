@@ -72,7 +72,7 @@ pub trait InvertedIndexReader: Send + Sync {
     }
 
     /// Retrieves the multiple bitmaps from the given ranges.
-    async fn bitmap_vec(&mut self, ranges: &[Range<u64>]) -> Result<VecDeque<BitVec>> {
+    async fn bitmap_deque(&mut self, ranges: &[Range<u64>]) -> Result<VecDeque<BitVec>> {
         Ok(self
             .read_vec(ranges)
             .await?

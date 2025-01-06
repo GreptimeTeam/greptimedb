@@ -115,10 +115,6 @@ mod tests {
     async fn is_eof_returns_true_at_end_of_portion() {
         let data: Vec<u8> = (0..100).collect();
         let reader = PartialReader::new(data, 10, 30);
-        // we are not at the end of the portion
-        // assert!(!reader.is_eof());
         let _ = reader.read(0..20).await.unwrap();
-        // we are at the end of the portion
-        // assert!(reader.is_eof());
     }
 }
