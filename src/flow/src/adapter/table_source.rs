@@ -82,6 +82,31 @@ impl ManagedTableSource {
         }
     }
 
+    /// Get the time index column from table id
+    pub async fn get_time_index_column_from_table_id(
+        &self,
+        table_id: &TableId,
+    ) -> Result<(usize, datatypes::schema::ColumnSchema), Error> {
+        let info = self
+            .table_info_manager
+            .get(*table_id)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?
+            .context(UnexpectedSnafu {
+                reason: format!("Table id = {:?}, couldn't found table info", table_id),
+            })?;
+        let raw_schema = &info.table_info.meta.schema;
+        let Some(ts_index) = raw_schema.timestamp_index else {
+            UnexpectedSnafu {
+                reason: format!("Table id = {:?}, couldn't found timestamp index", table_id),
+            }
+            .fail()?
+        };
+        let col_schema = raw_schema.column_schemas[ts_index].clone();
+        Ok((ts_index, col_schema))
+    }
+
     pub async fn get_table_id_from_proto_name(
         &self,
         name: &greptime_proto::v1::TableName,
@@ -167,6 +192,16 @@ impl ManagedTableSource {
 
         let desc = table_info_value_to_relation_desc(table_info_value)?;
         Ok((table_name, desc))
+    }
+
+    pub async fn check_table_exist(&self, table_id: &TableId) -> Result<bool, Error> {
+        Ok(self
+            .table_info_manager
+            .get(*table_id)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?
+            .is_some())
     }
 }
 

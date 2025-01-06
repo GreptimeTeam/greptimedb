@@ -33,7 +33,7 @@ use crate::adapter::table_source::ManagedTableSource;
 use crate::adapter::FlowWorkerManagerRef;
 use crate::error::{FlowNotFoundSnafu, JoinTaskSnafu, UnexpectedSnafu};
 use crate::expr::error::ExternalSnafu;
-use crate::expr::find_plan_time_window_expr_lower_bound;
+use crate::expr::utils::find_plan_time_window_expr_lower_bound;
 use crate::repr::RelationDesc;
 use crate::server::get_all_flow_ids;
 use crate::{Error, FrontendInvoker};
@@ -110,7 +110,8 @@ impl FlowWorkerManager {
                 let time_index_col = self
                     .table_info_source
                     .get_time_index_column_from_table_id(src_table)
-                    .await?;
+                    .await?
+                    .1;
                 let time_index_name = time_index_col.name;
                 let task = RefillTask::create(
                     flow_id as u64,

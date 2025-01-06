@@ -21,7 +21,7 @@ use common_error::{define_into_tonic_status, from_err_code_msg_to_header};
 use common_macro::stack_trace_debug;
 use common_telemetry::common_error::ext::ErrorExt;
 use common_telemetry::common_error::status_code::StatusCode;
-use snafu::{Location, Snafu};
+use snafu::{Location, ResultExt, Snafu};
 use tonic::metadata::MetadataMap;
 
 use crate::adapter::FlowId;
@@ -259,3 +259,9 @@ impl ErrorExt for Error {
 }
 
 define_into_tonic_status!(Error);
+
+impl From<EvalError> for Error {
+    fn from(e: EvalError) -> Self {
+        Err::<(), _>(e).context(EvalSnafu).unwrap_err()
+    }
+}
