@@ -70,6 +70,7 @@ pub enum WalConfig {
 pub struct StoreConfig {
     pub store_addrs: Vec<String>,
     pub setup_etcd: bool,
+    pub setup_pg: bool,
 }
 
 #[derive(Clone)]
@@ -159,6 +160,7 @@ impl Env {
             self.build_db();
             self.setup_wal();
             self.setup_etcd();
+            // self.setup_pg();
 
             let db_ctx = GreptimeDBContext::new(self.wal.clone(), self.store_config.clone());
 
@@ -385,6 +387,8 @@ impl Env {
                 ];
                 if db_ctx.store_config().store_addrs.is_empty() {
                     args.extend(vec!["--backend".to_string(), "memory-store".to_string()])
+                } else if db_ctx.store_config().setup_pg {
+                    args.extend(vec!["--backend".to_string(), "postgres-store".to_string()]);
                 }
                 (args, vec![METASRV_ADDR.to_string()])
             }
@@ -570,6 +574,24 @@ impl Env {
         }
     }
 
+    /// Setup PostgreSql if needed.
+    fn _setup_pg(&self) {
+        if self.store_config.setup_pg {
+            let client_ports = self
+                .store_config
+                .store_addrs
+                .iter()
+                .map(|s| s.split(':').nth(1).unwrap().parse::<u16>().unwrap())
+                .collect::<Vec<_>>();
+            let client_port = if let Some(port) = client_ports.first() {
+                port
+            } else {
+                &5432
+            };
+            util::setup_pg(*client_port, None);
+        }
+    }
+
     /// Generate config file to `/tmp/{subcommand}-{current_time}.toml`
     fn generate_config_file(&self, subcommand: &str, db_ctx: &GreptimeDBContext) -> String {
         let mut tt = TinyTemplate::new();
@@ -587,6 +609,7 @@ impl Env {
             is_raft_engine: bool,
             kafka_wal_broker_endpoints: String,
             use_etcd: bool,
+            use_pg: bool,
             store_addrs: String,
         }
 
@@ -602,6 +625,7 @@ impl Env {
             is_raft_engine: db_ctx.is_raft_engine(),
             kafka_wal_broker_endpoints: db_ctx.kafka_wal_broker_endpoints(),
             use_etcd: !self.store_config.store_addrs.is_empty(),
+            use_pg: self.store_config.setup_pg,
             store_addrs: self
                 .store_config
                 .store_addrs
@@ -646,7 +670,7 @@ impl Env {
         println!("Going to build the DB...");
         let output = Command::new("cargo")
             .current_dir(util::get_workspace_root())
-            .args(["build", "--bin", "greptime"])
+            .args(["build", "--bin", "greptime", "--features", "pg_kvbackend"])
             .output()
             .expect("Failed to start GreptimeDB");
         if !output.status.success() {
