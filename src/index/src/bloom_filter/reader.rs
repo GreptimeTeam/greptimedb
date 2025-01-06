@@ -65,7 +65,7 @@ pub trait BloomFilterReader: Sync {
     }
 
     async fn bloom_filter_vec(
-        &mut self,
+        &self,
         locs: &[BloomFilterSegmentLocation],
     ) -> Result<Vec<BloomFilter>> {
         let ranges = locs

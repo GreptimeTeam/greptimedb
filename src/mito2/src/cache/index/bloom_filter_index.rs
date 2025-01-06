@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::future::try_join_all;
 use index::bloom_filter::error::Result;
 use index::bloom_filter::reader::BloomFilterReader;
 use index::bloom_filter::BloomFilterMeta;
@@ -102,9 +103,22 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
             .map(|b| b.into())
     }
 
-    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
-        // TODO(zhongzc): wait for #5276 to make it utilize cache.
-        Ok(self.inner.read_vec(ranges).await?)
+    async fn read_vec(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+        let fetch = ranges.iter().map(|range| {
+            let inner = &self.inner;
+            self.cache.get_or_load(
+                (self.file_id, self.column_id),
+                self.blob_size,
+                range.start,
+                (range.end - range.start) as u32,
+                move |ranges| async move { inner.read_vec(&ranges).await },
+            )
+        });
+        Ok(try_join_all(fetch)
+            .await?
+            .into_iter()
+            .map(Bytes::from)
+            .collect::<Vec<_>>())
     }
 
     /// Reads the meta information of the bloom filter.
