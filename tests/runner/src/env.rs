@@ -583,12 +583,8 @@ impl Env {
                 .iter()
                 .map(|s| s.split(':').nth(1).unwrap().parse::<u16>().unwrap())
                 .collect::<Vec<_>>();
-            let client_port = if let Some(port) = client_ports.first() {
-                port
-            } else {
-                &5432
-            };
-            util::setup_pg(*client_port, None);
+            let client_port = client_ports.first().unwrap_or(&5432);
+            util::_setup_pg(*client_port, None);
         }
     }
 
