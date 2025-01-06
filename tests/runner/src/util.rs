@@ -306,7 +306,7 @@ pub fn stop_rm_etcd() {
 }
 
 /// Set up a PostgreSQL server in docker.
-pub fn _setup_pg(pg_port: u16, pg_version: Option<&str>) {
+pub fn setup_pg(pg_port: u16, pg_version: Option<&str>) {
     if std::process::Command::new("docker")
         .args(["-v"])
         .status()

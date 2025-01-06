@@ -573,6 +573,9 @@ jobs:
           - name: "Remote WAL"
             opts: "-w kafka -k 127.0.0.1:9092"
             kafka: true
+          - name: "Pg Kvbackend"
+            opts: "--setup-pg"
+            kafka: false
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
