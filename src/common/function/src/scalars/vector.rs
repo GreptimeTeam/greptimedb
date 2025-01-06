@@ -14,6 +14,7 @@
 
 mod convert;
 mod distance;
+mod elem_product;
 mod elem_sum;
 pub mod impl_conv;
 pub(crate) mod product;
@@ -50,5 +51,6 @@ impl VectorFunction {
         registry.register(Arc::new(vector_div::VectorDivFunction));
         registry.register(Arc::new(sub::SubFunction));
         registry.register(Arc::new(elem_sum::ElemSumFunction));
+        registry.register(Arc::new(elem_product::ElemProductFunction));
     }
 }
