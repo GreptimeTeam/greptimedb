@@ -8,13 +8,21 @@ bind_addr = "127.0.0.1:3002"
 server_addr = "127.0.0.1:3002"
 
 ## Store server address default to etcd store.
+## For postgres store, the format is:
+## "password=password dbname=postgres user=postgres host=localhost port=5432"
+## For etcd store, the format is:
+## "127.0.0.1:2379"
 store_addrs = ["127.0.0.1:2379"]
 
 ## If it's not empty, the metasrv will store all data with this key prefix.
 store_key_prefix = ""
 
 ## The datastore for meta server.
-backend = "EtcdStore"
+## Available values:
+## - `etcd_store` (default value)
+## - `memory_store`
+## - `postgres_store`
+backend = "etcd_store"
 
 ## Datanode selector type.
 ## - `round_robin` (default value)
