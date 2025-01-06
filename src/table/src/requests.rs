@@ -185,6 +185,8 @@ pub struct AddColumnRequest {
     pub column_schema: ColumnSchema,
     pub is_key: bool,
     pub location: Option<AddColumnLocation>,
+    /// Add column if not exists.
+    pub add_if_not_exists: bool,
 }
 
 /// Change column datatype request
@@ -317,6 +319,13 @@ pub struct CopyDatabaseRequest {
     pub with: HashMap<String, String>,
     pub connection: HashMap<String, String>,
     pub time_range: Option<TimestampRange>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct CopyQueryToRequest {
+    pub location: String,
+    pub with: HashMap<String, String>,
+    pub connection: HashMap<String, String>,
 }
 
 #[cfg(test)]

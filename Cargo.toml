@@ -118,13 +118,15 @@ datafusion-physical-expr = { git = "https://github.com/waynexia/arrow-datafusion
 datafusion-physical-plan = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
 datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
 datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
+deadpool = "0.10"
+deadpool-postgres = "0.12"
 derive_builder = "0.12"
 dotenv = "0.15"
 etcd-client = "0.13"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "a875e976441188028353f7274a46a7e6e065c5d4" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "43ddd8dea69f4df0fe2e8b5cdc0044d2cfa35908" }
 hex = "0.4"
 http = "0.2"
 humantime = "2.1"

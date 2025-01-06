@@ -928,9 +928,9 @@ worker_request_batch_size = 64
 manifest_checkpoint_distance = 10
 compress_manifest = false
 auto_flush_interval = "30m"
-enable_experimental_write_cache = false
-experimental_write_cache_path = ""
-experimental_write_cache_size = "5GiB"
+enable_write_cache = false
+write_cache_path = ""
+write_cache_size = "5GiB"
 sst_write_buffer_size = "8MiB"
 parallel_scan_channel_size = 32
 allow_stale_entries = false
@@ -946,7 +946,7 @@ create_on_flush = "auto"
 create_on_compaction = "auto"
 apply_on_query = "auto"
 mem_threshold_on_create = "auto"
-content_cache_page_size = "8MiB"
+content_cache_page_size = "64KiB"
 
 [region_engine.mito.fulltext_index]
 create_on_flush = "auto"

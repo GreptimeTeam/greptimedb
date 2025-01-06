@@ -475,18 +475,18 @@ auto_flush_interval = "1h"
 ## @toml2docs:none-default="Auto"
 #+ selector_result_cache_size = "512MB"
 
-## Whether to enable the experimental write cache, it's enabled by default when using object storage. It is recommended to enable it when using object storage for better performance.
-enable_experimental_write_cache = false
+## Whether to enable the write cache, it's enabled by default when using object storage. It is recommended to enable it when using object storage for better performance.
+enable_write_cache = false
 
 ## File system path for write cache, defaults to `{data_home}`.
-experimental_write_cache_path = ""
+write_cache_path = ""
 
 ## Capacity for write cache. If your disk space is sufficient, it is recommended to set it larger.
-experimental_write_cache_size = "5GiB"
+write_cache_size = "5GiB"
 
 ## TTL for write cache.
 ## @toml2docs:none-default
-experimental_write_cache_ttl = "8h"
+write_cache_ttl = "8h"
 
 ## Buffer size for SST writing.
 sst_write_buffer_size = "8MB"
@@ -550,7 +550,7 @@ metadata_cache_size = "64MiB"
 content_cache_size = "128MiB"
 
 ## Page size for inverted index content cache.
-content_cache_page_size = "8MiB"
+content_cache_page_size = "64KiB"
 
 ## The options for full-text index in Mito engine.
 [region_engine.mito.fulltext_index]

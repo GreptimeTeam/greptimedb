@@ -93,15 +93,15 @@ pub struct MitoConfig {
     pub page_cache_size: ReadableSize,
     /// Cache size for time series selector (e.g. `last_value()`). Setting it to 0 to disable the cache.
     pub selector_result_cache_size: ReadableSize,
-    /// Whether to enable the experimental write cache.
-    pub enable_experimental_write_cache: bool,
+    /// Whether to enable the write cache.
+    pub enable_write_cache: bool,
     /// File system path for write cache dir's root, defaults to `{data_home}`.
-    pub experimental_write_cache_path: String,
+    pub write_cache_path: String,
     /// Capacity for write cache.
-    pub experimental_write_cache_size: ReadableSize,
+    pub write_cache_size: ReadableSize,
     /// TTL for write cache.
     #[serde(with = "humantime_serde")]
-    pub experimental_write_cache_ttl: Option<Duration>,
+    pub write_cache_ttl: Option<Duration>,
 
     // Other configs:
     /// Buffer size for SST writing.
@@ -147,10 +147,10 @@ impl Default for MitoConfig {
             vector_cache_size: ReadableSize::mb(512),
             page_cache_size: ReadableSize::mb(512),
             selector_result_cache_size: ReadableSize::mb(512),
-            enable_experimental_write_cache: false,
-            experimental_write_cache_path: String::new(),
-            experimental_write_cache_size: ReadableSize::gb(5),
-            experimental_write_cache_ttl: None,
+            enable_write_cache: false,
+            write_cache_path: String::new(),
+            write_cache_size: ReadableSize::gb(5),
+            write_cache_ttl: None,
             sst_write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             allow_stale_entries: false,
@@ -234,8 +234,8 @@ impl MitoConfig {
         }
 
         // Sets write cache path if it is empty.
-        if self.experimental_write_cache_path.trim().is_empty() {
-            self.experimental_write_cache_path = data_home.to_string();
+        if self.write_cache_path.trim().is_empty() {
+            self.write_cache_path = data_home.to_string();
         }
 
         self.index.sanitize(data_home, &self.inverted_index)?;
@@ -268,7 +268,7 @@ impl MitoConfig {
         self.selector_result_cache_size = mem_cache_size;
     }
 
-    /// Enable experimental write cache.
+    /// Enable write cache.
     #[cfg(test)]
     pub fn enable_write_cache(
         mut self,
@@ -276,10 +276,10 @@ impl MitoConfig {
         size: ReadableSize,
         ttl: Option<Duration>,
     ) -> Self {
-        self.enable_experimental_write_cache = true;
-        self.experimental_write_cache_path = path;
-        self.experimental_write_cache_size = size;
-        self.experimental_write_cache_ttl = ttl;
+        self.enable_write_cache = true;
+        self.write_cache_path = path;
+        self.write_cache_size = size;
+        self.write_cache_ttl = ttl;
         self
     }
 }
@@ -443,7 +443,7 @@ impl Default for InvertedIndexConfig {
             intermediate_path: String::new(),
             metadata_cache_size: ReadableSize::mb(64),
             content_cache_size: ReadableSize::mb(128),
-            content_cache_page_size: ReadableSize::mb(8),
+            content_cache_page_size: ReadableSize::kb(64),
         };
 
         if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {

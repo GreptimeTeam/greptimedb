@@ -45,17 +45,12 @@ use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 pub(crate) use crate::adapter::node_context::FlownodeContext;
-use crate::adapter::table_source::TableSource;
-use crate::adapter::util::{
-    relation_desc_to_column_schemas_with_fallback, table_info_value_to_relation_desc,
-};
+use crate::adapter::table_source::ManagedTableSource;
+use crate::adapter::util::relation_desc_to_column_schemas_with_fallback;
 use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
 use crate::df_optimizer::sql_to_flow_plan;
-use crate::error::{
-    EvalSnafu, ExternalSnafu, FlowAlreadyExistSnafu, InternalSnafu, InvalidQuerySnafu,
-    UnexpectedSnafu,
-};
+use crate::error::{EvalSnafu, ExternalSnafu, InternalSnafu, InvalidQuerySnafu, UnexpectedSnafu};
 use crate::expr::Batch;
 use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_ROWS, METRIC_FLOW_RUN_INTERVAL_MS};
 use crate::repr::{self, DiffRow, RelationDesc, Row, BATCH_SIZE};
@@ -69,7 +64,7 @@ mod util;
 mod worker;
 
 pub(crate) mod node_context;
-mod table_source;
+pub(crate) mod table_source;
 
 use crate::error::Error;
 use crate::utils::StateReportHandler;
@@ -129,7 +124,7 @@ pub struct FlowWorkerManager {
     /// The query engine that will be used to parse the query and convert it to a dataflow plan
     pub query_engine: Arc<dyn QueryEngine>,
     /// Getting table name and table schema from table info manager
-    table_info_source: TableSource,
+    table_info_source: ManagedTableSource,
     frontend_invoker: RwLock<Option<FrontendInvoker>>,
     /// contains mapping from table name to global id, and table schema
     node_context: RwLock<FlownodeContext>,
@@ -158,11 +153,11 @@ impl FlowWorkerManager {
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
     ) -> Self {
-        let srv_map = TableSource::new(
+        let srv_map = ManagedTableSource::new(
             table_meta.table_info_manager().clone(),
             table_meta.table_name_manager().clone(),
         );
-        let node_context = FlownodeContext::default();
+        let node_context = FlownodeContext::new(Box::new(srv_map.clone()) as _);
         let tick_manager = FlowTickManager::new();
         let worker_handles = Vec::new();
         FlowWorkerManager {
@@ -409,7 +404,7 @@ impl FlowWorkerManager {
     ) -> Result<Option<(Vec<String>, Option<usize>, Vec<ColumnSchema>)>, Error> {
         if let Some(table_id) = self
             .table_info_source
-            .get_table_id_from_name(table_name)
+            .get_opt_table_id_from_name(table_name)
             .await?
         {
             let table_info = self
@@ -729,43 +724,6 @@ impl FlowWorkerManager {
             query_ctx,
         } = args;
 
-        let already_exist = {
-            let mut flag = false;
-
-            // check if the task already exists
-            for handle in self.worker_handles.iter() {
-                if handle.lock().await.contains_flow(flow_id).await? {
-                    flag = true;
-                    break;
-                }
-            }
-            flag
-        };
-        match (create_if_not_exists, or_replace, already_exist) {
-            // do replace
-            (_, true, true) => {
-                info!("Replacing flow with id={}", flow_id);
-                self.remove_flow(flow_id).await?;
-            }
-            (false, false, true) => FlowAlreadyExistSnafu { id: flow_id }.fail()?,
-            // do nothing if exists
-            (true, false, true) => {
-                info!("Flow with id={} already exists, do nothing", flow_id);
-                return Ok(None);
-            }
-            // create if not exists
-            (_, _, false) => (),
-        }
-
-        if create_if_not_exists {
-            // check if the task already exists
-            for handle in self.worker_handles.iter() {
-                if handle.lock().await.contains_flow(flow_id).await? {
-                    return Ok(None);
-                }
-            }
-        }
-
         let mut node_ctx = self.node_context.write().await;
         // assign global id to source and sink table
         for source in &source_table_ids {
@@ -828,27 +786,9 @@ impl FlowWorkerManager {
                     .fail()?,
                 }
             }
-
-            let table_id = self
-                .table_info_source
-                .get_table_id_from_name(&sink_table_name)
-                .await?
-                .context(UnexpectedSnafu {
-                    reason: format!("Can't get table id for table name {:?}", sink_table_name),
-                })?;
-            let table_info_value = self
-                .table_info_source
-                .get_table_info_value(&table_id)
-                .await?
-                .context(UnexpectedSnafu {
-                    reason: format!("Can't get table info value for table id {:?}", table_id),
-                })?;
-            let real_schema = table_info_value_to_relation_desc(table_info_value)?;
-            node_ctx.assign_table_schema(&sink_table_name, real_schema.clone())?;
         } else {
             // assign inferred schema to sink table
             // create sink table
-            node_ctx.assign_table_schema(&sink_table_name, flow_plan.schema.clone())?;
             let did_create = self
                 .create_table_from_relation(
                     &format!("flow-id={flow_id}"),
@@ -897,9 +837,11 @@ impl FlowWorkerManager {
             source_ids,
             src_recvs: source_receivers,
             expire_after,
+            or_replace,
             create_if_not_exists,
             err_collector,
         };
+
         handle.create_flow(create_request).await?;
         info!("Successfully create flow with id={}", flow_id);
         Ok(Some(flow_id))
