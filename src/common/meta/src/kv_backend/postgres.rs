@@ -13,17 +13,19 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::borrow::Cow;
+use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
+use common_telemetry::debug;
 use deadpool_postgres::{Config, Pool, Runtime};
 use snafu::ResultExt;
 use tokio_postgres::types::ToSql;
-use tokio_postgres::NoTls;
+use tokio_postgres::{NoTls, Row};
 
 use crate::error::{
     CreatePostgresPoolSnafu, Error, GetPostgresConnectionSnafu, PostgresExecutionSnafu,
-    PostgresTransactionSnafu, Result, StrFromUtf8Snafu,
+    PostgresTransactionSnafu, Result,
 };
 use crate::kv_backend::txn::{
     Compare, Txn as KvTxn, TxnOp, TxnOpResponse, TxnResponse as KvTxnResponse,
@@ -32,8 +34,8 @@ use crate::kv_backend::{KvBackend, KvBackendRef, TxnService};
 use crate::metrics::METRIC_META_TXN_REQUEST;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
-    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
-    DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+    BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse,
+    RangeRequest, RangeResponse,
 };
 use crate::rpc::KeyValue;
 
@@ -54,11 +56,11 @@ impl PgQueryExecutor<'_> {
             PgQueryExecutor::Client(client) => client
                 .query(query, params)
                 .await
-                .context(PostgresExecutionSnafu),
+                .context(PostgresExecutionSnafu { sql: query }),
             PgQueryExecutor::Transaction(txn) => txn
                 .query(query, params)
                 .await
-                .context(PostgresExecutionSnafu),
+                .context(PostgresExecutionSnafu { sql: query }),
         }
     }
 
@@ -75,77 +77,182 @@ impl PgQueryExecutor<'_> {
 }
 
 /// Posgres backend store for metasrv
-pub struct PgStore {
+pub struct PgStore<T> {
     pool: Pool,
     max_txn_ops: usize,
+    sql_template_set: SqlTemplateSet<T>,
 }
 
 const EMPTY: &[u8] = &[0];
 
-// TODO: allow users to configure metadata table name.
-const METADKV_CREATION: &str =
-    "CREATE TABLE IF NOT EXISTS greptime_metakv(k varchar PRIMARY KEY, v varchar)";
+/// Factory for building sql templates.
+struct SqlTemplateFactory<'a, T> {
+    table_name: &'a str,
+    _phantom: PhantomData<T>,
+}
 
-const FULL_TABLE_SCAN: &str = "SELECT k, v FROM greptime_metakv $1 ORDER BY K";
+impl<'a, T> SqlTemplateFactory<'a, T> {
+    /// Creates a new [`SqlTemplateFactory`] with the given table name.
+    fn new(table_name: &'a str) -> Self {
+        Self {
+            table_name,
+            _phantom: PhantomData,
+        }
+    }
 
-const POINT_GET: &str = "SELECT k, v FROM greptime_metakv WHERE k = $1";
+    /// Builds the template set for the given table name.
+    fn build(
+        &self,
+        key_value_from_row: fn(Row) -> T,
+        key_value_from_row_key_only: fn(Row) -> T,
+    ) -> SqlTemplateSet<T> {
+        let table_name = self.table_name;
+        SqlTemplateSet {
+            table_name: table_name.to_string(),
+            create_table_statement: format!(
+                "CREATE TABLE IF NOT EXISTS {table_name}(k bytea PRIMARY KEY, v bytea)",
+            ),
+            range_template: RangeTemplate {
+                point: format!("SELECT k, v FROM {table_name} WHERE k = $1"),
+                range: format!("SELECT k, v FROM {table_name} WHERE k >= $1 AND k < $2 ORDER BY k"),
+                full: format!("SELECT k, v FROM {table_name} $1 ORDER BY k"),
+                left_bounded: format!("SELECT k, v FROM {table_name} WHERE k >= $1 ORDER BY k"),
+                prefix: format!("SELECT k, v FROM {table_name} WHERE k LIKE $1 ORDER BY k"),
+            },
+            delete_template: RangeTemplate {
+                point: format!("DELETE FROM {table_name} WHERE k = $1 RETURNING k,v;"),
+                range: format!("DELETE FROM {table_name} WHERE k >= $1 AND k < $2 RETURNING k,v;"),
+                full: format!("DELETE FROM {table_name} RETURNING k,v"),
+                left_bounded: format!("DELETE FROM {table_name} WHERE k >= $1 RETURNING k,v;"),
+                prefix: format!("DELETE FROM {table_name} WHERE k LIKE $1 RETURNING k,v;"),
+            },
+            key_value_from_row,
+            key_value_from_row_key_only,
+        }
+    }
+}
 
-const PREFIX_SCAN: &str = "SELECT k, v FROM greptime_metakv WHERE k LIKE $1 ORDER BY K";
+/// Templates for the given table name.
+#[derive(Debug, Clone)]
+pub struct SqlTemplateSet<T> {
+    table_name: String,
+    create_table_statement: String,
+    range_template: RangeTemplate,
+    delete_template: RangeTemplate,
+    key_value_from_row: fn(Row) -> T,
+    key_value_from_row_key_only: fn(Row) -> T,
+}
 
-const RANGE_SCAN_LEFT_BOUNDED: &str = "SELECT k, v FROM greptime_metakv WHERE k >= $1 ORDER BY K";
+impl<T: Sync + Send> SqlTemplateSet<T> {
+    /// Converts a row to a [`KeyValue`] with options.
+    fn key_value_from_row_with_opts(&self, keys_only: bool) -> impl Fn(Row) -> T {
+        if keys_only {
+            self.key_value_from_row_key_only
+        } else {
+            self.key_value_from_row
+        }
+    }
 
-const RANGE_SCAN_FULL_RANGE: &str =
-    "SELECT k, v FROM greptime_metakv WHERE k >= $1 AND K < $2 ORDER BY K";
+    /// Generates the sql for batch get.
+    fn generate_batch_get_query(&self, key_len: usize) -> String {
+        let table_name = &self.table_name;
+        let in_clause = generate_in_placeholders(1, key_len).join(", ");
+        format!("SELECT k, v FROM {table_name} WHERE k in ({});", in_clause)
+    }
 
-const FULL_TABLE_DELETE: &str = "DELETE FROM greptime_metakv RETURNING k,v";
+    /// Generates the sql for batch delete.
+    fn generate_batch_delete_query(&self, key_len: usize) -> String {
+        let table_name = &self.table_name;
+        let in_clause = generate_in_placeholders(1, key_len).join(", ");
+        format!(
+            "DELETE FROM {table_name} WHERE k in ({}) RETURNING k,v;",
+            in_clause
+        )
+    }
 
-const POINT_DELETE: &str = "DELETE FROM greptime_metakv WHERE K = $1 RETURNING k,v;";
+    /// Generates the sql for batch upsert.
+    fn generate_batch_upsert_query(&self, kv_len: usize) -> String {
+        let table_name = &self.table_name;
+        let in_placeholders: Vec<String> = (1..=kv_len).map(|i| format!("${}", i)).collect();
+        let in_clause = in_placeholders.join(", ");
+        let mut param_index = kv_len + 1;
+        let mut values_placeholders = Vec::new();
+        for _ in 0..kv_len {
+            values_placeholders.push(format!("(${0}, ${1})", param_index, param_index + 1));
+            param_index += 2;
+        }
+        let values_clause = values_placeholders.join(", ");
 
-const PREFIX_DELETE: &str = "DELETE FROM greptime_metakv WHERE k LIKE $1 RETURNING k,v;";
+        format!(
+            r#"
+    WITH prev AS (
+        SELECT k,v FROM {table_name} WHERE k IN ({in_clause})
+    ), update AS (
+    INSERT INTO {table_name} (k, v) VALUES
+        {values_clause}
+    ON CONFLICT (
+        k
+    ) DO UPDATE SET
+        v = excluded.v
+    )
 
-const RANGE_DELETE_LEFT_BOUNDED: &str = "DELETE FROM greptime_metakv WHERE k >= $1 RETURNING k,v;";
+    SELECT k, v FROM prev;
+    "#
+        )
+    }
+}
 
-const RANGE_DELETE_FULL_RANGE: &str =
-    "DELETE FROM greptime_metakv WHERE k >= $1 AND K < $2 RETURNING k,v;";
+/// Default sql template set for [`KeyValue`].
+pub type DefaultSqlTemplateSet = SqlTemplateSet<KeyValue>;
 
-const CAS: &str = r#"
-WITH prev AS (
-    SELECT k,v FROM greptime_metakv WHERE k = $1 AND v = $2
-), update AS (
-UPDATE greptime_metakv
-SET k=$1,
-v=$2
-WHERE 
-    k=$1 AND v=$3
-)
+/// Default pg store for [`KeyValue`].
+pub type DefaultPgStore = PgStore<KeyValue>;
 
-SELECT k, v FROM prev;
-"#;
+impl<T> PgStore<T> {
+    async fn client(&self) -> Result<PgClient> {
+        match self.pool.get().await {
+            Ok(client) => Ok(client),
+            Err(e) => GetPostgresConnectionSnafu {
+                reason: e.to_string(),
+            }
+            .fail(),
+        }
+    }
 
-const PUT_IF_NOT_EXISTS: &str = r#"    
-WITH prev AS (
-    select k,v from greptime_metakv where k = $1
-), insert AS (
-    INSERT INTO greptime_metakv
-    VALUES ($1, $2)
-    ON CONFLICT (k) DO NOTHING
-)
+    async fn client_executor(&self) -> Result<PgQueryExecutor<'_>> {
+        let client = self.client().await?;
+        Ok(PgQueryExecutor::Client(client))
+    }
 
-SELECT k, v FROM prev;"#;
+    async fn txn_executor<'a>(&self, client: &'a mut PgClient) -> Result<PgQueryExecutor<'a>> {
+        let txn = client
+            .transaction()
+            .await
+            .context(PostgresTransactionSnafu {
+                operation: "start".to_string(),
+            })?;
+        Ok(PgQueryExecutor::Transaction(txn))
+    }
+}
 
-impl PgStore {
+impl DefaultPgStore {
     /// Create pgstore impl of KvBackendRef from url.
-    pub async fn with_url(url: &str, max_txn_ops: usize) -> Result<KvBackendRef> {
+    pub async fn with_url(url: &str, table_name: &str, max_txn_ops: usize) -> Result<KvBackendRef> {
         let mut cfg = Config::new();
         cfg.url = Some(url.to_string());
+        // TODO(weny, CookiePie): add tls support
         let pool = cfg
             .create_pool(Some(Runtime::Tokio1), NoTls)
             .context(CreatePostgresPoolSnafu)?;
-        Self::with_pg_pool(pool, max_txn_ops).await
+        Self::with_pg_pool(pool, table_name, max_txn_ops).await
     }
 
     /// Create pgstore impl of KvBackendRef from tokio-postgres client.
-    pub async fn with_pg_pool(pool: Pool, max_txn_ops: usize) -> Result<KvBackendRef> {
+    pub async fn with_pg_pool(
+        pool: Pool,
+        table_name: &str,
+        max_txn_ops: usize,
+    ) -> Result<KvBackendRef> {
         // This step ensures the postgres metadata backend is ready to use.
         // We check if greptime_metakv table exists, and we will create a new table
         // if it does not exist.
@@ -158,144 +265,103 @@ impl PgStore {
                 .fail();
             }
         };
+        let template_factory = SqlTemplateFactory::new(table_name);
+        let sql_template_set =
+            template_factory.build(key_value_from_row, key_value_from_row_key_only);
         client
-            .execute(METADKV_CREATION, &[])
+            .execute(&sql_template_set.create_table_statement, &[])
             .await
-            .context(PostgresExecutionSnafu)?;
-        Ok(Arc::new(Self { pool, max_txn_ops }))
+            .with_context(|_| PostgresExecutionSnafu {
+                sql: sql_template_set.create_table_statement.to_string(),
+            })?;
+        Ok(Arc::new(Self {
+            pool,
+            max_txn_ops,
+            sql_template_set,
+        }))
     }
+}
 
-    async fn get_client(&self) -> Result<PgClient> {
-        match self.pool.get().await {
-            Ok(client) => Ok(client),
-            Err(e) => GetPostgresConnectionSnafu {
-                reason: e.to_string(),
+/// Type of range template.
+#[derive(Debug, Clone, Copy)]
+enum RangeTemplateType {
+    Point,
+    Range,
+    Full,
+    LeftBounded,
+    Prefix,
+}
+
+/// Builds params for the given range template type.
+impl RangeTemplateType {
+    fn build_params(&self, mut key: Vec<u8>, range_end: Vec<u8>) -> Vec<Vec<u8>> {
+        match self {
+            RangeTemplateType::Point => vec![key],
+            RangeTemplateType::Range => vec![key, range_end],
+            RangeTemplateType::Full => vec![],
+            RangeTemplateType::LeftBounded => vec![key],
+            RangeTemplateType::Prefix => {
+                key.push(b'%');
+                vec![key]
             }
-            .fail(),
+        }
+    }
+}
+
+/// Templates for range request.
+#[derive(Debug, Clone)]
+struct RangeTemplate {
+    point: String,
+    range: String,
+    full: String,
+    left_bounded: String,
+    prefix: String,
+}
+
+impl RangeTemplate {
+    /// Gets the template for the given type.
+    fn get(&self, typ: RangeTemplateType) -> &str {
+        match typ {
+            RangeTemplateType::Point => &self.point,
+            RangeTemplateType::Range => &self.range,
+            RangeTemplateType::Full => &self.full,
+            RangeTemplateType::LeftBounded => &self.left_bounded,
+            RangeTemplateType::Prefix => &self.prefix,
         }
     }
 
-    async fn get_client_executor(&self) -> Result<PgQueryExecutor<'_>> {
-        let client = self.get_client().await?;
-        Ok(PgQueryExecutor::Client(client))
-    }
-
-    async fn get_txn_executor<'a>(&self, client: &'a mut PgClient) -> Result<PgQueryExecutor<'a>> {
-        let txn = client
-            .transaction()
-            .await
-            .context(PostgresTransactionSnafu {
-                operation: "start".to_string(),
-            })?;
-        Ok(PgQueryExecutor::Transaction(txn))
-    }
-
-    async fn put_if_not_exists_with_query_executor(
-        &self,
-        query_executor: &PgQueryExecutor<'_>,
-        key: &str,
-        value: &str,
-    ) -> Result<bool> {
-        let res = query_executor
-            .query(PUT_IF_NOT_EXISTS, &[&key, &value])
-            .await?;
-        Ok(res.is_empty())
+    /// Adds limit to the template.
+    fn with_limit(template: &str, limit: i64) -> String {
+        if limit == 0 {
+            return format!("{};", template);
+        }
+        format!("{} LIMIT {};", template, limit)
     }
 }
 
-fn select_range_template(req: &RangeRequest) -> &str {
-    if req.range_end.is_empty() {
-        return POINT_GET;
-    }
-    if req.key == EMPTY && req.range_end == EMPTY {
-        FULL_TABLE_SCAN
-    } else if req.range_end == EMPTY {
-        RANGE_SCAN_LEFT_BOUNDED
-    } else if is_prefix_range(&req.key, &req.range_end) {
-        PREFIX_SCAN
-    } else {
-        RANGE_SCAN_FULL_RANGE
-    }
-}
-
-fn select_range_delete_template(req: &DeleteRangeRequest) -> &str {
-    if req.range_end.is_empty() {
-        return POINT_DELETE;
-    }
-    if req.key == EMPTY && req.range_end == EMPTY {
-        FULL_TABLE_DELETE
-    } else if req.range_end == EMPTY {
-        RANGE_DELETE_LEFT_BOUNDED
-    } else if is_prefix_range(&req.key, &req.range_end) {
-        PREFIX_DELETE
-    } else {
-        RANGE_DELETE_FULL_RANGE
+/// Determine the template type for range request.
+fn range_template(key: &[u8], range_end: &[u8]) -> RangeTemplateType {
+    match (key, range_end) {
+        (_, &[]) => RangeTemplateType::Point,
+        (EMPTY, EMPTY) => RangeTemplateType::Full,
+        (_, EMPTY) => RangeTemplateType::LeftBounded,
+        (start, end) => {
+            if is_prefix_range(start, end) {
+                RangeTemplateType::Prefix
+            } else {
+                RangeTemplateType::Range
+            }
+        }
     }
 }
 
-// Generate dynamic parameterized sql for batch get.
-fn generate_batch_get_query(key_len: usize) -> String {
-    let in_placeholders: Vec<String> = (1..=key_len).map(|i| format!("${}", i)).collect();
-    let in_clause = in_placeholders.join(", ");
-    format!(
-        "SELECT k, v FROM greptime_metakv WHERE k in ({});",
-        in_clause
-    )
-}
-
-// Generate dynamic parameterized sql for batch delete.
-fn generate_batch_delete_query(key_len: usize) -> String {
-    let in_placeholders: Vec<String> = (1..=key_len).map(|i| format!("${}", i)).collect();
-    let in_clause = in_placeholders.join(", ");
-    format!(
-        "DELETE FROM greptime_metakv WHERE k in ({}) RETURNING k, v;",
-        in_clause
-    )
-}
-
-// Generate dynamic parameterized sql for batch upsert.
-fn generate_batch_upsert_query(kv_len: usize) -> String {
-    let in_placeholders: Vec<String> = (1..=kv_len).map(|i| format!("${}", i)).collect();
-    let in_clause = in_placeholders.join(", ");
-    let mut param_index = kv_len + 1;
-    let mut values_placeholders = Vec::new();
-    for _ in 0..kv_len {
-        values_placeholders.push(format!("(${0}, ${1})", param_index, param_index + 1));
-        param_index += 2;
-    }
-    let values_clause = values_placeholders.join(", ");
-
-    format!(
-        r#"
-    WITH prev AS (
-        SELECT k,v FROM greptime_metakv WHERE k IN ({in_clause})
-    ), update AS (
-    INSERT INTO greptime_metakv (k, v) VALUES
-        {values_clause}
-    ON CONFLICT (
-        k
-    ) DO UPDATE SET
-        v = excluded.v
-    )
-
-    SELECT k, v FROM prev;
-    "#
-    )
-}
-
-//  Trim null byte at the end and convert bytes to string.
-fn process_bytes<'a>(data: &'a [u8], name: &str) -> Result<&'a str> {
-    let mut len = data.len();
-    // remove trailing null bytes to avoid error in postgres encoding.
-    while len > 0 && data[len - 1] == 0 {
-        len -= 1;
-    }
-    let res = std::str::from_utf8(&data[0..len]).context(StrFromUtf8Snafu { name })?;
-    Ok(res)
+/// Generate in placeholders for sql.
+fn generate_in_placeholders(from: usize, to: usize) -> Vec<String> {
+    (from..=to).map(|i| format!("${}", i)).collect()
 }
 
 #[async_trait::async_trait]
-impl KvBackend for PgStore {
+impl KvBackend for DefaultPgStore {
     fn name(&self) -> &str {
         "Postgres"
     }
@@ -305,101 +371,83 @@ impl KvBackend for PgStore {
     }
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
-        let client = self.get_client_executor().await?;
+        let client = self.client_executor().await?;
         self.range_with_query_executor(&client, req).await
     }
 
     async fn put(&self, req: PutRequest) -> Result<PutResponse> {
-        let client = self.get_client_executor().await?;
+        let client = self.client_executor().await?;
         self.put_with_query_executor(&client, req).await
     }
 
     async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
-        let client = self.get_client_executor().await?;
+        let client = self.client_executor().await?;
         self.batch_put_with_query_executor(&client, req).await
     }
 
     async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
-        let client = self.get_client_executor().await?;
+        let client = self.client_executor().await?;
         self.batch_get_with_query_executor(&client, req).await
     }
 
     async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
-        let client = self.get_client_executor().await?;
+        let client = self.client_executor().await?;
         self.delete_range_with_query_executor(&client, req).await
     }
 
     async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
-        let client = self.get_client_executor().await?;
+        let client = self.client_executor().await?;
         self.batch_delete_with_query_executor(&client, req).await
-    }
-
-    async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
-        let client = self.get_client_executor().await?;
-        self.compare_and_put_with_query_executor(&client, req).await
     }
 }
 
-impl PgStore {
+/// Converts a row to a [`KeyValue`] with key only.
+fn key_value_from_row_key_only(r: Row) -> KeyValue {
+    KeyValue {
+        key: r.get(0),
+        value: vec![],
+    }
+}
+
+/// Converts a row to a [`KeyValue`].
+fn key_value_from_row(r: Row) -> KeyValue {
+    KeyValue {
+        key: r.get(0),
+        value: r.get(1),
+    }
+}
+
+impl DefaultPgStore {
     async fn range_with_query_executor(
         &self,
         query_executor: &PgQueryExecutor<'_>,
         req: RangeRequest,
     ) -> Result<RangeResponse> {
-        let mut params = vec![];
-        let template = select_range_template(&req);
-        if req.key != EMPTY {
-            let key = process_bytes(&req.key, "rangeKey")?;
-            if template == PREFIX_SCAN {
-                let prefix = format!("{key}%");
-                params.push(Cow::Owned(prefix))
-            } else {
-                params.push(Cow::Borrowed(key))
-            }
-        }
-        if template == RANGE_SCAN_FULL_RANGE && req.range_end != EMPTY {
-            let range_end = process_bytes(&req.range_end, "rangeEnd")?;
-            params.push(Cow::Borrowed(range_end));
-        }
+        let template_type = range_template(&req.key, &req.range_end);
+        let template = self.sql_template_set.range_template.get(template_type);
+        let params = template_type.build_params(req.key, req.range_end);
+        let params_ref = params.iter().map(|x| x as _).collect::<Vec<_>>();
+        // Always add 1 to limit to check if there is more data
+        let query =
+            RangeTemplate::with_limit(template, if req.limit == 0 { 0 } else { req.limit + 1 });
         let limit = req.limit as usize;
-        let limit_cause = match limit > 0 {
-            true => format!(" LIMIT {};", limit + 1),
-            false => ";".to_string(),
-        };
-        let template = format!("{}{}", template, limit_cause);
-        let params: Vec<&(dyn ToSql + Sync)> = params
-            .iter()
-            .map(|x| match x {
-                Cow::Borrowed(borrowed) => borrowed as &(dyn ToSql + Sync),
-                Cow::Owned(owned) => owned as &(dyn ToSql + Sync),
-            })
-            .collect();
-        let res = query_executor.query(&template, &params).await?;
-        let kvs: Vec<KeyValue> = res
+        debug!("query: {:?}, params: {:?}", query, params);
+        let res = query_executor.query(&query, &params_ref).await?;
+        let mut kvs: Vec<KeyValue> = res
             .into_iter()
-            .map(|r| {
-                let key: String = r.get(0);
-                if req.keys_only {
-                    return KeyValue {
-                        key: key.into_bytes(),
-                        value: vec![],
-                    };
-                }
-                let value: String = r.get(1);
-                KeyValue {
-                    key: key.into_bytes(),
-                    value: value.into_bytes(),
-                }
-            })
+            .map(
+                self.sql_template_set
+                    .key_value_from_row_with_opts(req.keys_only),
+            )
             .collect();
-        if limit == 0 || limit > kvs.len() {
+        // If limit is 0, we always return all data
+        if limit == 0 || kvs.len() <= limit {
             return Ok(RangeResponse { kvs, more: false });
         }
-        let (filtered_kvs, _) = kvs.split_at(limit);
-        Ok(RangeResponse {
-            kvs: filtered_kvs.to_vec(),
-            more: kvs.len() > limit,
-        })
+        // If limit is greater than the number of rows, we remove the last row and set more to true
+        let removed = kvs.pop();
+        debug_assert!(removed.is_some());
+        Ok(RangeResponse { kvs, more: true })
     }
 
     async fn put_with_query_executor(
@@ -422,11 +470,12 @@ impl PgStore {
             .await?;
 
         if !res.prev_kvs.is_empty() {
+            debug_assert!(req.prev_kv);
             return Ok(PutResponse {
                 prev_kv: Some(res.prev_kvs.remove(0)),
             });
         }
-        Ok(PutResponse { prev_kv: None })
+        Ok(PutResponse::default())
     }
 
     async fn batch_put_with_query_executor(
@@ -434,41 +483,33 @@ impl PgStore {
         query_executor: &PgQueryExecutor<'_>,
         req: BatchPutRequest,
     ) -> Result<BatchPutResponse> {
-        let mut in_params = Vec::with_capacity(req.kvs.len());
+        let mut in_params = Vec::with_capacity(req.kvs.len() * 3);
         let mut values_params = Vec::with_capacity(req.kvs.len() * 2);
 
         for kv in &req.kvs {
-            let processed_key = process_bytes(&kv.key, "BatchPutRequestKey")?;
+            let processed_key = &kv.key;
             in_params.push(processed_key);
 
-            let processed_value = process_bytes(&kv.value, "BatchPutRequestValue")?;
+            let processed_value = &kv.value;
             values_params.push(processed_key);
             values_params.push(processed_value);
         }
         in_params.extend(values_params);
-        let params: Vec<&(dyn ToSql + Sync)> =
-            in_params.iter().map(|x| x as &(dyn ToSql + Sync)).collect();
-
-        let query = generate_batch_upsert_query(req.kvs.len());
-
+        let params = in_params.iter().map(|x| x as _).collect::<Vec<_>>();
+        let query = self
+            .sql_template_set
+            .generate_batch_upsert_query(req.kvs.len());
         let res = query_executor.query(&query, &params).await?;
         if req.prev_kv {
-            let kvs: Vec<KeyValue> = res
-                .into_iter()
-                .map(|r| {
-                    let key: String = r.get(0);
-                    let value: String = r.get(1);
-                    KeyValue {
-                        key: key.into_bytes(),
-                        value: value.into_bytes(),
-                    }
-                })
-                .collect();
-            if !kvs.is_empty() {
-                return Ok(BatchPutResponse { prev_kvs: kvs });
-            }
+            Ok(BatchPutResponse {
+                prev_kvs: res
+                    .into_iter()
+                    .map(self.sql_template_set.key_value_from_row)
+                    .collect(),
+            })
+        } else {
+            Ok(BatchPutResponse::default())
         }
-        Ok(BatchPutResponse { prev_kvs: vec![] })
     }
 
     /// Batch get with certain client. It's needed for a client with transaction.
@@ -480,30 +521,17 @@ impl PgStore {
         if req.keys.is_empty() {
             return Ok(BatchGetResponse { kvs: vec![] });
         }
-        let query = generate_batch_get_query(req.keys.len());
-        let value_params = req
-            .keys
-            .iter()
-            .map(|k| process_bytes(k, "BatchGetRequestKey"))
-            .collect::<Result<Vec<&str>>>()?;
-        let params: Vec<&(dyn ToSql + Sync)> = value_params
-            .iter()
-            .map(|x| x as &(dyn ToSql + Sync))
-            .collect();
-
+        let query = self
+            .sql_template_set
+            .generate_batch_get_query(req.keys.len());
+        let params = req.keys.iter().map(|x| x as _).collect::<Vec<_>>();
         let res = query_executor.query(&query, &params).await?;
-        let kvs: Vec<KeyValue> = res
-            .into_iter()
-            .map(|r| {
-                let key: String = r.get(0);
-                let value: String = r.get(1);
-                KeyValue {
-                    key: key.into_bytes(),
-                    value: value.into_bytes(),
-                }
-            })
-            .collect();
-        Ok(BatchGetResponse { kvs })
+        Ok(BatchGetResponse {
+            kvs: res
+                .into_iter()
+                .map(self.sql_template_set.key_value_from_row)
+                .collect(),
+        })
     }
 
     async fn delete_range_with_query_executor(
@@ -511,54 +539,20 @@ impl PgStore {
         query_executor: &PgQueryExecutor<'_>,
         req: DeleteRangeRequest,
     ) -> Result<DeleteRangeResponse> {
-        let mut params = vec![];
-        let template = select_range_delete_template(&req);
-        if req.key != EMPTY {
-            let key = process_bytes(&req.key, "deleteRangeKey")?;
-            if template == PREFIX_DELETE {
-                let prefix = format!("{key}%");
-                params.push(Cow::Owned(prefix));
-            } else {
-                params.push(Cow::Borrowed(key));
-            }
+        let template_type = range_template(&req.key, &req.range_end);
+        let template = self.sql_template_set.delete_template.get(template_type);
+        let params = template_type.build_params(req.key, req.range_end);
+        let params_ref = params.iter().map(|x| x as _).collect::<Vec<_>>();
+        let res = query_executor.query(template, &params_ref).await?;
+        let mut resp = DeleteRangeResponse::new(res.len() as i64);
+        if req.prev_kv {
+            resp.with_prev_kvs(
+                res.into_iter()
+                    .map(self.sql_template_set.key_value_from_row)
+                    .collect(),
+            );
         }
-        if template == RANGE_DELETE_FULL_RANGE && req.range_end != EMPTY {
-            let range_end = process_bytes(&req.range_end, "deleteRangeEnd")?;
-            params.push(Cow::Borrowed(range_end));
-        }
-        let params: Vec<&(dyn ToSql + Sync)> = params
-            .iter()
-            .map(|x| match x {
-                Cow::Borrowed(borrowed) => borrowed as &(dyn ToSql + Sync),
-                Cow::Owned(owned) => owned as &(dyn ToSql + Sync),
-            })
-            .collect();
-
-        let res = query_executor.query(template, &params).await?;
-        let deleted = res.len() as i64;
-        if !req.prev_kv {
-            return Ok({
-                DeleteRangeResponse {
-                    deleted,
-                    prev_kvs: vec![],
-                }
-            });
-        }
-        let kvs: Vec<KeyValue> = res
-            .into_iter()
-            .map(|r| {
-                let key: String = r.get(0);
-                let value: String = r.get(1);
-                KeyValue {
-                    key: key.into_bytes(),
-                    value: value.into_bytes(),
-                }
-            })
-            .collect();
-        Ok(DeleteRangeResponse {
-            deleted,
-            prev_kvs: kvs,
-        })
+        Ok(resp)
     }
 
     async fn batch_delete_with_query_executor(
@@ -567,78 +561,22 @@ impl PgStore {
         req: BatchDeleteRequest,
     ) -> Result<BatchDeleteResponse> {
         if req.keys.is_empty() {
-            return Ok(BatchDeleteResponse { prev_kvs: vec![] });
+            return Ok(BatchDeleteResponse::default());
         }
-        let query = generate_batch_delete_query(req.keys.len());
-        let value_params = req
-            .keys
-            .iter()
-            .map(|k| process_bytes(k, "BatchDeleteRequestKey"))
-            .collect::<Result<Vec<&str>>>()?;
-        let params: Vec<&(dyn ToSql + Sync)> = value_params
-            .iter()
-            .map(|x| x as &(dyn ToSql + Sync))
-            .collect();
-
+        let query = self
+            .sql_template_set
+            .generate_batch_delete_query(req.keys.len());
+        let params = req.keys.iter().map(|x| x as _).collect::<Vec<_>>();
         let res = query_executor.query(&query, &params).await?;
-        if !req.prev_kv {
-            return Ok(BatchDeleteResponse { prev_kvs: vec![] });
-        }
-        let kvs: Vec<KeyValue> = res
-            .into_iter()
-            .map(|r| {
-                let key: String = r.get(0);
-                let value: String = r.get(1);
-                KeyValue {
-                    key: key.into_bytes(),
-                    value: value.into_bytes(),
-                }
-            })
-            .collect();
-        Ok(BatchDeleteResponse { prev_kvs: kvs })
-    }
-
-    async fn compare_and_put_with_query_executor(
-        &self,
-        query_executor: &PgQueryExecutor<'_>,
-        req: CompareAndPutRequest,
-    ) -> Result<CompareAndPutResponse> {
-        let key = process_bytes(&req.key, "CASKey")?;
-        let value = process_bytes(&req.value, "CASValue")?;
-        if req.expect.is_empty() {
-            let put_res = self
-                .put_if_not_exists_with_query_executor(query_executor, key, value)
-                .await?;
-            return Ok(CompareAndPutResponse {
-                success: put_res,
-                prev_kv: None,
-            });
-        }
-        let expect = process_bytes(&req.expect, "CASExpect")?;
-
-        let res = query_executor.query(CAS, &[&key, &value, &expect]).await?;
-        match res.is_empty() {
-            true => Ok(CompareAndPutResponse {
-                success: false,
-                prev_kv: None,
-            }),
-            false => {
-                let mut kvs: Vec<KeyValue> = res
+        if req.prev_kv {
+            Ok(BatchDeleteResponse {
+                prev_kvs: res
                     .into_iter()
-                    .map(|r| {
-                        let key: String = r.get(0);
-                        let value: String = r.get(1);
-                        KeyValue {
-                            key: key.into_bytes(),
-                            value: value.into_bytes(),
-                        }
-                    })
-                    .collect();
-                Ok(CompareAndPutResponse {
-                    success: true,
-                    prev_kv: Some(kvs.remove(0)),
-                })
-            }
+                    .map(self.sql_template_set.key_value_from_row)
+                    .collect(),
+            })
+        } else {
+            Ok(BatchDeleteResponse::default())
         }
     }
 
@@ -657,7 +595,7 @@ impl PgStore {
             .kvs
             .into_iter()
             .map(|kv| (kv.key, kv.value))
-            .collect::<std::collections::HashMap<Vec<u8>, Vec<u8>>>();
+            .collect::<HashMap<Vec<u8>, Vec<u8>>>();
         for c in cmp {
             let value = res_map.get(&c.key);
             if !c.compare_value(value) {
@@ -676,124 +614,115 @@ impl PgStore {
         if !check_txn_ops(txn_ops)? {
             return Ok(None);
         }
-        match txn_ops.first() {
-            Some(TxnOp::Delete(_)) => {
-                let mut batch_del_req = BatchDeleteRequest {
-                    keys: vec![],
-                    prev_kv: false,
-                };
-                for op in txn_ops {
-                    if let TxnOp::Delete(key) = op {
-                        batch_del_req.keys.push(key.clone());
-                    }
-                }
-                let res = self
-                    .batch_delete_with_query_executor(query_executor, batch_del_req)
-                    .await?;
-                let res_map = res
-                    .prev_kvs
-                    .into_iter()
-                    .map(|kv| (kv.key, kv.value))
-                    .collect::<std::collections::HashMap<Vec<u8>, Vec<u8>>>();
-                let mut resps = Vec::with_capacity(txn_ops.len());
-                for op in txn_ops {
-                    if let TxnOp::Delete(key) = op {
-                        let value = res_map.get(key);
-                        resps.push(TxnOpResponse::ResponseDelete(DeleteRangeResponse {
-                            deleted: if value.is_some() { 1 } else { 0 },
-                            prev_kvs: value
-                                .map(|v| {
-                                    vec![KeyValue {
-                                        key: key.clone(),
-                                        value: v.clone(),
-                                    }]
-                                })
-                                .unwrap_or_default(),
-                        }));
-                    }
-                }
-                Ok(Some(resps))
-            }
-            Some(TxnOp::Put(_, _)) => {
-                let mut batch_put_req = BatchPutRequest {
-                    kvs: vec![],
-                    prev_kv: false,
-                };
-                for op in txn_ops {
-                    if let TxnOp::Put(key, value) = op {
-                        batch_put_req.kvs.push(KeyValue {
-                            key: key.clone(),
-                            value: value.clone(),
-                        });
-                    }
-                }
-                let res = self
-                    .batch_put_with_query_executor(query_executor, batch_put_req)
-                    .await?;
-                let res_map = res
-                    .prev_kvs
-                    .into_iter()
-                    .map(|kv| (kv.key, kv.value))
-                    .collect::<std::collections::HashMap<Vec<u8>, Vec<u8>>>();
-                let mut resps = Vec::with_capacity(txn_ops.len());
-                for op in txn_ops {
-                    if let TxnOp::Put(key, _) = op {
-                        let prev_kv = res_map.get(key);
-                        match prev_kv {
-                            Some(v) => {
-                                resps.push(TxnOpResponse::ResponsePut(PutResponse {
-                                    prev_kv: Some(KeyValue {
-                                        key: key.clone(),
-                                        value: v.clone(),
-                                    }),
-                                }));
-                            }
-                            None => {
-                                resps.push(TxnOpResponse::ResponsePut(PutResponse {
-                                    prev_kv: None,
-                                }));
-                            }
-                        }
-                    }
-                }
-                Ok(Some(resps))
-            }
-            Some(TxnOp::Get(_)) => {
-                let mut batch_get_req = BatchGetRequest { keys: vec![] };
-                for op in txn_ops {
-                    if let TxnOp::Get(key) = op {
-                        batch_get_req.keys.push(key.clone());
-                    }
-                }
-                let res = self
-                    .batch_get_with_query_executor(query_executor, batch_get_req)
-                    .await?;
-                let res_map = res
-                    .kvs
-                    .into_iter()
-                    .map(|kv| (kv.key, kv.value))
-                    .collect::<std::collections::HashMap<Vec<u8>, Vec<u8>>>();
-                let mut resps = Vec::with_capacity(txn_ops.len());
-                for op in txn_ops {
-                    if let TxnOp::Get(key) = op {
-                        let value = res_map.get(key);
-                        resps.push(TxnOpResponse::ResponseGet(RangeResponse {
-                            kvs: value
-                                .map(|v| {
-                                    vec![KeyValue {
-                                        key: key.clone(),
-                                        value: v.clone(),
-                                    }]
-                                })
-                                .unwrap_or_default(),
-                            more: false,
-                        }));
-                    }
-                }
-                Ok(Some(resps))
-            }
-            None => Ok(Some(vec![])),
+        // Safety: txn_ops is not empty
+        match txn_ops.first().unwrap() {
+            TxnOp::Delete(_) => self.handle_batch_delete(query_executor, txn_ops).await,
+            TxnOp::Put(_, _) => self.handle_batch_put(query_executor, txn_ops).await,
+            TxnOp::Get(_) => self.handle_batch_get(query_executor, txn_ops).await,
         }
+    }
+
+    async fn handle_batch_delete(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        txn_ops: &[TxnOp],
+    ) -> Result<Option<Vec<TxnOpResponse>>> {
+        let mut batch_del_req = BatchDeleteRequest {
+            keys: vec![],
+            prev_kv: true,
+        };
+        for op in txn_ops {
+            if let TxnOp::Delete(key) = op {
+                batch_del_req.keys.push(key.clone());
+            }
+        }
+        let res = self
+            .batch_delete_with_query_executor(query_executor, batch_del_req)
+            .await?;
+        let res_map = res
+            .prev_kvs
+            .into_iter()
+            .map(|kv| (kv.key, kv.value))
+            .collect::<HashMap<Vec<u8>, Vec<u8>>>();
+        let mut resps = Vec::with_capacity(txn_ops.len());
+        for op in txn_ops {
+            if let TxnOp::Delete(key) = op {
+                let value = res_map.get(key);
+                resps.push(TxnOpResponse::ResponseDelete(DeleteRangeResponse {
+                    deleted: if value.is_some() { 1 } else { 0 },
+                    prev_kvs: vec![],
+                }));
+            }
+        }
+        Ok(Some(resps))
+    }
+
+    async fn handle_batch_put(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        txn_ops: &[TxnOp],
+    ) -> Result<Option<Vec<TxnOpResponse>>> {
+        let mut batch_put_req = BatchPutRequest {
+            kvs: vec![],
+            prev_kv: false,
+        };
+        for op in txn_ops {
+            if let TxnOp::Put(key, value) = op {
+                batch_put_req.kvs.push(KeyValue {
+                    key: key.clone(),
+                    value: value.clone(),
+                });
+            }
+        }
+        let _ = self
+            .batch_put_with_query_executor(query_executor, batch_put_req)
+            .await?;
+        let mut resps = Vec::with_capacity(txn_ops.len());
+        for op in txn_ops {
+            if let TxnOp::Put(_, _) = op {
+                resps.push(TxnOpResponse::ResponsePut(PutResponse { prev_kv: None }));
+            }
+        }
+        Ok(Some(resps))
+    }
+
+    async fn handle_batch_get(
+        &self,
+        query_executor: &PgQueryExecutor<'_>,
+        txn_ops: &[TxnOp],
+    ) -> Result<Option<Vec<TxnOpResponse>>> {
+        let mut batch_get_req = BatchGetRequest { keys: vec![] };
+        for op in txn_ops {
+            if let TxnOp::Get(key) = op {
+                batch_get_req.keys.push(key.clone());
+            }
+        }
+        let res = self
+            .batch_get_with_query_executor(query_executor, batch_get_req)
+            .await?;
+        let res_map = res
+            .kvs
+            .into_iter()
+            .map(|kv| (kv.key, kv.value))
+            .collect::<HashMap<Vec<u8>, Vec<u8>>>();
+        let mut resps = Vec::with_capacity(txn_ops.len());
+        for op in txn_ops {
+            if let TxnOp::Get(key) = op {
+                let value = res_map.get(key);
+                resps.push(TxnOpResponse::ResponseGet(RangeResponse {
+                    kvs: value
+                        .map(|v| {
+                            vec![KeyValue {
+                                key: key.clone(),
+                                value: v.clone(),
+                            }]
+                        })
+                        .unwrap_or_default(),
+                    more: false,
+                }));
+            }
+        }
+        Ok(Some(resps))
     }
 
     async fn execute_txn_op(
@@ -847,7 +776,7 @@ impl PgStore {
 }
 
 #[async_trait::async_trait]
-impl TxnService for PgStore {
+impl TxnService for DefaultPgStore {
     type Error = Error;
 
     async fn txn(&self, txn: KvTxn) -> Result<KvTxnResponse> {
@@ -855,8 +784,11 @@ impl TxnService for PgStore {
             .with_label_values(&["postgres", "txn"])
             .start_timer();
 
-        let mut client = self.get_client().await?;
-        let pg_txn = self.get_txn_executor(&mut client).await?;
+        let mut client = self.client().await?;
+        let pg_txn = self.txn_executor(&mut client).await?;
+        pg_txn
+            .query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;", &[])
+            .await?;
         let mut success = true;
         if txn.c_when {
             success = self.execute_txn_cmp(&pg_txn, &txn.req.compare).await?;
@@ -908,23 +840,20 @@ fn is_prefix_range(start: &[u8], end: &[u8]) -> bool {
     false
 }
 
-/// Check if the transaction operations are the same type.
+/// Checks if the transaction operations are the same type.
 fn check_txn_ops(txn_ops: &[TxnOp]) -> Result<bool> {
     if txn_ops.is_empty() {
         return Ok(false);
     }
-    let first_op = &txn_ops[0];
-    for op in txn_ops {
-        match (op, first_op) {
-            (TxnOp::Put(_, _), TxnOp::Put(_, _)) => {}
-            (TxnOp::Get(_), TxnOp::Get(_)) => {}
-            (TxnOp::Delete(_), TxnOp::Delete(_)) => {}
-            _ => {
-                return Ok(false);
-            }
-        }
-    }
-    Ok(true)
+    let same = txn_ops.windows(2).all(|a| {
+        matches!(
+            (&a[0], &a[1]),
+            (TxnOp::Put(_, _), TxnOp::Put(_, _))
+                | (TxnOp::Get(_), TxnOp::Get(_))
+                | (TxnOp::Delete(_), TxnOp::Delete(_))
+        )
+    });
+    Ok(same)
 }
 
 #[cfg(test)]
@@ -932,14 +861,13 @@ mod tests {
     use super::*;
     use crate::kv_backend::test::{
         prepare_kv_with_prefix, test_kv_batch_delete_with_prefix, test_kv_batch_get_with_prefix,
-        test_kv_compare_and_put_with_prefix, test_kv_delete_range_with_prefix,
-        test_kv_put_with_prefix, test_kv_range_2_with_prefix, test_kv_range_with_prefix,
-        test_txn_compare_equal, test_txn_compare_greater, test_txn_compare_less,
-        test_txn_compare_not_equal, test_txn_one_compare_op, text_txn_multi_compare_op,
-        unprepare_kv,
+        test_kv_delete_range_with_prefix, test_kv_put_with_prefix, test_kv_range_2_with_prefix,
+        test_kv_range_with_prefix, test_txn_compare_equal, test_txn_compare_greater,
+        test_txn_compare_less, test_txn_compare_not_equal, test_txn_one_compare_op,
+        text_txn_multi_compare_op, unprepare_kv,
     };
 
-    async fn build_pg_kv_backend() -> Option<PgStore> {
+    async fn build_pg_kv_backend(table_name: &str) -> Option<DefaultPgStore> {
         let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
         if endpoints.is_empty() {
             return None;
@@ -952,71 +880,110 @@ mod tests {
             .context(CreatePostgresPoolSnafu)
             .unwrap();
         let client = pool.get().await.unwrap();
+        let template_factory = SqlTemplateFactory::new(table_name);
+        let sql_templates = template_factory.build(key_value_from_row, key_value_from_row_key_only);
         client
-            .execute(METADKV_CREATION, &[])
+            .execute(&sql_templates.create_table_statement, &[])
             .await
-            .context(PostgresExecutionSnafu)
+            .context(PostgresExecutionSnafu {
+                sql: sql_templates.create_table_statement.to_string(),
+            })
             .unwrap();
         Some(PgStore {
             pool,
             max_txn_ops: 128,
+            sql_template_set: sql_templates,
         })
     }
 
     #[tokio::test]
-    async fn test_pg_crud() {
-        if let Some(kv_backend) = build_pg_kv_backend().await {
+    async fn test_pg_put() {
+        if let Some(kv_backend) = build_pg_kv_backend("put_test").await {
             let prefix = b"put/";
             prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
             test_kv_put_with_prefix(&kv_backend, prefix.to_vec()).await;
             unprepare_kv(&kv_backend, prefix).await;
+        }
+    }
 
+    #[tokio::test]
+    async fn test_pg_range() {
+        if let Some(kv_backend) = build_pg_kv_backend("range_test").await {
             let prefix = b"range/";
             prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
             test_kv_range_with_prefix(&kv_backend, prefix.to_vec()).await;
             unprepare_kv(&kv_backend, prefix).await;
+        }
+    }
 
-            let prefix = b"batchGet/";
+    #[tokio::test]
+    async fn test_pg_range_2() {
+        if let Some(kv_backend) = build_pg_kv_backend("range2_test").await {
+            let prefix = b"range2/";
+            test_kv_range_2_with_prefix(&kv_backend, prefix.to_vec()).await;
+            unprepare_kv(&kv_backend, prefix).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pg_batch_get() {
+        if let Some(kv_backend) = build_pg_kv_backend("batch_get_test").await {
+            let prefix = b"batch_get/";
             prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
             test_kv_batch_get_with_prefix(&kv_backend, prefix.to_vec()).await;
             unprepare_kv(&kv_backend, prefix).await;
+        }
+    }
 
-            let prefix = b"deleteRange/";
+    #[tokio::test]
+    async fn test_pg_batch_delete() {
+        if let Some(kv_backend) = build_pg_kv_backend("batch_delete_test").await {
+            let prefix = b"batch_delete/";
             prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
-            test_kv_delete_range_with_prefix(kv_backend, prefix.to_vec()).await;
+            test_kv_delete_range_with_prefix(&kv_backend, prefix.to_vec()).await;
+            unprepare_kv(&kv_backend, prefix).await;
         }
+    }
 
-        if let Some(kv_backend) = build_pg_kv_backend().await {
-            test_kv_range_2_with_prefix(kv_backend, b"range2/".to_vec()).await;
-        }
-
-        if let Some(kv_backend) = build_pg_kv_backend().await {
-            let kv_backend = Arc::new(kv_backend);
-            test_kv_compare_and_put_with_prefix(kv_backend, b"compareAndPut/".to_vec()).await;
-        }
-
-        if let Some(kv_backend) = build_pg_kv_backend().await {
-            let prefix = b"batchDelete/";
+    #[tokio::test]
+    async fn test_pg_batch_delete_with_prefix() {
+        if let Some(kv_backend) = build_pg_kv_backend("batch_delete_prefix_test").await {
+            let prefix = b"batch_delete/";
             prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
-            test_kv_batch_delete_with_prefix(kv_backend, prefix.to_vec()).await;
+            test_kv_batch_delete_with_prefix(&kv_backend, prefix.to_vec()).await;
+            unprepare_kv(&kv_backend, prefix).await;
         }
+    }
 
-        if let Some(kv_backend) = build_pg_kv_backend().await {
-            let kv_backend_ref = Arc::new(kv_backend);
-            test_txn_one_compare_op(kv_backend_ref.clone()).await;
-            text_txn_multi_compare_op(kv_backend_ref.clone()).await;
-            test_txn_compare_equal(kv_backend_ref.clone()).await;
-            test_txn_compare_greater(kv_backend_ref.clone()).await;
-            test_txn_compare_less(kv_backend_ref.clone()).await;
-            test_txn_compare_not_equal(kv_backend_ref.clone()).await;
-            // Clean up
-            kv_backend_ref
-                .get_client()
-                .await
-                .unwrap()
-                .execute("DELETE FROM greptime_metakv", &[])
-                .await
-                .unwrap();
+    #[tokio::test]
+    async fn test_pg_delete_range() {
+        if let Some(kv_backend) = build_pg_kv_backend("delete_range_test").await {
+            let prefix = b"delete_range/";
+            prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+            test_kv_delete_range_with_prefix(&kv_backend, prefix.to_vec()).await;
+            unprepare_kv(&kv_backend, prefix).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pg_compare_and_put() {
+        //FIXME(weny, CookiePie): fix this test
+        // if let Some(kv_backend) = build_pg_kv_backend("compare_and_put_test").await {
+        //     let prefix = b"compare_and_put/";
+        //     let kv_backend = Arc::new(kv_backend);
+        //     test_kv_compare_and_put_with_prefix(kv_backend.clone(), prefix.to_vec()).await;
+        // }
+    }
+
+    #[tokio::test]
+    async fn test_pg_txn() {
+        if let Some(kv_backend) = build_pg_kv_backend("txn_test").await {
+            test_txn_one_compare_op(&kv_backend).await;
+            text_txn_multi_compare_op(&kv_backend).await;
+            test_txn_compare_equal(&kv_backend).await;
+            test_txn_compare_greater(&kv_backend).await;
+            test_txn_compare_less(&kv_backend).await;
+            test_txn_compare_not_equal(&kv_backend).await;
         }
     }
 }

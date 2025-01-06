@@ -658,8 +658,9 @@ pub enum Error {
     GetCache { source: Arc<Error> },
 
     #[cfg(feature = "pg_kvbackend")]
-    #[snafu(display("Failed to execute via Postgres"))]
+    #[snafu(display("Failed to execute via Postgres, sql: {}", sql))]
     PostgresExecution {
+        sql: String,
         #[snafu(source)]
         error: tokio_postgres::Error,
         #[snafu(implicit)]
@@ -818,6 +819,17 @@ impl ErrorExt for Error {
 }
 
 impl Error {
+    /// Check if the error is a serialization error.
+    pub fn is_serialization_error(&self) -> bool {
+        match self {
+            Error::PostgresTransaction { error, .. } => {
+                common_telemetry::debug!("code: {:?}", error.code());
+                error.code() == Some(&tokio_postgres::error::SqlState::T_R_SERIALIZATION_FAILURE)
+            }
+            _ => false,
+        }
+    }
+
     /// Creates a new [Error::RetryLater] error from source `err`.
     pub fn retry_later<E: ErrorExt + Send + Sync + 'static>(err: E) -> Error {
         Error::RetryLater {
