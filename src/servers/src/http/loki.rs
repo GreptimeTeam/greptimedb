@@ -192,8 +192,7 @@ async fn handle_json_req(
                 l.iter()
                     .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
                     .collect::<BTreeMap<String, String>>()
-            })
-            .unwrap_or_default();
+            });
 
         // process each line
         for (line_index, line) in lines.iter().enumerate() {
@@ -231,7 +230,7 @@ async fn handle_json_req(
             // TODO(shuiyisong): we'll ignore structured metadata for now
 
             let mut row = init_row(schemas.len(), ts, line_text);
-            process_labels(&mut column_indexer, schemas, &mut row, labels.iter());
+            process_labels(&mut column_indexer, schemas, &mut row, labels.as_ref());
 
             rows.push(row);
         }
@@ -256,13 +255,11 @@ async fn handle_pb_req(
     let mut rows = Vec::with_capacity(cnt);
 
     for stream in req.streams {
-        let labels = match parse_loki_labels(&stream.labels) {
-            Ok(labels) => labels,
-            Err(e) => {
+        let labels = parse_loki_labels(&stream.labels)
+            .inspect_err(|e| {
                 warn!("failed to parse loki labels: {}", e);
-                BTreeMap::new()
-            }
-        };
+            })
+            .ok();
 
         // process entries
         for entry in stream.entries {
@@ -274,7 +271,7 @@ async fn handle_pb_req(
             let line = entry.line;
 
             let mut row = init_row(schemas.len(), prost_ts_to_nano(&ts), line);
-            process_labels(&mut column_indexer, schemas, &mut row, labels.iter());
+            process_labels(&mut column_indexer, schemas, &mut row, labels.as_ref());
 
             rows.push(row);
         }
@@ -376,12 +373,16 @@ fn init_row(schema_len: usize, ts: i64, line: String) -> Vec<GreptimeValue> {
     row
 }
 
-fn process_labels<'a>(
+fn process_labels(
     column_indexer: &mut HashMap<String, u16>,
     schemas: &mut Vec<ColumnSchema>,
     row: &mut Vec<GreptimeValue>,
-    labels: impl Iterator<Item = (&'a String, &'a String)>,
+    labels: Option<&BTreeMap<String, String>>,
 ) {
+    let Some(labels) = labels else {
+        return;
+    };
+
     // insert labels
     for (k, v) in labels {
         if let Some(index) = column_indexer.get(k) {

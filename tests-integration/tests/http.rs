@@ -1873,7 +1873,7 @@ pub async fn test_loki_pb_logs(store_type: StorageType) {
     // init loki request
     let req: PushRequest = PushRequest {
         streams: vec![StreamAdapter {
-            labels: r#"{service="test",source="integration","wadaxi"="do anything"}"#.to_string(),
+            labels: r#"{service="test",source="integration",wadaxi="do anything"}"#.to_string(),
             entries: vec![
                 EntryAdapter {
                     timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
