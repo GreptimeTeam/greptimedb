@@ -267,8 +267,8 @@ async fn migrate_regions(ctx: &FuzzContext, migrations: &[Migration]) -> Result<
         info!("Migrating region: {region_id} from {from_peer} to {to_peer}, procedure: {procedure_id}");
         procedure_ids.push(procedure_id);
     }
-    for (migration, procedure_id) in migrations.clone().into_iter().zip(procedure_ids) {
-        wait_for_migration(&ctx, &migration, &procedure_id).await;
+    for (migration, procedure_id) in migrations.iter().zip(procedure_ids) {
+        wait_for_migration(ctx, migration, &procedure_id).await;
     }
 
     tokio::time::sleep(Duration::from_secs(
