@@ -287,7 +287,7 @@ async fn handle_pb_req(
 /// ref:
 /// 1. encoding: https://github.com/grafana/alloy/blob/be34410b9e841cc0c37c153f9550d9086a304bca/internal/component/common/loki/client/batch.go#L114-L145
 /// 2. test data: https://github.com/grafana/loki/blob/a24ef7b206e0ca63ee74ca6ecb0a09b745cd2258/pkg/push/types_test.go
-fn parse_loki_labels(labels: &str) -> Result<BTreeMap<String, String>> {
+pub fn parse_loki_labels(labels: &str) -> Result<BTreeMap<String, String>> {
     let mut labels = labels.trim();
     ensure!(
         labels.len() >= 2,

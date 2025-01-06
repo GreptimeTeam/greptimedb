@@ -123,6 +123,7 @@ client = { workspace = true, features = ["testing"] }
 common-base.workspace = true
 common-test-util.workspace = true
 criterion = "0.5"
+json5 = "0.4"
 mysql_async = { version = "0.33", default-features = false, features = [
     "default-rustls",
 ] }
@@ -148,4 +149,8 @@ harness = false
 
 [[bench]]
 name = "to_http_output"
+harness = false
+
+[[bench]]
+name = "loki_labels"
 harness = false
