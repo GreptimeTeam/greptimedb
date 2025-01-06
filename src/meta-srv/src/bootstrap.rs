@@ -229,7 +229,7 @@ pub async fn metasrv_builder(
         #[cfg(feature = "pg_kvbackend")]
         (None, BackendImpl::PostgresStore) => {
             let pool = create_postgres_pool(opts).await?;
-            let kv_backend = PgStore::with_pg_pool(pool)
+            let kv_backend = PgStore::with_pg_pool(pool, opts.max_txn_ops)
                 .await
                 .context(error::KvBackendSnafu)?;
             // Client for election should be created separately since we need a different session keep-alive idle time.
