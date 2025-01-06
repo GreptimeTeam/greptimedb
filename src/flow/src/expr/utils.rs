@@ -74,9 +74,8 @@ pub fn find_plan_time_window_expr_lower_bound(
         .context(UnexpectedSnafu {
             reason: "Failed to find time index column",
         })?;
-    let ts_col = ScalarExpr::Column(ts_col);
 
-    find_time_window_lower_bound(&expr_time_index, &ts_col, current)
+    find_time_window_lower_bound(&expr_time_index, ts_col, current)
 }
 
 /// Find the lower bound of time window in given `expr` and `current` timestamp.
@@ -88,15 +87,9 @@ pub fn find_plan_time_window_expr_lower_bound(
 /// if return None, meaning this time window have no lower bound
 pub fn find_time_window_lower_bound(
     expr: &ScalarExpr,
-    ts_col: &ScalarExpr,
+    ts_col_idx: usize,
     current: common_time::Timestamp,
 ) -> Result<Option<common_time::Timestamp>> {
-    let ScalarExpr::Column(ts_col_idx) = ts_col.clone() else {
-        UnexpectedSnafu {
-            reason: format!("Expected column expression but got {ts_col:?}"),
-        }
-        .fail()?
-    };
     let all_ref_columns = expr.get_all_ref_columns();
     if !all_ref_columns.contains(&ts_col_idx) {
         UnexpectedSnafu {
@@ -337,7 +330,7 @@ mod test {
 
             let current = common_time::Timestamp::from_str(current, None).unwrap();
 
-            let res = find_time_window_lower_bound(&expr, &ScalarExpr::Column(1), current).unwrap();
+            let res = find_time_window_lower_bound(&expr, 1, current).unwrap();
 
             let expected = Some(common_time::Timestamp::from_str(expected, None).unwrap());
 
