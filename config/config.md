@@ -293,9 +293,9 @@
 | `data_home` | String | `/tmp/metasrv/` | The working home directory. |
 | `bind_addr` | String | `127.0.0.1:3002` | The bind address of metasrv. |
 | `server_addr` | String | `127.0.0.1:3002` | The communication server address for frontend and datanode to connect to metasrv,  "127.0.0.1:3002" by default for localhost. |
-| `store_addrs` | Array | -- | Store server address default to etcd store. |
+| `store_addrs` | Array | -- | Store server address default to etcd store.<br/>For postgres store, the format is:<br/>"password=password dbname=postgres user=postgres host=localhost port=5432"<br/>For etcd store, the format is:<br/>"127.0.0.1:2379" |
 | `store_key_prefix` | String | `""` | If it's not empty, the metasrv will store all data with this key prefix. |
-| `backend` | String | `EtcdStore` | The datastore for meta server. |
+| `backend` | String | `etcd_store` | The datastore for meta server.<br/>Available values:<br/>- `etcd_store` (default value)<br/>- `memory_store`<br/>- `postgres_store` |
 | `selector` | String | `round_robin` | Datanode selector type.<br/>- `round_robin` (default value)<br/>- `lease_based`<br/>- `load_based`<br/>For details, please see "https://docs.greptime.com/developer-guide/metasrv/selector". |
 | `use_memory_store` | Bool | `false` | Store data in memory. |
 | `enable_region_failover` | Bool | `false` | Whether to enable region failover.<br/>This feature is only available on GreptimeDB running on cluster mode and<br/>- Using Remote WAL<br/>- Using shared storage (e.g., s3). |

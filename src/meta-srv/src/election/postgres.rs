@@ -37,10 +37,9 @@ use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
 // TODO(CookiePie): The lock id should be configurable.
 const CAMPAIGN: &str = "SELECT pg_try_advisory_lock({})";
 const STEP_DOWN: &str = "SELECT pg_advisory_unlock({})";
-const SET_IDLE_SESSION_TIMEOUT: &str = "SET idle_in_transaction_session_timeout = $1";
 // Currently the session timeout is longer than the leader lease time, so the leader lease may expire while the session is still alive.
 // Either the leader reconnects and step down or the session expires and the lock is released.
-const IDLE_SESSION_TIMEOUT: &str = "10s";
+const SET_IDLE_SESSION_TIMEOUT: &str = "SET idle_in_transaction_session_timeout = '10s';";
 
 // Separator between value and expire time.
 const LEASE_SEP: &str = r#"||__metadata_lease_sep||"#;
@@ -150,7 +149,7 @@ impl PgElection {
     ) -> Result<ElectionRef> {
         // Set idle session timeout to IDLE_SESSION_TIMEOUT to avoid dead advisory lock.
         client
-            .execute(SET_IDLE_SESSION_TIMEOUT, &[&IDLE_SESSION_TIMEOUT])
+            .execute(SET_IDLE_SESSION_TIMEOUT, &[])
             .await
             .context(PostgresExecutionSnafu)?;
 
