@@ -78,7 +78,6 @@ tokio.workspace = true
 
 [dev-dependencies]
 catalog = { workspace = true, features = ["testing"] }
-common-test-util.workspace = true
 criterion = { version = "0.4", features = ["html_reports", "async_tokio"] }
 operator.workspace = true
 rayon = "1.0"
