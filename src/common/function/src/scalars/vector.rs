@@ -24,6 +24,7 @@ mod sub;
 pub(crate) mod sum;
 mod vector_div;
 mod vector_mul;
+mod vector_norm;
 
 use std::sync::Arc;
 
@@ -48,6 +49,7 @@ impl VectorFunction {
 
         // vector calculation
         registry.register(Arc::new(vector_mul::VectorMulFunction));
+        registry.register(Arc::new(vector_norm::VectorNormFunction));
         registry.register(Arc::new(vector_div::VectorDivFunction));
         registry.register(Arc::new(sub::SubFunction));
         registry.register(Arc::new(elem_sum::ElemSumFunction));

@@ -45,3 +45,13 @@ SELECT vec_elem_product('[-1.0, -2.0, -3.0, 4.0]');
 SELECT vec_elem_product(parse_vec('[1.0, 2.0, 3.0, 4.0]'));
 
 SELECT vec_elem_product(parse_vec('[-1.0, -2.0, -3.0, 4.0]'));
+
+SELECT vec_to_string(vec_norm('[0.0, 2.0, 3.0]'));
+
+SELECT vec_to_string(vec_norm('[1.0, 2.0, 3.0]'));
+
+SELECT vec_to_string(vec_norm('[7.0, 8.0, 9.0]'));
+
+SELECT vec_to_string(vec_norm('[7.0, -8.0, 9.0]'));
+
+SELECT vec_to_string(vec_norm(parse_vec('[7.0, -8.0, 9.0]')));
