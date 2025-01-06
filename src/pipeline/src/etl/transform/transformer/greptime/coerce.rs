@@ -257,7 +257,7 @@ fn coerce_bool_value(b: bool, transform: &Transform) -> Result<Option<ValueData>
 }
 
 fn coerce_i64_value(n: i64, transform: &Transform) -> Result<Option<ValueData>> {
-    let val = match transform.type_ {
+    let val = match &transform.type_ {
         Value::Int8(_) => ValueData::I8Value(n as i32),
         Value::Int16(_) => ValueData::I16Value(n as i32),
         Value::Int32(_) => ValueData::I32Value(n as i32),
@@ -274,14 +274,11 @@ fn coerce_i64_value(n: i64, transform: &Transform) -> Result<Option<ValueData>> 
         Value::Boolean(_) => ValueData::BoolValue(n != 0),
         Value::String(_) => ValueData::StringValue(n.to_string()),
 
-        Value::Timestamp(_) => match transform.on_failure {
-            Some(OnFailure::Ignore) => return Ok(None),
-            Some(OnFailure::Default) => {
-                return CoerceUnsupportedEpochTypeSnafu { ty: "Default" }.fail();
-            }
-            None => {
-                return CoerceUnsupportedEpochTypeSnafu { ty: "Integer" }.fail();
-            }
+        Value::Timestamp(unit) => match unit {
+            Timestamp::Nanosecond(_) => ValueData::TimestampNanosecondValue(n),
+            Timestamp::Microsecond(_) => ValueData::TimestampMicrosecondValue(n),
+            Timestamp::Millisecond(_) => ValueData::TimestampMillisecondValue(n),
+            Timestamp::Second(_) => ValueData::TimestampSecondValue(n),
         },
 
         Value::Array(_) | Value::Map(_) => {
@@ -298,7 +295,7 @@ fn coerce_i64_value(n: i64, transform: &Transform) -> Result<Option<ValueData>> 
 }
 
 fn coerce_u64_value(n: u64, transform: &Transform) -> Result<Option<ValueData>> {
-    let val = match transform.type_ {
+    let val = match &transform.type_ {
         Value::Int8(_) => ValueData::I8Value(n as i32),
         Value::Int16(_) => ValueData::I16Value(n as i32),
         Value::Int32(_) => ValueData::I32Value(n as i32),
@@ -315,14 +312,11 @@ fn coerce_u64_value(n: u64, transform: &Transform) -> Result<Option<ValueData>> 
         Value::Boolean(_) => ValueData::BoolValue(n != 0),
         Value::String(_) => ValueData::StringValue(n.to_string()),
 
-        Value::Timestamp(_) => match transform.on_failure {
-            Some(OnFailure::Ignore) => return Ok(None),
-            Some(OnFailure::Default) => {
-                return CoerceUnsupportedEpochTypeSnafu { ty: "Default" }.fail();
-            }
-            None => {
-                return CoerceUnsupportedEpochTypeSnafu { ty: "Integer" }.fail();
-            }
+        Value::Timestamp(unit) => match unit {
+            Timestamp::Nanosecond(_) => ValueData::TimestampNanosecondValue(n as i64),
+            Timestamp::Microsecond(_) => ValueData::TimestampMicrosecondValue(n as i64),
+            Timestamp::Millisecond(_) => ValueData::TimestampMillisecondValue(n as i64),
+            Timestamp::Second(_) => ValueData::TimestampSecondValue(n as i64),
         },
 
         Value::Array(_) | Value::Map(_) => {
