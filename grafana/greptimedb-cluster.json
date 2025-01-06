@@ -5296,7 +5296,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by(pod, scheme, operation) (rate(opendal_requests_total{pod=~\"$datanode\"}[$__rate_interval]))",
+          "expr": "sum by(pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{pod=~\"$datanode\"}[$__rate_interval]))",
           "instant": false,
           "legendFormat": "[{{pod}}]-[{{scheme}}]-[{{operation}}]-qps",
           "range": true,
@@ -5392,7 +5392,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by(pod, scheme) (rate(opendal_requests_duration_seconds_count{pod=~\"$datanode\", operation=\"read\"}[$__rate_interval]))",
+          "expr": "sum by(pod, scheme) (rate(opendal_operation_duration_seconds_count{pod=~\"$datanode\", operation=\"read\"}[$__rate_interval]))",
           "instant": false,
           "legendFormat": "[{{pod}}]-[{{scheme}}]-qps",
           "range": true,
@@ -5488,7 +5488,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by(pod, le, scheme) (rate(opendal_requests_duration_seconds_bucket{pod=~\"$datanode\",operation=\"read\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(pod, le, scheme) (rate(opendal_operation_duration_seconds_bucket{pod=~\"$datanode\",operation=\"read\"}[$__rate_interval])))",
           "instant": false,
           "legendFormat": "[{{pod}}]-{{scheme}}-p99",
           "range": true,
@@ -5584,7 +5584,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by(pod, scheme) (rate(opendal_requests_duration_seconds_count{pod=~\"$datanode\", operation=\"write\"}[$__rate_interval]))",
+          "expr": "sum by(pod, scheme) (rate(opendal_operation_duration_seconds_count{pod=~\"$datanode\", operation=\"write\"}[$__rate_interval]))",
           "instant": false,
           "legendFormat": "[{{pod}}]-[{{scheme}}]-qps",
           "range": true,
@@ -5680,7 +5680,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by(pod, le, scheme) (rate(opendal_requests_duration_seconds_bucket{pod=~\"$datanode\", operation=\"write\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(pod, le, scheme) (rate(opendal_operation_duration_seconds_bucket{pod=~\"$datanode\", operation=\"write\"}[$__rate_interval])))",
           "instant": false,
           "legendFormat": "[{{pod}}]-[{{scheme}}]-p99",
           "range": true,
@@ -5776,7 +5776,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by(pod, scheme) (rate(opendal_requests_duration_seconds_count{pod=~\"$datanode\", operation=\"list\"}[$__rate_interval]))",
+          "expr": "sum by(pod, scheme) (rate(opendal_operation_duration_seconds_count{pod=~\"$datanode\", operation=\"list\"}[$__rate_interval]))",
           "instant": false,
           "interval": "",
           "legendFormat": "[{{pod}}]-[{{scheme}}]-qps",
@@ -5873,7 +5873,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by(pod, le, scheme) (rate(opendal_requests_duration_seconds_bucket{pod=~\"$datanode\", operation=\"list\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(pod, le, scheme) (rate(opendal_operation_duration_seconds_bucket{pod=~\"$datanode\", operation=\"list\"}[$__rate_interval])))",
           "instant": false,
           "interval": "",
           "legendFormat": "[{{pod}}]-[{{scheme}}]-p99",
@@ -5970,7 +5970,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by(pod, scheme, operation) (rate(opendal_requests_duration_seconds_count{pod=~\"$datanode\",operation!~\"read|write|list|stat\"}[$__rate_interval]))",
+          "expr": "sum by(pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{pod=~\"$datanode\",operation!~\"read|write|list|stat\"}[$__rate_interval]))",
           "instant": false,
           "legendFormat": "[{{pod}}]-[{{scheme}}]-[{{operation}}]-qps",
           "range": true,
@@ -6066,7 +6066,7 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by(pod, le, scheme, operation) (rate(opendal_requests_duration_seconds_bucket{pod=~\"$datanode\", operation!~\"read|write|list\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(pod, le, scheme, operation) (rate(opendal_operation_duration_seconds_bucket{pod=~\"$datanode\", operation!~\"read|write|list\"}[$__rate_interval])))",
           "instant": false,
           "legendFormat": "[{{pod}}]-[{{scheme}}]-[{{operation}}]-p99",
           "range": true,
