@@ -32,12 +32,13 @@ use hashbrown::HashMap;
 use lazy_static::lazy_static;
 use loki_api::prost_types::Timestamp;
 use prost::Message;
+use quoted_string::test_utils::TestSpec;
 use session::context::{Channel, QueryContext};
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
-    DecodeOtlpRequestSnafu, InvalidLokiPayloadSnafu, ParseJson5Snafu, ParseJsonSnafu, Result,
-    UnsupportedContentTypeSnafu,
+    DecodeOtlpRequestSnafu, InvalidLokiLabelsSnafu, InvalidLokiPayloadSnafu, ParseJsonSnafu,
+    Result, UnsupportedContentTypeSnafu,
 };
 use crate::http::event::{LogState, JSON_CONTENT_TYPE, PB_CONTENT_TYPE};
 use crate::http::extractor::LogTableName;
@@ -255,13 +256,13 @@ async fn handle_pb_req(
     let mut rows = Vec::with_capacity(cnt);
 
     for stream in req.streams {
-        // parse labels for each row
-        // encoding: https://github.com/grafana/alloy/blob/be34410b9e841cc0c37c153f9550d9086a304bca/internal/component/common/loki/client/batch.go#L114-L145
-        // use very dirty hack to parse labels
-        // TODO(shuiyisong): remove json5 and parse the string directly
-        let labels = stream.labels.replace("=", ":");
-        // use btreemap to keep order
-        let labels: BTreeMap<String, String> = json5::from_str(&labels).context(ParseJson5Snafu)?;
+        let labels = match parse_loki_labels(&stream.labels) {
+            Ok(labels) => labels,
+            Err(e) => {
+                warn!("failed to parse loki labels: {}", e);
+                BTreeMap::new()
+            }
+        };
 
         // process entries
         for entry in stream.entries {
@@ -280,6 +281,77 @@ async fn handle_pb_req(
     }
 
     Ok(rows)
+}
+
+/// since we're hand-parsing the labels, if any error is encountered, we'll just skip the label
+/// ref:
+/// 1. encoding: https://github.com/grafana/alloy/blob/be34410b9e841cc0c37c153f9550d9086a304bca/internal/component/common/loki/client/batch.go#L114-L145
+/// 2. test data: https://github.com/grafana/loki/blob/a24ef7b206e0ca63ee74ca6ecb0a09b745cd2258/pkg/push/types_test.go
+fn parse_loki_labels(labels: &str) -> Result<BTreeMap<String, String>> {
+    let mut labels = labels.trim();
+    ensure!(
+        labels.len() >= 2,
+        InvalidLokiLabelsSnafu {
+            msg: "labels string too short"
+        }
+    );
+    ensure!(
+        labels.starts_with("{"),
+        InvalidLokiLabelsSnafu {
+            msg: "missing `{` at the beginning"
+        }
+    );
+    ensure!(
+        labels.ends_with("}"),
+        InvalidLokiLabelsSnafu {
+            msg: "missing `}` at the end"
+        }
+    );
+
+    let mut result = BTreeMap::new();
+    labels = &labels[1..labels.len() - 1];
+
+    while !labels.is_empty() {
+        // parse key
+        let first_index = labels.find("=").context(InvalidLokiLabelsSnafu {
+            msg: format!("missing `=` near: {}", labels),
+        })?;
+        let key = &labels[..first_index];
+        labels = &labels[first_index + 1..];
+
+        // parse value
+        let qs = quoted_string::parse::<TestSpec>(labels)
+            .map_err(|_| {
+                InvalidLokiLabelsSnafu {
+                    msg: format!("failed to parse quoted string near: {}", labels),
+                }
+                .build()
+            })?
+            .quoted_string;
+
+        labels = &labels[qs.len()..];
+
+        let value = quoted_string::to_content::<TestSpec>(qs).map_err(|_| {
+            InvalidLokiLabelsSnafu {
+                msg: format!("failed to unquote the string: {}", qs),
+            }
+            .build()
+        })?;
+
+        // insert key and value
+        result.insert(key.to_string(), value.to_string());
+
+        if labels.is_empty() {
+            break;
+        }
+        ensure!(
+            labels.starts_with(","),
+            InvalidLokiLabelsSnafu { msg: "missing `,`" }
+        );
+        labels = labels[1..].trim_start();
+    }
+
+    Ok(result)
 }
 
 #[inline]
@@ -359,9 +431,11 @@ macro_rules! unwrap_or_warn_continue {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use loki_api::prost_types::Timestamp;
 
-    use crate::http::loki::prost_ts_to_nano;
+    use crate::http::loki::{parse_loki_labels, prost_ts_to_nano};
 
     #[test]
     fn test_ts_to_nano() {
@@ -373,5 +447,28 @@ mod tests {
             nanos: 804293888,
         };
         assert_eq!(prost_ts_to_nano(&ts), 1731748568804293888);
+    }
+
+    #[test]
+    fn test_parse_loki_labels() {
+        let mut expected = BTreeMap::new();
+        expected.insert("job".to_string(), "foobar".to_string());
+        expected.insert("cluster".to_string(), "foo-central1".to_string());
+        expected.insert("namespace".to_string(), "bar".to_string());
+        expected.insert("container_name".to_string(), "buzz".to_string());
+
+        // perfect case
+        let valid_labels =
+            r#"{job="foobar", cluster="foo-central1", namespace="bar", container_name="buzz"}"#;
+        let re = parse_loki_labels(valid_labels);
+        assert!(re.is_ok());
+        assert_eq!(re.unwrap(), expected);
+
+        // non space case
+        let valid_labels =
+            r#"{job="foobar",cluster="foo-central1",namespace="bar",container_name="buzz"}"#;
+        let re = parse_loki_labels(valid_labels);
+        assert!(re.is_ok());
+        assert_eq!(re.unwrap(), expected);
     }
 }
