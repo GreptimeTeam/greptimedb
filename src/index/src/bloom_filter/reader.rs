@@ -63,6 +63,31 @@ pub trait BloomFilterReader: Sync {
             .expected_items(loc.elem_count);
         Ok(bm)
     }
+
+    async fn bloom_filter_vec(
+        &self,
+        locs: &[BloomFilterSegmentLocation],
+    ) -> Result<Vec<BloomFilter>> {
+        let ranges = locs
+            .iter()
+            .map(|l| l.offset..l.offset + l.size)
+            .collect::<Vec<_>>();
+        let bss = self.read_vec(&ranges).await?;
+
+        let mut result = Vec::with_capacity(bss.len());
+        for (bs, loc) in bss.into_iter().zip(locs.iter()) {
+            let vec = bs
+                .chunks_exact(std::mem::size_of::<u64>())
+                .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
+                .collect();
+            let bm = BloomFilter::from_vec(vec)
+                .seed(&SEED)
+                .expected_items(loc.elem_count);
+            result.push(bm);
+        }
+
+        Ok(result)
+    }
 }
 
 /// `BloomFilterReaderImpl` reads the bloom filter from the file.

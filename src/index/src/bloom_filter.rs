@@ -45,7 +45,7 @@ pub struct BloomFilterMeta {
 }
 
 /// The location of the bloom filter segment in the file.
-#[derive(Debug, Serialize, Deserialize, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct BloomFilterSegmentLocation {
     /// The offset of the bloom filter segment in the file.
     pub offset: u64,
