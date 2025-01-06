@@ -157,7 +157,7 @@ where
         load: F,
     ) -> Result<Vec<u8>, E>
     where
-        F: FnOnce(Vec<Range<u64>>) -> Fut,
+        F: Fn(Vec<Range<u64>>) -> Fut,
         Fut: Future<Output = Result<Vec<Bytes>, E>>,
         E: std::error::Error,
     {
