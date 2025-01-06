@@ -12336,6 +12336,7 @@ dependencies = [
  "common-base",
  "common-error",
  "common-macro",
+ "common-meta",
  "common-query",
  "common-runtime",
  "common-telemetry",
