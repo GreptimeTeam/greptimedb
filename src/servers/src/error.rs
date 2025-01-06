@@ -506,7 +506,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid Loki lables: {}", msg))]
+    #[snafu(display("Invalid Loki labels: {}", msg))]
     InvalidLokiLabels {
         msg: String,
         #[snafu(implicit)]
