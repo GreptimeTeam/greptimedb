@@ -116,6 +116,11 @@ mod tests {
                 0..12,
                 vec![0..8],
             ), // search multiple rows in multiple ranges
+            (
+                vec![b"row01".to_vec(), b"row11".to_vec()],
+                0..12,
+                vec![0..4, 8..12],
+            ), // search multiple rows in multiple ranges
             (vec![b"row99".to_vec()], 0..12, vec![]), // search for a row that doesn't exist in the full range
             (vec![b"row00".to_vec()], 12..12, vec![]), // search in an empty range
             (
