@@ -58,8 +58,8 @@ pub struct Batch {
 impl From<common_recordbatch::RecordBatch> for Batch {
     fn from(value: common_recordbatch::RecordBatch) -> Self {
         Self {
-            batch: value.columns().to_vec(),
             row_count: value.num_rows(),
+            batch: value.columns,
             diffs: None,
         }
     }

@@ -85,11 +85,11 @@ impl ManagedTableSource {
     /// Get the time index column from table id
     pub async fn get_time_index_column_from_table_id(
         &self,
-        table_id: &TableId,
+        table_id: TableId,
     ) -> Result<(usize, datatypes::schema::ColumnSchema), Error> {
         let info = self
             .table_info_manager
-            .get(*table_id)
+            .get(table_id)
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?
@@ -195,13 +195,11 @@ impl ManagedTableSource {
     }
 
     pub async fn check_table_exist(&self, table_id: &TableId) -> Result<bool, Error> {
-        Ok(self
-            .table_info_manager
-            .get(*table_id)
+        self.table_info_manager
+            .exists(*table_id)
             .await
             .map_err(BoxedError::new)
-            .context(ExternalSnafu)?
-            .is_some())
+            .context(ExternalSnafu)
     }
 }
 

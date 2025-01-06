@@ -264,8 +264,8 @@ impl FlownodeContext {
         self.flow_to_sink.insert(task_id, sink_table_name.clone());
         self.sink_to_flow.insert(sink_table_name, task_id);
     }
+
     /// add flow plan to worker context
-    ///
     pub fn add_flow_plan(&mut self, task_id: FlowId, plan: TypedPlan) {
         self.flow_plans.insert(task_id, plan);
     }
