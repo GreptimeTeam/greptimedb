@@ -436,6 +436,7 @@ mod tests {
 
     use loki_api::prost_types::Timestamp;
 
+    use crate::error::Error::InvalidLokiLabels;
     use crate::http::loki::{parse_loki_labels, prost_ts_to_nano};
 
     #[test]
@@ -465,11 +466,34 @@ mod tests {
         assert!(re.is_ok());
         assert_eq!(re.unwrap(), expected);
 
-        // non space case
-        let valid_labels =
-            r#"{job="foobar",cluster="foo-central1",namespace="bar",container_name="buzz"}"#;
-        let re = parse_loki_labels(valid_labels);
-        assert!(re.is_ok());
-        assert_eq!(re.unwrap(), expected);
+        // too short
+        let too_short = r#"}"#;
+        let re = parse_loki_labels(too_short);
+        assert!(matches!(re.err().unwrap(), InvalidLokiLabels { .. }));
+
+        // missing start
+        let missing_start = r#"job="foobar"}"#;
+        let re = parse_loki_labels(missing_start);
+        assert!(matches!(re.err().unwrap(), InvalidLokiLabels { .. }));
+
+        // missing start
+        let missing_end = r#"{job="foobar""#;
+        let re = parse_loki_labels(missing_end);
+        assert!(matches!(re.err().unwrap(), InvalidLokiLabels { .. }));
+
+        // missing equal
+        let missing_equal = r#"{job"foobar"}"#;
+        let re = parse_loki_labels(missing_equal);
+        assert!(matches!(re.err().unwrap(), InvalidLokiLabels { .. }));
+
+        // missing quote
+        let missing_quote = r#"{job=foobar}"#;
+        let re = parse_loki_labels(missing_quote);
+        assert!(matches!(re.err().unwrap(), InvalidLokiLabels { .. }));
+
+        // missing comma
+        let missing_comma = r#"{job="foobar" cluster="foo-central1"}"#;
+        let re = parse_loki_labels(missing_comma);
+        assert!(matches!(re.err().unwrap(), InvalidLokiLabels { .. }));
     }
 }
