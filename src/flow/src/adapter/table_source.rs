@@ -29,7 +29,7 @@ use crate::error::{
 };
 use crate::repr::RelationDesc;
 
-/// Table description, include relation desc and default values, which is the mininal information flow needed for table
+/// Table description, include relation desc and default values, which is the minimal information flow needed for table
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TableDesc {
     pub relation_desc: RelationDesc,
