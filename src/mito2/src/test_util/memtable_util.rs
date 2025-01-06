@@ -289,6 +289,7 @@ pub(crate) fn build_key_values_with_ts_seq_values(
             schema: column_schema,
             rows,
         }),
+        write_hint: 0,
     };
     KeyValues::new(metadata.as_ref(), mutation).unwrap()
 }

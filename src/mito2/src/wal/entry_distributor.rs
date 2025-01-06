@@ -279,6 +279,7 @@ mod tests {
                         op_type: OpType::Put as i32,
                         sequence: 1u64,
                         rows: None,
+                        write_hint: 0,
                     }],
                 }
                 .encode_to_vec(),
@@ -292,6 +293,7 @@ mod tests {
                         op_type: OpType::Put as i32,
                         sequence: 2u64,
                         rows: None,
+                        write_hint: 0,
                     }],
                 }
                 .encode_to_vec(),
@@ -305,6 +307,7 @@ mod tests {
                         op_type: OpType::Put as i32,
                         sequence: 3u64,
                         rows: None,
+                        write_hint: 0,
                     }],
                 }
                 .encode_to_vec(),
@@ -348,6 +351,7 @@ mod tests {
                         op_type: OpType::Put as i32,
                         sequence: 1u64,
                         rows: None,
+                        write_hint: 0,
                     }],
                 }
             )]
@@ -367,6 +371,7 @@ mod tests {
                         op_type: OpType::Put as i32,
                         sequence: 2u64,
                         rows: None,
+                        write_hint: 0,
                     }],
                 }
             )]
@@ -382,6 +387,7 @@ mod tests {
                 op_type: OpType::Put as i32,
                 sequence: 1u64,
                 rows: None,
+                write_hint: 0,
             }],
         };
         let region2 = RegionId::new(1, 2);
@@ -390,6 +396,7 @@ mod tests {
                 op_type: OpType::Put as i32,
                 sequence: 3u64,
                 rows: None,
+                write_hint: 0,
             }],
         };
         let region3 = RegionId::new(1, 3);
@@ -398,6 +405,7 @@ mod tests {
                 op_type: OpType::Put as i32,
                 sequence: 3u64,
                 rows: None,
+                write_hint: 0,
             }],
         };
         let provider = Provider::kafka_provider("my_topic".to_string());
@@ -475,6 +483,7 @@ mod tests {
                 op_type: OpType::Put as i32,
                 sequence: 1u64,
                 rows: None,
+                write_hint: 0,
             }],
         };
         let region2 = RegionId::new(1, 2);
@@ -551,6 +560,7 @@ mod tests {
                         op_type: OpType::Put as i32,
                         sequence: 1u64,
                         rows: None,
+                        write_hint: 0,
                     }],
                 }
                 .encode_to_vec(),
@@ -564,6 +574,7 @@ mod tests {
                         op_type: OpType::Put as i32,
                         sequence: 2u64,
                         rows: None,
+                        write_hint: 0,
                     }],
                 }
                 .encode_to_vec(),
@@ -577,6 +588,7 @@ mod tests {
                         op_type: OpType::Put as i32,
                         sequence: 3u64,
                         rows: None,
+                        write_hint: 0,
                     }],
                 }
                 .encode_to_vec(),
@@ -590,6 +602,7 @@ mod tests {
                         op_type: OpType::Put as i32,
                         sequence: 4u64,
                         rows: None,
+                        write_hint: 0,
                     }],
                 }
                 .encode_to_vec(),
@@ -624,6 +637,7 @@ mod tests {
                         op_type: OpType::Put as i32,
                         sequence: 4u64,
                         rows: None,
+                        write_hint: 0,
                     }],
                 }
             )]

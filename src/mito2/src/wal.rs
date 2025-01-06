@@ -287,6 +287,7 @@ mod tests {
             op_type: op_type as i32,
             sequence,
             rows: Some(Rows { schema, rows }),
+            write_hint: 0,
         }
     }
 

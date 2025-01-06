@@ -165,6 +165,7 @@ pub(crate) fn write_rows_to_version(
         op_type: OpType::Put as i32,
         sequence: start_ts as u64, // The sequence may be incorrect, but it's fine in test.
         rows: Some(rows),
+        write_hint: 0,
     };
     let key_values = KeyValues::new(&version.metadata, mutation).unwrap();
     version.memtables.mutable.write(&key_values).unwrap();
