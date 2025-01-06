@@ -353,7 +353,7 @@ impl FlownodeContext {
                 name: name.join("."),
             })?;
         let schema = self.table_source.table(name).await?;
-        Ok((id, schema))
+        Ok((id, schema.relation_desc))
     }
 
     /// Assign a global id to a table, if already assigned, return the existing global id

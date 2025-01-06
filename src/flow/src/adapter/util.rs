@@ -27,6 +27,7 @@ use session::context::QueryContextBuilder;
 use snafu::{OptionExt, ResultExt};
 use table::table_reference::TableReference;
 
+use crate::adapter::table_source::TableDesc;
 use crate::adapter::{TableName, AUTO_CREATED_PLACEHOLDER_TS_COL};
 use crate::error::{Error, ExternalSnafu, UnexpectedSnafu};
 use crate::repr::{ColumnType, RelationDesc, RelationType};
@@ -126,7 +127,7 @@ impl FlowWorkerManager {
 
 pub fn table_info_value_to_relation_desc(
     table_info_value: TableInfoValue,
-) -> Result<RelationDesc, Error> {
+) -> Result<TableDesc, Error> {
     let raw_schema = table_info_value.table_info.meta.schema;
     let (column_types, col_names): (Vec<_>, Vec<_>) = raw_schema
         .column_schemas
@@ -147,8 +148,7 @@ pub fn table_info_value_to_relation_desc(
     let keys = vec![crate::repr::Key::from(key)];
 
     let time_index = raw_schema.timestamp_index;
-
-    Ok(RelationDesc {
+    let relation_desc = RelationDesc {
         typ: RelationType {
             column_types,
             keys,
@@ -157,6 +157,16 @@ pub fn table_info_value_to_relation_desc(
             auto_columns: vec![],
         },
         names: col_names,
+    };
+    let default_values = raw_schema
+        .column_schemas
+        .iter()
+        .map(|c| c.default_constraint().cloned())
+        .collect_vec();
+
+    Ok(TableDesc {
+        relation_desc,
+        default_values,
     })
 }
 
