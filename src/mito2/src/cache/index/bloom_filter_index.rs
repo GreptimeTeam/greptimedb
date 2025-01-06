@@ -88,8 +88,8 @@ impl<R> CachedBloomFilterIndexBlobReader<R> {
 
 #[async_trait]
 impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBlobReader<R> {
-    async fn range_read(&mut self, offset: u64, size: u32) -> Result<Bytes> {
-        let inner = &mut self.inner;
+    async fn range_read(&self, offset: u64, size: u32) -> Result<Bytes> {
+        let inner = &self.inner;
         self.cache
             .get_or_load(
                 (self.file_id, self.column_id),
@@ -108,7 +108,7 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
     }
 
     /// Reads the meta information of the bloom filter.
-    async fn metadata(&mut self) -> Result<BloomFilterMeta> {
+    async fn metadata(&self) -> Result<BloomFilterMeta> {
         if let Some(cached) = self.cache.get_metadata((self.file_id, self.column_id)) {
             CACHE_HIT.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             Ok((*cached).clone())

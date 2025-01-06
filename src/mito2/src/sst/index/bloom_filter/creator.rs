@@ -481,7 +481,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             let reader = blob_guard.reader().await.unwrap();
-            let mut bloom_filter = BloomFilterReaderImpl::new(reader);
+            let bloom_filter = BloomFilterReaderImpl::new(reader);
             let metadata = bloom_filter.metadata().await.unwrap();
 
             assert_eq!(metadata.bloom_filter_segments.len(), 10);
@@ -510,7 +510,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             let reader = blob_guard.reader().await.unwrap();
-            let mut bloom_filter = BloomFilterReaderImpl::new(reader);
+            let bloom_filter = BloomFilterReaderImpl::new(reader);
             let metadata = bloom_filter.metadata().await.unwrap();
 
             assert_eq!(metadata.bloom_filter_segments.len(), 5);

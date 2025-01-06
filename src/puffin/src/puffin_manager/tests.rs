@@ -297,7 +297,7 @@ async fn check_blob(
     compressed: bool,
 ) {
     let blob = puffin_reader.blob(key).await.unwrap();
-    let mut reader = blob.reader().await.unwrap();
+    let reader = blob.reader().await.unwrap();
     let meta = reader.metadata().await.unwrap();
     let bs = reader.read(0..meta.content_length).await.unwrap();
     assert_eq!(&*bs, raw_data);

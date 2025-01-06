@@ -24,7 +24,7 @@ use crate::inverted_index::error::{
 };
 use crate::inverted_index::format::FOOTER_PAYLOAD_SIZE_SIZE;
 
-pub const DEFAULT_PREFETCH_SIZE: u64 = 1024; // 1KiB
+pub const DEFAULT_PREFETCH_SIZE: u64 = 8192; // 8KiB
 
 /// InvertedIndexFooterReader is for reading the footer section of the blob.
 pub struct InvertedIndexFooterReader<R> {
@@ -177,11 +177,11 @@ mod tests {
             ..Default::default()
         };
 
-        let mut payload_buf = create_test_payload(meta);
+        let payload_buf = create_test_payload(meta);
         let blob_size = payload_buf.len() as u64;
 
         for prefetch in [0, blob_size / 2, blob_size, blob_size + 10] {
-            let mut reader = InvertedIndexFooterReader::new(&mut payload_buf, blob_size);
+            let mut reader = InvertedIndexFooterReader::new(&payload_buf, blob_size);
             if prefetch > 0 {
                 reader = reader.with_prefetch_size(prefetch);
             }
@@ -205,7 +205,7 @@ mod tests {
 
         for prefetch in [0, blob_size / 2, blob_size, blob_size + 10] {
             let blob_size = payload_buf.len() as u64;
-            let mut reader = InvertedIndexFooterReader::new(&mut payload_buf, blob_size);
+            let mut reader = InvertedIndexFooterReader::new(&payload_buf, blob_size);
             if prefetch > 0 {
                 reader = reader.with_prefetch_size(prefetch);
             }
@@ -224,11 +224,11 @@ mod tests {
             ..Default::default()
         };
 
-        let mut payload_buf = create_test_payload(meta);
+        let payload_buf = create_test_payload(meta);
         let blob_size = payload_buf.len() as u64;
 
         for prefetch in [0, blob_size / 2, blob_size, blob_size + 10] {
-            let mut reader = InvertedIndexFooterReader::new(&mut payload_buf, blob_size);
+            let mut reader = InvertedIndexFooterReader::new(&payload_buf, blob_size);
             if prefetch > 0 {
                 reader = reader.with_prefetch_size(prefetch);
             }
