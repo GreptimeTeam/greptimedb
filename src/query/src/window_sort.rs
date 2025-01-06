@@ -237,6 +237,10 @@ impl ExecutionPlan for WindowedSortExec {
     fn benefits_from_input_partitioning(&self) -> Vec<bool> {
         vec![false; self.ranges.len()]
     }
+
+    fn name(&self) -> &str {
+        "WindowedSortExec"
+    }
 }
 
 /// The core logic of merging sort multiple sorted ranges

@@ -22,6 +22,7 @@ use datafusion_optimizer::analyzer::AnalyzerRule;
 
 /// StringNormalizationRule normalizes(trims) string values in logical plan.
 /// Mainly used for timestamp trimming
+#[derive(Debug)]
 pub struct StringNormalizationRule;
 
 impl AnalyzerRule for StringNormalizationRule {

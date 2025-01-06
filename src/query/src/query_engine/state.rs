@@ -286,6 +286,7 @@ impl QueryEngineState {
     }
 }
 
+#[derive(Debug)]
 struct DfQueryPlanner {
     physical_planner: DefaultPhysicalPlanner,
 }

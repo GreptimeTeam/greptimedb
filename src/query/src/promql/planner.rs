@@ -40,6 +40,7 @@ use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
 use datafusion::sql::TableReference;
 use datafusion_expr::utils::conjunction;
+use datafusion_expr::SortExpr;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
@@ -1447,7 +1448,7 @@ impl PromPlanner {
         Ok(result)
     }
 
-    fn create_tag_and_time_index_column_sort_exprs(&self) -> Result<Vec<DfExpr>> {
+    fn create_tag_and_time_index_column_sort_exprs(&self) -> Result<Vec<SortExpr>> {
         let mut result = self
             .ctx
             .tag_columns

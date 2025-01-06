@@ -307,11 +307,9 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use datafusion::logical_expr::expr::AggregateFunction as AggrExpr;
     use datafusion_common::arrow::datatypes::Field;
     use datafusion_common::{Column, DFSchema};
-    use datafusion_expr::expr::AggregateFunctionDefinition;
-    use datafusion_expr::{AggregateFunction, LogicalPlanBuilder};
+    use datafusion_expr::LogicalPlanBuilder;
     use datafusion_sql::TableReference;
     use session::context::QueryContext;
 
@@ -476,14 +474,16 @@ mod tests {
             .unwrap()
             .aggregate(
                 Vec::<Expr>::new(),
-                vec![Expr::AggregateFunction(AggrExpr {
-                    func_def: AggregateFunctionDefinition::BuiltIn(AggregateFunction::Count),
-                    args: vec![Expr::Column(Column::from_name("column1"))],
-                    distinct: false,
-                    filter: None,
-                    order_by: None,
-                    null_treatment: None,
-                })],
+                vec![Expr::AggregateFunction(
+                    datafusion_expr::expr::AggregateFunction::new_udf(
+                        datafusion::functions_aggregate::count::count_udaf(),
+                        vec![Expr::Column(Column::from_name("column1"))],
+                        false,
+                        None,
+                        None,
+                        None,
+                    ),
+                )],
             )
             .unwrap()
             .build()

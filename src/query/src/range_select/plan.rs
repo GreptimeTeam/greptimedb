@@ -31,26 +31,26 @@ use datafusion::error::Result as DfResult;
 use datafusion::execution::context::SessionState;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
-use datafusion::physical_plan::udaf::create_aggregate_expr as create_aggr_udf_expr;
+// use datafusion::physical_plan::udaf::create_aggregate_expr as create_aggr_udf_expr;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
 use datafusion::physical_planner::create_physical_sort_expr;
 use datafusion_common::hash_utils::create_hashes;
-use datafusion_common::utils::{get_arrayref_at_indices, get_row_at_idx};
+use datafusion_common::utils::get_row_at_idx;
 use datafusion_common::{DFSchema, DFSchemaRef, DataFusionError, ScalarValue};
-use datafusion_expr::expr::AggregateFunctionDefinition;
+// use datafusion_expr::expr::AggregateFunctionDefinition;
 use datafusion_expr::utils::{exprlist_to_fields, COUNT_STAR_EXPANSION};
 use datafusion_expr::{
-    lit, Accumulator, AggregateFunction, Expr, ExprSchemable, LogicalPlan,
-    UserDefinedLogicalNodeCore,
+    lit, Accumulator, AggregateUDF, Expr, ExprSchemable, LogicalPlan, UserDefinedLogicalNodeCore,
 };
-use datafusion_physical_expr::aggregate::utils::down_cast_any_ref;
-use datafusion_physical_expr::expressions::create_aggregate_expr as create_aggr_expr;
+use datafusion_physical_expr::aggregate::AggregateExprBuilder;
+// use datafusion_physical_expr::aggregate::utils::down_cast_any_ref;
+// use datafusion_physical_expr::expressions::create_aggregate_expr as create_aggr_expr;
 use datafusion_physical_expr::{
-    create_physical_expr, AggregateExpr, Distribution, EquivalenceProperties, Partitioning,
-    PhysicalExpr, PhysicalSortExpr,
+    create_physical_expr, Distribution, EquivalenceProperties, Partitioning, PhysicalExpr,
+    PhysicalSortExpr,
 };
 use datatypes::arrow::array::{
     Array, ArrayRef, TimestampMillisecondArray, TimestampMillisecondBuilder, UInt32Builder,
@@ -409,7 +409,7 @@ impl Display for RangeFn {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialOrd, PartialEq, Eq, Hash)]
 pub struct RangeSelect {
     /// The incoming logical plan
     pub input: Arc<LogicalPlan>,
@@ -782,27 +782,12 @@ impl RangeSelect {
                             input_dfschema,
                             session_state,
                         )?;
-                        match &aggr.func_def {
-                            AggregateFunctionDefinition::BuiltIn(fun) => create_aggr_expr(
-                                fun,
-                                distinct,
-                                &input_phy_exprs,
-                                &order_by,
-                                &input_schema,
-                                name,
-                                false,
-                            ),
-                            AggregateFunctionDefinition::UDF(fun) => create_aggr_udf_expr(
-                                fun,
-                                &input_phy_exprs,
-                                &[],
-                                &[],
-                                &input_schema,
-                                name,
-                                false,
-                                distinct,
-                            ),
-                        }
+                        AggregateExprBuilder::new(aggr.func, input_phy_exprs)
+                            .schema(input_schema)
+                            .order_by(order_by)
+                            .with_distinct(distinct)
+                            .name(name)
+                            .build()
                     }
                     _ => Err(DataFusionError::Plan(format!(
                         "Unexpected Expr: {} in RangeSelect",
@@ -854,7 +839,7 @@ impl RangeSelect {
 
 #[derive(Debug, Clone)]
 struct RangeFnExec {
-    pub expr: Arc<dyn AggregateExpr>,
+    pub expr: Arc<AggregateUDF>,
     pub args: Vec<Arc<dyn PhysicalExpr>>,
     pub range: Millisecond,
     pub fill: Option<Fill>,
@@ -1005,6 +990,10 @@ impl ExecutionPlan for RangeSelectExec {
 
     fn statistics(&self) -> DataFusionResult<Statistics> {
         Ok(Statistics::new_unknown(self.schema.as_ref()))
+    }
+
+    fn name(&self) -> &str {
+        "RanegSelectExec"
     }
 }
 
@@ -1368,7 +1357,7 @@ mod test {
     use datafusion::physical_plan::memory::MemoryExec;
     use datafusion::physical_plan::sorts::sort::SortExec;
     use datafusion::prelude::SessionContext;
-    use datafusion_physical_expr::expressions::{self, Column};
+    use datafusion_physical_expr::expressions::Column;
     use datafusion_physical_expr::PhysicalSortExpr;
     use datatypes::arrow::array::TimestampMillisecondArray;
     use datatypes::arrow_array::StringArray;
@@ -1466,22 +1455,14 @@ mod test {
             input: memory_exec,
             range_exec: vec![
                 RangeFnExec {
-                    expr: Arc::new(expressions::Min::new(
-                        Arc::new(Column::new("value", 1)),
-                        "MIN(value)",
-                        data_type.clone(),
-                    )),
+                    expr: datafusion::functions_aggregate::min_max::min_udaf(),
                     args: vec![Arc::new(Column::new("value", 1))],
                     range: range1,
                     fill: fill.clone(),
                     need_cast: need_cast.clone(),
                 },
                 RangeFnExec {
-                    expr: Arc::new(expressions::Max::new(
-                        Arc::new(Column::new("value", 1)),
-                        "MAX(value)",
-                        data_type,
-                    )),
+                    expr: datafusion::functions_aggregate::min_max::max_udaf(),
                     args: vec![Arc::new(Column::new("value", 1))],
                     range: range2,
                     fill,

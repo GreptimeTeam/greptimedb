@@ -35,6 +35,7 @@ use crate::dist_plan::commutativity::{
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
 use crate::query_engine::DefaultSerializer;
 
+#[derive(Debug)]
 pub struct DistPlannerAnalyzer;
 
 impl AnalyzerRule for DistPlannerAnalyzer {

@@ -30,6 +30,7 @@ use table::table::adapter::DfTableProviderAdapter;
 /// faster to read comparing to PRIMARY KEYs.
 ///
 /// [`CountWildcardRule`]: datafusion::optimizer::analyzer::CountWildcardRule
+#[derive(Debug)]
 pub struct CountWildcardToTimeIndexRule;
 
 impl AnalyzerRule for CountWildcardToTimeIndexRule {

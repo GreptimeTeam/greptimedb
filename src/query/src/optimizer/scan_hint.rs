@@ -34,6 +34,7 @@ use crate::dummy_catalog::DummyTableProvider;
 ///   time series row selector hint.
 ///
 /// [`ScanRequest`]: store_api::storage::ScanRequest
+#[derive(Debug)]
 pub struct ScanHintRule;
 
 impl OptimizerRule for ScanHintRule {

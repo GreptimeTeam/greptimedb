@@ -25,7 +25,7 @@ use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 /// MergeSort Logical Plan, have same field as `Sort`, but indicate it is a merge sort,
 /// which assume each input partition is a sorted stream, and will use `SortPreserveingMergeExec`
 /// to merge them into a single sorted stream.
-#[derive(Hash, PartialEq, Eq, Clone)]
+#[derive(Hash, PartialOrd, PartialEq, Eq, Clone)]
 pub struct MergeSortLogicalPlan {
     pub expr: Vec<Expr>,
     pub input: Arc<LogicalPlan>,

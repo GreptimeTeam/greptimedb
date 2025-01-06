@@ -42,7 +42,7 @@ use common_time::Timestamp;
 use datafusion::common::ScalarValue;
 use datafusion::prelude::SessionContext;
 use datafusion_expr::expr::WildcardOptions;
-use datafusion_expr::{case, col, lit, Expr};
+use datafusion_expr::{case, col, lit, Expr, SortExpr};
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema, Schema};
 use datatypes::vectors::StringVector;
@@ -226,7 +226,7 @@ async fn query_from_information_schema_table(
     projects: Vec<(&str, &str)>,
     filters: Vec<Expr>,
     like_field: Option<&str>,
-    sort: Vec<Expr>,
+    sort: Vec<SortExpr>,
     kind: ShowKind,
 ) -> Result<Output> {
     let table = catalog_manager

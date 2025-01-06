@@ -39,6 +39,7 @@ use crate::window_sort::WindowedSortExec;
 ///
 /// [`ScanHint`]: crate::optimizer::scan_hint::ScanHintRule
 /// [`ParallelizeScan`]: crate::optimizer::parallelize_scan::ParallelizeScan
+#[derive(Debug)]
 pub struct WindowedSortPhysicalRule;
 
 impl PhysicalOptimizerRule for WindowedSortPhysicalRule {

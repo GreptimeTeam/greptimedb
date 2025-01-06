@@ -29,6 +29,7 @@ use datafusion::scalar::ScalarValue;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
 use datafusion_common::{DFSchema, DataFusionError, Result as DFResult};
 use datafusion_expr::execution_props::ExecutionProps;
+use datafusion_expr::expr::WildcardOptions;
 use datafusion_expr::simplify::SimplifyContext;
 use datafusion_expr::{
     Aggregate, Analyze, Explain, Expr, ExprSchemable, Extension, LogicalPlan, LogicalPlanBuilder,
@@ -467,7 +468,10 @@ impl RangePlanRewriter {
     /// If the user does not explicitly use the `by` keyword to indicate time series,
     /// `[row_columns]` will be use as default time series
     async fn get_index_by(&mut self, schema: &Arc<DFSchema>) -> Result<(Expr, Vec<Expr>)> {
-        let mut time_index_expr = Expr::Wildcard { qualifier: None };
+        let mut time_index_expr = Expr::Wildcard {
+            qualifier: None,
+            options: WildcardOptions::default(),
+        };
         let mut default_by = vec![];
         for i in 0..schema.fields().len() {
             let (qualifier, _) = schema.qualified_field(i);
