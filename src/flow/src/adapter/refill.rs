@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! This module contains the refill flow task, which is used to refill flow with given table id and a time range.
+
 use std::collections::BTreeSet;
 use std::sync::Arc;
 

@@ -94,6 +94,30 @@ impl MapFilterProject {
         }
     }
 
+    pub fn get_nth_expr(&self, n: usize) -> Option<ScalarExpr> {
+        let idx = *self.projection.get(n)?;
+        if idx < self.input_arity {
+            Some(ScalarExpr::Column(idx))
+        } else {
+            // find direct ref to input's expr
+
+            let mut expr = self.expressions.get(idx - self.input_arity)?;
+            loop {
+                match expr {
+                    ScalarExpr::Column(prev) => {
+                        if *prev < self.input_arity {
+                            return Some(ScalarExpr::Column(*prev));
+                        } else {
+                            expr = self.expressions.get(*prev - self.input_arity)?;
+                            continue;
+                        }
+                    }
+                    _ => return Some(expr.clone()),
+                }
+            }
+        }
+    }
+
     /// The number of columns expected in the output row.
     pub fn output_arity(&self) -> usize {
         self.projection.len()
