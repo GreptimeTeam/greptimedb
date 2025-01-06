@@ -498,6 +498,7 @@ impl Env {
                     Env::stop_server(server_process);
                 }
             }
+
             if is_full_restart {
                 if let Some(mut metasrv_process) =
                     db.metasrv_process.lock().expect("poisoned lock").take()
@@ -509,11 +510,12 @@ impl Env {
                 {
                     Env::stop_server(&mut frontend_process);
                 }
-                if let Some(mut flownode_process) =
-                    db.flownode_process.lock().expect("poisoned lock").take()
-                {
-                    Env::stop_server(&mut flownode_process);
-                }
+            }
+
+            if let Some(mut flownode_process) =
+                db.flownode_process.lock().expect("poisoned lock").take()
+            {
+                Env::stop_server(&mut flownode_process);
             }
         }
 
@@ -547,13 +549,13 @@ impl Env {
                     .lock()
                     .expect("lock poisoned")
                     .replace(frontend);
-
-                let flownode = self.start_server("flownode", &db.ctx, false).await;
-                db.flownode_process
-                    .lock()
-                    .expect("lock poisoned")
-                    .replace(flownode);
             }
+            let flownode = self.start_server("flownode", &db.ctx, false).await;
+            db.flownode_process
+                .lock()
+                .expect("lock poisoned")
+                .replace(flownode);
+
             processes
         };
 
