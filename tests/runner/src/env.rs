@@ -159,6 +159,7 @@ impl Env {
             self.build_db();
             self.setup_wal();
             self.setup_etcd();
+            self.setup_pg();
 
             let db_ctx = GreptimeDBContext::new(self.wal.clone(), self.store_config.clone());
 
@@ -383,7 +384,21 @@ impl Env {
                     "-c".to_string(),
                     self.generate_config_file(subcommand, db_ctx),
                 ];
-                if db_ctx.store_config().store_addrs.is_empty() {
+                if db_ctx.store_config().setup_pg {
+                    let client_ports = self
+                        .store_config
+                        .store_addrs
+                        .iter()
+                        .map(|s| s.split(':').nth(1).unwrap().parse::<u16>().unwrap())
+                        .collect::<Vec<_>>();
+                    let client_port = client_ports.first().unwrap_or(&5432);
+                    let pg_server_addr = format!(
+                        "postgresql://greptimedb:admin@127.0.0.1:{}/postgres",
+                        client_port
+                    );
+                    args.extend(vec!["--backend".to_string(), "postgres-store".to_string()]);
+                    args.extend(vec!["--store-addrs".to_string(), pg_server_addr]);
+                } else if db_ctx.store_config().store_addrs.is_empty() {
                     args.extend(vec!["--backend".to_string(), "memory-store".to_string()])
                 }
                 (args, vec![METASRV_ADDR.to_string()])
@@ -567,6 +582,20 @@ impl Env {
                 .map(|s| s.split(':').nth(1).unwrap().parse::<u16>().unwrap())
                 .collect::<Vec<_>>();
             util::setup_etcd(client_ports, None, None);
+        }
+    }
+
+    /// Setup PostgreSql if needed.
+    fn setup_pg(&self) {
+        if self.store_config.setup_pg {
+            let client_ports = self
+                .store_config
+                .store_addrs
+                .iter()
+                .map(|s| s.split(':').nth(1).unwrap().parse::<u16>().unwrap())
+                .collect::<Vec<_>>();
+            let client_port = client_ports.first().unwrap_or(&5432);
+            util::setup_pg(*client_port, None);
         }
     }
 
