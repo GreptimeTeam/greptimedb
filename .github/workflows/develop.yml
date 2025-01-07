@@ -100,7 +100,7 @@ jobs:
       - name: Build greptime binaries
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
-        run: cargo gc -- --bin greptime --bin sqlness-runner
+        run: cargo gc -- --bin greptime --bin sqlness-runner --features pg_kvbackend
       - name: Pack greptime binaries
         shell: bash
         run: |
@@ -261,7 +261,7 @@ jobs:
       - name: Build greptime bianry
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
-        run: cargo gc --profile ci -- --bin greptime
+        run: cargo gc --profile ci -- --bin greptime --features pg_kvbackend
       - name: Pack greptime binary
         shell: bash
         run: |
@@ -573,6 +573,9 @@ jobs:
           - name: "Remote WAL"
             opts: "-w kafka -k 127.0.0.1:9092"
             kafka: true
+          - name: "Pg Kvbackend"
+            opts: "--setup-pg"
+            kafka: false
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

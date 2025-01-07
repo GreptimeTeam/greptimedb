@@ -639,15 +639,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse {} from str to utf8", name))]
-    StrFromUtf8 {
-        name: String,
-        #[snafu(source)]
-        error: std::str::Utf8Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Value not exists"))]
     ValueNotExist {
         #[snafu(implicit)]
@@ -658,8 +649,9 @@ pub enum Error {
     GetCache { source: Arc<Error> },
 
     #[cfg(feature = "pg_kvbackend")]
-    #[snafu(display("Failed to execute via Postgres"))]
+    #[snafu(display("Failed to execute via Postgres, sql: {}", sql))]
     PostgresExecution {
+        sql: String,
         #[snafu(source)]
         error: tokio_postgres::Error,
         #[snafu(implicit)]
@@ -691,6 +683,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         operation: String,
+    },
+
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Postgres transaction retry failed"))]
+    PostgresTransactionRetryFailed {
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display(
@@ -756,8 +755,7 @@ impl ErrorExt for Error {
             | UnexpectedLogicalRouteTable { .. }
             | ProcedureOutput { .. }
             | FromUtf8 { .. }
-            | MetadataCorruption { .. }
-            | StrFromUtf8 { .. } => StatusCode::Unexpected,
+            | MetadataCorruption { .. } => StatusCode::Unexpected,
 
             SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } => StatusCode::Internal,
 
@@ -807,7 +805,8 @@ impl ErrorExt for Error {
             PostgresExecution { .. }
             | CreatePostgresPool { .. }
             | GetPostgresConnection { .. }
-            | PostgresTransaction { .. } => StatusCode::Internal,
+            | PostgresTransaction { .. }
+            | PostgresTransactionRetryFailed { .. } => StatusCode::Internal,
             Error::DatanodeTableInfoNotFound { .. } => StatusCode::Internal,
         }
     }
@@ -818,6 +817,20 @@ impl ErrorExt for Error {
 }
 
 impl Error {
+    #[cfg(feature = "pg_kvbackend")]
+    /// Check if the error is a serialization error.
+    pub fn is_serialization_error(&self) -> bool {
+        match self {
+            Error::PostgresTransaction { error, .. } => {
+                error.code() == Some(&tokio_postgres::error::SqlState::T_R_SERIALIZATION_FAILURE)
+            }
+            Error::PostgresExecution { error, .. } => {
+                error.code() == Some(&tokio_postgres::error::SqlState::T_R_SERIALIZATION_FAILURE)
+            }
+            _ => false,
+        }
+    }
+
     /// Creates a new [Error::RetryLater] error from source `err`.
     pub fn retry_later<E: ErrorExt + Send + Sync + 'static>(err: E) -> Error {
         Error::RetryLater {

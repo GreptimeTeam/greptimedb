@@ -266,7 +266,7 @@ impl PutRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct PutResponse {
     pub prev_kv: Option<KeyValue>,
 }
@@ -425,7 +425,7 @@ impl BatchPutRequest {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BatchPutResponse {
     pub prev_kvs: Vec<KeyValue>,
 }
@@ -509,7 +509,7 @@ impl BatchDeleteRequest {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BatchDeleteResponse {
     pub prev_kvs: Vec<KeyValue>,
 }
@@ -754,6 +754,19 @@ impl TryFrom<PbDeleteRangeResponse> for DeleteRangeResponse {
 }
 
 impl DeleteRangeResponse {
+    /// Creates a new [`DeleteRangeResponse`] with the given deleted count.
+    pub fn new(deleted: i64) -> Self {
+        Self {
+            deleted,
+            prev_kvs: vec![],
+        }
+    }
+
+    /// Creates a new [`DeleteRangeResponse`] with the given deleted count and previous key-value pairs.
+    pub fn with_prev_kvs(&mut self, prev_kvs: Vec<KeyValue>) {
+        self.prev_kvs = prev_kvs;
+    }
+
     pub fn to_proto_resp(self, header: PbResponseHeader) -> PbDeleteRangeResponse {
         PbDeleteRangeResponse {
             header: Some(header),

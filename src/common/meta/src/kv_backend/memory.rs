@@ -355,7 +355,7 @@ mod tests {
     async fn test_range_2() {
         let kv = MemoryKvBackend::<Error>::new();
 
-        test_kv_range_2(kv).await;
+        test_kv_range_2(&kv).await;
     }
 
     #[tokio::test]
@@ -376,24 +376,24 @@ mod tests {
     async fn test_delete_range() {
         let kv_backend = mock_mem_store_with_data().await;
 
-        test_kv_delete_range(kv_backend).await;
+        test_kv_delete_range(&kv_backend).await;
     }
 
     #[tokio::test]
     async fn test_batch_delete() {
         let kv_backend = mock_mem_store_with_data().await;
 
-        test_kv_batch_delete(kv_backend).await;
+        test_kv_batch_delete(&kv_backend).await;
     }
 
     #[tokio::test]
     async fn test_memory_txn() {
-        let kv_backend = Arc::new(MemoryKvBackend::<Error>::new());
-        test_txn_one_compare_op(kv_backend.clone()).await;
-        text_txn_multi_compare_op(kv_backend.clone()).await;
-        test_txn_compare_equal(kv_backend.clone()).await;
-        test_txn_compare_greater(kv_backend.clone()).await;
-        test_txn_compare_less(kv_backend.clone()).await;
-        test_txn_compare_not_equal(kv_backend).await;
+        let kv_backend = MemoryKvBackend::<Error>::new();
+        test_txn_one_compare_op(&kv_backend).await;
+        text_txn_multi_compare_op(&kv_backend).await;
+        test_txn_compare_equal(&kv_backend).await;
+        test_txn_compare_greater(&kv_backend).await;
+        test_txn_compare_less(&kv_backend).await;
+        test_txn_compare_not_equal(&kv_backend).await;
     }
 }

@@ -99,6 +99,7 @@ arrow-schema = { version = "51.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 axum = { version = "0.6", features = ["headers"] }
+backon = "1"
 base64 = "0.21"
 bigdecimal = "0.4.2"
 bitflags = "2.4.1"
