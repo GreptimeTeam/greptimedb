@@ -113,6 +113,17 @@ impl RegionOpener {
         self
     }
 
+    /// Builds the region metadata.
+    ///
+    /// Panics if `options` is not set.
+    /// Panics if `metadata_builder` is not set.
+    pub(crate) fn build_metadata(&mut self) -> Result<RegionMetadata> {
+        let options = self.options.as_ref().unwrap();
+        let mut metadata_builder = self.metadata_builder.take().unwrap();
+        metadata_builder.primary_key_encoding(options.primary_key_encoding());
+        metadata_builder.build().context(InvalidMetadataSnafu)
+    }
+
     /// Parses and sets options for the region.
     pub(crate) fn parse_options(self, options: HashMap<String, String>) -> Result<Self> {
         self.options(RegionOptions::try_from(&options)?)
@@ -151,21 +162,15 @@ impl RegionOpener {
     /// Opens the region if it already exists.
     ///
     /// # Panics
-    /// - Panics if metadata is not set.
-    /// - Panics if options is not set.
+    /// - Panics if `metadata_builder` is not set.
+    /// - Panics if `options` is not set.
     pub(crate) async fn create_or_open<S: LogStore>(
         mut self,
         config: &MitoConfig,
         wal: &Wal<S>,
     ) -> Result<MitoRegion> {
         let region_id = self.region_id;
-
-        // Safety: must be set before calling this method.
-        let options = self.options.take().unwrap();
-        // Safety: must be set before calling this method.
-        let mut metadata_builder = self.metadata_builder.take().unwrap();
-        metadata_builder.primary_key_encoding(options.primary_key_encoding());
-        let metadata = metadata_builder.build().context(InvalidMetadataSnafu)?;
+        let metadata = self.build_metadata()?;
         // Tries to open the region.
         match self.maybe_open(config, wal).await {
             Ok(Some(region)) => {
@@ -195,7 +200,8 @@ impl RegionOpener {
                 );
             }
         }
-
+        // Safety: must be set before calling this method.
+        let options = self.options.take().unwrap();
         let object_store = self.object_store(&options.storage)?.clone();
         let provider = self.provider(&options.wal_options);
         let metadata = Arc::new(metadata);

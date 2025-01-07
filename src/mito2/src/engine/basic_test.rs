@@ -553,7 +553,7 @@ async fn test_region_usage() {
     // region is empty now, check manifest size
     let region = engine.get_region(region_id).unwrap();
     let region_stat = region.region_statistic();
-    assert_eq!(region_stat.manifest_size, 686);
+    assert_eq!(region_stat.manifest_size, 716);
 
     // put some rows
     let rows = Rows {

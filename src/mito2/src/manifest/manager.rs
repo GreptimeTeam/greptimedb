@@ -592,6 +592,6 @@ mod test {
 
         // get manifest size again
         let manifest_size = manager.manifest_usage();
-        assert_eq!(manifest_size, 1173);
+        assert_eq!(manifest_size, 1203);
     }
 }
