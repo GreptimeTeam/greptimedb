@@ -60,7 +60,9 @@ use crate::error::{
 use crate::expr_factory::CreateExprFactory;
 use crate::region_req_factory::RegionRequestFactory;
 use crate::req_convert::common::preprocess_row_insert_requests;
-use crate::req_convert::insert::{ColumnToRow, RowToRegion, StatementToRegion, TableToRegion};
+use crate::req_convert::insert::{
+    fill_reqs_with_impure_default, ColumnToRow, RowToRegion, StatementToRegion, TableToRegion,
+};
 use crate::statement::StatementExecutor;
 
 pub struct Inserter {
@@ -203,10 +205,10 @@ impl Inserter {
         });
         validate_column_count_match(&requests)?;
 
-        let AutoCreateAlterTableResult {
+        let CreateAlterTableResult {
             table_name_to_ids,
             instant_table_ids,
-            ..
+            table_infos,
         } = self
             .create_or_alter_tables_on_demand(&requests, &ctx, create_type, statement_executor)
             .await?;
@@ -217,6 +219,9 @@ impl Inserter {
         )
         .convert(requests)
         .await?;
+
+        // Fill impure default values in the request
+        let inserts = fill_reqs_with_impure_default(&table_infos, inserts)?;
 
         self.do_request(inserts, &ctx).await
     }
@@ -243,10 +248,10 @@ impl Inserter {
             .await?;
 
         // check and create logical tables
-        let AutoCreateAlterTableResult {
+        let CreateAlterTableResult {
             table_name_to_ids,
             instant_table_ids,
-            ..
+            table_infos,
         } = self
             .create_or_alter_tables_on_demand(
                 &requests,
@@ -259,6 +264,8 @@ impl Inserter {
             .convert(requests)
             .await?;
 
+        // Fill impure default values in the request
+        let inserts = fill_reqs_with_impure_default(&table_infos, inserts)?;
         self.do_request(inserts, &ctx).await
     }
 
@@ -280,6 +287,10 @@ impl Inserter {
             .convert(request)
             .await?;
 
+        let table_infos =
+            HashMap::from_iter([(table_info.table_id(), table_info.clone())].into_iter());
+        // Fill impure default values in the request
+        let inserts = fill_reqs_with_impure_default(&table_infos, inserts)?;
         self.do_request(inserts, &ctx).await
     }
 
@@ -506,7 +517,7 @@ impl Inserter {
         ctx: &QueryContextRef,
         auto_create_table_type: AutoCreateTableType,
         statement_executor: &StatementExecutor,
-    ) -> Result<AutoCreateAlterTableResult> {
+    ) -> Result<CreateAlterTableResult> {
         let _timer = crate::metrics::CREATE_ALTER_ON_DEMAND
             .with_label_values(&[auto_create_table_type.as_str()])
             .start_timer();
@@ -546,7 +557,7 @@ impl Inserter {
                 table_infos.insert(table_info.table_id(), table.table_info());
                 table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
             }
-            let ret = AutoCreateAlterTableResult {
+            let ret = CreateAlterTableResult {
                 table_name_to_ids,
                 instant_table_ids,
                 table_infos,
@@ -629,7 +640,7 @@ impl Inserter {
             }
         }
 
-        Ok(AutoCreateAlterTableResult {
+        Ok(CreateAlterTableResult {
             table_name_to_ids,
             instant_table_ids,
             table_infos,
@@ -897,7 +908,7 @@ fn build_create_table_expr(
 }
 
 /// Result of `create_or_alter_tables_on_demand`.
-struct AutoCreateAlterTableResult {
+struct CreateAlterTableResult {
     /// mapping from table name to table id,
     /// where table name is the table name involved in the requests.
     table_name_to_ids: HashMap<String, TableId>,

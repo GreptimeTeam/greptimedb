@@ -14,13 +14,17 @@
 
 //! Util functions to help with fill impure default values columns in request
 
+use std::sync::Arc;
+
 use ahash::{HashMap, HashMapExt, HashSet};
 use datatypes::schema::ColumnSchema;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
+use store_api::storage::{RegionId, TableId};
 use table::metadata::{TableInfo, TableInfoRef};
 
-use crate::error::{ConvertColumnDefaultConstraintSnafu, Result};
+use crate::error::{ConvertColumnDefaultConstraintSnafu, Result, UnexpectedSnafu};
 use crate::expr_factory::column_schemas_to_defs;
+use crate::insert::InstantAndNormalInsertRequests;
 
 /// Find all columns that have impure default values
 pub fn find_all_impure_columns(table_info: &TableInfo) -> Vec<ColumnSchema> {
@@ -34,7 +38,6 @@ pub fn find_all_impure_columns(table_info: &TableInfo) -> Vec<ColumnSchema> {
 
 /// Fill impure default values in the request
 pub struct ImpureDefaultFiller {
-    table_info: TableInfoRef,
     impure_columns: HashMap<String, (api::v1::ColumnSchema, Option<api::v1::Value>)>,
 }
 
@@ -71,10 +74,7 @@ impl ImpureDefaultFiller {
                 (grpc_column_schema, grpc_default_value),
             );
         }
-        Ok(Self {
-            table_info,
-            impure_columns,
-        })
+        Ok(Self { impure_columns })
     }
 
     /// Fill impure default values in the request
@@ -108,4 +108,32 @@ impl ImpureDefaultFiller {
             row.values.extend(row_append.clone());
         }
     }
+}
+
+/// Fill impure default values in the request(only for normal insert requests, since instant insert can be filled in flownode directly as a single source of truth)
+pub fn fill_reqs_with_impure_default(
+    table_infos: &HashMap<TableId, Arc<TableInfo>>,
+    mut inserts: InstantAndNormalInsertRequests,
+) -> Result<InstantAndNormalInsertRequests> {
+    let fillers = table_infos
+        .iter()
+        .map(|(table_id, table_info)| {
+            let table_id = *table_id;
+            ImpureDefaultFiller::new(table_info.clone()).map(|filler| (table_id, filler))
+        })
+        .collect::<Result<HashMap<TableId, ImpureDefaultFiller>>>()?;
+
+    let normal_inserts = &mut inserts.normal_requests;
+    for request in normal_inserts.requests.iter_mut() {
+        let region_id = RegionId::from(request.region_id);
+        let table_id = region_id.table_id();
+        let filler = fillers.get(&table_id).with_context(|| UnexpectedSnafu {
+            violated: format!("impure default filler for table_id: {} not found", table_id),
+        })?;
+
+        if let Some(rows) = &mut request.rows {
+            filler.fill_rows(rows);
+        }
+    }
+    Ok(inserts)
 }
