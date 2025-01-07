@@ -23,7 +23,7 @@ use datafusion::common::DataFusionError;
 use datafusion::error::Result;
 use datafusion::execution::context::SessionState;
 use datafusion::execution::registry::SerializerRegistry;
-use datafusion::execution::FunctionRegistry;
+use datafusion::execution::{FunctionRegistry, SessionStateBuilder};
 use datafusion::logical_expr::LogicalPlan;
 use datafusion_expr::UserDefinedLogicalNode;
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
@@ -112,8 +112,11 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
         optimize: bool,
     ) -> common_query::error::Result<LogicalPlan> {
         // The session_state already has the `DefaultSerialzier` as `SerializerRegistry`.
+        let session_state = SessionStateBuilder::new_from_existing(self.session_state.clone())
+            .with_catalog_list(catalog_list)
+            .build();
         let logical_plan = DFLogicalSubstraitConvertor
-            .decode(message, self.session_state.clone())
+            .decode(message, session_state)
             .await
             .map_err(BoxedError::new)
             .context(common_query::error::DecodePlanSnafu)?;
