@@ -164,10 +164,7 @@ pub fn table_info_value_to_relation_desc(
         .map(|c| c.default_constraint().cloned())
         .collect_vec();
 
-    Ok(TableDesc {
-        relation_desc,
-        default_values,
-    })
+    Ok(TableDesc::new(relation_desc, default_values))
 }
 
 pub fn from_proto_to_data_type(

@@ -53,15 +53,17 @@ impl ImpureDefaultFiller {
         for column in impure_column_list {
             let default_value = column
                 .create_impure_default()
-                .context(ConvertColumnDefaultConstraintSnafu {
+                .with_context(|_| ConvertColumnDefaultConstraintSnafu {
                     column_name: column.name.clone(),
                 })?
-                .expect("impure default value");
-            let grpc_default_value = api::helper::to_proto_value(default_value.clone());
-            let def = column_schemas_to_defs(vec![column], &pk_names)?
-                .into_iter()
-                .next()
-                .expect("column def have one element");
+                .with_context(|| UnexpectedSnafu {
+                    violated: format!(
+                        "Expect default value to be impure, found {:?}",
+                        column.default_constraint()
+                    ),
+                })?;
+            let grpc_default_value = api::helper::to_proto_value(default_value);
+            let def = column_schemas_to_defs(vec![column], &pk_names)?.swap_remove(0);
             let grpc_column_schema = api::v1::ColumnSchema {
                 column_name: def.name,
                 datatype: def.data_type,

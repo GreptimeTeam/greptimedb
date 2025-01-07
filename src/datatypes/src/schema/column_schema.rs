@@ -299,6 +299,7 @@ impl ColumnSchema {
     }
 
     /// Creates an impure default value for this column, only if it have a impure default constraint.
+    /// Otherwise, returns `Ok(None)`.
     pub fn create_impure_default(&self) -> Result<Option<Value>> {
         match &self.default_constraint {
             Some(c) => c.create_impure_default(&self.data_type),
