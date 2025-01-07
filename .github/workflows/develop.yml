@@ -261,7 +261,7 @@ jobs:
       - name: Build greptime bianry
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
-        run: cargo gc --profile ci -- --bin greptime
+        run: cargo gc --profile ci -- --bin greptime --features pg_kvbackend
       - name: Pack greptime binary
         shell: bash
         run: |
