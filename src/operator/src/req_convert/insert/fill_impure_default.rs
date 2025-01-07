@@ -137,3 +137,100 @@ pub fn fill_reqs_with_impure_default(
     }
     Ok(inserts)
 }
+
+#[cfg(test)]
+mod tests {
+    use api::v1::value::ValueData;
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
+    use datatypes::value::Value;
+    use table::metadata::{TableInfoBuilder, TableMetaBuilder};
+
+    use super::*;
+
+    /// Create a test schema with 3 columns: `[col1 int32, ts timestampmills DEFAULT now(), col2 int32]`.
+    fn new_test_schema() -> Schema {
+        let column_schemas = vec![
+            ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true)
+            .with_default_constraint(Some(datatypes::schema::ColumnDefaultConstraint::Function(
+                "now()".to_string(),
+            )))
+            .unwrap(),
+            ColumnSchema::new("col2", ConcreteDataType::int32_datatype(), true)
+                .with_default_constraint(Some(datatypes::schema::ColumnDefaultConstraint::Value(
+                    Value::from(1i32),
+                )))
+                .unwrap(),
+        ];
+        SchemaBuilder::try_from(column_schemas)
+            .unwrap()
+            .version(123)
+            .build()
+            .unwrap()
+    }
+
+    pub fn new_table_info() -> TableInfo {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        TableInfoBuilder::default()
+            .table_id(10)
+            .table_version(5)
+            .name("mytable")
+            .meta(meta)
+            .build()
+            .unwrap()
+    }
+
+    fn column_schema_to_proto(
+        column_schema: &[ColumnSchema],
+        pk_names: &[String],
+    ) -> Vec<api::v1::ColumnSchema> {
+        column_schemas_to_defs(column_schema.to_vec(), pk_names)
+            .unwrap()
+            .into_iter()
+            .map(|def| api::v1::ColumnSchema {
+                column_name: def.name,
+                datatype: def.data_type,
+                semantic_type: def.semantic_type,
+                datatype_extension: def.datatype_extension,
+                options: def.options,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_impure_append() {
+        let row = api::v1::Row {
+            values: vec![api::v1::Value {
+                value_data: Some(ValueData::I32Value(42)),
+            }],
+        };
+        let schema = new_test_schema().column_schemas()[0].clone();
+        let col_schemas = column_schema_to_proto(&[schema], &["col1".to_string()]);
+
+        let mut rows = api::v1::Rows {
+            schema: col_schemas,
+            rows: vec![row],
+        };
+
+        let info = new_table_info();
+        let filler = ImpureDefaultFiller::new(Arc::new(info)).unwrap();
+        filler.fill_rows(&mut rows);
+
+        assert_eq!(rows.schema[1].column_name, "ts");
+        assert!(rows.schema.len() == 2 && rows.rows[0].values.len() == 2);
+    }
+}
