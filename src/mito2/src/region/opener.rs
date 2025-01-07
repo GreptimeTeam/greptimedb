@@ -24,10 +24,10 @@ use futures::future::BoxFuture;
 use futures::StreamExt;
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::util::{join_dir, normalize_dir};
-use snafu::{ensure, OptionExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
-use store_api::metadata::{ColumnMetadata, RegionMetadata};
+use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
 use store_api::region_engine::RegionRole;
 use store_api::storage::{ColumnId, RegionId};
 
@@ -35,7 +35,8 @@ use crate::access_layer::AccessLayer;
 use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::error::{
-    EmptyRegionDirSnafu, ObjectStoreNotFoundSnafu, RegionCorruptedSnafu, Result, StaleLogEntrySnafu,
+    EmptyRegionDirSnafu, InvalidMetadataSnafu, ObjectStoreNotFoundSnafu, RegionCorruptedSnafu,
+    Result, StaleLogEntrySnafu,
 };
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::manifest_compress_type;
@@ -59,7 +60,7 @@ use crate::wal::{EntryId, Wal};
 /// Builder to create a new [MitoRegion] or open an existing one.
 pub(crate) struct RegionOpener {
     region_id: RegionId,
-    metadata: Option<RegionMetadata>,
+    metadata_builder: Option<RegionMetadataBuilder>,
     memtable_builder_provider: MemtableBuilderProvider,
     object_store_manager: ObjectStoreManagerRef,
     region_dir: String,
@@ -90,7 +91,7 @@ impl RegionOpener {
     ) -> RegionOpener {
         RegionOpener {
             region_id,
-            metadata: None,
+            metadata_builder: None,
             memtable_builder_provider,
             object_store_manager,
             region_dir: normalize_dir(region_dir),
@@ -106,16 +107,15 @@ impl RegionOpener {
         }
     }
 
-    /// Sets metadata of the region to create.
-    pub(crate) fn metadata(mut self, metadata: RegionMetadata) -> Self {
-        self.metadata = Some(metadata);
+    /// Sets metadata builder of the region to create.
+    pub(crate) fn metadata_builder(mut self, builder: RegionMetadataBuilder) -> Self {
+        self.metadata_builder = Some(builder);
         self
     }
 
     /// Parses and sets options for the region.
-    pub(crate) fn parse_options(mut self, options: HashMap<String, String>) -> Result<Self> {
-        self.options = Some(RegionOptions::try_from(&options)?);
-        Ok(self)
+    pub(crate) fn parse_options(self, options: HashMap<String, String>) -> Result<Self> {
+        self.options(RegionOptions::try_from(&options)?)
     }
 
     /// If a [WalEntryReader] is set, the [RegionOpener] will use [WalEntryReader] instead of
@@ -160,12 +160,18 @@ impl RegionOpener {
     ) -> Result<MitoRegion> {
         let region_id = self.region_id;
 
+        // Safety: must be set before calling this method.
+        let options = self.options.take().unwrap();
+        // Safety: must be set before calling this method.
+        let mut metadata_builder = self.metadata_builder.take().unwrap();
+        metadata_builder.primary_key_encoding(options.primary_key_encoding());
+        let metadata = metadata_builder.build().context(InvalidMetadataSnafu)?;
         // Tries to open the region.
         match self.maybe_open(config, wal).await {
             Ok(Some(region)) => {
                 let recovered = region.metadata();
                 // Checks the schema of the region.
-                let expect = self.metadata.as_ref().unwrap();
+                let expect = &metadata;
                 check_recovered_region(
                     &recovered,
                     expect.region_id,
@@ -189,13 +195,12 @@ impl RegionOpener {
                 );
             }
         }
-        let options = self.options.take().unwrap();
+
         let object_store = self.object_store(&options.storage)?.clone();
         let provider = self.provider(&options.wal_options);
-
+        let metadata = Arc::new(metadata);
         // Create a manifest manager for this region and writes regions to the manifest file.
         let region_manifest_options = self.manifest_options(config, &options)?;
-        let metadata = Arc::new(self.metadata.unwrap());
         let manifest_manager = RegionManifestManager::new(
             metadata.clone(),
             region_manifest_options,

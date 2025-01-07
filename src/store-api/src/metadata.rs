@@ -33,6 +33,7 @@ use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
 
+use crate::codec::PrimaryKeyEncoding;
 use crate::region_request::{AddColumn, AddColumnLocation, AlterKind, ModifyColumnType};
 use crate::storage::consts::is_internal_column;
 use crate::storage::{ColumnId, RegionId};
@@ -145,6 +146,9 @@ pub struct RegionMetadata {
     ///
     /// The version starts from 0. Altering the schema bumps the version.
     pub schema_version: u64,
+
+    /// Primary key encoding mode.
+    pub primary_key_encoding: PrimaryKeyEncoding,
 }
 
 impl fmt::Debug for RegionMetadata {
@@ -173,6 +177,8 @@ impl<'de> Deserialize<'de> for RegionMetadata {
             primary_key: Vec<ColumnId>,
             region_id: RegionId,
             schema_version: u64,
+            #[serde(default)]
+            primary_key_encoding: PrimaryKeyEncoding,
         }
 
         let without_schema = RegionMetadataWithoutSchema::deserialize(deserializer)?;
@@ -187,6 +193,7 @@ impl<'de> Deserialize<'de> for RegionMetadata {
             primary_key: without_schema.primary_key,
             region_id: without_schema.region_id,
             schema_version: without_schema.schema_version,
+            primary_key_encoding: without_schema.primary_key_encoding,
         })
     }
 }
@@ -320,6 +327,7 @@ impl RegionMetadata {
             primary_key: projected_primary_key,
             region_id: self.region_id,
             schema_version: self.schema_version,
+            primary_key_encoding: self.primary_key_encoding,
         })
     }
 
@@ -504,6 +512,7 @@ pub struct RegionMetadataBuilder {
     column_metadatas: Vec<ColumnMetadata>,
     primary_key: Vec<ColumnId>,
     schema_version: u64,
+    primary_key_encoding: PrimaryKeyEncoding,
 }
 
 impl RegionMetadataBuilder {
@@ -514,6 +523,7 @@ impl RegionMetadataBuilder {
             column_metadatas: vec![],
             primary_key: vec![],
             schema_version: 0,
+            primary_key_encoding: PrimaryKeyEncoding::Full,
         }
     }
 
@@ -524,7 +534,14 @@ impl RegionMetadataBuilder {
             primary_key: existing.primary_key,
             region_id: existing.region_id,
             schema_version: existing.schema_version,
+            primary_key_encoding: existing.primary_key_encoding,
         }
+    }
+
+    /// Sets the primary key encoding mode.
+    pub fn primary_key_encoding(&mut self, encoding: PrimaryKeyEncoding) -> &mut Self {
+        self.primary_key_encoding = encoding;
+        self
     }
 
     /// Pushes a new column metadata to this region's metadata.
@@ -582,6 +599,7 @@ impl RegionMetadataBuilder {
             primary_key: self.primary_key,
             region_id: self.region_id,
             schema_version: self.schema_version,
+            primary_key_encoding: self.primary_key_encoding,
         };
 
         meta.validate()?;

@@ -1,4 +1,3 @@
-#![feature(let_chains)]
 // Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,16 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Storage related APIs
+use serde::{Deserialize, Serialize};
 
-pub mod data_source;
-pub mod logstore;
-pub mod manifest;
-pub mod metadata;
-pub mod metric_engine_consts;
-pub mod mito_engine_options;
-pub mod path_utils;
-pub mod region_engine;
-pub mod region_request;
-pub mod storage;
-pub mod codec;
+/// Primary key encoding mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimaryKeyEncoding {
+    #[default]
+    /// Full primary key encoding.
+    Full,
+    /// Sparse primary key encoding.
+    Sparse,
+}

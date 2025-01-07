@@ -27,6 +27,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use serde_with::{serde_as, with_prefix, DisplayFromStr, NoneAsEmptyString};
 use snafu::{ensure, ResultExt};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::storage::ColumnId;
 use strum::EnumString;
 
@@ -93,9 +94,18 @@ impl RegionOptions {
         !self.append_mode
     }
 
-    /// Returns the `merge_mode` if it is set, otherwise returns the default `MergeMode`.
+    /// Returns the `merge_mode` if it is set, otherwise returns the default [`MergeMode`].
     pub fn merge_mode(&self) -> MergeMode {
         self.merge_mode.unwrap_or_default()
+    }
+
+    /// Returns the `primary_key_encoding` if it is set, otherwise returns the default [`PrimaryKeyEncoding`].
+    pub fn primary_key_encoding(&self) -> PrimaryKeyEncoding {
+        self.memtable
+            .as_ref()
+            .map_or(PrimaryKeyEncoding::default(), |memtable| {
+                memtable.primary_key_encoding()
+            })
     }
 }
 
@@ -319,6 +329,16 @@ pub enum MemtableOptions {
 
 with_prefix!(prefix_partition_tree "memtable.partition_tree.");
 
+impl MemtableOptions {
+    /// Returns the primary key encoding mode.
+    pub fn primary_key_encoding(&self) -> PrimaryKeyEncoding {
+        match self {
+            MemtableOptions::PartitionTree(opts) => opts.primary_key_encoding,
+            _ => PrimaryKeyEncoding::Full,
+        }
+    }
+}
+
 /// Partition tree memtable options.
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -332,6 +352,8 @@ pub struct PartitionTreeOptions {
     pub data_freeze_threshold: usize,
     /// Total bytes of dictionary to keep in fork.
     pub fork_dictionary_bytes: ReadableSize,
+    /// Primary key encoding mode.
+    pub primary_key_encoding: PrimaryKeyEncoding,
 }
 
 impl Default for PartitionTreeOptions {
@@ -350,6 +372,7 @@ impl Default for PartitionTreeOptions {
             index_max_keys_per_shard: DEFAULT_MAX_KEYS_PER_SHARD,
             data_freeze_threshold: DEFAULT_FREEZE_THRESHOLD,
             fork_dictionary_bytes,
+            primary_key_encoding: PrimaryKeyEncoding::Full,
         }
     }
 }
@@ -644,6 +667,7 @@ mod tests {
                 index_max_keys_per_shard: 2048,
                 data_freeze_threshold: 2048,
                 fork_dictionary_bytes: ReadableSize::mb(128),
+                primary_key_encoding: PrimaryKeyEncoding::Full,
             })),
             merge_mode: Some(MergeMode::LastNonNull),
         };
@@ -679,6 +703,7 @@ mod tests {
                 index_max_keys_per_shard: 2048,
                 data_freeze_threshold: 2048,
                 fork_dictionary_bytes: ReadableSize::mb(128),
+                primary_key_encoding: PrimaryKeyEncoding::Full,
             })),
             merge_mode: Some(MergeMode::LastNonNull),
         };
@@ -747,6 +772,7 @@ mod tests {
                 index_max_keys_per_shard: 2048,
                 data_freeze_threshold: 2048,
                 fork_dictionary_bytes: ReadableSize::mb(128),
+                primary_key_encoding: PrimaryKeyEncoding::Full,
             })),
             merge_mode: Some(MergeMode::LastNonNull),
         };
