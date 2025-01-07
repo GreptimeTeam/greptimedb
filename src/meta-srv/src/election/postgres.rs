@@ -40,7 +40,7 @@ const CAMPAIGN: &str = "SELECT pg_try_advisory_lock({})";
 const STEP_DOWN: &str = "SELECT pg_advisory_unlock({})";
 // Currently the session timeout is longer than the leader lease time, so the leader lease may expire while the session is still alive.
 // Either the leader reconnects and step down or the session expires and the lock is released.
-const SET_IDLE_SESSION_TIMEOUT: &str = "SET idle_in_session_timeout = '10s';";
+const SET_IDLE_SESSION_TIMEOUT: &str = "SET idle_session_timeout = '10s';";
 
 // Separator between value and expire time.
 const LEASE_SEP: &str = r#"||__metadata_lease_sep||"#;
