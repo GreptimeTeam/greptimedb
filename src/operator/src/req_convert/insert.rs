@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod column_to_row;
+mod fill_impure_default;
 mod row_to_region;
 mod stmt_to_region;
 mod table_to_region;
