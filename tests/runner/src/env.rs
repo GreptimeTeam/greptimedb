@@ -70,6 +70,7 @@ pub enum WalConfig {
 pub struct StoreConfig {
     pub store_addrs: Vec<String>,
     pub setup_etcd: bool,
+    pub setup_pg: bool,
 }
 
 #[derive(Clone)]
