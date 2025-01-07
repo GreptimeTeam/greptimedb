@@ -21,7 +21,7 @@ use common_telemetry::debug;
 use deadpool_postgres::{Config, Pool, Runtime};
 use snafu::ResultExt;
 use tokio_postgres::types::ToSql;
-use tokio_postgres::{NoTls, Row};
+use tokio_postgres::{IsolationLevel, NoTls, Row};
 
 use crate::error::{
     CreatePostgresPoolSnafu, Error, GetPostgresConnectionSnafu, PostgresExecutionSnafu,
@@ -226,7 +226,9 @@ impl<T> PgStore<T> {
 
     async fn txn_executor<'a>(&self, client: &'a mut PgClient) -> Result<PgQueryExecutor<'a>> {
         let txn = client
-            .transaction()
+            .build_transaction()
+            .isolation_level(IsolationLevel::Serializable)
+            .start()
             .await
             .context(PostgresTransactionSnafu {
                 operation: "start".to_string(),
@@ -786,9 +788,6 @@ impl TxnService for DefaultPgStore {
 
         let mut client = self.client().await?;
         let pg_txn = self.txn_executor(&mut client).await?;
-        pg_txn
-            .query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;", &[])
-            .await?;
         let mut success = true;
         if txn.c_when {
             success = self.execute_txn_cmp(&pg_txn, &txn.req.compare).await?;

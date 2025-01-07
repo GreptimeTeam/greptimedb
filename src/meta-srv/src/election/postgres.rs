@@ -23,6 +23,7 @@ use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::broadcast;
 use tokio::time::MissedTickBehavior;
+use tokio_postgres::types::ToSql;
 use tokio_postgres::Client;
 
 use crate::election::{
@@ -50,7 +51,7 @@ WITH prev AS (
     SELECT k, v FROM greptime_metakv WHERE k = $1
 ), insert AS (
     INSERT INTO greptime_metakv
-    VALUES($1, $2 || $3 || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $4, 'YYYY-MM-DD HH24:MI:SS.MS'))
+    VALUES($1, convert_to($2 || $3 || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $4, 'YYYY-MM-DD HH24:MI:SS.MS'), 'UTF8'))
     ON CONFLICT (k) DO NOTHING
 )
 
@@ -61,7 +62,7 @@ SELECT k, v FROM prev;
 const CAS_WITH_EXPIRE_TIME: &str = r#"
 UPDATE greptime_metakv
 SET k=$1,
-v=$3 || $4 || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $5, 'YYYY-MM-DD HH24:MI:SS.MS')
+v=convert_to($3 || $4 || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $5, 'YYYY-MM-DD HH24:MI:SS.MS'), 'UTF8')
 WHERE 
     k=$1 AND v=$2
 "#;
@@ -329,12 +330,13 @@ impl PgElection {
     /// Returns value, expire time and current time. If `with_origin` is true, the origin string is also returned.
     async fn get_value_with_lease(
         &self,
-        key: &String,
+        key: &str,
         with_origin: bool,
     ) -> Result<Option<(String, Timestamp, Timestamp, Option<String>)>> {
+        let key = key.as_bytes().to_vec();
         let res = self
             .client
-            .query(GET_WITH_CURRENT_TIMESTAMP, &[&key])
+            .query(GET_WITH_CURRENT_TIMESTAMP, &[&key as &(dyn ToSql + Sync)])
             .await
             .context(PostgresExecutionSnafu)?;
 
@@ -342,7 +344,7 @@ impl PgElection {
             Ok(None)
         } else {
             // Safety: Checked if res is empty above.
-            let current_time_str = res[0].get(1);
+            let current_time_str = res[0].try_get(1).unwrap_or_default();
             let current_time = match Timestamp::from_str(current_time_str, None) {
                 Ok(ts) => ts,
                 Err(_) => UnexpectedSnafu {
@@ -351,8 +353,9 @@ impl PgElection {
                 .fail()?,
             };
             // Safety: Checked if res is empty above.
-            let value_and_expire_time = res[0].get(0);
-            let (value, expire_time) = parse_value_and_expire_time(value_and_expire_time)?;
+            let value_and_expire_time =
+                String::from_utf8_lossy(res[0].try_get(0).unwrap_or_default());
+            let (value, expire_time) = parse_value_and_expire_time(&value_and_expire_time)?;
 
             if with_origin {
                 Ok(Some((
@@ -372,17 +375,20 @@ impl PgElection {
         &self,
         key_prefix: &str,
     ) -> Result<(Vec<(String, Timestamp)>, Timestamp)> {
-        let key_prefix = format!("{}%", key_prefix);
+        let key_prefix = format!("{}%", key_prefix).as_bytes().to_vec();
         let res = self
             .client
-            .query(PREFIX_GET_WITH_CURRENT_TIMESTAMP, &[&key_prefix])
+            .query(
+                PREFIX_GET_WITH_CURRENT_TIMESTAMP,
+                &[(&key_prefix as &(dyn ToSql + Sync))],
+            )
             .await
             .context(PostgresExecutionSnafu)?;
 
         let mut values_with_leases = vec![];
         let mut current = Timestamp::default();
         for row in res {
-            let current_time_str = row.get(1);
+            let current_time_str = row.try_get(1).unwrap_or_default();
             current = match Timestamp::from_str(current_time_str, None) {
                 Ok(ts) => ts,
                 Err(_) => UnexpectedSnafu {
@@ -391,8 +397,8 @@ impl PgElection {
                 .fail()?,
             };
 
-            let value_and_expire_time = row.get(0);
-            let (value, expire_time) = parse_value_and_expire_time(value_and_expire_time)?;
+            let value_and_expire_time = String::from_utf8_lossy(row.try_get(0).unwrap_or_default());
+            let (value, expire_time) = parse_value_and_expire_time(&value_and_expire_time)?;
 
             values_with_leases.push((value, expire_time));
         }
@@ -400,13 +406,15 @@ impl PgElection {
     }
 
     async fn update_value_with_lease(&self, key: &str, prev: &str, updated: &str) -> Result<()> {
+        let key = key.as_bytes().to_vec();
+        let prev = prev.as_bytes().to_vec();
         let res = self
             .client
             .execute(
                 CAS_WITH_EXPIRE_TIME,
                 &[
-                    &key,
-                    &prev,
+                    &key as &(dyn ToSql + Sync),
+                    &prev as &(dyn ToSql + Sync),
                     &updated,
                     &LEASE_SEP,
                     &(self.candidate_lease_ttl_secs as f64),
@@ -418,7 +426,7 @@ impl PgElection {
         ensure!(
             res == 1,
             UnexpectedSnafu {
-                violated: format!("Failed to update key: {}", key),
+                violated: format!("Failed to update key: {}", String::from_utf8_lossy(&key)),
             }
         );
 
@@ -432,12 +440,17 @@ impl PgElection {
         value: &str,
         lease_ttl_secs: u64,
     ) -> Result<bool> {
+        let key = key.as_bytes().to_vec();
+        let lease_ttl_secs = lease_ttl_secs as f64;
+        let params: Vec<&(dyn ToSql + Sync)> = vec![
+            &key as &(dyn ToSql + Sync),
+            &value as &(dyn ToSql + Sync),
+            &LEASE_SEP,
+            &lease_ttl_secs,
+        ];
         let res = self
             .client
-            .query(
-                PUT_IF_NOT_EXISTS_WITH_EXPIRE_TIME,
-                &[&key, &value, &LEASE_SEP, &(lease_ttl_secs as f64)],
-            )
+            .query(PUT_IF_NOT_EXISTS_WITH_EXPIRE_TIME, &params)
             .await
             .context(PostgresExecutionSnafu)?;
         Ok(res.is_empty())
@@ -445,10 +458,11 @@ impl PgElection {
 
     /// Returns `true` if the deletion is successful.
     /// Caution: Should only delete the key if the lease is expired.
-    async fn delete_value(&self, key: &String) -> Result<bool> {
+    async fn delete_value(&self, key: &str) -> Result<bool> {
+        let key = key.as_bytes().to_vec();
         let res = self
             .client
-            .query(POINT_DELETE, &[&key])
+            .query(POINT_DELETE, &[&key as &(dyn ToSql + Sync)])
             .await
             .context(PostgresExecutionSnafu)?;
 
