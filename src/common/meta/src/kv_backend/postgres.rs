@@ -16,7 +16,9 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Duration;
 
+use backon::{BackoffBuilder, ExponentialBuilder};
 use common_telemetry::debug;
 use deadpool_postgres::{Config, Pool, Runtime};
 use snafu::ResultExt;
@@ -25,7 +27,7 @@ use tokio_postgres::{IsolationLevel, NoTls, Row};
 
 use crate::error::{
     CreatePostgresPoolSnafu, Error, GetPostgresConnectionSnafu, PostgresExecutionSnafu,
-    PostgresTransactionSnafu, Result,
+    PostgresTransactionRetryFailedSnafu, PostgresTransactionSnafu, Result,
 };
 use crate::kv_backend::txn::{
     Compare, Txn as KvTxn, TxnOp, TxnOpResponse, TxnResponse as KvTxnResponse,
@@ -76,11 +78,14 @@ impl PgQueryExecutor<'_> {
     }
 }
 
+const PG_STORE_TXN_RETRY_COUNT: usize = 3;
+
 /// Posgres backend store for metasrv
 pub struct PgStore<T> {
     pool: Pool,
     max_txn_ops: usize,
     sql_template_set: SqlTemplateSet<T>,
+    txn_retry_count: usize,
 }
 
 const EMPTY: &[u8] = &[0];
@@ -280,6 +285,7 @@ impl DefaultPgStore {
             pool,
             max_txn_ops,
             sql_template_set,
+            txn_retry_count: PG_STORE_TXN_RETRY_COUNT,
         }))
     }
 }
@@ -593,6 +599,7 @@ impl DefaultPgStore {
         let res = self
             .batch_get_with_query_executor(query_executor, batch_get_req)
             .await?;
+        debug!("batch get res: {:?}", res);
         let res_map = res
             .kvs
             .into_iter()
@@ -730,7 +737,7 @@ impl DefaultPgStore {
     async fn execute_txn_op(
         &self,
         query_executor: &PgQueryExecutor<'_>,
-        op: TxnOp,
+        op: &TxnOp,
     ) -> Result<TxnOpResponse> {
         match op {
             TxnOp::Put(key, value) => {
@@ -738,8 +745,8 @@ impl DefaultPgStore {
                     .put_with_query_executor(
                         query_executor,
                         PutRequest {
-                            key,
-                            value,
+                            key: key.clone(),
+                            value: value.clone(),
                             prev_kv: false,
                         },
                     )
@@ -751,7 +758,7 @@ impl DefaultPgStore {
                     .range_with_query_executor(
                         query_executor,
                         RangeRequest {
-                            key,
+                            key: key.clone(),
                             range_end: vec![],
                             limit: 1,
                             keys_only: false,
@@ -765,7 +772,7 @@ impl DefaultPgStore {
                     .delete_range_with_query_executor(
                         query_executor,
                         DeleteRangeRequest {
-                            key,
+                            key: key.clone(),
                             range_end: vec![],
                             prev_kv: false,
                         },
@@ -775,17 +782,8 @@ impl DefaultPgStore {
             }
         }
     }
-}
 
-#[async_trait::async_trait]
-impl TxnService for DefaultPgStore {
-    type Error = Error;
-
-    async fn txn(&self, txn: KvTxn) -> Result<KvTxnResponse> {
-        let _timer = METRIC_META_TXN_REQUEST
-            .with_label_values(&["postgres", "txn"])
-            .start_timer();
-
+    async fn txn_inner(&self, txn: &KvTxn) -> Result<KvTxnResponse> {
         let mut client = self.client().await?;
         let pg_txn = self.txn_executor(&mut client).await?;
         let mut success = true;
@@ -797,7 +795,7 @@ impl TxnService for DefaultPgStore {
             match self.try_batch_txn(&pg_txn, &txn.req.success).await? {
                 Some(res) => responses.extend(res),
                 None => {
-                    for txnop in txn.req.success {
+                    for txnop in &txn.req.success {
                         let res = self.execute_txn_op(&pg_txn, txnop).await?;
                         responses.push(res);
                     }
@@ -807,7 +805,7 @@ impl TxnService for DefaultPgStore {
             match self.try_batch_txn(&pg_txn, &txn.req.failure).await? {
                 Some(res) => responses.extend(res),
                 None => {
-                    for txnop in txn.req.failure {
+                    for txnop in &txn.req.failure {
                         let res = self.execute_txn_op(&pg_txn, txnop).await?;
                         responses.push(res);
                     }
@@ -820,6 +818,43 @@ impl TxnService for DefaultPgStore {
             responses,
             succeeded: success,
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl TxnService for DefaultPgStore {
+    type Error = Error;
+
+    async fn txn(&self, txn: KvTxn) -> Result<KvTxnResponse> {
+        let _timer = METRIC_META_TXN_REQUEST
+            .with_label_values(&["postgres", "txn"])
+            .start_timer();
+
+        let mut backoff = ExponentialBuilder::default()
+            .with_min_delay(Duration::from_millis(10))
+            .with_max_delay(Duration::from_millis(200))
+            .with_max_times(self.txn_retry_count)
+            .build();
+
+        loop {
+            match self.txn_inner(&txn).await {
+                Ok(res) => return Ok(res),
+                Err(e) => {
+                    if e.is_serialization_error() {
+                        let d = backoff.next();
+                        if let Some(d) = d {
+                            tokio::time::sleep(d).await;
+                            continue;
+                        }
+                        break;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        PostgresTransactionRetryFailedSnafu {}.fail()
     }
 
     fn max_txn_ops(&self) -> usize {
@@ -860,10 +895,11 @@ mod tests {
     use super::*;
     use crate::kv_backend::test::{
         prepare_kv_with_prefix, test_kv_batch_delete_with_prefix, test_kv_batch_get_with_prefix,
-        test_kv_delete_range_with_prefix, test_kv_put_with_prefix, test_kv_range_2_with_prefix,
-        test_kv_range_with_prefix, test_txn_compare_equal, test_txn_compare_greater,
-        test_txn_compare_less, test_txn_compare_not_equal, test_txn_one_compare_op,
-        text_txn_multi_compare_op, unprepare_kv,
+        test_kv_compare_and_put_with_prefix, test_kv_delete_range_with_prefix,
+        test_kv_put_with_prefix, test_kv_range_2_with_prefix, test_kv_range_with_prefix,
+        test_txn_compare_equal, test_txn_compare_greater, test_txn_compare_less,
+        test_txn_compare_not_equal, test_txn_one_compare_op, text_txn_multi_compare_op,
+        unprepare_kv,
     };
 
     async fn build_pg_kv_backend(table_name: &str) -> Option<DefaultPgStore> {
@@ -892,6 +928,7 @@ mod tests {
             pool,
             max_txn_ops: 128,
             sql_template_set: sql_templates,
+            txn_retry_count: PG_STORE_TXN_RETRY_COUNT,
         })
     }
 
@@ -966,12 +1003,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_pg_compare_and_put() {
-        //FIXME(weny, CookiePie): fix this test
-        // if let Some(kv_backend) = build_pg_kv_backend("compare_and_put_test").await {
-        //     let prefix = b"compare_and_put/";
-        //     let kv_backend = Arc::new(kv_backend);
-        //     test_kv_compare_and_put_with_prefix(kv_backend.clone(), prefix.to_vec()).await;
-        // }
+        if let Some(kv_backend) = build_pg_kv_backend("compare_and_put_test").await {
+            let prefix = b"compare_and_put/";
+            let kv_backend = Arc::new(kv_backend);
+            test_kv_compare_and_put_with_prefix(kv_backend.clone(), prefix.to_vec()).await;
+        }
     }
 
     #[tokio::test]

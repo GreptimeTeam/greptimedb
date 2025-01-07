@@ -685,6 +685,13 @@ pub enum Error {
         operation: String,
     },
 
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Postgres transaction retry failed"))]
+    PostgresTransactionRetryFailed {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Datanode table info not found, table id: {}, datanode id: {}",
         table_id,
@@ -798,7 +805,8 @@ impl ErrorExt for Error {
             PostgresExecution { .. }
             | CreatePostgresPool { .. }
             | GetPostgresConnection { .. }
-            | PostgresTransaction { .. } => StatusCode::Internal,
+            | PostgresTransaction { .. }
+            | PostgresTransactionRetryFailed { .. } => StatusCode::Internal,
             Error::DatanodeTableInfoNotFound { .. } => StatusCode::Internal,
         }
     }
@@ -814,6 +822,9 @@ impl Error {
     pub fn is_serialization_error(&self) -> bool {
         match self {
             Error::PostgresTransaction { error, .. } => {
+                error.code() == Some(&tokio_postgres::error::SqlState::T_R_SERIALIZATION_FAILURE)
+            }
+            Error::PostgresExecution { error, .. } => {
                 error.code() == Some(&tokio_postgres::error::SqlState::T_R_SERIALIZATION_FAILURE)
             }
             _ => false,

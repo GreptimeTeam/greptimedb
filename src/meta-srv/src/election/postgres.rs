@@ -40,7 +40,7 @@ const CAMPAIGN: &str = "SELECT pg_try_advisory_lock({})";
 const STEP_DOWN: &str = "SELECT pg_advisory_unlock({})";
 // Currently the session timeout is longer than the leader lease time, so the leader lease may expire while the session is still alive.
 // Either the leader reconnects and step down or the session expires and the lock is released.
-const SET_IDLE_SESSION_TIMEOUT: &str = "SET idle_in_transaction_session_timeout = '10s';";
+const SET_IDLE_SESSION_TIMEOUT: &str = "SET idle_in_session_timeout = '10s';";
 
 // Separator between value and expire time.
 const LEASE_SEP: &str = r#"||__metadata_lease_sep||"#;
@@ -649,6 +649,8 @@ mod tests {
 
     use super::*;
     use crate::error::PostgresExecutionSnafu;
+    const CREATE_TABLE: &str =
+        "CREATE TABLE IF NOT EXISTS greptime_metakv(k bytea PRIMARY KEY, v bytea);";
 
     async fn create_postgres_client() -> Result<Client> {
         let endpoint = env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
@@ -664,6 +666,7 @@ mod tests {
         tokio::spawn(async move {
             connection.await.context(PostgresExecutionSnafu).unwrap();
         });
+        client.execute(CREATE_TABLE, &[]).await.unwrap();
         Ok(client)
     }
 
@@ -1166,6 +1169,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_follower_action() {
+        common_telemetry::init_default_ut_logging();
         let candidate_lease_ttl_secs = 5;
         let store_key_prefix = uuid::Uuid::new_v4().to_string();
 
