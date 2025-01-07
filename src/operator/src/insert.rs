@@ -299,10 +299,15 @@ impl Inserter {
         insert: &Insert,
         ctx: &QueryContextRef,
     ) -> Result<Output> {
-        let inserts =
+        let (inserts, table_info) =
             StatementToRegion::new(self.catalog_manager.as_ref(), &self.partition_manager, ctx)
                 .convert(insert, ctx)
                 .await?;
+
+        let table_infos =
+            HashMap::from_iter([(table_info.table_id(), table_info.clone())].into_iter());
+        // Fill impure default values in the request
+        let inserts = fill_reqs_with_impure_default(&table_infos, inserts)?;
 
         self.do_request(inserts, ctx).await
     }
