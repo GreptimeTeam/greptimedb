@@ -98,6 +98,7 @@ macro_rules! http_tests {
                 test_otlp_logs,
                 test_loki_pb_logs,
                 test_loki_json_logs,
+                test_elasticsearch_logs,
             );
         )*
     };
@@ -2009,6 +2010,47 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_elasticsearch_logs(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_elasticsearch_logs").await;
+
+    let client = TestClient::new(app);
+
+    let body = r#"
+        {"create":{"_index":"test","_id":"1"}}
+        {"foo":"foo_value1", "bar":"value1"}
+        {"create":{"_index":"test","_id":"2"}}
+        {"foo":"foo_value2","bar":"value2"}
+    "#;
+
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )],
+        "/v1/elasticsearch/_bulk?table=elasticsearch_logs_test",
+        body.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+
+    assert_eq!(StatusCode::OK, res.status());
+
+    let expected = "[[\"foo_value2\",\"value2\"],[\"foo_value1\",\"value1\"]]";
+
+    validate_data(
+        "test_elasticsearch_logs",
+        &client,
+        "select foo, bar from elasticsearch_logs_test;",
+        expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
 async fn validate_data(test_name: &str, client: &TestClient, sql: &str, expected: &str) {
     let res = client
         .get(format!("/v1/sql?sql={sql}").as_str())
@@ -2018,7 +2060,10 @@ async fn validate_data(test_name: &str, client: &TestClient, sql: &str, expected
     let resp = res.text().await;
     let v = get_rows_from_output(&resp);
 
-    assert_eq!(v, expected, "validate {test_name} fail");
+    assert_eq!(
+        v, expected,
+        "validate {test_name} fail, expected: {expected}, actual: {v}"
+    );
 }
 
 async fn send_req(

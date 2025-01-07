@@ -69,22 +69,16 @@ lazy_static! {
 pub struct LogIngesterQueryParams {
     /// The database where log data will be written to.
     pub db: Option<String>,
-
     /// The table where log data will be written to.
     pub table: Option<String>,
-
     /// The pipeline that will be used for log ingestion.
     pub pipeline_name: Option<String>,
-
     /// The version of the pipeline to be used for log ingestion.
     pub version: Option<String>,
-
     /// Whether to ignore errors during log ingestion.
     pub ignore_errors: Option<bool>,
-
     /// The source of the log data.
     pub source: Option<String>,
-
     /// The JSON field name of the log message. If not provided, it will take the whole log as the message.
     /// The field must be at the top level of the JSON structure.
     pub msg_field: Option<String>,

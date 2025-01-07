@@ -21,7 +21,8 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::{Extension, TypedHeader};
 use common_error::ext::ErrorExt;
-use common_telemetry::{debug, warn};
+use common_telemetry::{debug, error};
+use once_cell::sync::Lazy;
 use serde_json::{json, Deserializer, Value};
 use session::context::{Channel, QueryContext};
 use snafu::{ensure, ResultExt};
@@ -33,6 +34,20 @@ use crate::error::{
 use crate::http::event::{
     ingest_logs_inner, LogIngesterQueryParams, LogState, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
+
+// The headers for every response of Elasticsearch API.
+static ELASTICSEARCH_HEADERS: Lazy<HeaderMap> = Lazy::new(|| {
+    HeaderMap::from_iter([
+        (
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        ),
+        (
+            HeaderName::from_static("x-elastic-product"),
+            HeaderValue::from_static("Elasticsearch"),
+        ),
+    ])
+});
 
 // The fake version of Elasticsearch and used for `_version` API.
 const ELASTICSEARCH_VERSION: &str = "8.16.0";
@@ -84,7 +99,7 @@ pub async fn handle_bulk_api(
 
     // Record the ingestion time histogram.
     let _timer = crate::metrics::METRIC_ELASTICSEARCH_LOGS_INGESTION_ELAPSED
-        .with_label_values(&[params.db.unwrap_or("public".to_string()).as_str()])
+        .with_label_values(&[params.db.unwrap_or_else(|| "public".to_string()).as_str()])
         .start_timer();
 
     let table = if let Some(table) = params.table {
@@ -137,7 +152,7 @@ pub async fn handle_bulk_api(
     )
     .await
     {
-        warn!("Failed to ingest logs: {:?}", e);
+        error!(e; "Failed to ingest logs");
         return (
             status_code_to_http_status(&e.status_code()),
             elasticsearch_headers(),
@@ -209,17 +224,7 @@ fn write_bulk_response(took_ms: i64, n: usize, status_code: u32, error_reason: &
 
 /// Returns the headers for every response of Elasticsearch API.
 pub fn elasticsearch_headers() -> HeaderMap {
-    HeaderMap::from_iter([
-        (
-            axum::http::header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        ),
-        // Logstash needs this header to identify the product.
-        (
-            HeaderName::from_static("x-elastic-product"),
-            HeaderValue::from_static("Elasticsearch"),
-        ),
-    ])
+    ELASTICSEARCH_HEADERS.clone()
 }
 
 // The input will be Elasticsearch bulk request in NDJSON format.
@@ -246,7 +251,7 @@ fn convert_es_input_to_log_values(
         }
     );
 
-    let mut log_values: Vec<Value> = Vec::new();
+    let mut log_values: Vec<Value> = Vec::with_capacity(values.len() / 2);
 
     // For Elasticsearch post `_bulk` API, each chunk contains two objects:
     // 1. The first object is the command, it should be `create` or `index`. `create` is used for insert, `index` is used for upsert.
@@ -271,18 +276,15 @@ fn convert_es_input_to_log_values(
         // It means the second object is the document data.
         if is_document {
             // If the msg_field is provided, fetch the value of the field from the document data.
-            if let Some(msg_field) = msg_field {
-                if let Some(Value::String(message)) = v.get(msg_field) {
-                    let value = match serde_json::from_str::<Value>(message) {
-                        Ok(value) => value,
-                        // If the message is not a valid JSON, just use the original message as the log value.
-                        Err(_) => Value::String(message.to_string()),
-                    };
-                    log_values.push(value);
-                }
+            let log_value = if let Some(msg_field) = msg_field {
+                get_log_value_from_msg_field(v, msg_field)
             } else {
-                log_values.push(v);
-            }
+                v
+            };
+
+            log_values.push(log_value);
+
+            // Reset the flag for the next chunk.
             is_document = false;
         }
     }
@@ -290,6 +292,24 @@ fn convert_es_input_to_log_values(
     debug!("Received log data: {:?}", log_values);
 
     Ok(log_values)
+}
+
+fn get_log_value_from_msg_field(mut v: Value, msg_field: &str) -> Value {
+    if let Some(message) = v.get_mut(msg_field) {
+        let message = message.take();
+        match message {
+            Value::String(s) => match serde_json::from_str::<Value>(&s) {
+                Ok(s) => s,
+                // If the message is not a valid JSON, just use the original message as the log value.
+                Err(_) => Value::String(s),
+            },
+            // If the message is not a string, just use the original message as the log value.
+            _ => message,
+        }
+    } else {
+        // If the msg_field is not found, just use the original message as the log value.
+        v
+    }
 }
 
 #[cfg(test)]
