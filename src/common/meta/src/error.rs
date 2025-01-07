@@ -639,15 +639,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse {} from str to utf8", name))]
-    StrFromUtf8 {
-        name: String,
-        #[snafu(source)]
-        error: std::str::Utf8Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Value not exists"))]
     ValueNotExist {
         #[snafu(implicit)]
@@ -757,8 +748,7 @@ impl ErrorExt for Error {
             | UnexpectedLogicalRouteTable { .. }
             | ProcedureOutput { .. }
             | FromUtf8 { .. }
-            | MetadataCorruption { .. }
-            | StrFromUtf8 { .. } => StatusCode::Unexpected,
+            | MetadataCorruption { .. } => StatusCode::Unexpected,
 
             SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } => StatusCode::Internal,
 
