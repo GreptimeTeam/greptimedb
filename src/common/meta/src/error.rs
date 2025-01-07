@@ -809,11 +809,11 @@ impl ErrorExt for Error {
 }
 
 impl Error {
+    #[cfg(feature = "pg_kvbackend")]
     /// Check if the error is a serialization error.
     pub fn is_serialization_error(&self) -> bool {
         match self {
             Error::PostgresTransaction { error, .. } => {
-                common_telemetry::debug!("code: {:?}", error.code());
                 error.code() == Some(&tokio_postgres::error::SqlState::T_R_SERIALIZATION_FAILURE)
             }
             _ => false,
