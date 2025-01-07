@@ -16,6 +16,7 @@ use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
+use arrow::datatypes::IntervalDayTime;
 use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
 use common_query::prelude::GREPTIME_VALUE;
@@ -1312,8 +1313,9 @@ impl PromPlanner {
                 let month_lit_expr = DfExpr::Literal(ScalarValue::Utf8(Some("month".to_string())));
                 let interval_1month_lit_expr =
                     DfExpr::Literal(ScalarValue::IntervalYearMonth(Some(1)));
-                let interval_1day_lit_expr =
-                    DfExpr::Literal(ScalarValue::IntervalDayTime(Some(1 << 32)));
+                let interval_1day_lit_expr = DfExpr::Literal(ScalarValue::IntervalDayTime(Some(
+                    IntervalDayTime::new(1, 0),
+                )));
                 let the_1month_minus_1day_expr = DfExpr::BinaryExpr(BinaryExpr {
                     left: Box::new(interval_1month_lit_expr),
                     op: Operator::Minus,

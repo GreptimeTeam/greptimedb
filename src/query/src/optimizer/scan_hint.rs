@@ -179,13 +179,7 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
     fn f_down(&mut self, node: &Self::Node) -> DataFusionResult<TreeNodeRecursion> {
         // Get order requirement from sort plan
         if let LogicalPlan::Sort(sort) = node {
-            let mut exprs = vec![];
-            for expr in &sort.expr {
-                if let Expr::Sort(sort_expr) = expr {
-                    exprs.push(sort_expr.clone());
-                }
-            }
-            self.order_expr = Some(exprs);
+            self.order_expr = Some(sort.expr.clone());
         }
 
         // Get time series row selector from aggr plan
@@ -198,7 +192,7 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
                     is_all_last_value = false;
                     break;
                 };
-                if func.func_def.name() != "last_value" || func.filter.is_some() || func.distinct {
+                if func.func.name() != "last_value" || func.filter.is_some() || func.distinct {
                     is_all_last_value = false;
                     break;
                 }
@@ -212,10 +206,10 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
                             is_all_last_value = false;
                             break;
                         }
-                    } else if let Expr::Sort(sort_expr) = first_order_by {
+                    } else {
                         // only allow `order by xxx [ASC]`, xxx is a bare column reference so `last_value()` is the max
                         // value of the column.
-                        if !sort_expr.asc || !matches!(&*sort_expr.expr, Expr::Column(_)) {
+                        if !first_order_by.asc || !matches!(&first_order_by.expr, Expr::Column(_)) {
                             is_all_last_value = false;
                             break;
                         }
@@ -236,13 +230,8 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
                     }
                 }
                 // Safety: checked in the above loop
-                let Expr::Sort(Sort {
-                    expr: order_by_col, ..
-                }) = order_by_expr.unwrap()
-                else {
-                    unreachable!()
-                };
-                let Expr::Column(order_by_col) = *order_by_col else {
+                let order_by_expr = order_by_expr.unwrap();
+                let Expr::Column(order_by_col) = order_by_expr.expr else {
                     unreachable!()
                 };
                 if is_all_last_value {
@@ -335,11 +324,11 @@ mod test {
                     args: vec![col("v0")],
                     distinct: false,
                     filter: None,
-                    order_by: Some(vec![Expr::Sort(Sort {
-                        expr: Box::new(col("ts")),
+                    order_by: Some(vec![Sort {
+                        expr: col("ts"),
                         asc: true,
                         nulls_first: true,
-                    })]),
+                    }]),
                     null_treatment: None,
                 })],
             )

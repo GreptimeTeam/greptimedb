@@ -24,6 +24,7 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::Result as DataFusionResult;
 use datafusion_physical_expr::expressions::Column as PhysicalColumn;
+use datafusion_physical_expr::LexOrdering;
 use store_api::region_engine::PartitionRange;
 use table::table::scan::RegionScanExec;
 
@@ -117,7 +118,7 @@ impl WindowedSortPhysicalRule {
 
                     if !preserve_partitioning {
                         let order_preserving_merge = SortPreservingMergeExec::new(
-                            sort_exec.expr().to_vec(),
+                            LexOrdering::new(sort_exec.expr().to_vec()),
                             Arc::new(windowed_sort_exec),
                         );
                         return Ok(Transformed {

@@ -74,7 +74,6 @@ impl Categorizer {
                 Commutativity::ConditionalCommutative(Some(Arc::new(merge_sort_transformer)))
             }
             LogicalPlan::Join(_) => Commutativity::NonCommutative,
-            LogicalPlan::CrossJoin(_) => Commutativity::NonCommutative,
             LogicalPlan::Repartition(_) => {
                 // unsupported? or non-commutative
                 Commutativity::Unimplemented
@@ -89,7 +88,7 @@ impl Categorizer {
                 // wait for https://github.com/apache/arrow-datafusion/pull/7669
                 if partition_cols.is_empty() && limit.fetch.is_some() {
                     Commutativity::Commutative
-                } else if limit.skip == 0 && limit.fetch.is_some() {
+                } else if limit.skip.is_none() && limit.fetch.is_some() {
                     Commutativity::PartialCommutative
                 } else {
                     Commutativity::Unimplemented
@@ -104,7 +103,6 @@ impl Categorizer {
             LogicalPlan::Values(_) => Commutativity::Unsupported,
             LogicalPlan::Explain(_) => Commutativity::Unsupported,
             LogicalPlan::Analyze(_) => Commutativity::Unsupported,
-            LogicalPlan::Prepare(_) => Commutativity::Unsupported,
             LogicalPlan::DescribeTable(_) => Commutativity::Unsupported,
             LogicalPlan::Dml(_) => Commutativity::Unsupported,
             LogicalPlan::Ddl(_) => Commutativity::Unsupported,
@@ -144,7 +142,6 @@ impl Categorizer {
             | Expr::IsNotFalse(_)
             | Expr::Negative(_)
             | Expr::Between(_)
-            | Expr::Sort(_)
             | Expr::Exists(_)
             | Expr::ScalarFunction(_) => Commutativity::Commutative,
 

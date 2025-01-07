@@ -39,7 +39,7 @@ use datafusion::physical_plan::{
 };
 use datafusion_common::utils::bisect;
 use datafusion_common::{internal_err, DataFusionError};
-use datafusion_physical_expr::PhysicalSortExpr;
+use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
 use datatypes::value::Value;
 use futures::Stream;
 use itertools::Itertools;
@@ -121,7 +121,7 @@ impl WindowedSortExec {
             input
                 .equivalence_properties()
                 .clone()
-                .with_reorder(vec![expression.clone()]),
+                .with_reorder(LexOrdering::new(vec![expression.clone()])),
             input.output_partitioning().clone(),
             input.execution_mode(),
         );
@@ -639,11 +639,12 @@ impl WindowedSortStream {
         let reservation = MemoryConsumer::new(format!("WindowedSortStream[{}]", self.merge_count))
             .register(&self.memory_pool);
         self.merge_count += 1;
+        let lex_ordering = LexOrdering::new(vec![self.expression.clone()]);
 
         let resulting_stream = StreamingMergeBuilder::new()
             .with_streams(streams)
             .with_schema(self.schema())
-            .with_expressions(&[self.expression.clone()])
+            .with_expressions(&lex_ordering)
             .with_metrics(self.metrics.clone())
             .with_batch_size(self.batch_size)
             .with_fetch(fetch)

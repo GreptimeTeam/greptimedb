@@ -35,7 +35,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties, TopK,
 };
 use datafusion_common::{internal_err, DataFusionError};
-use datafusion_physical_expr::PhysicalSortExpr;
+use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
 use futures::{Stream, StreamExt};
 use itertools::Itertools;
 use snafu::location;
@@ -129,6 +129,10 @@ impl DisplayAs for PartSortExec {
 }
 
 impl ExecutionPlan for PartSortExec {
+    fn name(&self) -> &str {
+        "PartSortExec"
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -236,12 +240,11 @@ impl PartSortStream {
                 TopK::try_new(
                     partition,
                     sort.schema().clone(),
-                    vec![sort.expression.clone()],
+                    LexOrdering::new(vec![sort.expression.clone()]),
                     limit,
                     context.session_config().batch_size(),
                     context.runtime_env(),
                     &sort.metrics,
-                    partition,
                 )?,
                 0,
             )
@@ -490,12 +493,11 @@ impl PartSortStream {
         let new_top_buffer = TopK::try_new(
             self.partition,
             self.schema().clone(),
-            vec![self.expression.clone()],
+            LexOrdering::new(vec![self.expression.clone()]),
             self.limit.unwrap(),
             self.context.session_config().batch_size(),
             self.context.runtime_env(),
             &self.root_metrics,
-            self.partition,
         )?;
         let PartSortBuffer::Top(top_k, _) =
             std::mem::replace(&mut self.buffer, PartSortBuffer::Top(new_top_buffer, 0))
@@ -506,13 +508,11 @@ impl PartSortStream {
         let mut result_stream = top_k.emit()?;
         let mut placeholder_ctx = std::task::Context::from_waker(futures::task::noop_waker_ref());
         let mut results = vec![];
-        let mut row_count = 0;
         // according to the current implementation of `TopK`, the result stream will always be ready
         loop {
             match result_stream.poll_next_unpin(&mut placeholder_ctx) {
                 Poll::Ready(Some(batch)) => {
                     let batch = batch?;
-                    row_count += batch.num_rows();
                     results.push(batch);
                 }
                 Poll::Pending => {
@@ -525,7 +525,7 @@ impl PartSortStream {
             }
         }
 
-        let concat_batch = concat_batches(&self.schema, &results, row_count).map_err(|e| {
+        let concat_batch = concat_batches(&self.schema, &results).map_err(|e| {
             DataFusionError::ArrowError(
                 e,
                 Some(format!(

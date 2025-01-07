@@ -37,6 +37,7 @@ use crate::dist_plan::MergeScanLogicalPlan;
 use crate::error::DataFusionSnafu;
 
 /// Extended [`substrait::extension_serializer::ExtensionSerializer`] but supports [`MergeScanLogicalPlan`] serialization.
+#[derive(Debug)]
 pub struct DefaultSerializer;
 
 impl SerializerRegistry for DefaultSerializer {
@@ -112,7 +113,7 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
     ) -> common_query::error::Result<LogicalPlan> {
         // The session_state already has the `DefaultSerialzier` as `SerializerRegistry`.
         let logical_plan = DFLogicalSubstraitConvertor
-            .decode(message, catalog_list.clone(), self.session_state.clone())
+            .decode(message, self.session_state.clone())
             .await
             .map_err(BoxedError::new)
             .context(common_query::error::DecodePlanSnafu)?;

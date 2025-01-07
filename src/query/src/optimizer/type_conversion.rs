@@ -88,7 +88,6 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
             | LogicalPlan::Limit { .. }
             | LogicalPlan::Union { .. }
             | LogicalPlan::Join { .. }
-            | LogicalPlan::CrossJoin { .. }
             | LogicalPlan::Distinct { .. }
             | LogicalPlan::Values { .. }
             | LogicalPlan::Analyze { .. } => {
@@ -110,7 +109,6 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
             | LogicalPlan::Explain { .. }
             | LogicalPlan::SubqueryAlias { .. }
             | LogicalPlan::EmptyRelation(_)
-            | LogicalPlan::Prepare(_)
             | LogicalPlan::Dml(_)
             | LogicalPlan::DescribeTable(_)
             | LogicalPlan::Unnest(_)

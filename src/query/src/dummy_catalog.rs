@@ -15,13 +15,14 @@
 //! Dummy catalog for region server.
 
 use std::any::Any;
+use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use api::v1::SemanticType;
 use async_trait::async_trait;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_recordbatch::OrderOption;
-use datafusion::catalog::{CatalogProvider, CatalogProviderList, SchemaProvider};
+use datafusion::catalog::{CatalogProvider, CatalogProviderList, SchemaProvider, Session};
 use datafusion::datasource::TableProvider;
 use datafusion::execution::context::SessionState;
 use datafusion::physical_plan::ExecutionPlan;
@@ -37,7 +38,7 @@ use table::table::scan::RegionScanExec;
 use crate::error::{GetRegionMetadataSnafu, Result};
 
 /// Resolve to the given region (specified by [RegionId]) unconditionally.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DummyCatalogList {
     catalog: DummyCatalogProvider,
 }
@@ -80,7 +81,7 @@ impl CatalogProviderList for DummyCatalogList {
 }
 
 /// A dummy catalog provider for [DummyCatalogList].
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct DummyCatalogProvider {
     schema: DummySchemaProvider,
 }
@@ -100,7 +101,7 @@ impl CatalogProvider for DummyCatalogProvider {
 }
 
 /// A dummy schema provider for [DummyCatalogList].
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct DummySchemaProvider {
     table: Arc<dyn TableProvider>,
 }
@@ -137,6 +138,16 @@ pub struct DummyTableProvider {
     scan_request: Arc<Mutex<ScanRequest>>,
 }
 
+impl fmt::Debug for DummyTableProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DummyTableProvider")
+            .field("region_id", &self.region_id)
+            .field("metadata", &self.metadata)
+            .field("scan_request", &self.scan_request)
+            .finish()
+    }
+}
+
 #[async_trait]
 impl TableProvider for DummyTableProvider {
     fn as_any(&self) -> &dyn Any {
@@ -153,7 +164,7 @@ impl TableProvider for DummyTableProvider {
 
     async fn scan(
         &self,
-        _state: &SessionState,
+        _state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,

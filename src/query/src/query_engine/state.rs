@@ -286,9 +286,14 @@ impl QueryEngineState {
     }
 }
 
-#[derive(Debug)]
 struct DfQueryPlanner {
     physical_planner: DefaultPhysicalPlanner,
+}
+
+impl fmt::Debug for DfQueryPlanner {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("DfQueryPlanner").finish()
+    }
 }
 
 #[async_trait]
