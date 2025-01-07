@@ -24,7 +24,6 @@ use api::v1::{
 };
 use axum::body::HttpBody;
 use axum::extract::{FromRequest, Multipart, Path, Query, State};
-use axum::headers::ContentType;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -35,6 +34,7 @@ use common_query::prelude::GREPTIME_TIMESTAMP;
 use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
 use datatypes::value::column_data_to_json;
+use headers::ContentType;
 use lazy_static::lazy_static;
 use loki_api::prost_types::Timestamp;
 use pipeline::error::PipelineTransformSnafu;

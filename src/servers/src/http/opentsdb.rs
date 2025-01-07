@@ -15,11 +15,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Query, RawBody, State};
+use axum::body::Body;
+use axum::extract::{Query, State};
 use axum::http::StatusCode as HttpStatusCode;
 use axum::{Extension, Json};
 use common_error::ext::ErrorExt;
-use hyper::Body;
 use serde::{Deserialize, Serialize};
 use session::context::{Channel, QueryContext};
 use snafu::ResultExt;
@@ -76,7 +76,7 @@ pub async fn put(
     State(opentsdb_handler): State<OpentsdbProtocolHandlerRef>,
     Query(params): Query<HashMap<String, String>>,
     Extension(mut ctx): Extension<QueryContext>,
-    RawBody(body): RawBody,
+    body: Body,
 ) -> Result<(HttpStatusCode, Json<OpentsdbPutResponse>)> {
     let summary = params.contains_key("summary");
     let details = params.contains_key("details");
@@ -126,7 +126,7 @@ pub async fn put(
 }
 
 async fn parse_data_points(body: Body) -> Result<Vec<DataPointRequest>> {
-    let body = hyper::body::to_bytes(body)
+    let body = axum::body::to_bytes(body)
         .await
         .context(error::HyperSnafu)?;
     let data_points = serde_json::from_slice::<OneOrMany<DataPointRequest>>(&body[..])

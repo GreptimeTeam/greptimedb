@@ -16,7 +16,8 @@ use std::sync::Arc;
 
 use api::prom_store::remote::ReadRequest;
 use api::v1::RowInsertRequests;
-use axum::extract::{Query, RawBody, State};
+use axum::body::Body;
+use axum::extract::{Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Extension;
@@ -76,7 +77,7 @@ pub async fn route_write_without_metric_engine(
     query: Query<RemoteWriteQuery>,
     extension: Extension<QueryContext>,
     content_encoding: TypedHeader<headers::ContentEncoding>,
-    raw_body: RawBody,
+    raw_body: Body,
 ) -> Result<impl IntoResponse> {
     remote_write_impl(
         handler,
@@ -98,7 +99,7 @@ pub async fn route_write_without_metric_engine_and_strict_mode(
     query: Query<RemoteWriteQuery>,
     extension: Extension<QueryContext>,
     content_encoding: TypedHeader<headers::ContentEncoding>,
-    raw_body: RawBody,
+    raw_body: Body,
 ) -> Result<impl IntoResponse> {
     remote_write_impl(
         handler,
@@ -122,7 +123,7 @@ pub async fn remote_write(
     query: Query<RemoteWriteQuery>,
     extension: Extension<QueryContext>,
     content_encoding: TypedHeader<headers::ContentEncoding>,
-    raw_body: RawBody,
+    raw_body: Body,
 ) -> Result<impl IntoResponse> {
     remote_write_impl(
         handler,
@@ -146,7 +147,7 @@ pub async fn remote_write_without_strict_mode(
     query: Query<RemoteWriteQuery>,
     extension: Extension<QueryContext>,
     content_encoding: TypedHeader<headers::ContentEncoding>,
-    raw_body: RawBody,
+    raw_body: Body,
 ) -> Result<impl IntoResponse> {
     remote_write_impl(
         handler,

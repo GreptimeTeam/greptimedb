@@ -30,14 +30,13 @@ use headers::Header;
 use session::context::QueryContextBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
 
-use super::header::{GreptimeDbName, GREPTIME_TIMEZONE_HEADER_NAME};
-use super::PUBLIC_APIS;
 use crate::error::{
     self, InvalidAuthHeaderInvisibleASCIISnafu, InvalidAuthHeaderSnafu, InvalidParameterSnafu,
     NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu, UrlDecodeSnafu,
 };
+use crate::http::header::{GreptimeDbName, GREPTIME_TIMEZONE_HEADER_NAME};
 use crate::http::result::error_result::ErrorResponse;
-use crate::http::HTTP_API_PREFIX;
+use crate::http::{HTTP_API_PREFIX, PUBLIC_APIS};
 use crate::influxdb::{is_influxdb_request, is_influxdb_v2_request};
 
 /// AuthState is a holder state for [`UserProviderRef`]
