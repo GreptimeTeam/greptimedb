@@ -42,7 +42,7 @@ use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::error::{
     CompactRegionSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu, Error, FillDefaultSnafu,
-    FlushRegionSnafu, InvalidRequestSnafu, Result,
+    FlushRegionSnafu, InvalidRequestSnafu, Result, UnexpectedImpureDefaultSnafu,
 };
 use crate::manifest::action::RegionEdit;
 use crate::memtable::MemtableId;
@@ -333,6 +333,14 @@ impl WriteRequest {
             }
             OpType::Put => {
                 // For put requests, we use the default value from column schema.
+                if column.column_schema.is_default_impure() {
+                    UnexpectedImpureDefaultSnafu {
+                        region_id: self.region_id,
+                        column: &column.column_schema.name,
+                        default_value: format!("{:?}", column.column_schema.default_constraint()),
+                    }
+                    .fail()?
+                }
                 column
                     .column_schema
                     .create_default()

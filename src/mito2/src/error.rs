@@ -925,6 +925,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Unexpected impure default value with region_id: {}, column: {}, default_value: {}",
+        region_id,
+        column,
+        default_value
+    ))]
+    UnexpectedImpureDefault {
+        #[snafu(implicit)]
+        location: Location,
+        region_id: RegionId,
+        column: String,
+        default_value: String,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -964,7 +978,8 @@ impl ErrorExt for Error {
             | InvalidParquet { .. }
             | OperateAbortedIndex { .. }
             | UnexpectedReplay { .. }
-            | IndexEncodeNull { .. } => StatusCode::Unexpected,
+            | IndexEncodeNull { .. }
+            | UnexpectedImpureDefault { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }
             | InvalidScanIndex { .. }
