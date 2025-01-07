@@ -7,10 +7,8 @@ ARG OUTPUT_DIR
 ENV LANG en_US.utf8
 WORKDIR /greptimedb
 
-# Add PPA for Python 3.10.
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common && \
-    add-apt-repository ppa:deadsnakes/ppa -y
+    DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common
 
 # Install dependencies.
 RUN --mount=type=cache,target=/var/cache/apt \
