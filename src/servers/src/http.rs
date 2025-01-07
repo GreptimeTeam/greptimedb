@@ -81,6 +81,7 @@ pub mod handler;
 pub mod header;
 pub mod influxdb;
 pub mod logs;
+pub mod loki;
 pub mod mem_prof;
 pub mod opentsdb;
 pub mod otlp;
@@ -742,7 +743,12 @@ impl HttpServer {
 
     fn route_loki<S>(log_state: LogState) -> Router<S> {
         Router::new()
-            .route("/api/v1/push", routing::post(event::loki_ingest))
+            .route("/api/v1/push", routing::post(loki::loki_ingest))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(handle_error))
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
+            )
             .with_state(log_state)
     }
 
@@ -761,7 +767,7 @@ impl HttpServer {
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))
-                    .layer(RequestDecompressionLayer::new()),
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
             .with_state(log_state)
     }
@@ -854,7 +860,7 @@ impl HttpServer {
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))
-                    .layer(RequestDecompressionLayer::new()),
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
             .route("/ping", routing::get(influxdb_ping))
             .route("/health", routing::get(influxdb_health))
@@ -875,7 +881,7 @@ impl HttpServer {
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))
-                    .layer(RequestDecompressionLayer::new()),
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
             .with_state(otlp_handler)
     }

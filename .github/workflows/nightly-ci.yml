@@ -96,7 +96,7 @@ jobs:
         with:
           distribution: Ubuntu-22.04
       - name: Running tests
-        run: cargo nextest run -F dashboard
+        run: cargo nextest run -F dashboard -F pg_kvbackend
         env:
           CARGO_BUILD_RUSTFLAGS: "-C linker=lld-link"
           RUST_BACKTRACE: 1

@@ -249,8 +249,6 @@ impl StartCommand {
 
         if let Some(backend) = &self.backend {
             opts.backend.clone_from(backend);
-        } else {
-            opts.backend = BackendImpl::default()
         }
 
         // Disable dashboard in metasrv.
