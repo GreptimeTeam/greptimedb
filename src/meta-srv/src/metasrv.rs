@@ -73,6 +73,7 @@ pub const METASRV_HOME: &str = "/tmp/metasrv";
 
 // The datastores that implements metadata kvbackend.
 #[derive(Clone, Debug, PartialEq, Serialize, Default, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
 pub enum BackendImpl {
     // Etcd as metadata storage.
     #[default]

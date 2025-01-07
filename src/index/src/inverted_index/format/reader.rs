@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -33,10 +34,10 @@ mod footer;
 #[async_trait]
 pub trait InvertedIndexReader: Send + Sync {
     /// Seeks to given offset and reads data with exact size as provided.
-    async fn range_read(&mut self, offset: u64, size: u32) -> Result<Vec<u8>>;
+    async fn range_read(&self, offset: u64, size: u32) -> Result<Vec<u8>>;
 
     /// Reads the bytes in the given ranges.
-    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+    async fn read_vec(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
         let mut result = Vec::with_capacity(ranges.len());
         for range in ranges {
             let data = self
@@ -48,16 +49,35 @@ pub trait InvertedIndexReader: Send + Sync {
     }
 
     /// Retrieves metadata of all inverted indices stored within the blob.
-    async fn metadata(&mut self) -> Result<Arc<InvertedIndexMetas>>;
+    async fn metadata(&self) -> Result<Arc<InvertedIndexMetas>>;
 
     /// Retrieves the finite state transducer (FST) map from the given offset and size.
-    async fn fst(&mut self, offset: u64, size: u32) -> Result<FstMap> {
+    async fn fst(&self, offset: u64, size: u32) -> Result<FstMap> {
         let fst_data = self.range_read(offset, size).await?;
         FstMap::new(fst_data).context(DecodeFstSnafu)
     }
 
+    /// Retrieves the multiple finite state transducer (FST) maps from the given ranges.
+    async fn fst_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<FstMap>> {
+        self.read_vec(ranges)
+            .await?
+            .into_iter()
+            .map(|bytes| FstMap::new(bytes.to_vec()).context(DecodeFstSnafu))
+            .collect::<Result<Vec<_>>>()
+    }
+
     /// Retrieves the bitmap from the given offset and size.
-    async fn bitmap(&mut self, offset: u64, size: u32) -> Result<BitVec> {
+    async fn bitmap(&self, offset: u64, size: u32) -> Result<BitVec> {
         self.range_read(offset, size).await.map(BitVec::from_vec)
+    }
+
+    /// Retrieves the multiple bitmaps from the given ranges.
+    async fn bitmap_deque(&mut self, ranges: &[Range<u64>]) -> Result<VecDeque<BitVec>> {
+        Ok(self
+            .read_vec(ranges)
+            .await?
+            .into_iter()
+            .map(|bytes| BitVec::from_slice(bytes.as_ref()))
+            .collect::<VecDeque<_>>())
     }
 }

@@ -96,7 +96,8 @@ macro_rules! http_tests {
                 test_otlp_metrics,
                 test_otlp_traces,
                 test_otlp_logs,
-                test_loki_logs,
+                test_loki_pb_logs,
+                test_loki_json_logs,
             );
         )*
     };
@@ -1670,7 +1671,17 @@ pub async fn test_otlp_metrics(store_type: StorageType) {
     let client = TestClient::new(app);
 
     // write metrics data
-    let res = send_req(&client, vec![], "/v1/otlp/v1/metrics", body.clone(), false).await;
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )],
+        "/v1/otlp/v1/metrics",
+        body.clone(),
+        false,
+    )
+    .await;
     assert_eq!(StatusCode::OK, res.status());
 
     // select metrics data
@@ -1682,7 +1693,17 @@ pub async fn test_otlp_metrics(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
 
     // write metrics data with gzip
-    let res = send_req(&client, vec![], "/v1/otlp/v1/metrics", body.clone(), true).await;
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )],
+        "/v1/otlp/v1/metrics",
+        body.clone(),
+        true,
+    )
+    .await;
     assert_eq!(StatusCode::OK, res.status());
 
     // select metrics data again
@@ -1713,7 +1734,17 @@ pub async fn test_otlp_traces(store_type: StorageType) {
     let client = TestClient::new(app);
 
     // write traces data
-    let res = send_req(&client, vec![], "/v1/otlp/v1/traces", body.clone(), false).await;
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )],
+        "/v1/otlp/v1/traces",
+        body.clone(),
+        false,
+    )
+    .await;
     assert_eq!(StatusCode::OK, res.status());
 
     // select traces data
@@ -1734,7 +1765,17 @@ pub async fn test_otlp_traces(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
 
     // write traces data with gzip
-    let res = send_req(&client, vec![], "/v1/otlp/v1/traces", body.clone(), true).await;
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )],
+        "/v1/otlp/v1/traces",
+        body.clone(),
+        true,
+    )
+    .await;
     assert_eq!(StatusCode::OK, res.status());
 
     // select traces data again
@@ -1765,10 +1806,16 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         // write log data
         let res = send_req(
             &client,
-            vec![(
-                HeaderName::from_static("x-greptime-log-table-name"),
-                HeaderValue::from_static("logs1"),
-            )],
+            vec![
+                (
+                    HeaderName::from_static("content-type"),
+                    HeaderValue::from_static("application/x-protobuf"),
+                ),
+                (
+                    HeaderName::from_static("x-greptime-log-table-name"),
+                    HeaderValue::from_static("logs1"),
+                ),
+            ],
             "/v1/otlp/v1/logs?db=public",
             body.clone(),
             false,
@@ -1784,6 +1831,10 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         let res = send_req(
             &client,
             vec![
+                (
+                    HeaderName::from_static("content-type"),
+                    HeaderValue::from_static("application/x-protobuf"),
+                ),
                 (
                     HeaderName::from_static("x-greptime-log-table-name"),
                     HeaderValue::from_static("logs"),
@@ -1813,9 +1864,9 @@ pub async fn test_otlp_logs(store_type: StorageType) {
     guard.remove_all().await;
 }
 
-pub async fn test_loki_logs(store_type: StorageType) {
+pub async fn test_loki_pb_logs(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_loke_logs").await;
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_loki_pb_logs").await;
 
     let client = TestClient::new(app);
 
@@ -1848,6 +1899,14 @@ pub async fn test_loki_logs(store_type: StorageType) {
                 HeaderValue::from_static("application/x-protobuf"),
             ),
             (
+                HeaderName::from_static("content-encoding"),
+                HeaderValue::from_static("snappy"),
+            ),
+            (
+                HeaderName::from_static("accept-encoding"),
+                HeaderValue::from_static("identity"),
+            ),
+            (
                 HeaderName::from_static(GREPTIME_LOG_TABLE_NAME_HEADER_NAME),
                 HeaderValue::from_static("loki_table_name"),
             ),
@@ -1862,7 +1921,7 @@ pub async fn test_loki_logs(store_type: StorageType) {
     // test schema
     let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"service\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  \\\"wadaxi\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"service\\\", \\\"source\\\", \\\"wadaxi\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
     validate_data(
-        "loki_schema",
+        "loki_pb_schema",
         &client,
         "show create table loki_table_name;",
         expected,
@@ -1872,7 +1931,75 @@ pub async fn test_loki_logs(store_type: StorageType) {
     // test content
     let expected = r#"[[1730976830000000000,"this is a log message","test","integration","do anything"],[1730976830000000000,"this is a log message","test","integration","do anything"]]"#;
     validate_data(
-        "loki_content",
+        "loki_pb_content",
+        &client,
+        "select * from loki_table_name;",
+        expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_loki_json_logs(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_loki_json_logs").await;
+
+    let client = TestClient::new(app);
+
+    let body = r#"
+{
+  "streams": [
+    {
+      "stream": {
+        "source": "test"
+      },
+      "values": [
+          [ "1735901380059465984", "this is line one" ],
+          [ "1735901398478897920", "this is line two" ]
+      ]
+    }
+  ]
+}
+    "#;
+
+    let body = body.as_bytes().to_vec();
+
+    // write plain to loki
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/json"),
+            ),
+            (
+                HeaderName::from_static(GREPTIME_LOG_TABLE_NAME_HEADER_NAME),
+                HeaderValue::from_static("loki_table_name"),
+            ),
+        ],
+        "/v1/loki/api/v1/push",
+        body,
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    // test schema
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"source\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    validate_data(
+        "loki_json_schema",
+        &client,
+        "show create table loki_table_name;",
+        expected,
+    )
+    .await;
+
+    // test content
+    let expected = "[[1735901380059465984,\"this is line one\",\"test\"],[1735901398478897920,\"this is line two\",\"test\"]]";
+    validate_data(
+        "loki_json_content",
         &client,
         "select * from loki_table_name;",
         expected,
@@ -1901,9 +2028,7 @@ async fn send_req(
     body: Vec<u8>,
     with_gzip: bool,
 ) -> TestResponse {
-    let mut req = client
-        .post(path)
-        .header("content-type", "application/x-protobuf");
+    let mut req = client.post(path);
 
     for (k, v) in headers {
         req = req.header(k, v);

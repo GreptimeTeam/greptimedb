@@ -15,7 +15,6 @@
 //! Utilities to mock version.
 
 use std::collections::HashMap;
-use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use api::v1::value::ValueData;
