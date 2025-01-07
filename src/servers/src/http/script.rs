@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{Query, RawBody, State};
+use axum::extract::{Query, State};
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -52,7 +52,7 @@ macro_rules! unwrap_or_json_err {
 pub async fn scripts(
     State(state): State<ApiState>,
     Query(params): Query<ScriptQuery>,
-    RawBody(body): RawBody,
+    body: Bytes,
 ) -> HttpResponse {
     if let Some(script_handler) = &state.script_handler {
         let catalog = params

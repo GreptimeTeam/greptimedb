@@ -27,7 +27,7 @@ use axum::extract::{FromRequest, Multipart, Path, Query, State};
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::{async_trait, BoxError, Extension, Json};
+use axum::{BoxError, Extension, Json};
 use axum_extra::TypedHeader;
 use bytes::Bytes;
 use common_query::prelude::GREPTIME_TIMESTAMP;

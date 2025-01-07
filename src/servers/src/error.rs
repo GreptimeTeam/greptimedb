@@ -39,7 +39,7 @@ pub enum Error {
     AddressBind {
         addr: SocketAddr,
         #[snafu(source)]
-        error: hyper::Error,
+        error: std::io::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -215,6 +215,12 @@ pub enum Error {
     Hyper {
         #[snafu(source)]
         error: hyper::Error,
+    },
+
+    #[snafu(display("Axum error"))]
+    Axum {
+        #[snafu(source)]
+        error: axum::Error,
     },
 
     #[snafu(display("Invalid OpenTSDB Json request"))]
@@ -600,7 +606,8 @@ impl ErrorExt for Error {
             | TcpIncoming { .. }
             | BuildHttpResponse { .. }
             | Arrow { .. }
-            | FileWatch { .. } => StatusCode::Internal,
+            | FileWatch { .. }
+            | Axum { .. } => StatusCode::Internal,
 
             AddressBind { .. }
             | AlreadyStarted { .. }

@@ -23,6 +23,7 @@ use auth::UserProviderRef;
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::DefaultBodyLimit;
 use axum::response::{IntoResponse, Json, Response};
+use axum::serve::ListenerExt;
 use axum::{middleware, routing, BoxError, Router};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
@@ -48,7 +49,10 @@ use tower_http::trace::TraceLayer;
 use self::authorize::AuthState;
 use self::result::table_result::TableResponse;
 use crate::configurator::ConfiguratorRef;
-use crate::error::{AddressBindSnafu, AlreadyStartedSnafu, Error, HyperSnafu, Result, ToJsonSnafu};
+use crate::error::{
+    AddressBindSnafu, AlreadyStartedSnafu, AxumSnafu, Error, HyperSnafu, InternalIoSnafu, Result,
+    ToJsonSnafu,
+};
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::prometheus::{
     build_info_query, format_query, instant_query, label_values_query, labels_query, parse_query,
@@ -687,18 +691,16 @@ impl HttpServer {
         router
             // middlewares
             .layer(
-                ServiceBuilder::new()
-                    .layer(HandleErrorLayer::new(handle_error))
-                    // disable on failure tracing. because printing out isn't very helpful,
-                    // and we have impl IntoResponse for Error. It will print out more detailed error messages
-                    .layer(TraceLayer::new_for_http().on_failure(()))
-                    .option_layer(timeout_layer)
-                    .option_layer(body_limit_layer)
-                    // auth layer
-                    .layer(middleware::from_fn_with_state(
-                        AuthState::new(self.user_provider.clone()),
-                        authorize::check_http_auth,
-                    )),
+                ServiceBuilder::new().layer(HandleErrorLayer::new(handle_error)), // // disable on failure tracing. because printing out isn't very helpful,
+                                                                                  // // and we have impl IntoResponse for Error. It will print out more detailed error messages
+                                                                                  // .layer(TraceLayer::new_for_http().on_failure(()))
+                                                                                  // .option_layer(timeout_layer)
+                                                                                  // .option_layer(body_limit_layer)
+                                                                                  // // auth layer
+                                                                                  // .layer(middleware::from_fn_with_state(
+                                                                                  //     AuthState::new(self.user_provider.clone()),
+                                                                                  //     authorize::check_http_auth,
+                                                                                  // )),
             )
             // Handlers for debug, we don't expect a timeout.
             .nest(
@@ -876,7 +878,7 @@ impl Server for HttpServer {
 
     async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
         let (tx, rx) = oneshot::channel();
-        let server = {
+        let serve = {
             let mut shutdown_tx = self.shutdown_tx.lock().await;
             ensure!(
                 shutdown_tx.is_none(),
@@ -888,30 +890,41 @@ impl Server for HttpServer {
                 app = configurator.config_http(app);
             }
             let app = self.build(app);
-            let server = axum::Server::try_bind(&listening)
-                .with_context(|_| AddressBindSnafu { addr: listening })?
-                .tcp_nodelay(true)
-                // Enable TCP keepalive to close the dangling established connections.
-                // It's configured to let the keepalive probes first send after the connection sits
-                // idle for 59 minutes, and then send every 10 seconds for 6 times.
-                // So the connection will be closed after roughly 1 hour.
-                .tcp_keepalive(Some(Duration::from_secs(59 * 60)))
-                .tcp_keepalive_interval(Some(Duration::from_secs(10)))
-                .tcp_keepalive_retries(Some(6))
-                .serve(app.into_make_service());
+            let listener = tokio::net::TcpListener::bind(listening)
+                .await
+                .context(AddressBindSnafu { addr: listening })?
+                .tap_io(|tcp_stream| {
+                    if let Err(e) = tcp_stream.set_nodelay(true) {
+                        error!(e; "Failed to set TCP_NODELAY on incoming connection");
+                    }
+                });
+            let serve = axum::serve(listener, app.into_make_service());
+
+            // FIXME(yingwen): Support keepalive.
+            // let server = axum::Server::try_bind(&listening)
+            //     .with_context(|_| AddressBindSnafu { addr: listening })?
+            //     .tcp_nodelay(true)
+            //     // Enable TCP keepalive to close the dangling established connections.
+            //     // It's configured to let the keepalive probes first send after the connection sits
+            //     // idle for 59 minutes, and then send every 10 seconds for 6 times.
+            //     // So the connection will be closed after roughly 1 hour.
+            //     .tcp_keepalive(Some(Duration::from_secs(59 * 60)))
+            //     .tcp_keepalive_interval(Some(Duration::from_secs(10)))
+            //     .tcp_keepalive_retries(Some(6))
+            //     .serve(app.into_make_service());
 
             *shutdown_tx = Some(tx);
 
-            server
+            serve
         };
-        let listening = server.local_addr();
+        let listening = serve.local_addr().context(InternalIoSnafu)?;
         info!("HTTP server is bound to {}", listening);
 
         common_runtime::spawn_global(async move {
-            if let Err(e) = server
+            if let Err(e) = serve
                 .with_graceful_shutdown(rx.map(drop))
                 .await
-                .context(HyperSnafu)
+                .context(InternalIoSnafu)
             {
                 error!(e; "Failed to shutdown http server");
             }

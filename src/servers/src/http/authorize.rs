@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use ::auth::UserProviderRef;
-use axum::extract::State;
-use axum::http::{self, Request, StatusCode};
+use axum::extract::{Request, State};
+use axum::http::{self, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use base64::prelude::BASE64_STANDARD;
@@ -114,10 +114,10 @@ pub async fn inner_auth<B>(
     }
 }
 
-pub async fn check_http_auth<B>(
+pub async fn check_http_auth(
     State(auth_state): State<AuthState>,
-    req: Request<B>,
-    next: Next<B>,
+    req: Request,
+    next: Next,
 ) -> Response {
     match inner_auth(auth_state.user_provider, req).await {
         Ok(req) => next.run(req).await,

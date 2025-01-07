@@ -108,7 +108,7 @@ tokio-util.workspace = true
 tonic.workspace = true
 tonic-reflection = "0.12"
 tower = { workspace = true, features = ["full"] }
-tower-http = { version = "0.4", features = ["full"] }
+tower-http = { version = "0.5", features = ["full"] }
 urlencoding = "2.1"
 uuid.workspace = true
 zstd.workspace = true
