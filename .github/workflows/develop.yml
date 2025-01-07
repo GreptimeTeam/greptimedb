@@ -100,7 +100,7 @@ jobs:
       - name: Build greptime binaries
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
-        run: cargo gc -- --bin greptime --bin sqlness-runner
+        run: cargo gc -- --bin greptime --features pg_kvbackend --bin sqlness-runner
       - name: Pack greptime binaries
         shell: bash
         run: |
