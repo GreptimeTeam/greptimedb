@@ -47,7 +47,7 @@ use tokio::sync::{broadcast, watch, Mutex, RwLock};
 pub(crate) use crate::adapter::node_context::FlownodeContext;
 use crate::adapter::table_source::ManagedTableSource;
 use crate::adapter::util::relation_desc_to_column_schemas_with_fallback;
-use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
+pub(crate) use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
 use crate::df_optimizer::sql_to_flow_plan;
 use crate::error::{EvalSnafu, ExternalSnafu, InternalSnafu, InvalidQuerySnafu, UnexpectedSnafu};
@@ -87,6 +87,7 @@ pub struct FlownodeOptions {
     pub mode: Mode,
     pub cluster_id: Option<u64>,
     pub node_id: Option<u64>,
+    pub num_workers: usize,
     pub grpc: GrpcOptions,
     pub meta_client: Option<MetaClientOptions>,
     pub logging: LoggingOptions,
@@ -100,6 +101,7 @@ impl Default for FlownodeOptions {
             mode: servers::Mode::Standalone,
             cluster_id: None,
             node_id: None,
+            num_workers: 2,
             grpc: GrpcOptions::default().with_addr("127.0.0.1:3004"),
             meta_client: None,
             logging: LoggingOptions::default(),
@@ -181,15 +183,20 @@ impl FlowWorkerManager {
     }
 
     /// Create a flownode manager with one worker
-    pub fn new_with_worker<'s>(
+    pub fn new_with_workers<'s>(
         node_id: Option<u32>,
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
-    ) -> (Self, Worker<'s>) {
+        num_workers: usize,
+    ) -> (Self, Vec<Worker<'s>>) {
         let mut zelf = Self::new(node_id, query_engine, table_meta);
-        let (handle, worker) = create_worker();
-        zelf.add_worker_handle(handle);
-        (zelf, worker)
+        let mut workers = Vec::new();
+        for _ in 0..num_workers {
+            let (handle, worker) = create_worker();
+            zelf.add_worker_handle(handle);
+            workers.push(worker);
+        }
+        (zelf, workers)
     }
 
     /// add a worker handler to manager, meaning this corresponding worker is under it's manage
@@ -830,6 +837,7 @@ impl FlowWorkerManager {
             .write()
             .await
             .insert(flow_id, err_collector.clone());
+        // TODO(discord9): load balance?
         let handle = &self.worker_handles[0].lock().await;
         let create_request = worker::Request::Create {
             flow_id,
