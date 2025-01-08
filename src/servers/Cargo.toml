@@ -24,8 +24,8 @@ arrow-schema.workspace = true
 async-trait = "0.1"
 auth.workspace = true
 axum = { workspace = true, features = ["multipart"] }
-axum-extra.workspace = true
-axum-macros = "0.3.8"
+axum-extra = { version = "0.10", features = ["typed-header"] }
+axum-macros = "0.4"
 base64.workspace = true
 bytes.workspace = true
 catalog.workspace = true
@@ -67,7 +67,7 @@ itertools.workspace = true
 json5 = "0.4"
 jsonb.workspace = true
 lazy_static.workspace = true
-loki-api = "0.1"
+loki-api = { git = "https://github.com/shuiyisong/tracing-loki", branch = "chore/prost_version" }
 mime_guess = "2.0"
 notify.workspace = true
 object-pool = "0.5"

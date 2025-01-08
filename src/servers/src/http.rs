@@ -20,14 +20,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use auth::UserProviderRef;
-use axum::error_handling::HandleErrorLayer;
 use axum::extract::DefaultBodyLimit;
-use axum::response::{IntoResponse, Json, Response};
+use axum::response::{IntoResponse, Response};
 use axum::serve::ListenerExt;
-use axum::{middleware, routing, BoxError, Router};
+use axum::{middleware, routing, Router};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
-use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatch;
 use common_telemetry::{error, info};
 use common_time::timestamp::TimeUnit;
@@ -50,8 +48,7 @@ use self::authorize::AuthState;
 use self::result::table_result::TableResponse;
 use crate::configurator::ConfiguratorRef;
 use crate::error::{
-    AddressBindSnafu, AlreadyStartedSnafu, AxumSnafu, Error, HyperSnafu, InternalIoSnafu, Result,
-    ToJsonSnafu,
+    AddressBindSnafu, AlreadyStartedSnafu, Error, InternalIoSnafu, Result, ToJsonSnafu,
 };
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::prometheus::{
@@ -636,6 +633,7 @@ impl HttpServerBuilder {
 }
 
 impl HttpServer {
+    /// Gets the router and adds necessary root routes (health, status, dashboard).
     pub fn make_app(&self) -> Router {
         let mut router = {
             let router = self.router.lock().unwrap();
@@ -671,6 +669,8 @@ impl HttpServer {
         router
     }
 
+    /// Attaches middlewares and debug routes to the router.
+    /// Callers should call this method after [HttpServer::make_app()].
     pub fn build(&self, router: Router) -> Router {
         let timeout_layer = if self.options.timeout != Duration::default() {
             Some(ServiceBuilder::new().layer(DynamicTimeoutLayer::new(self.options.timeout)))
@@ -691,16 +691,17 @@ impl HttpServer {
         router
             // middlewares
             .layer(
-                ServiceBuilder::new().layer(HandleErrorLayer::new(handle_error)), // // disable on failure tracing. because printing out isn't very helpful,
-                                                                                  // // and we have impl IntoResponse for Error. It will print out more detailed error messages
-                                                                                  // .layer(TraceLayer::new_for_http().on_failure(()))
-                                                                                  // .option_layer(timeout_layer)
-                                                                                  // .option_layer(body_limit_layer)
-                                                                                  // // auth layer
-                                                                                  // .layer(middleware::from_fn_with_state(
-                                                                                  //     AuthState::new(self.user_provider.clone()),
-                                                                                  //     authorize::check_http_auth,
-                                                                                  // )),
+                ServiceBuilder::new()
+                    // disable on failure tracing. because printing out isn't very helpful,
+                    // and we have impl IntoResponse for Error. It will print out more detailed error messages
+                    .layer(TraceLayer::new_for_http().on_failure(()))
+                    .option_layer(timeout_layer)
+                    .option_layer(body_limit_layer)
+                    // auth layer
+                    .layer(middleware::from_fn_with_state(
+                        AuthState::new(self.user_provider.clone()),
+                        authorize::check_http_auth,
+                    )),
             )
             // Handlers for debug, we don't expect a timeout.
             .nest(
@@ -741,11 +742,7 @@ impl HttpServer {
                 routing::delete(event::delete_pipeline),
             )
             .route("/pipelines/dryrun", routing::post(event::pipeline_dryrun))
-            .layer(
-                ServiceBuilder::new()
-                    .layer(HandleErrorLayer::new(handle_error))
-                    .layer(RequestDecompressionLayer::new()),
-            )
+            .layer(ServiceBuilder::new().layer(RequestDecompressionLayer::new()))
             .with_state(log_state)
     }
 
@@ -824,11 +821,7 @@ impl HttpServer {
         Router::new()
             .route("/write", routing::post(influxdb_write_v1))
             .route("/api/v2/write", routing::post(influxdb_write_v2))
-            .layer(
-                ServiceBuilder::new()
-                    .layer(HandleErrorLayer::new(handle_error))
-                    .layer(RequestDecompressionLayer::new()),
-            )
+            .layer(ServiceBuilder::new().layer(RequestDecompressionLayer::new()))
             .route("/ping", routing::get(influxdb_ping))
             .route("/health", routing::get(influxdb_health))
             .with_state(influxdb_handler)
@@ -845,11 +838,7 @@ impl HttpServer {
             .route("/v1/metrics", routing::post(otlp::metrics))
             .route("/v1/traces", routing::post(otlp::traces))
             .route("/v1/logs", routing::post(otlp::logs))
-            .layer(
-                ServiceBuilder::new()
-                    .layer(HandleErrorLayer::new(handle_error))
-                    .layer(RequestDecompressionLayer::new()),
-            )
+            .layer(ServiceBuilder::new().layer(RequestDecompressionLayer::new()))
             .with_state(otlp_handler)
     }
 
@@ -901,6 +890,9 @@ impl Server for HttpServer {
             let serve = axum::serve(listener, app.into_make_service());
 
             // FIXME(yingwen): Support keepalive.
+            // See:
+            // - https://github.com/tokio-rs/axum/discussions/2939
+            // - https://stackoverflow.com/questions/73069718/how-do-i-keep-alive-tokiotcpstream-in-rust
             // let server = axum::Server::try_bind(&listening)
             //     .with_context(|_| AddressBindSnafu { addr: listening })?
             //     .tcp_nodelay(true)
@@ -935,15 +927,6 @@ impl Server for HttpServer {
     fn name(&self) -> &str {
         HTTP_SERVER
     }
-}
-
-/// handle error middleware
-async fn handle_error(err: BoxError) -> Json<HttpResponse> {
-    error!(err; "Unhandled internal error: {}", err.to_string());
-    Json(HttpResponse::Error(ErrorResponse::from_error_message(
-        StatusCode::Unexpected,
-        format!("Unhandled internal error: {err}"),
-    )))
 }
 
 #[cfg(test)]

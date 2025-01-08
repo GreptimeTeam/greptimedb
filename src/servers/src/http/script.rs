@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::body::Bytes;
 use axum::extract::{Query, State};
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::ext::ErrorExt;
@@ -24,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use session::context::QueryContext;
 use snafu::ResultExt;
 
-use crate::error::{HyperSnafu, InvalidUtf8ValueSnafu};
+use crate::error::InvalidUtf8ValueSnafu;
 use crate::http::result::error_result::ErrorResponse;
 use crate::http::{ApiState, GreptimedbV1Response, HttpResponse};
 
@@ -52,7 +53,7 @@ macro_rules! unwrap_or_json_err {
 pub async fn scripts(
     State(state): State<ApiState>,
     Query(params): Query<ScriptQuery>,
-    body: Bytes,
+    bytes: Bytes,
 ) -> HttpResponse {
     if let Some(script_handler) = &state.script_handler {
         let catalog = params
@@ -69,8 +70,6 @@ pub async fn scripts(
         if name.is_none() || name.unwrap().is_empty() {
             json_err!("invalid name", StatusCode::InvalidArguments);
         }
-
-        let bytes = unwrap_or_json_err!(hyper::body::to_bytes(body).await.context(HyperSnafu));
 
         let script =
             unwrap_or_json_err!(String::from_utf8(bytes.to_vec()).context(InvalidUtf8ValueSnafu));

@@ -98,7 +98,7 @@ pub async fn route_write_without_metric_engine_and_strict_mode(
     query: Query<RemoteWriteQuery>,
     extension: Extension<QueryContext>,
     content_encoding: TypedHeader<headers::ContentEncoding>,
-    raw_body: Body,
+    raw_body: Bytes,
 ) -> Result<impl IntoResponse> {
     remote_write_impl(
         handler,
@@ -122,7 +122,7 @@ pub async fn remote_write(
     query: Query<RemoteWriteQuery>,
     extension: Extension<QueryContext>,
     content_encoding: TypedHeader<headers::ContentEncoding>,
-    raw_body: Body,
+    raw_body: Bytes,
 ) -> Result<impl IntoResponse> {
     remote_write_impl(
         handler,
@@ -146,7 +146,7 @@ pub async fn remote_write_without_strict_mode(
     query: Query<RemoteWriteQuery>,
     extension: Extension<QueryContext>,
     content_encoding: TypedHeader<headers::ContentEncoding>,
-    raw_body: Body,
+    raw_body: Bytes,
 ) -> Result<impl IntoResponse> {
     remote_write_impl(
         handler,
@@ -165,7 +165,7 @@ async fn remote_write_impl(
     Query(params): Query<RemoteWriteQuery>,
     Extension(mut query_ctx): Extension<QueryContext>,
     content_encoding: TypedHeader<headers::ContentEncoding>,
-    body: Body,
+    body: Bytes,
     is_strict_mode: bool,
     is_metric_engine: bool,
 ) -> Result<impl IntoResponse> {
@@ -225,7 +225,7 @@ pub async fn remote_read(
     State(handler): State<PromStoreProtocolHandlerRef>,
     Query(params): Query<RemoteWriteQuery>,
     Extension(mut query_ctx): Extension<QueryContext>,
-    body: Body,
+    body: Bytes,
 ) -> Result<PromStoreResponse> {
     let db = params.db.clone().unwrap_or_default();
     query_ctx.set_channel(Channel::Prometheus);
@@ -249,13 +249,10 @@ fn try_decompress(is_zstd: bool, body: &[u8]) -> Result<Bytes> {
 
 async fn decode_remote_write_request(
     is_zstd: bool,
-    body: Body,
+    body: Bytes,
     is_strict_mode: bool,
 ) -> Result<(RowInsertRequests, usize)> {
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
-    let body = axum::body::to_bytes(body, usize::MAX)
-        .await
-        .context(error::AxumSnafu)?;
 
     // due to vmagent's limitation, there is a chance that vmagent is
     // sending content type wrong so we have to apply a fallback with decoding
@@ -277,11 +274,7 @@ async fn decode_remote_write_request(
     Ok(request.as_row_insert_requests())
 }
 
-async fn decode_remote_read_request(body: Body) -> Result<ReadRequest> {
-    let body = axum::body::to_bytes(body, usize::MAX)
-        .await
-        .context(error::AxumSnafu)?;
-
+async fn decode_remote_read_request(body: Bytes) -> Result<ReadRequest> {
     let buf = snappy_decompress(&body[..])?;
 
     ReadRequest::decode(&buf[..]).context(error::DecodePromRemoteRequestSnafu)

@@ -880,7 +880,6 @@ async fn retrieve_label_values_from_record_batch(
 /// Returns the metric name if a single metric is referenced, otherwise None.
 fn retrieve_metric_name_from_promql(query: &str) -> Option<String> {
     let promql_expr = promql_parser::parser::parse(query).ok()?;
-    // promql_expr_to_metric_name(&promql_expr)
 
     struct MetricNameVisitor {
         metric_name: Option<String>,

@@ -32,17 +32,12 @@
 
 use std::convert::TryFrom;
 use std::net::{SocketAddr, TcpListener};
-use std::str::FromStr;
 
-use axum::body::HttpBody;
-use axum::BoxError;
+use axum::Router;
 use bytes::Bytes;
 use common_telemetry::info;
 use http::header::{HeaderName, HeaderValue};
-use http::{Request, StatusCode};
-use hyper::service::Service;
-use hyper::{Body, Server};
-use tower::make::Shared;
+use http::StatusCode;
 
 /// Test client to Axum servers.
 pub struct TestClient {
@@ -52,22 +47,15 @@ pub struct TestClient {
 
 impl TestClient {
     /// Create a new test client.
-    pub fn new<S, ResBody>(svc: S) -> Self
-    where
-        S: Service<Request<Body>, Response = http::Response<ResBody>> + Clone + Send + 'static,
-        ResBody: HttpBody + Send + 'static,
-        ResBody::Data: Send,
-        ResBody::Error: Into<BoxError>,
-        S::Future: Send,
-        S::Error: Into<BoxError>,
-    {
+    pub fn new(svc: Router) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("Could not bind ephemeral socket");
         let addr = listener.local_addr().unwrap();
         info!("Listening on {}", addr);
 
         tokio::spawn(async move {
-            let server = Server::from_tcp(listener).unwrap().serve(Shared::new(svc));
-            server.await.expect("server error");
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+
+            axum::serve(listener, svc).await.expect("server error");
         });
 
         let client = reqwest::Client::builder()
@@ -170,13 +158,6 @@ impl RequestBuilder {
         HeaderValue: TryFrom<V>,
         <HeaderValue as TryFrom<V>>::Error: Into<http::Error>,
     {
-        // TODO(tisonkun): revert once http bump to 1.x
-        let key: HeaderName = key.try_into().map_err(Into::into).unwrap();
-        let key = reqwest::header::HeaderName::from_bytes(key.as_ref()).unwrap();
-
-        let value: HeaderValue = value.try_into().map_err(Into::into).unwrap();
-        let value = reqwest::header::HeaderValue::from_bytes(value.as_bytes()).unwrap();
-
         self.builder = self.builder.header(key, value);
 
         self
@@ -225,14 +206,7 @@ impl TestResponse {
 
     /// Get the response headers.
     pub fn headers(&self) -> http::HeaderMap {
-        // TODO(tisonkun): revert once http bump to 1.x
-        let mut headers = http::HeaderMap::new();
-        for (key, value) in self.response.headers() {
-            let key = HeaderName::from_str(key.as_str()).unwrap();
-            let value = HeaderValue::from_bytes(value.as_bytes()).unwrap();
-            headers.insert(key, value);
-        }
-        headers
+        self.response.headers().clone()
     }
 
     /// Get the response in chunks.

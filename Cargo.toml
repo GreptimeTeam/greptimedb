@@ -98,8 +98,8 @@ arrow-ipc = { version = "53.0.0", default-features = false, features = ["lz4", "
 arrow-schema = { version = "53.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
+# Remember to update axum-extra, axum-macros when updating axum
 axum = "0.8"
-axum-extra = { version = "0.9", features = ["typed-header"] }
 base64 = "0.21"
 bigdecimal = "0.4.2"
 bitflags = "2.4.1"

@@ -865,7 +865,6 @@ dependencies = [
  "tower 0.5.2",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -938,7 +937,6 @@ dependencies = [
  "sync_wrapper 1.0.1",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -963,21 +961,19 @@ dependencies = [
 
 [[package]]
 name = "axum-extra"
-version = "0.9.6"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c794b30c904f0a1c2fb7740f7df7f7972dfaa14ef6f57cb6178dc63e5dca2f04"
+checksum = "460fc6f625a1f7705c6cf62d0d070794e94668988b1c38111baeec177c715f7b"
 dependencies = [
- "axum 0.7.9",
- "axum-core 0.4.5",
+ "axum 0.8.1",
+ "axum-core 0.5.0",
  "bytes",
- "fastrand",
  "futures-util",
  "headers",
  "http 1.1.0",
  "http-body 1.0.1",
  "http-body-util",
  "mime",
- "multer",
  "pin-project-lite",
  "serde",
  "tower 0.5.2",
@@ -987,11 +983,10 @@ dependencies = [
 
 [[package]]
 name = "axum-macros"
-version = "0.3.8"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdca6a10ecad987bda04e95606ef85a5417dcaac1a78455242d72e031e2b6b62"
+checksum = "57d123550fa8d071b7255cb0cc04dc302baa6c8c4a79f55701552684d8399bce"
 dependencies = [
- "heck 0.4.1",
  "proc-macro2",
  "quote",
  "syn 2.0.90",
@@ -6509,6 +6504,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "loki-api"
+version = "0.1.2"
+source = "git+https://github.com/shuiyisong/tracing-loki?branch=chore%2Fprost_version#ad135292a77b6ce638d126571804c19fdaa36215"
+dependencies = [
+ "prost 0.13.3",
+ "prost-types 0.13.3",
+]
+
+[[package]]
 name = "lrlex"
 version = "0.13.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11252,7 +11256,7 @@ dependencies = [
  "json5",
  "jsonb",
  "lazy_static",
- "loki-api",
+ "loki-api 0.1.2 (git+https://github.com/shuiyisong/tracing-loki?branch=chore%2Fprost_version)",
  "mime_guess",
  "mysql_async",
  "notify",
@@ -12669,7 +12673,7 @@ dependencies = [
  "futures-util",
  "hex",
  "itertools 0.10.5",
- "loki-api",
+ "loki-api 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "meta-client",
  "meta-srv",
  "moka",

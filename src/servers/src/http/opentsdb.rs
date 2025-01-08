@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::body::Body;
+use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::StatusCode as HttpStatusCode;
 use axum::{Extension, Json};
@@ -76,7 +76,7 @@ pub async fn put(
     State(opentsdb_handler): State<OpentsdbProtocolHandlerRef>,
     Query(params): Query<HashMap<String, String>>,
     Extension(mut ctx): Extension<QueryContext>,
-    body: Body,
+    body: Bytes,
 ) -> Result<(HttpStatusCode, Json<OpentsdbPutResponse>)> {
     let summary = params.contains_key("summary");
     let details = params.contains_key("details");
@@ -125,10 +125,7 @@ pub async fn put(
     Ok(response)
 }
 
-async fn parse_data_points(body: Body) -> Result<Vec<DataPointRequest>> {
-    let body = axum::body::to_bytes(body)
-        .await
-        .context(error::HyperSnafu)?;
+async fn parse_data_points(body: Bytes) -> Result<Vec<DataPointRequest>> {
     let data_points = serde_json::from_slice::<OneOrMany<DataPointRequest>>(&body[..])
         .context(error::InvalidOpentsdbJsonRequestSnafu)?;
     Ok(data_points.into())
