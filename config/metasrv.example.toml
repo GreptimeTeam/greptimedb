@@ -7,6 +7,9 @@ bind_addr = "127.0.0.1:3002"
 ## The communication server address for frontend and datanode to connect to metasrv,  "127.0.0.1:3002" by default for localhost.
 server_addr = "127.0.0.1:3002"
 
+## Auto detect server address.
+auto_server_addr = false
+
 ## Store server address default to etcd store.
 ## For postgres store, the format is:
 ## "password=password dbname=postgres user=postgres host=localhost port=5432"

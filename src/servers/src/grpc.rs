@@ -56,6 +56,7 @@ type TonicResult<T> = std::result::Result<T, Status>;
 pub struct GrpcOptions {
     pub addr: String,
     pub hostname: String,
+    pub auto_hostname: bool,
     /// Max gRPC receiving(decoding) message size
     pub max_recv_message_size: ReadableSize,
     /// Max gRPC sending(encoding) message size
@@ -65,11 +66,31 @@ pub struct GrpcOptions {
     pub tls: TlsOption,
 }
 
+impl GrpcOptions {
+    /// Detect hostname if `auto_hostname` is true.
+    pub fn detect_hostname(&mut self) {
+        if self.auto_hostname {
+            match local_ip_address::local_ip() {
+                Ok(ip) => {
+                    let detected_addr =
+                        format!("{}:{}", ip, self.addr.split(':').last().unwrap_or("4001"));
+                    info!("Using detected: {} as server address", detected_addr);
+                    self.hostname = detected_addr;
+                }
+                Err(e) => {
+                    error!("Failed to detect local ip address: {}", e);
+                }
+            }
+        }
+    }
+}
+
 impl Default for GrpcOptions {
     fn default() -> Self {
         Self {
             addr: "127.0.0.1:4001".to_string(),
-            hostname: "127.0.0.1".to_string(),
+            hostname: "127.0.0.1:4001".to_string(),
+            auto_hostname: false,
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
             runtime_size: 8,
