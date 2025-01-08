@@ -189,6 +189,13 @@ lazy_static! {
             &[METRIC_DB_LABEL]
         )
         .unwrap();
+    pub static ref METRIC_ELASTICSEARCH_LOGS_DOCS_COUNT: IntCounterVec = register_int_counter_vec!(
+        "greptime_servers_elasticsearch_logs_docs_count",
+        "servers elasticsearch logs docs count",
+        &[METRIC_DB_LABEL]
+    )
+    .unwrap();
+
     pub static ref METRIC_HTTP_LOGS_TRANSFORM_ELAPSED: HistogramVec =
         register_histogram_vec!(
             "greptime_servers_http_logs_transform_elapsed",

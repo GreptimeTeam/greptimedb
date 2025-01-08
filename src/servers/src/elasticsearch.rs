@@ -34,6 +34,9 @@ use crate::error::{
 use crate::http::event::{
     ingest_logs_inner, LogIngesterQueryParams, LogState, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
+use crate::metrics::{
+    METRIC_ELASTICSEARCH_LOGS_DOCS_COUNT, METRIC_ELASTICSEARCH_LOGS_INGESTION_ELAPSED,
+};
 
 // The headers for every response of Elasticsearch API.
 static ELASTICSEARCH_HEADERS: Lazy<HeaderMap> = Lazy::new(|| {
@@ -97,9 +100,11 @@ pub async fn handle_bulk_api(
     // The `schema` is already set in the query_ctx in auth process.
     query_ctx.set_channel(Channel::Elasticsearch);
 
+    let db = params.db.unwrap_or_else(|| "public".to_string());
+
     // Record the ingestion time histogram.
-    let _timer = crate::metrics::METRIC_ELASTICSEARCH_LOGS_INGESTION_ELAPSED
-        .with_label_values(&[params.db.unwrap_or_else(|| "public".to_string()).as_str()])
+    let _timer = METRIC_ELASTICSEARCH_LOGS_INGESTION_ELAPSED
+        .with_label_values(&[&db])
         .start_timer();
 
     let table = if let Some(table) = params.table {
@@ -164,6 +169,11 @@ pub async fn handle_bulk_api(
             )),
         );
     }
+
+    // Record the number of documents ingested.
+    METRIC_ELASTICSEARCH_LOGS_DOCS_COUNT
+        .with_label_values(&[&db])
+        .inc_by(log_num as u64);
 
     (
         StatusCode::OK,
