@@ -109,7 +109,7 @@ fn make_test_app(tx: mpsc::Sender<String>) -> Router {
 
     let instance = Arc::new(DummyInstance { tx });
     let server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(instance.clone(), None)
+        .with_sql_handler(instance.clone())
         .with_opentsdb_handler(instance)
         .build();
     server.build(server.make_app())

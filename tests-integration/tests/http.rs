@@ -80,7 +80,6 @@ macro_rules! http_tests {
                 test_prometheus_promql_api,
                 test_prom_http_api,
                 test_metrics_api,
-                test_scripts_api,
                 test_health_api,
                 test_status_api,
                 test_config_api,
@@ -718,46 +717,6 @@ pub async fn test_metrics_api(store_type: StorageType) {
     let body = res.text().await;
     // Comment in the metrics text.
     assert!(body.contains("# HELP"));
-    guard.remove_all().await;
-}
-
-pub async fn test_scripts_api(store_type: StorageType) {
-    common_telemetry::init_default_ut_logging();
-    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "script_api").await;
-    let client = TestClient::new(app);
-
-    let res = client
-        .post("/v1/scripts?db=schema_test&name=test")
-        .body(
-            r#"
-@copr(sql='select number from numbers limit 10', args=['number'], returns=['n'])
-def test(n) -> vector[f64]:
-    return n + 1;
-"#,
-        )
-        .send()
-        .await;
-    assert_eq!(res.status(), StatusCode::OK);
-
-    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
-    assert!(body.output().is_empty());
-
-    // call script
-    let res = client
-        .post("/v1/run-script?db=schema_test&name=test")
-        .send()
-        .await;
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
-    let output = body.output();
-    assert_eq!(output.len(), 1);
-    assert_eq!(
-        output[0],
-        serde_json::from_value::<GreptimeQueryOutput>(json!({
-            "records":{"schema":{"column_schemas":[{"name":"n","data_type":"Float64"}]},"rows":[[1.0],[2.0],[3.0],[4.0],[5.0],[6.0],[7.0],[8.0],[9.0],[10.0]],"total_rows": 10}
-        })).unwrap()
-    );
-
     guard.remove_all().await;
 }
 

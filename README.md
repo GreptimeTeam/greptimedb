@@ -139,7 +139,7 @@ Check the prerequisite:
 * [Rust toolchain](https://www.rust-lang.org/tools/install) (nightly)
 * [Protobuf compiler](https://grpc.io/docs/protoc-installation/) (>= 3.15)
 * C/C++ building essentials, including `gcc`/`g++`/`autoconf` and glibc library (eg. `libc6-dev` on Ubuntu and `glibc-devel` on Fedora)
-* Python toolchain (optional): Required only if built with PyO3 backend. More details for compiling with PyO3 can be found in its [documentation](https://pyo3.rs/v0.18.1/building_and_distribution#configuring-the-python-version).
+* Python toolchain (optional): Required only if using some test scripts.
 
 Build GreptimeDB binary:
 

@@ -238,14 +238,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[cfg(feature = "python")]
-    #[snafu(display("Failed to start script manager"))]
-    StartScriptManager {
-        #[snafu(implicit)]
-        location: Location,
-        source: script::error::Error,
-    },
-
     #[snafu(display("Failed to insert value into table: {}", table_name))]
     Insert {
         table_name: String,
@@ -393,9 +385,6 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Error::FindTableRoute { source, .. } => source.status_code(),
-
-            #[cfg(feature = "python")]
-            Error::StartScriptManager { source, .. } => source.status_code(),
 
             Error::TableOperation { source, .. } => source.status_code(),
 

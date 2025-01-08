@@ -117,7 +117,7 @@ fn make_test_app(tx: Arc<mpsc::Sender<(String, String)>>, db_name: Option<&str>)
         })
     }
     let server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(instance.clone(), None)
+        .with_sql_handler(instance.clone())
         .with_user_provider(Arc::new(user_provider))
         .with_influxdb_handler(instance)
         .build();
