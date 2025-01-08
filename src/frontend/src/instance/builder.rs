@@ -43,7 +43,6 @@ use crate::frontend::FrontendOptions;
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::region_query::FrontendRegionQueryHandler;
 use crate::instance::Instance;
-use crate::script::ScriptExecutor;
 
 /// The frontend [`Instance`] builder.
 pub struct FrontendBuilder {
@@ -173,10 +172,6 @@ impl FrontendBuilder {
         )
         .query_engine();
 
-        let script_executor = Arc::new(
-            ScriptExecutor::new(self.catalog_manager.clone(), query_engine.clone()).await?,
-        );
-
         let statement_executor = Arc::new(StatementExecutor::new(
             self.catalog_manager.clone(),
             query_engine.clone(),
@@ -199,7 +194,6 @@ impl FrontendBuilder {
         Ok(Instance {
             options: self.options,
             catalog_manager: self.catalog_manager,
-            script_executor,
             pipeline_operator,
             statement_executor,
             query_engine,

@@ -50,24 +50,7 @@ pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + S
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
 pub type PromStoreProtocolHandlerRef = Arc<dyn PromStoreProtocolHandler + Send + Sync>;
 pub type OpenTelemetryProtocolHandlerRef = Arc<dyn OpenTelemetryProtocolHandler + Send + Sync>;
-pub type ScriptHandlerRef = Arc<dyn ScriptHandler + Send + Sync>;
 pub type PipelineHandlerRef = Arc<dyn PipelineHandler + Send + Sync>;
-
-#[async_trait]
-pub trait ScriptHandler {
-    async fn insert_script(
-        &self,
-        query_ctx: QueryContextRef,
-        name: &str,
-        script: &str,
-    ) -> Result<()>;
-    async fn execute_script(
-        &self,
-        query_ctx: QueryContextRef,
-        name: &str,
-        params: HashMap<String, String>,
-    ) -> Result<Output>;
-}
 
 #[async_trait]
 pub trait InfluxdbLineProtocolHandler {

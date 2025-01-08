@@ -26,9 +26,9 @@ runs:
         cp ${{ inputs.target-file }} ${{ inputs.artifacts-dir }}
 
     # The compressed artifacts will use the following layout:
-    # greptime-linux-amd64-pyo3-v0.3.0sha256sum
-    # greptime-linux-amd64-pyo3-v0.3.0.tar.gz
-    #   greptime-linux-amd64-pyo3-v0.3.0
+    # greptime-linux-amd64-v0.3.0sha256sum
+    # greptime-linux-amd64-v0.3.0.tar.gz
+    #   greptime-linux-amd64-v0.3.0
     #   └── greptime
     - name: Compress artifacts and calculate checksum
       working-directory: ${{ inputs.working-dir }}

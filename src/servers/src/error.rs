@@ -149,27 +149,11 @@ pub enum Error {
     #[snafu(display("Failed to describe statement"))]
     DescribeStatement { source: BoxedError },
 
-    #[snafu(display("Failed to insert script with name: {}", name))]
-    InsertScript {
-        name: String,
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
-    },
-
     #[snafu(display("Pipeline management api error"))]
     Pipeline {
         source: pipeline::error::Error,
         #[snafu(implicit)]
         location: Location,
-    },
-
-    #[snafu(display("Failed to execute script by name: {}", name))]
-    ExecuteScript {
-        name: String,
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
     },
 
     #[snafu(display("Not supported: {}", feat))]
@@ -607,9 +591,7 @@ impl ErrorExt for Error {
 
             CollectRecordbatch { .. } => StatusCode::EngineExecuteQuery,
 
-            InsertScript { source, .. }
-            | ExecuteScript { source, .. }
-            | ExecuteQuery { source, .. }
+            ExecuteQuery { source, .. }
             | ExecutePlan { source, .. }
             | ExecuteGrpcQuery { source, .. }
             | ExecuteGrpcRequest { source, .. }

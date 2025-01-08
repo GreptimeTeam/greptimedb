@@ -55,7 +55,6 @@ members = [
     "src/promql",
     "src/puffin",
     "src/query",
-    "src/script",
     "src/servers",
     "src/session",
     "src/sql",
@@ -79,8 +78,6 @@ clippy.dbg_macro = "warn"
 clippy.implicit_clone = "warn"
 clippy.readonly_write_lock = "allow"
 rust.unknown_lints = "deny"
-# Remove this after https://github.com/PyO3/pyo3/issues/4094
-rust.non_local_definitions = "allow"
 rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 
 [workspace.dependencies]
@@ -253,7 +250,6 @@ plugins = { path = "src/plugins" }
 promql = { path = "src/promql" }
 puffin = { path = "src/puffin" }
 query = { path = "src/query" }
-script = { path = "src/script" }
 servers = { path = "src/servers" }
 session = { path = "src/session" }
 sql = { path = "src/sql" }

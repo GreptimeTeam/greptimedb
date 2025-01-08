@@ -2042,18 +2042,19 @@ mod test {
         }
     }
 
-    #[test]
-    fn test_find_successive_runs() {
-        impl From<(i32, i32, Option<i32>, Option<i32>)> for SucRun<i32> {
-            fn from((offset, len, min_val, max_val): (i32, i32, Option<i32>, Option<i32>)) -> Self {
-                Self {
-                    offset: offset as usize,
-                    len: len as usize,
-                    first_val: min_val,
-                    last_val: max_val,
-                }
+    impl From<(i32, i32, Option<i32>, Option<i32>)> for SucRun<i32> {
+        fn from((offset, len, min_val, max_val): (i32, i32, Option<i32>, Option<i32>)) -> Self {
+            Self {
+                offset: offset as usize,
+                len: len as usize,
+                first_val: min_val,
+                last_val: max_val,
             }
         }
+    }
+
+    #[test]
+    fn test_find_successive_runs() {
         let testcases = vec![
             (
                 vec![Some(1), Some(1), Some(2), Some(1), Some(3)],

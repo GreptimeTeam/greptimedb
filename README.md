@@ -138,7 +138,8 @@ Check the prerequisite:
 
 * [Rust toolchain](https://www.rust-lang.org/tools/install) (nightly)
 * [Protobuf compiler](https://grpc.io/docs/protoc-installation/) (>= 3.15)
-* Python toolchain (optional): Required only if built with PyO3 backend. More detail for compiling with PyO3 can be found in its [documentation](https://pyo3.rs/v0.18.1/building_and_distribution#configuring-the-python-version).
+* C/C++ building essentials, including `gcc`/`g++`/`autoconf` and glibc library (eg. `libc6-dev` on Ubuntu and `glibc-devel` on Fedora)
+* Python toolchain (optional): Required only if using some test scripts.
 
 Build GreptimeDB binary:
 
@@ -173,7 +174,7 @@ Our official Grafana dashboard for monitoring GreptimeDB is available at [grafan
 
 ## Project Status
 
-GreptimeDB is currently in Beta. We are targeting GA (General Availability) with v1.0 release by Early 2025. 
+GreptimeDB is currently in Beta. We are targeting GA (General Availability) with v1.0 release by Early 2025.
 
 While in Beta, GreptimeDB is already:
 

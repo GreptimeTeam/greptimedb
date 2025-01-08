@@ -68,7 +68,7 @@ use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
     InfluxdbLineProtocolHandlerRef, OpenTelemetryProtocolHandlerRef, OpentsdbProtocolHandlerRef,
-    PipelineHandlerRef, PromStoreProtocolHandlerRef, ScriptHandlerRef,
+    PipelineHandlerRef, PromStoreProtocolHandlerRef,
 };
 use crate::server::Server;
 
@@ -88,7 +88,6 @@ pub mod pprof;
 pub mod prom_store;
 pub mod prometheus;
 pub mod result;
-pub mod script;
 mod timeout;
 
 pub(crate) use timeout::DynamicTimeoutLayer;
@@ -462,7 +461,6 @@ impl From<JsonResponse> for HttpResponse {
 #[derive(Clone)]
 pub struct ApiState {
     pub sql_handler: ServerSqlQueryHandlerRef,
-    pub script_handler: Option<ScriptHandlerRef>,
 }
 
 #[derive(Clone)]
@@ -488,15 +486,8 @@ impl HttpServerBuilder {
         }
     }
 
-    pub fn with_sql_handler(
-        self,
-        sql_handler: ServerSqlQueryHandlerRef,
-        script_handler: Option<ScriptHandlerRef>,
-    ) -> Self {
-        let sql_router = HttpServer::route_sql(ApiState {
-            sql_handler,
-            script_handler,
-        });
+    pub fn with_sql_handler(self, sql_handler: ServerSqlQueryHandlerRef) -> Self {
+        let sql_router = HttpServer::route_sql(ApiState { sql_handler });
 
         Self {
             router: self
@@ -753,8 +744,6 @@ impl HttpServer {
                 "/promql",
                 routing::get(handler::promql).post(handler::promql),
             )
-            .route("/scripts", routing::post(script::scripts))
-            .route("/run-script", routing::post(script::run_script))
             .with_state(api_state)
     }
 
@@ -1026,7 +1015,7 @@ mod test {
         let instance = Arc::new(DummyInstance { _tx: tx });
         let sql_instance = ServerSqlQueryHandlerAdapter::arc(instance.clone());
         let server = HttpServerBuilder::new(HttpOptions::default())
-            .with_sql_handler(sql_instance, None)
+            .with_sql_handler(sql_instance)
             .build();
         server.build(server.make_app()).route(
             "/test/timeout",

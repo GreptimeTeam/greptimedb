@@ -253,31 +253,6 @@ where
     }
 }
 
-/// ScriptInterceptor can track life cycle of a script request and customize or
-/// abort its execution at given point.
-pub trait ScriptInterceptor {
-    type Error: ErrorExt;
-
-    /// Called before script request is actually executed.
-    fn pre_execute(&self, _name: &str, _query_ctx: QueryContextRef) -> Result<(), Self::Error> {
-        Ok(())
-    }
-}
-
-pub type ScriptInterceptorRef<E> = Arc<dyn ScriptInterceptor<Error = E> + Send + Sync + 'static>;
-
-impl<E: ErrorExt> ScriptInterceptor for Option<ScriptInterceptorRef<E>> {
-    type Error = E;
-
-    fn pre_execute(&self, name: &str, query_ctx: QueryContextRef) -> Result<(), Self::Error> {
-        if let Some(this) = self {
-            this.pre_execute(name, query_ctx)
-        } else {
-            Ok(())
-        }
-    }
-}
-
 /// LineProtocolInterceptor can track life cycle of a line protocol request
 /// and customize or abort its execution at given point.
 #[async_trait]
