@@ -91,23 +91,23 @@ pub fn find_time_window_lower_bound(
     current: common_time::Timestamp,
 ) -> Result<Option<common_time::Timestamp>> {
     let all_ref_columns = expr.get_all_ref_columns();
-    if !all_ref_columns.contains(&ts_col_idx) {
+
+    ensure!(
+        all_ref_columns.contains(&ts_col_idx),
         UnexpectedSnafu {
             reason: format!(
                 "Expected column {} to be referenced in expression {expr:?}",
                 ts_col_idx
             ),
         }
-        .fail()?
-    }
-    if all_ref_columns.len() > 1 {
-        UnexpectedSnafu {
-            reason: format!(
-                "Expect only one column to be referenced in expression {expr:?}, found {all_ref_columns:?}"
-            ),
-        }
-        .fail()?
-    }
+    );
+
+    ensure!(all_ref_columns.len() == 1, UnexpectedSnafu {
+        reason: format!(
+            "Expect only one column to be referenced in expression {expr:?}, found {all_ref_columns:?}"
+        ),
+    });
+
     let permute_map = BTreeMap::from([(ts_col_idx, 0usize)]);
 
     let mut rewrote_expr = expr.clone();
@@ -236,7 +236,7 @@ mod test {
         ];
         let engine = create_test_query_engine();
 
-        for (sql, current, expected) in &testcases[3..] {
+        for (sql, current, expected) in &testcases {
             let plan = sql_to_substrait(engine.clone(), sql).await;
             let mut ctx = create_test_ctx();
             let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
