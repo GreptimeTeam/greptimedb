@@ -29,19 +29,6 @@ lazy_static! {
     pub static ref GRPC_HANDLE_PROMQL_ELAPSED: Histogram = GRPC_HANDLE_QUERY_ELAPSED
         .with_label_values(&["promql"]);
 
-    /// Timer of handling scripts in the script handler.
-    pub static ref HANDLE_SCRIPT_ELAPSED: HistogramVec = register_histogram_vec!(
-        "greptime_frontend_handle_script_elapsed",
-        "Elapsed time of handling scripts in the script handler",
-        &["type"],
-        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
-    )
-    .unwrap();
-    pub static ref INSERT_SCRIPTS_ELAPSED: Histogram = HANDLE_SCRIPT_ELAPSED
-        .with_label_values(&["insert"]);
-    pub static ref EXECUTE_SCRIPT_ELAPSED: Histogram = HANDLE_SCRIPT_ELAPSED
-        .with_label_values(&["execute"]);
-
     /// The number of OpenTelemetry metrics send by frontend node.
     pub static ref OTLP_METRICS_ROWS: IntCounter = register_int_counter!(
         "greptime_frontend_otlp_metrics_rows",
