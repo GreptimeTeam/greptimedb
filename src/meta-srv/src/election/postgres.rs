@@ -426,10 +426,7 @@ impl PgElection {
         let key = key.as_bytes();
         let res = self
             .client
-            .query(
-                &self.sql_set.get_value_with_lease,
-                &[&key as &(dyn ToSql + Sync)],
-            )
+            .query(&self.sql_set.get_value_with_lease, &[&key])
             .await
             .context(PostgresExecutionSnafu)?;
 
@@ -471,10 +468,7 @@ impl PgElection {
         let key_prefix = format!("{}%", key_prefix).as_bytes().to_vec();
         let res = self
             .client
-            .query(
-                &self.sql_set.get_value_with_lease_by_prefix,
-                &[(&key_prefix as &(dyn ToSql + Sync))],
-            )
+            .query(&self.sql_set.get_value_with_lease_by_prefix, &[&key_prefix])
             .await
             .context(PostgresExecutionSnafu)?;
 
@@ -506,8 +500,8 @@ impl PgElection {
             .execute(
                 &self.sql_set.update_value_with_lease,
                 &[
-                    &key as &(dyn ToSql + Sync),
-                    &prev as &(dyn ToSql + Sync),
+                    &key,
+                    &prev,
                     &updated,
                     &(self.candidate_lease_ttl_secs as f64),
                 ],
@@ -534,11 +528,7 @@ impl PgElection {
     ) -> Result<bool> {
         let key = key.as_bytes();
         let lease_ttl_secs = lease_ttl_secs as f64;
-        let params: Vec<&(dyn ToSql + Sync)> = vec![
-            &key as &(dyn ToSql + Sync),
-            &value as &(dyn ToSql + Sync),
-            &lease_ttl_secs,
-        ];
+        let params: Vec<&(dyn ToSql + Sync)> = vec![&key, &value, &lease_ttl_secs];
         let res = self
             .client
             .query(&self.sql_set.put_value_with_lease, &params)
@@ -553,7 +543,7 @@ impl PgElection {
         let key = key.as_bytes();
         let res = self
             .client
-            .query(&self.sql_set.delete_value, &[&key as &(dyn ToSql + Sync)])
+            .query(&self.sql_set.delete_value, &[&key])
             .await
             .context(PostgresExecutionSnafu)?;
 
