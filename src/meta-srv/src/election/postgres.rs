@@ -733,7 +733,7 @@ mod tests {
     use tokio_postgres::{Client, NoTls};
 
     use super::*;
-    use crate::error::PostgresExecutionSnafu;
+    use crate::{election::CANDIDATE_KEEP_ALIVE_INTERVAL_SECS, error::PostgresExecutionSnafu};
 
     async fn create_postgres_client(table_name: Option<&str>) -> Result<Client> {
         let endpoint = env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
@@ -869,8 +869,11 @@ mod tests {
             start_time_ms: 0,
         };
 
+        pg_election.register_candidate(&node_info).await.unwrap();
+
         loop {
-            pg_election.register_candidate(&node_info).await.unwrap();
+            pg_election.candidate_keep_alive(&node_info).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(CANDIDATE_KEEP_ALIVE_INTERVAL_SECS)).await;
         }
     }
 
