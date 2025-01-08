@@ -19,7 +19,7 @@ use arrow_schema::SortOptions;
 use common_recordbatch::OrderOption;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeVisitor};
-use datafusion_common::{Column, Result as DataFusionResult};
+use datafusion_common::{Column, Result};
 use datafusion_expr::expr::Sort;
 use datafusion_expr::{utils, Expr, LogicalPlan};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
@@ -38,37 +38,32 @@ use crate::dummy_catalog::DummyTableProvider;
 pub struct ScanHintRule;
 
 impl OptimizerRule for ScanHintRule {
-    fn try_optimize(
-        &self,
-        plan: &LogicalPlan,
-        _config: &dyn OptimizerConfig,
-    ) -> DataFusionResult<Option<LogicalPlan>> {
-        Self::optimize(plan).map(Some)
-    }
-
     fn name(&self) -> &str {
         "ScanHintRule"
+    }
+
+    fn rewrite(
+        &self,
+        plan: LogicalPlan,
+        _config: &dyn OptimizerConfig,
+    ) -> Result<Transformed<LogicalPlan>> {
+        Self::optimize(plan)
     }
 }
 
 impl ScanHintRule {
-    fn optimize(plan: &LogicalPlan) -> DataFusionResult<LogicalPlan> {
+    fn optimize(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
         let mut visitor = ScanHintVisitor::default();
         let _ = plan.visit(&mut visitor)?;
 
         if visitor.need_rewrite() {
-            plan.clone()
-                .transform_down(&|plan| Self::set_hints(plan, &visitor))
-                .map(|x| x.data)
+            plan.transform_down(&|plan| Self::set_hints(plan, &visitor))
         } else {
-            Ok(plan.clone())
+            Ok(Transformed::no(plan))
         }
     }
 
-    fn set_hints(
-        plan: LogicalPlan,
-        visitor: &ScanHintVisitor,
-    ) -> DataFusionResult<Transformed<LogicalPlan>> {
+    fn set_hints(plan: LogicalPlan, visitor: &ScanHintVisitor) -> Result<Transformed<LogicalPlan>> {
         match &plan {
             LogicalPlan::TableScan(table_scan) => {
                 let mut transformed = false;
@@ -176,7 +171,7 @@ struct ScanHintVisitor {
 impl TreeNodeVisitor<'_> for ScanHintVisitor {
     type Node = LogicalPlan;
 
-    fn f_down(&mut self, node: &Self::Node) -> DataFusionResult<TreeNodeRecursion> {
+    fn f_down(&mut self, node: &Self::Node) -> Result<TreeNodeRecursion> {
         // Get order requirement from sort plan
         if let LogicalPlan::Sort(sort) = node {
             self.order_expr = Some(sort.expr.clone());
