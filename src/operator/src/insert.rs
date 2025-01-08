@@ -212,8 +212,8 @@ impl Inserter {
             .await?;
 
         let name2info = table_infos
-            .iter()
-            .map(|(_, info)| (info.name.clone(), info.clone()))
+            .values()
+            .map(|info| (info.name.clone(), info.clone()))
             .collect::<HashMap<_, _>>();
         let inserts = RowToRegion::new(
             name2info,
@@ -260,8 +260,8 @@ impl Inserter {
             )
             .await?;
         let name2info = table_infos
-            .iter()
-            .map(|(_, info)| (info.name.clone(), info.clone()))
+            .values()
+            .map(|info| (info.name.clone(), info.clone()))
             .collect::<HashMap<_, _>>();
         let inserts = RowToRegion::new(name2info, instant_table_ids, &self.partition_manager)
             .convert(requests)
