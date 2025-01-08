@@ -1,6 +1,14 @@
 -- should not able to create pg_catalog
 create database pg_catalog;
 
+-- session_user because session_user is based on the current user so is not null is for test 
+-- SQLNESS PROTOCOL POSTGRES
+SELECT session_user is not null;
+
+-- session_user and current_schema
+-- SQLNESS PROTOCOL POSTGRES
+select current_schema();
+
 -- make sure all the pg_catalog tables are only visible to postgres
 select * from pg_catalog.pg_class;
 select * from pg_catalog.pg_namespace;
