@@ -293,7 +293,6 @@
 | `data_home` | String | `/tmp/metasrv/` | The working home directory. |
 | `bind_addr` | String | `127.0.0.1:3002` | The bind address of metasrv. |
 | `server_addr` | String | `127.0.0.1:3002` | The communication server address for frontend and datanode to connect to metasrv,  "127.0.0.1:3002" by default for localhost. |
-| `auto_server_addr` | Bool | `false` | Auto detect server address. |
 | `store_addrs` | Array | -- | Store server address default to etcd store.<br/>For postgres store, the format is:<br/>"password=password dbname=postgres user=postgres host=localhost port=5432"<br/>For etcd store, the format is:<br/>"127.0.0.1:2379" |
 | `store_key_prefix` | String | `""` | If it's not empty, the metasrv will store all data with this key prefix. |
 | `backend` | String | `etcd_store` | The datastore for meta server.<br/>Available values:<br/>- `etcd_store` (default value)<br/>- `memory_store`<br/>- `postgres_store` |
@@ -380,7 +379,6 @@
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.addr` | String | `127.0.0.1:3001` | The address to bind the gRPC server. |
 | `grpc.hostname` | String | `127.0.0.1:3001` | The hostname advertised to the metasrv,<br/>and used for connections from outside the host |
-| `grpc.auto_hostname` | Bool | `false` | Auto detect hostname. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
 | `grpc.max_recv_message_size` | String | `512MB` | The maximum receive message size for gRPC server. |
 | `grpc.max_send_message_size` | String | `512MB` | The maximum send message size for gRPC server. |
@@ -539,7 +537,6 @@
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.addr` | String | `127.0.0.1:6800` | The address to bind the gRPC server. |
 | `grpc.hostname` | String | `127.0.0.1` | The hostname advertised to the metasrv,<br/>and used for connections from outside the host |
-| `grpc.auto_hostname` | Bool | `false` | Auto detect hostname. |
 | `grpc.runtime_size` | Integer | `2` | The number of server worker threads. |
 | `grpc.max_recv_message_size` | String | `512MB` | The maximum receive message size for gRPC server. |
 | `grpc.max_send_message_size` | String | `512MB` | The maximum send message size for gRPC server. |

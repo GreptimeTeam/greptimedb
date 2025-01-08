@@ -12,8 +12,6 @@ addr = "127.0.0.1:6800"
 ## The hostname advertised to the metasrv,
 ## and used for connections from outside the host
 hostname = "127.0.0.1"
-## Auto detect hostname.
-auto_hostname = false
 ## The number of server worker threads.
 runtime_size = 2
 ## The maximum receive message size for gRPC server.

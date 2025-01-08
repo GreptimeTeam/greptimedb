@@ -92,8 +92,6 @@ pub struct MetasrvOptions {
     pub bind_addr: String,
     /// The address the server advertises to the clients.
     pub server_addr: String,
-    /// Auto detect server address.
-    pub auto_server_addr: bool,
     /// The address of the store, e.g., etcd.
     pub store_addrs: Vec<String>,
     /// The type of selector.
@@ -148,8 +146,8 @@ impl Default for MetasrvOptions {
     fn default() -> Self {
         Self {
             bind_addr: "127.0.0.1:3002".to_string(),
-            server_addr: "127.0.0.1:3002".to_string(),
-            auto_server_addr: false,
+            // If server_addr is not set, the server will use the local ip address as the server address.
+            server_addr: String::new(),
             store_addrs: vec!["127.0.0.1:2379".to_string()],
             selector: SelectorType::default(),
             use_memory_store: false,
@@ -190,13 +188,13 @@ impl Configurable for MetasrvOptions {
 impl MetasrvOptions {
     /// Detect server address if `auto_server_addr` is true.
     pub fn detect_server_addr(&mut self) {
-        if self.auto_server_addr {
+        if self.server_addr.is_empty() {
             match local_ip_address::local_ip() {
                 Ok(ip) => {
                     let detected_addr = format!(
                         "{}:{}",
                         ip,
-                        self.bind_addr.split(':').last().unwrap_or("3002")
+                        self.bind_addr.split(':').nth(1).unwrap_or("3002")
                     );
                     info!("Using detected: {} as server address", detected_addr);
                     self.server_addr = detected_addr;
