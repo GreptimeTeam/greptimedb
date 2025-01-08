@@ -45,6 +45,8 @@ pub struct LogQuery {
     /// Filters here can only refer to the columns from the original log.
     pub filters: Vec<ColumnFilters>,
     /// Adjacent lines to return. Applies to all filters above.
+    ///
+    /// TODO: Do we need per-filter context?
     pub context: Context,
 
     // Processors
