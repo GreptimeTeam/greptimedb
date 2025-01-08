@@ -55,7 +55,6 @@ impl<'a> RowToRegion<'a> {
             let table_id = self.get_table_id(&request.table_name)?;
             let region_numbers = self.region_numbers(&request.table_name)?;
             let requests = if let Some(region_id) = match region_numbers[..] {
-                [] => Some(RegionId::new(table_id, 0)),
                 [singular] => Some(RegionId::new(table_id, singular)),
                 _ => None,
             } {
