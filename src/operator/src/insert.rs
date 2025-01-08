@@ -47,6 +47,7 @@ use store_api::metric_engine_consts::{
 };
 use store_api::mito_engine_options::{APPEND_MODE_KEY, MERGE_MODE_KEY};
 use store_api::storage::{RegionId, TableId};
+use table::metadata::TableInfoRef;
 use table::requests::{InsertRequest as TableInsertRequest, AUTO_CREATE_TABLE_KEY, TTL_KEY};
 use table::table_reference::TableReference;
 use table::TableRef;
@@ -200,11 +201,11 @@ impl Inserter {
         });
         validate_column_count_match(&requests)?;
 
-        let (table_name_to_ids, instant_table_ids) = self
+        let (tables_info, instant_table_ids) = self
             .create_or_alter_tables_on_demand(&requests, &ctx, create_type, statement_executor)
             .await?;
         let inserts = RowToRegion::new(
-            table_name_to_ids,
+            tables_info,
             instant_table_ids,
             self.partition_manager.as_ref(),
         )
@@ -236,7 +237,7 @@ impl Inserter {
             .await?;
 
         // check and create logical tables
-        let (table_name_to_ids, instant_table_ids) = self
+        let (tables_info, instant_table_ids) = self
             .create_or_alter_tables_on_demand(
                 &requests,
                 &ctx,
@@ -244,13 +245,9 @@ impl Inserter {
                 statement_executor,
             )
             .await?;
-        let inserts = RowToRegion::new(
-            table_name_to_ids,
-            instant_table_ids,
-            &self.partition_manager,
-        )
-        .convert(requests)
-        .await?;
+        let inserts = RowToRegion::new(tables_info, instant_table_ids, &self.partition_manager)
+            .convert(requests)
+            .await?;
 
         self.do_request(inserts, &ctx).await
     }
@@ -499,14 +496,14 @@ impl Inserter {
         ctx: &QueryContextRef,
         auto_create_table_type: AutoCreateTableType,
         statement_executor: &StatementExecutor,
-    ) -> Result<(HashMap<String, TableId>, HashSet<TableId>)> {
+    ) -> Result<(HashMap<String, TableInfoRef>, HashSet<TableId>)> {
         let _timer = crate::metrics::CREATE_ALTER_ON_DEMAND
             .with_label_values(&[auto_create_table_type.as_str()])
             .start_timer();
 
         let catalog = ctx.current_catalog();
         let schema = ctx.current_schema();
-        let mut table_name_to_ids = HashMap::with_capacity(requests.inserts.len());
+        let mut tables_info = HashMap::with_capacity(requests.inserts.len());
         // If `auto_create_table` hint is disabled, skip creating/altering tables.
         let auto_create_table_hint = ctx
             .extension(AUTO_CREATE_TABLE_KEY)
@@ -535,9 +532,9 @@ impl Inserter {
                 if table_info.is_ttl_instant_table() {
                     instant_table_ids.insert(table_info.table_id());
                 }
-                table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
+                tables_info.insert(table_info.name.clone(), table_info);
             }
-            return Ok((table_name_to_ids, instant_table_ids));
+            return Ok((tables_info, instant_table_ids));
         }
 
         let mut create_tables = vec![];
@@ -551,7 +548,7 @@ impl Inserter {
                     if table_info.is_ttl_instant_table() {
                         instant_table_ids.insert(table_info.table_id());
                     }
-                    table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
+                    tables_info.insert(table_info.name.clone(), table_info);
                     if let Some(alter_expr) =
                         self.get_alter_table_expr_on_demand(req, &table, ctx)?
                     {
@@ -579,7 +576,7 @@ impl Inserter {
                         if table_info.is_ttl_instant_table() {
                             instant_table_ids.insert(table_info.table_id());
                         }
-                        table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
+                        tables_info.insert(table_info.name.clone(), table_info);
                     }
                 }
                 if !alter_tables.is_empty() {
@@ -602,7 +599,7 @@ impl Inserter {
                     if table_info.is_ttl_instant_table() {
                         instant_table_ids.insert(table_info.table_id());
                     }
-                    table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
+                    tables_info.insert(table_info.name.clone(), table_info);
                 }
                 for alter_expr in alter_tables.into_iter() {
                     statement_executor
@@ -612,7 +609,7 @@ impl Inserter {
             }
         }
 
-        Ok((table_name_to_ids, instant_table_ids))
+        Ok((tables_info, instant_table_ids))
     }
 
     async fn create_physical_table_on_demand(
