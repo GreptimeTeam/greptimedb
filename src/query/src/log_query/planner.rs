@@ -86,11 +86,7 @@ impl LogQueryPlanner {
 
         // Apply projections
         if !query.columns.is_empty() {
-            let projected_columns = query
-                .columns
-                .iter()
-                .map(|column_name| col(column_name))
-                .collect::<Vec<_>>();
+            let projected_columns = query.columns.iter().map(col).collect::<Vec<_>>();
             plan_builder = plan_builder
                 .project(projected_columns)
                 .context(DataFusionPlanningSnafu)?;
