@@ -38,6 +38,9 @@ mod server;
 mod transform;
 mod utils;
 
+#[cfg(test)]
+mod test_utils;
+
 pub use adapter::{FlowWorkerManager, FlowWorkerManagerRef, FlownodeOptions};
 pub use error::{Error, Result};
 pub use server::{FlownodeBuilder, FlownodeInstance, FlownodeServer, FrontendInvoker};

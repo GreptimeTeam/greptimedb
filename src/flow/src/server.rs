@@ -440,6 +440,7 @@ impl FlownodeBuilder {
     }
 }
 
+#[derive(Clone)]
 pub struct FrontendInvoker {
     inserter: Arc<Inserter>,
     deleter: Arc<Deleter>,
@@ -548,4 +549,43 @@ impl FrontendInvoker {
     pub fn statement_executor(&self) -> Arc<StatementExecutor> {
         self.statement_executor.clone()
     }
+}
+
+/// get all flow ids in this flownode
+pub(crate) async fn get_all_flow_ids(
+    flow_metadata_manager: &FlowMetadataManagerRef,
+    catalog_manager: &CatalogManagerRef,
+    nodeid: Option<u64>,
+) -> Result<Vec<u32>, Error> {
+    let ret = if let Some(nodeid) = nodeid {
+        let flow_ids_one_node = flow_metadata_manager
+            .flownode_flow_manager()
+            .flows(nodeid)
+            .try_collect::<Vec<_>>()
+            .await
+            .context(ListFlowsSnafu { id: Some(nodeid) })?;
+        flow_ids_one_node.into_iter().map(|(id, _)| id).collect()
+    } else {
+        let all_catalogs = catalog_manager
+            .catalog_names()
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        let mut all_flow_ids = vec![];
+        for catalog in all_catalogs {
+            let flows = flow_metadata_manager
+                .flow_name_manager()
+                .flow_names(&catalog)
+                .await
+                .try_collect::<Vec<_>>()
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
+
+            all_flow_ids.extend(flows.into_iter().map(|(_, id)| id.flow_id()));
+        }
+        all_flow_ids
+    };
+
+    Ok(ret)
 }

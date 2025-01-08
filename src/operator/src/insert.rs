@@ -105,6 +105,7 @@ pub struct InstantAndNormalInsertRequests {
     /// Requests with normal ttl.
     pub normal_requests: RegionInsertRequests,
     /// Requests with ttl=instant.
+    /// Will be discarded immediately at frontend, wouldn't even insert into memtable, and only sent to flow node if needed.
     pub instant_requests: RegionInsertRequests,
 }
 
