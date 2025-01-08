@@ -47,7 +47,6 @@ use store_api::metric_engine_consts::{
 };
 use store_api::mito_engine_options::{APPEND_MODE_KEY, MERGE_MODE_KEY};
 use store_api::storage::{RegionId, TableId};
-use table::metadata::TableInfoRef;
 use table::metadata::TableInfo;
 use table::requests::{InsertRequest as TableInsertRequest, AUTO_CREATE_TABLE_KEY, TTL_KEY};
 use table::table_reference::TableReference;
@@ -206,14 +205,18 @@ impl Inserter {
         validate_column_count_match(&requests)?;
 
         let CreateAlterTableResult {
-            table_name_to_ids,
             instant_table_ids,
             table_infos,
         } = self
             .create_or_alter_tables_on_demand(&requests, &ctx, create_type, statement_executor)
             .await?;
+
+        let name2info = table_infos
+            .iter()
+            .map(|(_, info)| (info.name.clone(), info.clone()))
+            .collect::<HashMap<_, _>>();
         let inserts = RowToRegion::new(
-            tables_info,
+            name2info,
             instant_table_ids,
             self.partition_manager.as_ref(),
         )
@@ -246,7 +249,6 @@ impl Inserter {
 
         // check and create logical tables
         let CreateAlterTableResult {
-            table_name_to_ids,
             instant_table_ids,
             table_infos,
         } = self
@@ -257,7 +259,11 @@ impl Inserter {
                 statement_executor,
             )
             .await?;
-        let inserts = RowToRegion::new(tables_info, instant_table_ids, &self.partition_manager)
+        let name2info = table_infos
+            .iter()
+            .map(|(_, info)| (info.name.clone(), info.clone()))
+            .collect::<HashMap<_, _>>();
+        let inserts = RowToRegion::new(name2info, instant_table_ids, &self.partition_manager)
             .convert(requests)
             .await?;
 
@@ -525,7 +531,7 @@ impl Inserter {
 
         let catalog = ctx.current_catalog();
         let schema = ctx.current_schema();
-        let mut table_name_to_ids = HashMap::with_capacity(requests.inserts.len());
+
         let mut table_infos = HashMap::new();
         // If `auto_create_table` hint is disabled, skip creating/altering tables.
         let auto_create_table_hint = ctx
@@ -556,10 +562,8 @@ impl Inserter {
                     instant_table_ids.insert(table_info.table_id());
                 }
                 table_infos.insert(table_info.table_id(), table.table_info());
-                table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
             }
             let ret = CreateAlterTableResult {
-                table_name_to_ids,
                 instant_table_ids,
                 table_infos,
             };
@@ -578,7 +582,6 @@ impl Inserter {
                         instant_table_ids.insert(table_info.table_id());
                     }
                     table_infos.insert(table_info.table_id(), table.table_info());
-                    table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
                     if let Some(alter_expr) =
                         self.get_alter_table_expr_on_demand(req, &table, ctx)?
                     {
@@ -607,7 +610,6 @@ impl Inserter {
                             instant_table_ids.insert(table_info.table_id());
                         }
                         table_infos.insert(table_info.table_id(), table.table_info());
-                        table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
                     }
                 }
                 if !alter_tables.is_empty() {
@@ -631,7 +633,6 @@ impl Inserter {
                         instant_table_ids.insert(table_info.table_id());
                     }
                     table_infos.insert(table_info.table_id(), table.table_info());
-                    table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
                 }
                 for alter_expr in alter_tables.into_iter() {
                     statement_executor
@@ -642,7 +643,6 @@ impl Inserter {
         }
 
         Ok(CreateAlterTableResult {
-            table_name_to_ids,
             instant_table_ids,
             table_infos,
         })
@@ -910,9 +910,6 @@ fn build_create_table_expr(
 
 /// Result of `create_or_alter_tables_on_demand`.
 struct CreateAlterTableResult {
-    /// mapping from table name to table id,
-    /// where table name is the table name involved in the requests.
-    table_name_to_ids: HashMap<String, TableId>,
     /// table ids of ttl=instant tables.
     instant_table_ids: HashSet<TableId>,
     /// Table Info of the created tables.
