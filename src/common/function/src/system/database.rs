@@ -28,9 +28,11 @@ pub struct DatabaseFunction;
 
 #[derive(Clone, Debug, Default)]
 pub struct CurrentSchemaFunction;
+pub struct SessionUserFunction;
 
 const DATABASE_FUNCTION_NAME: &str = "database";
 const CURRENT_SCHEMA_FUNCTION_NAME: &str = "current_schema";
+const SESSION_USER_FUNCTION_NAME: &str = "session_user";
 
 impl Function for DatabaseFunction {
     fn name(&self) -> &str {
@@ -72,6 +74,26 @@ impl Function for CurrentSchemaFunction {
     }
 }
 
+impl Function for SessionUserFunction {
+    fn name(&self) -> &str {
+        SESSION_USER_FUNCTION_NAME
+    }
+
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::string_datatype())
+    }
+
+    fn signature(&self) -> Signature {
+        Signature::uniform(0, vec![], Volatility::Immutable)
+    }
+
+    fn eval(&self, func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+        let user = func_ctx.query_ctx.current_user();
+
+        Ok(Arc::new(StringVector::from_slice(&[user.username()])) as _)
+    }
+}
+
 impl fmt::Display for DatabaseFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "DATABASE")
@@ -81,6 +103,12 @@ impl fmt::Display for DatabaseFunction {
 impl fmt::Display for CurrentSchemaFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "CURRENT_SCHEMA")
+    }
+}
+
+impl fmt::Display for SessionUserFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SESSION_USER")
     }
 }
 
