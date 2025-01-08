@@ -220,10 +220,7 @@ impl Inserter {
         .convert(requests)
         .await?;
 
-        // Fill impure default values in the request
-        let inserts = fill_reqs_with_impure_default(&table_infos, inserts)?;
-
-        self.do_request(inserts, &ctx).await
+        self.do_request(inserts, &table_infos, &ctx).await
     }
 
     /// Handles row inserts request with metric engine.
@@ -264,9 +261,7 @@ impl Inserter {
             .convert(requests)
             .await?;
 
-        // Fill impure default values in the request
-        let inserts = fill_reqs_with_impure_default(&table_infos, inserts)?;
-        self.do_request(inserts, &ctx).await
+        self.do_request(inserts, &table_infos, &ctx).await
     }
 
     pub async fn handle_table_insert(
@@ -289,9 +284,8 @@ impl Inserter {
 
         let table_infos =
             HashMap::from_iter([(table_info.table_id(), table_info.clone())].into_iter());
-        // Fill impure default values in the request
-        let inserts = fill_reqs_with_impure_default(&table_infos, inserts)?;
-        self.do_request(inserts, &ctx).await
+
+        self.do_request(inserts, &table_infos, &ctx).await
     }
 
     pub async fn handle_statement_insert(
@@ -306,10 +300,8 @@ impl Inserter {
 
         let table_infos =
             HashMap::from_iter([(table_info.table_id(), table_info.clone())].into_iter());
-        // Fill impure default values in the request
-        let inserts = fill_reqs_with_impure_default(&table_infos, inserts)?;
 
-        self.do_request(inserts, ctx).await
+        self.do_request(inserts, &table_infos, ctx).await
     }
 }
 
@@ -317,8 +309,12 @@ impl Inserter {
     async fn do_request(
         &self,
         requests: InstantAndNormalInsertRequests,
+        table_infos: &HashMap<TableId, Arc<TableInfo>>,
         ctx: &QueryContextRef,
     ) -> Result<Output> {
+        // Fill impure default values in the request
+        let requests = fill_reqs_with_impure_default(table_infos, requests)?;
+
         let write_cost = write_meter!(
             ctx.current_catalog(),
             ctx.current_schema(),

@@ -44,7 +44,7 @@ pub struct ImpureDefaultFiller {
 impl ImpureDefaultFiller {
     pub fn new(table_info: TableInfoRef) -> Result<Self> {
         let impure_column_list = find_all_impure_columns(&table_info);
-        let pks = table_info.meta.primary_key_indices.clone();
+        let pks = &table_info.meta.primary_key_indices;
         let pk_names = pks
             .iter()
             .map(|&i| table_info.meta.schema.column_name_by_index(i).to_string())
@@ -93,6 +93,10 @@ impl ImpureDefaultFiller {
             })
             .collect();
 
+        if self.impure_columns.len() == impure_columns_in_reqs.len() {
+            return;
+        }
+
         let (schema_append, row_append): (Vec<_>, Vec<_>) = self
             .impure_columns
             .iter()
@@ -107,7 +111,7 @@ impl ImpureDefaultFiller {
 
         rows.schema.extend(schema_append);
         for row in rows.rows.iter_mut() {
-            row.values.extend(row_append.clone());
+            row.values.extend_from_slice(row_append.as_slice());
         }
     }
 }
