@@ -733,7 +733,8 @@ mod tests {
     use tokio_postgres::{Client, NoTls};
 
     use super::*;
-    use crate::{election::CANDIDATE_KEEP_ALIVE_INTERVAL_SECS, error::PostgresExecutionSnafu};
+    use crate::election::CANDIDATE_KEEP_ALIVE_INTERVAL_SECS;
+    use crate::error::PostgresExecutionSnafu;
 
     async fn create_postgres_client(table_name: Option<&str>) -> Result<Client> {
         let endpoint = env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
