@@ -164,8 +164,15 @@ impl ColumnSchema {
             .unwrap_or(false)
     }
 
-    pub fn has_fulltext_index_key(&self) -> bool {
-        self.metadata.contains_key(FULLTEXT_KEY)
+    pub fn is_fulltext_indexed(&self) -> bool {
+        self.fulltext_options()
+            .unwrap_or_default()
+            .map(|option| option.enable)
+            .unwrap_or_default()
+    }
+
+    pub fn is_skipping_indexed(&self) -> bool {
+        self.skipping_index_options().unwrap_or_default().is_some()
     }
 
     pub fn has_inverted_index_key(&self) -> bool {
