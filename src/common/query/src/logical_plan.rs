@@ -307,7 +307,7 @@ mod tests {
 Projection: person.id AS a, person.name AS b
   Filter: person.id > Int32(500)
     TableScan: person"#,
-            format!("\n{:?}", new_plan)
+            format!("\n{}", new_plan)
         );
     }
 
