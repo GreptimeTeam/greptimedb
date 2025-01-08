@@ -659,20 +659,18 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      # - uses: KyleMayes/install-llvm-action@v1
-      #   with:
-      #     version: "14.0"
       - uses: rui314/setup-mold@v1
       - name: Install toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: llvm-tools
           cache: false
-      # - name: Rust Cache
-      #   uses: Swatinem/rust-cache@v2
-      #   with:
-      #     # Shares cross multiple jobs
-      #     shared-key: "coverage-test"
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares cross multiple jobs
+          shared-key: "coverage-test"
+          save-if: ${{ github.event_name == 'merge_group' }}
       # Disabled temporarily to see performance
       # - name: Docker Cache
       #   uses: ScribeMD/docker-cache@0.5.0
