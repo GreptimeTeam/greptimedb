@@ -401,7 +401,7 @@ impl PgElection {
         key: &str,
         with_origin: bool,
     ) -> Result<Option<(String, Timestamp, Timestamp, Option<String>)>> {
-        let key = key.as_bytes().to_vec();
+        let key = key.as_bytes();
         let res = self
             .client
             .query(
@@ -477,8 +477,8 @@ impl PgElection {
     }
 
     async fn update_value_with_lease(&self, key: &str, prev: &str, updated: &str) -> Result<()> {
-        let key = key.as_bytes().to_vec();
-        let prev = prev.as_bytes().to_vec();
+        let key = key.as_bytes();
+        let prev = prev.as_bytes();
         let res = self
             .client
             .execute(
@@ -496,7 +496,7 @@ impl PgElection {
         ensure!(
             res == 1,
             UnexpectedSnafu {
-                violated: format!("Failed to update key: {}", String::from_utf8_lossy(&key)),
+                violated: format!("Failed to update key: {}", String::from_utf8_lossy(key)),
             }
         );
 
@@ -510,7 +510,7 @@ impl PgElection {
         value: &str,
         lease_ttl_secs: u64,
     ) -> Result<bool> {
-        let key = key.as_bytes().to_vec();
+        let key = key.as_bytes();
         let lease_ttl_secs = lease_ttl_secs as f64;
         let params: Vec<&(dyn ToSql + Sync)> = vec![
             &key as &(dyn ToSql + Sync),
@@ -528,7 +528,7 @@ impl PgElection {
     /// Returns `true` if the deletion is successful.
     /// Caution: Should only delete the key if the lease is expired.
     async fn delete_value(&self, key: &str) -> Result<bool> {
-        let key = key.as_bytes().to_vec();
+        let key = key.as_bytes();
         let res = self
             .client
             .query(
