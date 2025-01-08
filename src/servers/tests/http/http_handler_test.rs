@@ -13,15 +13,14 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::usize;
 
 use axum::extract::{Json, Query, State};
 use axum::http::header;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::Form;
 use bytes::Bytes;
 use headers::HeaderValue;
-use http_body::combinators::UnsyncBoxBody;
-use hyper::Response;
 use mime_guess::mime;
 use servers::http::GreptimeQueryOutput::Records;
 use servers::http::{
@@ -135,27 +134,29 @@ async fn test_sql_output_rows() {
                 );
             }
             HttpResponse::Csv(resp) => {
-                use http_body::Body as HttpBody;
-                let mut resp = resp.into_response();
+                let resp = resp.into_response();
                 assert_eq!(
                     resp.headers().get(header::CONTENT_TYPE),
                     Some(HeaderValue::from_static(mime::TEXT_CSV_UTF_8.as_ref())).as_ref(),
                 );
                 assert_eq!(
-                    resp.body_mut().data().await.unwrap().unwrap(),
-                    hyper::body::Bytes::from_static(b"4950\n"),
+                    axum::body::to_bytes(resp.into_body(), usize::MAX)
+                        .await
+                        .unwrap(),
+                    Bytes::from_static(b"4950\n"),
                 );
             }
             HttpResponse::Table(resp) => {
-                use http_body::Body as HttpBody;
-                let mut resp = resp.into_response();
+                let resp = resp.into_response();
                 assert_eq!(
                     resp.headers().get(header::CONTENT_TYPE),
                     Some(HeaderValue::from_static(mime::TEXT_PLAIN_UTF_8.as_ref())).as_ref(),
                 );
                 assert_eq!(
-                    resp.body_mut().data().await.unwrap().unwrap(),
-                    hyper::body::Bytes::from(
+                    axum::body::to_bytes(resp.into_body(), usize::MAX)
+                        .await
+                        .unwrap(),
+                    Bytes::from(
                         r#"┌─SUM(numbers.uint32s)─┐
 │ 4950                 │
 └──────────────────────┘
@@ -280,27 +281,29 @@ async fn test_sql_form() {
                 );
             }
             HttpResponse::Csv(resp) => {
-                use http_body::Body as HttpBody;
-                let mut resp = resp.into_response();
+                let resp = resp.into_response();
                 assert_eq!(
                     resp.headers().get(header::CONTENT_TYPE),
                     Some(HeaderValue::from_static(mime::TEXT_CSV_UTF_8.as_ref())).as_ref(),
                 );
                 assert_eq!(
-                    resp.body_mut().data().await.unwrap().unwrap(),
-                    hyper::body::Bytes::from_static(b"4950\n"),
+                    axum::body::to_bytes(resp.into_body(), usize::MAX)
+                        .await
+                        .unwrap(),
+                    Bytes::from_static(b"4950\n"),
                 );
             }
             HttpResponse::Table(resp) => {
-                use http_body::Body as HttpBody;
-                let mut resp = resp.into_response();
+                let resp = resp.into_response();
                 assert_eq!(
                     resp.headers().get(header::CONTENT_TYPE),
                     Some(HeaderValue::from_static(mime::TEXT_PLAIN_UTF_8.as_ref())).as_ref(),
                 );
                 assert_eq!(
-                    resp.body_mut().data().await.unwrap().unwrap(),
-                    hyper::body::Bytes::from(
+                    axum::body::to_bytes(resp.into_body(), usize::MAX)
+                        .await
+                        .unwrap(),
+                    Bytes::from(
                         r#"┌─SUM(numbers.uint32s)─┐
 │ 4950                 │
 └──────────────────────┘
@@ -399,6 +402,8 @@ async fn test_config() {
     assert_eq!(get_body(rs).await, toml_str);
 }
 
-async fn get_body(response: Response<UnsyncBoxBody<Bytes, axum::Error>>) -> Bytes {
-    hyper::body::to_bytes(response.into_body()).await.unwrap()
+async fn get_body(response: Response) -> Bytes {
+    axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap()
 }

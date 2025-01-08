@@ -1019,13 +1019,7 @@ mod test {
             .build();
         server.build(server.make_app()).route(
             "/test/timeout",
-            get(forever.layer(
-                ServiceBuilder::new()
-                    .layer(HandleErrorLayer::new(|_: BoxError| async {
-                        StatusCode::REQUEST_TIMEOUT
-                    }))
-                    .layer(timeout()),
-            )),
+            get(forever.layer(ServiceBuilder::new().layer(timeout()))),
         )
     }
 

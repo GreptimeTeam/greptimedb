@@ -136,7 +136,7 @@ mod tests {
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
     use headers::Header;
-    use hyper::{Body, Request};
+    use hyper::Request;
     use session::context::QueryContext;
 
     use crate::grpc::authorize::do_auth;
@@ -148,7 +148,7 @@ mod tests {
 
         // auth success
         let authorization_val = format!("Basic {}", STANDARD.encode("greptime:greptime"));
-        let mut req = Request::new(Body::empty());
+        let mut req = Request::new(());
         req.headers_mut()
             .insert("authorization", authorization_val.parse().unwrap());
 
@@ -159,7 +159,7 @@ mod tests {
 
         // auth failed, err: user not exist.
         let authorization_val = format!("Basic {}", STANDARD.encode("greptime2:greptime2"));
-        let mut req = Request::new(Body::empty());
+        let mut req = Request::new(());
         req.headers_mut()
             .insert("authorization", authorization_val.parse().unwrap());
 
@@ -169,19 +169,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_do_auth_without_user_provider() {
-        let mut req = Request::new(Body::empty());
+        let mut req = Request::new(());
         req.headers_mut()
             .insert("authentication", "pwd".parse().unwrap());
         let auth_result = do_auth(&mut req, None).await;
         assert!(auth_result.is_ok());
         check_req(&req, "greptime", "public", "greptime");
 
-        let mut req = Request::new(Body::empty());
+        let mut req = Request::new(());
         let auth_result = do_auth(&mut req, None).await;
         assert!(auth_result.is_ok());
         check_req(&req, "greptime", "public", "greptime");
 
-        let mut req = Request::new(Body::empty());
+        let mut req = Request::new(());
         req.headers_mut()
             .insert(GreptimeDbName::name(), "catalog-schema".parse().unwrap());
         let auth_result = do_auth(&mut req, None).await;

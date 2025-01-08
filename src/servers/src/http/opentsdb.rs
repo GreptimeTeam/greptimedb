@@ -210,24 +210,24 @@ mod test {
             }"#;
         let data_point2 = serde_json::from_str::<DataPointRequest>(raw_data_point2).unwrap();
 
-        let body = Body::from(raw_data_point1);
+        let body = Bytes::from(raw_data_point1);
         let data_points = parse_data_points(body).await.unwrap();
         assert_eq!(data_points.len(), 1);
         assert_eq!(data_points[0], data_point1);
 
-        let body = Body::from(format!("[{raw_data_point1},{raw_data_point2}]"));
+        let body = Bytes::from(format!("[{raw_data_point1},{raw_data_point2}]"));
         let data_points = parse_data_points(body).await.unwrap();
         assert_eq!(data_points.len(), 2);
         assert_eq!(data_points[0], data_point1);
         assert_eq!(data_points[1], data_point2);
 
-        let body = Body::from("");
+        let body = Bytes::from("");
         let result = parse_data_points(body).await;
         assert!(result.is_err());
         let err = result.unwrap_err().output_msg();
         assert!(err.contains("EOF while parsing a value at line 1 column 0"));
 
-        let body = Body::from("hello world");
+        let body = Bytes::from("hello world");
         let result = parse_data_points(body).await;
         assert!(result.is_err());
         let err = result.unwrap_err().output_msg();

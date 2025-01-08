@@ -97,10 +97,10 @@ impl IntoResponse for GreptimedbManageResponse {
 
 #[cfg(test)]
 mod tests {
+    use std::usize;
 
     use arrow::datatypes::ToByteSlice;
-    use http_body::Body;
-    use hyper::body::to_bytes;
+    use axum::body::to_bytes;
 
     use super::*;
 
@@ -116,16 +116,14 @@ mod tests {
             execution_time_ms: 42,
         };
 
-        let mut re = resp.into_response();
-        let data = re.data();
-
-        let data_str = format!("{:?}", data);
+        let re = resp.into_response();
+        let data_str = format!("{:?}", re);
         assert_eq!(
             data_str,
             r#"Data(Response { status: 200, version: HTTP/1.1, headers: {"content-type": "application/json", "x-greptime-format": "greptimedb_manage", "x-greptime-execution-time": "42"}, body: UnsyncBoxBody })"#
         );
 
-        let body_bytes = to_bytes(re.into_body()).await.unwrap();
+        let body_bytes = to_bytes(re.into_body(), usize::MAX).await.unwrap();
         let body_str = String::from_utf8_lossy(body_bytes.to_byte_slice());
         assert_eq!(
             body_str,

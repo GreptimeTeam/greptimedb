@@ -13,11 +13,11 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::usize;
 
 use auth::tests::MockUserProvider;
 use auth::UserProvider;
 use axum::http;
-use http_body::Body;
 use hyper::{Request, StatusCode};
 use servers::http::authorize::inner_auth;
 use session::context::QueryContext;
@@ -46,22 +46,25 @@ async fn test_http_auth() {
     let req = mock_http_request(None, None).unwrap();
     let auth_res = inner_auth(mock_user_provider.clone(), req).await;
     assert!(auth_res.is_err());
-    let mut resp = auth_res.unwrap_err();
+    let resp = auth_res.unwrap_err();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(
         b"{\"code\":7003,\"error\":\"Not found http or grpc authorization header\",\"execution_time_ms\":0}",
-        resp.data().await.unwrap().unwrap().as_ref()
+        axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap().as_ref()
     );
 
     // base64encode("username:password") == "dXNlcm5hbWU6cGFzc3dvcmQ="
     let wrong_req = mock_http_request(Some("Basic dXNlcm5hbWU6cGFzc3dvcmQ="), None).unwrap();
     let auth_res = inner_auth(mock_user_provider, wrong_req).await;
     assert!(auth_res.is_err());
-    let mut resp = auth_res.unwrap_err();
+    let resp = auth_res.unwrap_err();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(
         b"{\"code\":7000,\"error\":\"User not found, username: username\",\"execution_time_ms\":0}",
-        resp.data().await.unwrap().unwrap().as_ref(),
+        axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .as_ref()
     );
 }
 
@@ -92,11 +95,11 @@ async fn test_schema_validating() {
     .unwrap();
     let result = inner_auth(mock_user_provider, req).await;
     assert!(result.is_err());
-    let mut resp = result.unwrap_err();
+    let resp = result.unwrap_err();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(
         b"{\"code\":7005,\"error\":\"Access denied for user 'greptime' to database 'greptime-wrong'\",\"execution_time_ms\":0}",
-        resp.data().await.unwrap().unwrap().as_ref()
+        axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap().as_ref()
     );
 }
 
@@ -110,11 +113,11 @@ async fn test_whitelist_no_auth() {
     let req = mock_http_request(None, None).unwrap();
     let auth_res = inner_auth(mock_user_provider.clone(), req).await;
     assert!(auth_res.is_err());
-    let mut resp = auth_res.unwrap_err();
+    let resp = auth_res.unwrap_err();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(
         b"{\"code\":7003,\"error\":\"Not found http or grpc authorization header\",\"execution_time_ms\":0}",
-        resp.data().await.unwrap().unwrap().as_ref()
+        axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap().as_ref()
     );
 
     // try whitelist path
