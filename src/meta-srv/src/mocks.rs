@@ -25,6 +25,7 @@ use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
+use hyper_util::rt::TokioIo;
 use tonic::codec::CompressionEncoding;
 use tower::service_fn;
 
@@ -123,7 +124,7 @@ pub async fn mock(
 
             async move {
                 if let Some(client) = client {
-                    Ok(client)
+                    Ok(TokioIo::new(client))
                 } else {
                     Err(std::io::Error::new(
                         std::io::ErrorKind::Other,

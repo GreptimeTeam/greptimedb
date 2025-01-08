@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 api.workspace = true
 async-trait = "0.1"
+bytes.workspace = true
 clap.workspace = true
 client.workspace = true
 common-base.workspace = true
@@ -37,7 +38,8 @@ derive_builder.workspace = true
 etcd-client.workspace = true
 futures.workspace = true
 h2 = "0.3"
-http-body = "0.4"
+http-body-util = "0.1"
+hyper-util = { workspace = true, features = ["tokio"] }
 humantime.workspace = true
 humantime-serde.workspace = true
 itertools.workspace = true
