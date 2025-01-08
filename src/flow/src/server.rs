@@ -430,9 +430,9 @@ impl FlownodeBuilder {
                     info!("Flow Worker started in new thread");
                     worker.run();
                 });
-            let worker_handle = rx.await.map_err(|_e| {
+            let worker_handle = rx.await.map_err(|e| {
                 UnexpectedSnafu {
-                    reason: "sender is dropped, failed to create flow node manager",
+                    reason: format!("Failed to receive worker handle: {}", e),
                 }
                 .build()
             })?;

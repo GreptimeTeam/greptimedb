@@ -45,7 +45,8 @@ impl FlowWorkerManager {
             *selector = 0
         };
 
-        let handle = self.worker_handles.get(*selector).unwrap();
+        // Safety: selector is always in bound
+        let handle = &self.worker_handles[*selector];
         handle.lock().await
     }
 
