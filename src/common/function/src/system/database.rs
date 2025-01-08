@@ -92,7 +92,6 @@ impl Function for SessionUserFunction {
 
         Ok(Arc::new(StringVector::from_slice(&[user.username()])) as _)
     }
-    
 }
 
 impl fmt::Display for DatabaseFunction {
