@@ -71,8 +71,14 @@ impl GrpcOptions {
         if self.hostname.is_empty() {
             match local_ip_address::local_ip() {
                 Ok(ip) => {
-                    let detected_addr =
-                        format!("{}:{}", ip, self.addr.split(':').nth(1).unwrap_or("4001"));
+                    let detected_addr = format!(
+                        "{}:{}",
+                        ip,
+                        self.addr
+                            .split(':')
+                            .nth(1)
+                            .unwrap_or(DEFAULT_GRPC_ADDR_PORT)
+                    );
                     info!("Using detected: {} as server address", detected_addr);
                     self.hostname = detected_addr;
                 }
@@ -84,10 +90,12 @@ impl GrpcOptions {
     }
 }
 
+const DEFAULT_GRPC_ADDR_PORT: &str = "4001";
+
 impl Default for GrpcOptions {
     fn default() -> Self {
         Self {
-            addr: "127.0.0.1:4001".to_string(),
+            addr: format!("127.0.0.1:{}", DEFAULT_GRPC_ADDR_PORT),
             // If hostname is not set, the server will use the local ip address as the hostname.
             hostname: String::new(),
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,

@@ -142,10 +142,12 @@ pub struct MetasrvOptions {
     pub backend: BackendImpl,
 }
 
+const DEFAULT_METASRV_ADDR_PORT: &str = "3002";
+
 impl Default for MetasrvOptions {
     fn default() -> Self {
         Self {
-            bind_addr: "127.0.0.1:3002".to_string(),
+            bind_addr: format!("127.0.0.1:{}", DEFAULT_METASRV_ADDR_PORT),
             // If server_addr is not set, the server will use the local ip address as the server address.
             server_addr: String::new(),
             store_addrs: vec!["127.0.0.1:2379".to_string()],
@@ -194,7 +196,10 @@ impl MetasrvOptions {
                     let detected_addr = format!(
                         "{}:{}",
                         ip,
-                        self.bind_addr.split(':').nth(1).unwrap_or("3002")
+                        self.bind_addr
+                            .split(':')
+                            .nth(1)
+                            .unwrap_or(DEFAULT_METASRV_ADDR_PORT)
                     );
                     info!("Using detected: {} as server address", detected_addr);
                     self.server_addr = detected_addr;
