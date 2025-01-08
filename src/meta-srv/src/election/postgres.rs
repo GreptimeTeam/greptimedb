@@ -81,7 +81,7 @@ impl ElectionSqlFactory {
                 SELECT k, v FROM {} WHERE k = $1
             ), insert AS (
                 INSERT INTO {}
-                VALUES($1, convert_to($2 || {} || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $3, 'YYYY-MM-DD HH24:MI:SS.MS'), 'UTF8'))
+                VALUES($1, convert_to($2 || '{}' || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $3, 'YYYY-MM-DD HH24:MI:SS.MS'), 'UTF8'))
                 ON CONFLICT (k) DO NOTHING
             )
             SELECT k, v FROM prev;
@@ -100,7 +100,7 @@ impl ElectionSqlFactory {
     fn update_value_with_lease_sql(&self) -> String {
         format!(
             r#"UPDATE {} 
-               SET v = convert_to($3 || {} || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $4, 'YYYY-MM-DD HH24:MI:SS.MS'), 'UTF8')
+               SET v = convert_to($3 || '{}' || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $4, 'YYYY-MM-DD HH24:MI:SS.MS'), 'UTF8')
                WHERE k = $1 AND v = $2"#,
             self.table_name, LEASE_SEP
         )
