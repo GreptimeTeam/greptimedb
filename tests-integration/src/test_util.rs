@@ -390,10 +390,7 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
         ..Default::default()
     };
     let http_server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(
-            ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()),
-            None,
-        )
+        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()))
         .with_metrics_handler(MetricsHandler)
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
         .build();
@@ -424,10 +421,7 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
     let mut http_server = HttpServerBuilder::new(http_opts);
 
     http_server = http_server
-        .with_sql_handler(
-            ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()),
-            Some(instance.instance.clone()),
-        )
+        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()))
         .with_log_ingest_handler(instance.instance.clone(), None, None)
         .with_otlp_handler(instance.instance.clone())
         .with_greptime_config_options(instance.opts.to_toml().unwrap());
@@ -463,10 +457,7 @@ pub async fn setup_test_prom_app_with_frontend(
     let frontend_ref = instance.instance.clone();
     let is_strict_mode = true;
     let http_server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(
-            ServerSqlQueryHandlerAdapter::arc(frontend_ref.clone()),
-            Some(frontend_ref.clone()),
-        )
+        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(frontend_ref.clone()))
         .with_prom_handler(frontend_ref.clone(), true, is_strict_mode)
         .with_prometheus_handler(frontend_ref)
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())

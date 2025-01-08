@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = ["python"]
-python = ["dep:script"]
+python = []
 testing = []
 
 [lints]
@@ -52,7 +52,6 @@ prometheus.workspace = true
 prost.workspace = true
 query.workspace = true
 raft-engine.workspace = true
-script = { workspace = true, features = ["python"], optional = true }
 serde.workspace = true
 servers.workspace = true
 session.workspace = true

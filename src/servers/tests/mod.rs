@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
@@ -25,12 +24,9 @@ use datafusion_expr::LogicalPlan;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
-use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
-use script::python::{PyEngine, PyScript};
 use servers::error::{Error, NotSupportedSnafu, Result};
 use servers::query_handler::grpc::{GrpcQueryHandler, ServerGrpcQueryHandlerRef};
 use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
-use servers::query_handler::{ScriptHandler, ScriptHandlerRef};
 use session::context::QueryContextRef;
 use snafu::ensure;
 use sql::statements::statement::Statement;
@@ -41,23 +37,16 @@ mod http;
 mod interceptor;
 mod mysql;
 mod postgres;
-mod py_script;
 
 const LOCALHOST_WITH_0: &str = "127.0.0.1:0";
 
 pub struct DummyInstance {
     query_engine: QueryEngineRef,
-    py_engine: Arc<PyEngine>,
-    scripts: RwLock<HashMap<String, Arc<PyScript>>>,
 }
 
 impl DummyInstance {
     fn new(query_engine: QueryEngineRef) -> Self {
-        Self {
-            py_engine: Arc::new(PyEngine::new(query_engine.clone())),
-            scripts: RwLock::new(HashMap::new()),
-            query_engine,
-        }
+        Self { query_engine }
     }
 }
 
@@ -110,51 +99,6 @@ impl SqlQueryHandler for DummyInstance {
 
     async fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
         Ok(catalog == DEFAULT_CATALOG_NAME && schema == DEFAULT_SCHEMA_NAME)
-    }
-}
-
-#[async_trait]
-impl ScriptHandler for DummyInstance {
-    async fn insert_script(
-        &self,
-        query_ctx: QueryContextRef,
-        name: &str,
-        script: &str,
-    ) -> Result<()> {
-        let catalog = query_ctx.current_catalog();
-        let schema = query_ctx.current_schema();
-
-        let script = self
-            .py_engine
-            .compile(script, CompileContext::default())
-            .await
-            .unwrap();
-        script.register_udf().await;
-        let _ = self
-            .scripts
-            .write()
-            .unwrap()
-            .insert(format!("{catalog}_{schema}_{name}"), Arc::new(script));
-
-        Ok(())
-    }
-
-    async fn execute_script(
-        &self,
-        query_ctx: QueryContextRef,
-        name: &str,
-        params: HashMap<String, String>,
-    ) -> Result<Output> {
-        let catalog = query_ctx.current_catalog();
-        let schema = query_ctx.current_schema();
-        let key = format!("{catalog}_{schema}_{name}");
-
-        let py_script = self.scripts.read().unwrap().get(&key).unwrap().clone();
-
-        Ok(py_script
-            .execute(params, EvalContext::default())
-            .await
-            .unwrap())
     }
 }
 
@@ -217,10 +161,6 @@ fn create_testing_instance(table: TableRef) -> DummyInstance {
     let query_engine =
         QueryEngineFactory::new(catalog_manager, None, None, None, None, false).query_engine();
     DummyInstance::new(query_engine)
-}
-
-fn create_testing_script_handler(table: TableRef) -> ScriptHandlerRef {
-    Arc::new(create_testing_instance(table)) as _
 }
 
 fn create_testing_sql_query_handler(table: TableRef) -> ServerSqlQueryHandlerRef {

@@ -55,7 +55,6 @@ members = [
     "src/promql",
     "src/puffin",
     "src/query",
-    "src/script",
     "src/servers",
     "src/session",
     "src/sql",
@@ -257,7 +256,6 @@ plugins = { path = "src/plugins" }
 promql = { path = "src/promql" }
 puffin = { path = "src/puffin" }
 query = { path = "src/query" }
-script = { path = "src/script" }
 servers = { path = "src/servers" }
 session = { path = "src/session" }
 sql = { path = "src/sql" }
