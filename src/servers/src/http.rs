@@ -561,7 +561,7 @@ impl HttpServerBuilder {
 
     pub fn with_metrics_handler(self, handler: MetricsHandler) -> Self {
         Self {
-            router: self.router.nest("", HttpServer::route_metrics(handler)),
+            router: self.router.merge(HttpServer::route_metrics(handler)),
             ..self
         }
     }
@@ -600,14 +600,14 @@ impl HttpServerBuilder {
         });
 
         Self {
-            router: self.router.nest("", config_router),
+            router: self.router.merge(config_router),
             ..self
         }
     }
 
     pub fn with_extra_router(self, router: Router) -> Self {
         Self {
-            router: self.router.nest("", router),
+            router: self.router.merge(router),
             ..self
         }
     }
@@ -725,11 +725,11 @@ impl HttpServer {
         Router::new()
             .route("/logs", routing::post(event::log_ingester))
             .route(
-                "/pipelines/:pipeline_name",
+                "/pipelines/{pipeline_name}",
                 routing::post(event::add_pipeline),
             )
             .route(
-                "/pipelines/:pipeline_name",
+                "/pipelines/{pipeline_name}",
                 routing::delete(event::delete_pipeline),
             )
             .route("/pipelines/dryrun", routing::post(event::pipeline_dryrun))
@@ -763,7 +763,7 @@ impl HttpServer {
             .route("/series", routing::post(series_query).get(series_query))
             .route("/parse_query", routing::post(parse_query).get(parse_query))
             .route(
-                "/label/:label_name/values",
+                "/label/{label_name}/values",
                 routing::get(label_values_query),
             )
             .with_state(prometheus_handler)
