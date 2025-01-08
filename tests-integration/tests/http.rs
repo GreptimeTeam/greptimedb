@@ -1873,7 +1873,7 @@ pub async fn test_loki_pb_logs(store_type: StorageType) {
     // init loki request
     let req: PushRequest = PushRequest {
         streams: vec![StreamAdapter {
-            labels: r#"{service="test",source="integration","wadaxi"="do anything"}"#.to_string(),
+            labels: r#"{service="test",source="integration",wadaxi="do anything"}"#.to_string(),
             entries: vec![
                 EntryAdapter {
                     timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
@@ -1953,7 +1953,8 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
   "streams": [
     {
       "stream": {
-        "source": "test"
+        "source": "test",
+        "sender": "integration"
       },
       "values": [
           [ "1735901380059465984", "this is line one" ],
@@ -1987,7 +1988,7 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // test schema
-    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"source\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"sender\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"sender\\\", \\\"source\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
     validate_data(
         "loki_json_schema",
         &client,
@@ -1997,7 +1998,7 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
     .await;
 
     // test content
-    let expected = "[[1735901380059465984,\"this is line one\",\"test\"],[1735901398478897920,\"this is line two\",\"test\"]]";
+    let expected = "[[1735901380059465984,\"this is line one\",\"integration\",\"test\"],[1735901398478897920,\"this is line two\",\"integration\",\"test\"]]";
     validate_data(
         "loki_json_content",
         &client,

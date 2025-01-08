@@ -63,7 +63,6 @@ humantime-serde.workspace = true
 hyper = { version = "0.14", features = ["full"] }
 influxdb_line_protocol = { git = "https://github.com/evenyag/influxdb_iox", branch = "feat/line-protocol" }
 itertools.workspace = true
-json5 = "0.4"
 jsonb.workspace = true
 lazy_static.workspace = true
 log-query.workspace = true
@@ -86,6 +85,7 @@ prometheus.workspace = true
 promql-parser.workspace = true
 prost.workspace = true
 query.workspace = true
+quoted-string = "0.6"
 rand.workspace = true
 regex.workspace = true
 reqwest.workspace = true
@@ -123,6 +123,7 @@ client = { workspace = true, features = ["testing"] }
 common-base.workspace = true
 common-test-util.workspace = true
 criterion = "0.5"
+json5 = "0.4"
 mysql_async = { version = "0.33", default-features = false, features = [
     "default-rustls",
 ] }
@@ -148,4 +149,8 @@ harness = false
 
 [[bench]]
 name = "to_http_output"
+harness = false
+
+[[bench]]
+name = "loki_labels"
 harness = false

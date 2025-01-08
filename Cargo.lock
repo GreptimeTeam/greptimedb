@@ -9171,6 +9171,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "quoted-string"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a206a30ce37189d1340e7da2ee0b4d65e342590af676541c23a4f3959ba272e"
+
+[[package]]
 name = "radium"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10907,6 +10913,7 @@ dependencies = [
  "promql-parser",
  "prost 0.12.6",
  "query",
+ "quoted-string",
  "rand",
  "regex",
  "reqwest",

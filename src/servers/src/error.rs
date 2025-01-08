@@ -506,10 +506,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse payload as json5"))]
-    ParseJson5 {
-        #[snafu(source)]
-        error: json5::Error,
+    #[snafu(display("Invalid Loki labels: {}", msg))]
+    InvalidLokiLabels {
+        msg: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -666,7 +665,7 @@ impl ErrorExt for Error {
             | MissingQueryContext { .. }
             | MysqlValueConversion { .. }
             | ParseJson { .. }
-            | ParseJson5 { .. }
+            | InvalidLokiLabels { .. }
             | InvalidLokiPayload { .. }
             | UnsupportedContentType { .. }
             | TimestampOverflow { .. }

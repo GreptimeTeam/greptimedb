@@ -27,17 +27,18 @@ use axum::{Extension, TypedHeader};
 use bytes::Bytes;
 use common_query::prelude::GREPTIME_TIMESTAMP;
 use common_query::{Output, OutputData};
-use common_telemetry::warn;
+use common_telemetry::{error, warn};
 use hashbrown::HashMap;
 use lazy_static::lazy_static;
 use loki_api::prost_types::Timestamp;
 use prost::Message;
+use quoted_string::test_utils::TestSpec;
 use session::context::{Channel, QueryContext};
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
-    DecodeOtlpRequestSnafu, InvalidLokiPayloadSnafu, ParseJson5Snafu, ParseJsonSnafu, Result,
-    UnsupportedContentTypeSnafu,
+    DecodeOtlpRequestSnafu, InvalidLokiLabelsSnafu, InvalidLokiPayloadSnafu, ParseJsonSnafu,
+    Result, UnsupportedContentTypeSnafu,
 };
 use crate::http::event::{LogState, JSON_CONTENT_TYPE, PB_CONTENT_TYPE};
 use crate::http::extractor::LogTableName;
@@ -191,8 +192,7 @@ async fn handle_json_req(
                 l.iter()
                     .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
                     .collect::<BTreeMap<String, String>>()
-            })
-            .unwrap_or_default();
+            });
 
         // process each line
         for (line_index, line) in lines.iter().enumerate() {
@@ -230,7 +230,7 @@ async fn handle_json_req(
             // TODO(shuiyisong): we'll ignore structured metadata for now
 
             let mut row = init_row(schemas.len(), ts, line_text);
-            process_labels(&mut column_indexer, schemas, &mut row, labels.iter());
+            process_labels(&mut column_indexer, schemas, &mut row, labels.as_ref());
 
             rows.push(row);
         }
@@ -255,13 +255,11 @@ async fn handle_pb_req(
     let mut rows = Vec::with_capacity(cnt);
 
     for stream in req.streams {
-        // parse labels for each row
-        // encoding: https://github.com/grafana/alloy/blob/be34410b9e841cc0c37c153f9550d9086a304bca/internal/component/common/loki/client/batch.go#L114-L145
-        // use very dirty hack to parse labels
-        // TODO(shuiyisong): remove json5 and parse the string directly
-        let labels = stream.labels.replace("=", ":");
-        // use btreemap to keep order
-        let labels: BTreeMap<String, String> = json5::from_str(&labels).context(ParseJson5Snafu)?;
+        let labels = parse_loki_labels(&stream.labels)
+            .inspect_err(|e| {
+                error!(e; "failed to parse loki labels");
+            })
+            .ok();
 
         // process entries
         for entry in stream.entries {
@@ -273,13 +271,88 @@ async fn handle_pb_req(
             let line = entry.line;
 
             let mut row = init_row(schemas.len(), prost_ts_to_nano(&ts), line);
-            process_labels(&mut column_indexer, schemas, &mut row, labels.iter());
+            process_labels(&mut column_indexer, schemas, &mut row, labels.as_ref());
 
             rows.push(row);
         }
     }
 
     Ok(rows)
+}
+
+/// since we're hand-parsing the labels, if any error is encountered, we'll just skip the label
+/// note: pub here for bench usage
+/// ref:
+/// 1. encoding: https://github.com/grafana/alloy/blob/be34410b9e841cc0c37c153f9550d9086a304bca/internal/component/common/loki/client/batch.go#L114-L145
+/// 2. test data: https://github.com/grafana/loki/blob/a24ef7b206e0ca63ee74ca6ecb0a09b745cd2258/pkg/push/types_test.go
+pub fn parse_loki_labels(labels: &str) -> Result<BTreeMap<String, String>> {
+    let mut labels = labels.trim();
+    ensure!(
+        labels.len() >= 2,
+        InvalidLokiLabelsSnafu {
+            msg: "labels string too short"
+        }
+    );
+    ensure!(
+        labels.starts_with("{"),
+        InvalidLokiLabelsSnafu {
+            msg: "missing `{` at the beginning"
+        }
+    );
+    ensure!(
+        labels.ends_with("}"),
+        InvalidLokiLabelsSnafu {
+            msg: "missing `}` at the end"
+        }
+    );
+
+    let mut result = BTreeMap::new();
+    labels = &labels[1..labels.len() - 1];
+
+    while !labels.is_empty() {
+        // parse key
+        let first_index = labels.find("=").context(InvalidLokiLabelsSnafu {
+            msg: format!("missing `=` near: {}", labels),
+        })?;
+        let key = &labels[..first_index];
+        labels = &labels[first_index + 1..];
+
+        // parse value
+        let qs = quoted_string::parse::<TestSpec>(labels)
+            .map_err(|e| {
+                InvalidLokiLabelsSnafu {
+                    msg: format!(
+                        "failed to parse quoted string near: {}, reason: {}",
+                        labels, e.1
+                    ),
+                }
+                .build()
+            })?
+            .quoted_string;
+
+        labels = &labels[qs.len()..];
+
+        let value = quoted_string::to_content::<TestSpec>(qs).map_err(|e| {
+            InvalidLokiLabelsSnafu {
+                msg: format!("failed to unquote the string: {}, reason: {}", qs, e),
+            }
+            .build()
+        })?;
+
+        // insert key and value
+        result.insert(key.to_string(), value.to_string());
+
+        if labels.is_empty() {
+            break;
+        }
+        ensure!(
+            labels.starts_with(","),
+            InvalidLokiLabelsSnafu { msg: "missing `,`" }
+        );
+        labels = labels[1..].trim_start();
+    }
+
+    Ok(result)
 }
 
 #[inline]
@@ -303,12 +376,16 @@ fn init_row(schema_len: usize, ts: i64, line: String) -> Vec<GreptimeValue> {
     row
 }
 
-fn process_labels<'a>(
+fn process_labels(
     column_indexer: &mut HashMap<String, u16>,
     schemas: &mut Vec<ColumnSchema>,
     row: &mut Vec<GreptimeValue>,
-    labels: impl Iterator<Item = (&'a String, &'a String)>,
+    labels: Option<&BTreeMap<String, String>>,
 ) {
+    let Some(labels) = labels else {
+        return;
+    };
+
     // insert labels
     for (k, v) in labels {
         if let Some(index) = column_indexer.get(k) {
@@ -359,9 +436,12 @@ macro_rules! unwrap_or_warn_continue {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use loki_api::prost_types::Timestamp;
 
-    use crate::http::loki::prost_ts_to_nano;
+    use crate::error::Error::InvalidLokiLabels;
+    use crate::http::loki::{parse_loki_labels, prost_ts_to_nano};
 
     #[test]
     fn test_ts_to_nano() {
@@ -373,5 +453,51 @@ mod tests {
             nanos: 804293888,
         };
         assert_eq!(prost_ts_to_nano(&ts), 1731748568804293888);
+    }
+
+    #[test]
+    fn test_parse_loki_labels() {
+        let mut expected = BTreeMap::new();
+        expected.insert("job".to_string(), "foobar".to_string());
+        expected.insert("cluster".to_string(), "foo-central1".to_string());
+        expected.insert("namespace".to_string(), "bar".to_string());
+        expected.insert("container_name".to_string(), "buzz".to_string());
+
+        // perfect case
+        let valid_labels =
+            r#"{job="foobar", cluster="foo-central1", namespace="bar", container_name="buzz"}"#;
+        let re = parse_loki_labels(valid_labels);
+        assert!(re.is_ok());
+        assert_eq!(re.unwrap(), expected);
+
+        // too short
+        let too_short = r#"}"#;
+        let re = parse_loki_labels(too_short);
+        assert!(matches!(re.err().unwrap(), InvalidLokiLabels { .. }));
+
+        // missing start
+        let missing_start = r#"job="foobar"}"#;
+        let re = parse_loki_labels(missing_start);
+        assert!(matches!(re.err().unwrap(), InvalidLokiLabels { .. }));
+
+        // missing start
+        let missing_end = r#"{job="foobar""#;
+        let re = parse_loki_labels(missing_end);
+        assert!(matches!(re.err().unwrap(), InvalidLokiLabels { .. }));
+
+        // missing equal
+        let missing_equal = r#"{job"foobar"}"#;
+        let re = parse_loki_labels(missing_equal);
+        assert!(matches!(re.err().unwrap(), InvalidLokiLabels { .. }));
+
+        // missing quote
+        let missing_quote = r#"{job=foobar}"#;
+        let re = parse_loki_labels(missing_quote);
+        assert!(matches!(re.err().unwrap(), InvalidLokiLabels { .. }));
+
+        // missing comma
+        let missing_comma = r#"{job="foobar" cluster="foo-central1"}"#;
+        let re = parse_loki_labels(missing_comma);
+        assert!(matches!(re.err().unwrap(), InvalidLokiLabels { .. }));
     }
 }
