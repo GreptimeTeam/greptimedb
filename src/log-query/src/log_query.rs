@@ -57,9 +57,20 @@ pub enum LogQueryExpr {
     NamedIdent(String),
     PositionalIdent(usize),
     Literal(String),
-    Call {
+    ScalarFunc {
         name: String,
         args: Vec<LogQueryExpr>,
+    },
+    AggrFunc {
+        name: String,
+        args: Vec<LogQueryExpr>,
+    },
+    Decompose {
+        expr: Box<LogQueryExpr>,
+        /// JSON, CSV, etc.
+        schema: String,
+        /// Fields with type name to extract from the decomposed value.
+        fields: Vec<(String, String)>,
     },
     BinaryOp {
         left: Box<LogQueryExpr>,
@@ -274,6 +285,7 @@ pub struct ColumnFilters {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ContentFilter {
+    // Search-based filters
     /// Only match the exact content.
     ///
     /// For example, if the content is "pale blue dot", the filter "pale" or "pale blue" will match.
@@ -288,10 +300,15 @@ pub enum ContentFilter {
     Contains(String),
     /// Match the content with a regex pattern. The pattern should be a valid Rust regex.
     Regex(String),
+
+    // Value-based filters
     /// Content exists, a.k.a. not null.
     Exist,
-    Compound(Vec<ContentFilter>, BinaryOperator),
+    Between(String, String),
     // TODO: arithmetic operations
+
+    // Compound filters
+    Compound(Vec<ContentFilter>, BinaryOperator),
 }
 
 #[derive(Debug, Serialize, Deserialize)]

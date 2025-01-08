@@ -69,13 +69,11 @@ impl LogQueryPlanner {
         // Time filter
         filters.push(self.build_time_filter(&query.time_filter, &schema)?);
 
-        // Column filters and projections
-        let mut projected_columns = Vec::new();
+        // Column filters
         for column_filter in &query.filters {
             if let Some(expr) = self.build_column_filter(column_filter)? {
                 filters.push(expr);
             }
-            projected_columns.push(col(&column_filter.column_name));
         }
 
         // Apply filters
@@ -87,9 +85,16 @@ impl LogQueryPlanner {
         }
 
         // Apply projections
-        plan_builder = plan_builder
-            .project(projected_columns)
-            .context(DataFusionPlanningSnafu)?;
+        if !query.columns.is_empty() {
+            let projected_columns = query
+                .columns
+                .iter()
+                .map(|column_name| col(column_name))
+                .collect::<Vec<_>>();
+            plan_builder = plan_builder
+                .project(projected_columns)
+                .context(DataFusionPlanningSnafu)?;
+        }
 
         // Apply limit
         plan_builder = plan_builder
@@ -159,6 +164,17 @@ impl LogQueryPlanner {
                     }
                     .build(),
                 ),
+                log_query::ContentFilter::Exist => {
+                    Ok(col(&column_filter.column_name).is_not_null())
+                }
+                log_query::ContentFilter::Between(lower, upper) => {
+                    Ok(col(&column_filter.column_name)
+                        .gt_eq(lit(ScalarValue::Utf8(Some(escape_like_pattern(lower)))))
+                        .and(
+                            col(&column_filter.column_name)
+                                .lt_eq(lit(ScalarValue::Utf8(Some(escape_like_pattern(upper))))),
+                        ))
+                }
                 log_query::ContentFilter::Compound(..) => Err::<Expr, _>(
                     UnimplementedSnafu {
                         feature: "compound filter",
@@ -276,6 +292,8 @@ mod tests {
                 fetch: Some(100),
             },
             context: Context::None,
+            columns: vec![],
+            exprs: vec![],
         };
 
         let plan = planner.query_to_plan(log_query).await.unwrap();
@@ -389,6 +407,8 @@ mod tests {
                 fetch: None,
             },
             context: Context::None,
+            columns: vec![],
+            exprs: vec![],
         };
 
         let plan = planner.query_to_plan(log_query).await.unwrap();
@@ -422,6 +442,8 @@ mod tests {
                 fetch: None,
             },
             context: Context::None,
+            columns: vec![],
+            exprs: vec![],
         };
 
         let plan = planner.query_to_plan(log_query).await.unwrap();
