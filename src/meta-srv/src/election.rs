@@ -30,7 +30,7 @@ pub const ELECTION_KEY: &str = "__metasrv_election";
 pub const CANDIDATES_ROOT: &str = "__metasrv_election_candidates/";
 
 pub(crate) const CANDIDATE_LEASE_SECS: u64 = 600;
-const KEEP_ALIVE_INTERVAL_SECS: u64 = CANDIDATE_LEASE_SECS / 2;
+pub(crate) const CANDIDATE_KEEP_ALIVE_INTERVAL_SECS: u64 = CANDIDATE_LEASE_SECS / 2;
 
 /// Messages sent when the leader changes.
 #[derive(Debug, Clone)]
@@ -124,6 +124,9 @@ pub trait Election: Send + Sync {
 
     /// Registers a candidate for the election.
     async fn register_candidate(&self, node_info: &MetasrvNodeInfo) -> Result<()>;
+
+    /// Keep alive the candidate lease.
+    async fn candidate_keep_alive(&self, node_info: &MetasrvNodeInfo) -> Result<()>;
 
     /// Gets all candidates in the election.
     async fn all_candidates(&self) -> Result<Vec<MetasrvNodeInfo>>;

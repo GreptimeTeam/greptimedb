@@ -28,7 +28,7 @@ use tokio::time::{timeout, MissedTickBehavior};
 
 use crate::election::{
     listen_leader_change, Election, LeaderChangeMessage, LeaderKey, CANDIDATES_ROOT,
-    CANDIDATE_LEASE_SECS, ELECTION_KEY, KEEP_ALIVE_INTERVAL_SECS,
+    CANDIDATE_KEEP_ALIVE_INTERVAL_SECS, CANDIDATE_LEASE_SECS, ELECTION_KEY,
 };
 use crate::error;
 use crate::error::Result;
@@ -153,7 +153,7 @@ impl Election for EtcdElection {
             .context(error::EtcdFailedSnafu)?;
 
         let mut keep_alive_interval =
-            tokio::time::interval(Duration::from_secs(KEEP_ALIVE_INTERVAL_SECS));
+            tokio::time::interval(Duration::from_secs(CANDIDATE_KEEP_ALIVE_INTERVAL_SECS));
 
         loop {
             let _ = keep_alive_interval.tick().await;
@@ -168,6 +168,10 @@ impl Election for EtcdElection {
         }
 
         Ok(())
+    }
+
+    async fn candidate_keep_alive(&self, _node_info: &MetasrvNodeInfo) -> Result<()> {
+        unimplemented!("Etcd keeps the candidate alive in register_candidate, so we don't need to call candidate_keep_alive.")
     }
 
     async fn all_candidates(&self) -> Result<Vec<MetasrvNodeInfo>> {

@@ -285,7 +285,6 @@ impl Election for PgElection {
             .is_ok()
     }
 
-    /// TODO(CookiePie): Split the candidate registration and keep alive logic into separate methods, so that upper layers can call them separately.
     async fn register_candidate(&self, node_info: &MetasrvNodeInfo) -> Result<()> {
         let key = self.candidate_key();
         let node_info =
@@ -297,37 +296,42 @@ impl Election for PgElection {
             .await?;
         // May registered before, just update the lease.
         if !res {
+            warn!("Candidate lease exists. Now remove previous lease and register again.");
             self.delete_value(&key).await?;
             self.put_value_with_lease(&key, &node_info, self.candidate_lease_ttl_secs)
                 .await?;
         }
 
-        // Check if the current lease has expired and renew the lease.
-        let mut keep_alive_interval =
-            tokio::time::interval(Duration::from_secs(self.candidate_lease_ttl_secs / 2));
-        loop {
-            let _ = keep_alive_interval.tick().await;
+        Ok(())
+    }
 
-            let (_, prev_expire_time, current_time, origin) = self
-                .get_value_with_lease(&key, true)
-                .await?
-                .unwrap_or_default();
+    async fn candidate_keep_alive(&self, node_info: &MetasrvNodeInfo) -> Result<()> {
+        let key = self.candidate_key();
+        let node_info =
+            serde_json::to_string(node_info).with_context(|_| SerializeToJsonSnafu {
+                input: format!("{node_info:?}"),
+            })?;
+        let (_, prev_expire_time, current_time, origin) = self
+            .get_value_with_lease(&key, true)
+            .await?
+            .unwrap_or_default();
 
-            ensure!(
-                prev_expire_time > current_time,
-                UnexpectedSnafu {
-                    violated: format!(
-                        "Candidate lease expired, key: {:?}",
-                        String::from_utf8_lossy(&key.into_bytes())
-                    ),
-                }
-            );
+        ensure!(
+            prev_expire_time > current_time,
+            UnexpectedSnafu {
+                violated: format!(
+                    "Candidate lease expired, key: {:?}",
+                    String::from_utf8_lossy(&key.into_bytes())
+                ),
+            }
+        );
 
-            // Safety: origin is Some since we are using `get_value_with_lease` with `true`.
-            let origin = origin.unwrap();
-            self.update_value_with_lease(&key, &origin, &node_info)
-                .await?;
-        }
+        // Safety: origin is Some since we are using `get_value_with_lease` with `true`.
+        let origin = origin.unwrap();
+        self.update_value_with_lease(&key, &origin, &node_info)
+            .await?;
+
+        Ok(())
     }
 
     async fn all_candidates(&self) -> Result<Vec<MetasrvNodeInfo>> {
@@ -864,7 +868,10 @@ mod tests {
             git_commit: "test_git_commit".to_string(),
             start_time_ms: 0,
         };
-        pg_election.register_candidate(&node_info).await.unwrap();
+
+        loop {
+            pg_election.register_candidate(&node_info).await.unwrap();
+        }
     }
 
     #[tokio::test]

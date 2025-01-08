@@ -50,7 +50,7 @@ use table::metadata::TableId;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::cluster::MetaPeerClientRef;
-use crate::election::{Election, LeaderChangeMessage};
+use crate::election::{Election, LeaderChangeMessage, CANDIDATE_KEEP_ALIVE_INTERVAL_SECS};
 use crate::error::{
     self, InitMetadataSnafu, KvBackendSnafu, Result, StartProcedureManagerSnafu,
     StartTelemetryTaskSnafu, StopProcedureManagerSnafu,
@@ -494,9 +494,23 @@ impl Metasrv {
                 let node_info = self.node_info();
                 let _handle = common_runtime::spawn_global(async move {
                     while started.load(Ordering::Relaxed) {
-                        let res = election.register_candidate(&node_info).await;
-                        if let Err(e) = res {
-                            warn!(e; "Metasrv register candidate error");
+                        loop {
+                            let res = election.register_candidate(&node_info).await;
+                            if let Err(e) = res {
+                                warn!(e; "Metasrv register candidate error");
+                            }
+                            break;
+                        }
+                        loop {
+                            let mut keep_alive_interval = tokio::time::interval(
+                                Duration::from_secs(CANDIDATE_KEEP_ALIVE_INTERVAL_SECS),
+                            );
+                            keep_alive_interval.tick().await;
+                            let res = election.candidate_keep_alive(&node_info).await;
+                            if let Err(e) = res {
+                                warn!(e; "Metasrv keep lease error");
+                            }
+                            break;
                         }
                     }
                 });
