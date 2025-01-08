@@ -123,6 +123,8 @@ pub struct FlowWorkerManager {
     /// The handler to the worker that will run the dataflow
     /// which is `!Send` so a handle is used
     pub worker_handles: Vec<Mutex<WorkerHandle>>,
+    /// The selector to select a worker to run the dataflow
+    worker_selector: Mutex<usize>,
     /// The query engine that will be used to parse the query and convert it to a dataflow plan
     pub query_engine: Arc<dyn QueryEngine>,
     /// Getting table name and table schema from table info manager
@@ -164,6 +166,7 @@ impl FlowWorkerManager {
         let worker_handles = Vec::new();
         FlowWorkerManager {
             worker_handles,
+            worker_selector: Mutex::new(0),
             query_engine,
             table_info_source: srv_map,
             frontend_invoker: RwLock::new(None),
@@ -838,7 +841,7 @@ impl FlowWorkerManager {
             .await
             .insert(flow_id, err_collector.clone());
         // TODO(discord9): load balance?
-        let handle = &self.worker_handles[0].lock().await;
+        let handle = &self.get_worker_handle_for_create_flow().await;
         let create_request = worker::Request::Create {
             flow_id,
             plan: flow_plan,
