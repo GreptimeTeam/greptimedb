@@ -320,9 +320,11 @@ pub fn parse_loki_labels(labels: &str) -> Result<BTreeMap<String, String>> {
         // parse value
         let qs = quoted_string::parse::<TestSpec>(labels)
             .map_err(|e| {
-                error!(e.1; "failed to parse quoted string");
                 InvalidLokiLabelsSnafu {
-                    msg: format!("failed to parse quoted string near: {}", labels),
+                    msg: format!(
+                        "failed to parse quoted string near: {}, reason: {}",
+                        labels, e.1
+                    ),
                 }
                 .build()
             })?
@@ -331,9 +333,8 @@ pub fn parse_loki_labels(labels: &str) -> Result<BTreeMap<String, String>> {
         labels = &labels[qs.len()..];
 
         let value = quoted_string::to_content::<TestSpec>(qs).map_err(|e| {
-            error!(e; "failed to unquote the string");
             InvalidLokiLabelsSnafu {
-                msg: format!("failed to unquote the string: {}", qs),
+                msg: format!("failed to unquote the string: {}, reason: {}", qs, e),
             }
             .build()
         })?;
