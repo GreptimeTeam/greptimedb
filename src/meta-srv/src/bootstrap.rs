@@ -240,7 +240,7 @@ pub async fn metasrv_builder(
                 election_client,
                 opts.store_key_prefix.clone(),
                 CANDIDATE_LEASE_SECS,
-                opts.meta_table_name.clone(),
+                &opts.meta_table_name,
                 opts.meta_election_lock_id,
             )
             .await?;
