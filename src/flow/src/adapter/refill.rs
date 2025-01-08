@@ -27,7 +27,7 @@ use datatypes::value::Value;
 use futures::StreamExt;
 use query::parser::QueryLanguageParser;
 use session::context::QueryContextBuilder;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
 
 use super::{FlowId, FlowWorkerManager};
@@ -174,37 +174,41 @@ impl TaskData {
     /// validate that incoming batch's schema is the same as table schema(by comparing types&names)
     fn validate_schema(table_schema: &RelationDesc, rb: &RecordBatch) -> Result<(), Error> {
         let rb_schema = &rb.schema;
-        if rb_schema.column_schemas().len() != table_schema.len()? {
+        ensure!(
+            rb_schema.column_schemas().len() == table_schema.len()?,
             UnexpectedSnafu {
-                reason: "rb schema len != table schema len",
+                reason: format!(
+                    "RecordBatch schema length does not match table schema length, {}!={}",
+                    rb_schema.column_schemas().len(),
+                    table_schema.len()?
+                )
             }
-            .fail()?;
-        }
+        );
         for (i, rb_col) in rb_schema.column_schemas().iter().enumerate() {
             let (rb_name, rb_ty) = (rb_col.name.as_str(), &rb_col.data_type);
             let (table_name, table_ty) = (
                 table_schema.names[i].as_ref(),
                 &table_schema.typ().column_types[i].scalar_type,
             );
-            if Some(rb_name) != table_name.map(|c| c.as_str()) {
+            ensure!(
+                Some(rb_name) == table_name.map(|c| c.as_str()),
                 UnexpectedSnafu {
                     reason: format!(
-                        "incoming batch's schema name {} != expected table schema name {:?}",
-                        rb_name, table_name
-                    ),
+                        "Mismatch in column names: expected {:?}, found {}",
+                        table_name, rb_name
+                    )
                 }
-                .fail()?;
-            }
+            );
 
-            if rb_ty != table_ty {
+            ensure!(
+                rb_ty == table_ty,
                 UnexpectedSnafu {
                     reason: format!(
-                        "incoming batch's schema type {:?} != expected table schema type {:?}",
-                        rb_ty, table_ty
-                    ),
+                        "Mismatch in column types for {}: expected {:?}, found {:?}",
+                        rb_name, table_ty, rb_ty
+                    )
                 }
-                .fail()?;
-            }
+            );
         }
         Ok(())
     }
