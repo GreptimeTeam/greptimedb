@@ -402,19 +402,22 @@ pub async fn show_index(
         query_ctx.current_schema()
     };
 
+    let primary_key_expr = case(col("constraint_name").like(lit("%PRIMARY%")))
+        .when(lit(true), lit("greptime-primary-key-v1"))
+        .otherwise(null())
+        .context(error::PlanSqlSnafu)?;
+    let inverted_index_expr = case(col("constraint_name").like(lit("%INVERTED INDEX%")))
+        .when(lit(true), lit("greptime-inverted-index-v1"))
+        .otherwise(null())
+        .context(error::PlanSqlSnafu)?;
     let fulltext_index_expr = case(col("constraint_name").like(lit("%FULLTEXT INDEX%")))
         .when(lit(true), lit("greptime-fulltext-index-v1"))
         .otherwise(null())
         .context(error::PlanSqlSnafu)?;
-
-    let inverted_index_expr = case(
-        col("constraint_name")
-            .like(lit("%INVERTED INDEX%"))
-            .or(col("constraint_name").like(lit("%PRIMARY%"))),
-    )
-    .when(lit(true), lit("greptime-inverted-index-v1"))
-    .otherwise(null())
-    .context(error::PlanSqlSnafu)?;
+    let skipping_index_expr = case(col("constraint_name").like(lit("%SKIPPING INDEX%")))
+        .when(lit(true), lit("greptime-bloom-filter-v1"))
+        .otherwise(null())
+        .context(error::PlanSqlSnafu)?;
 
     let select = vec![
         // 1 as `Non_unique`: contain duplicates
@@ -435,7 +438,12 @@ pub async fn show_index(
             .alias(COLUMN_NULLABLE_COLUMN),
         concat_ws(
             lit(", "),
-            vec![inverted_index_expr.clone(), fulltext_index_expr.clone()],
+            vec![
+                primary_key_expr,
+                inverted_index_expr,
+                fulltext_index_expr,
+                skipping_index_expr,
+            ],
         )
         .alias(INDEX_INDEX_TYPE_COLUMN),
         lit("").alias(COLUMN_COMMENT_COLUMN),
