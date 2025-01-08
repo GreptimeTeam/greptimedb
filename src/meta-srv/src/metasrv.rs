@@ -73,6 +73,8 @@ pub const METASRV_HOME: &str = "/tmp/metasrv";
 
 #[cfg(feature = "pg_kvbackend")]
 pub const DEFAULT_META_TABLE_NAME: &str = "greptime_metakv";
+#[cfg(feature = "pg_kvbackend")]
+pub const DEFAULT_META_ELECTION_LOCK_ID: u64 = 1;
 
 // The datastores that implements metadata kvbackend.
 #[derive(Clone, Debug, PartialEq, Serialize, Default, Deserialize, ValueEnum)]
@@ -146,6 +148,9 @@ pub struct MetasrvOptions {
     #[cfg(feature = "pg_kvbackend")]
     /// Table name of rds kv backend.
     pub meta_table_name: String,
+    #[cfg(feature = "pg_kvbackend")]
+    /// Lock id for meta kv election. Only effect when using pg_kvbackend.
+    pub meta_election_lock_id: u64,
 }
 
 impl Default for MetasrvOptions {
@@ -182,6 +187,8 @@ impl Default for MetasrvOptions {
             backend: BackendImpl::EtcdStore,
             #[cfg(feature = "pg_kvbackend")]
             meta_table_name: DEFAULT_META_TABLE_NAME.to_string(),
+            #[cfg(feature = "pg_kvbackend")]
+            meta_election_lock_id: DEFAULT_META_ELECTION_LOCK_ID,
         }
     }
 }

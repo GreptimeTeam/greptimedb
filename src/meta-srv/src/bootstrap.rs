@@ -241,6 +241,7 @@ pub async fn metasrv_builder(
                 opts.store_key_prefix.clone(),
                 CANDIDATE_LEASE_SECS,
                 opts.meta_table_name.clone(),
+                opts.meta_election_lock_id,
             )
             .await?;
             (kv_backend, Some(election))

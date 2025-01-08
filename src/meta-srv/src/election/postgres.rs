@@ -39,13 +39,12 @@ use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
 const LEASE_SEP: &str = r#"||__metadata_lease_sep||"#;
 
 struct ElectionSqlFactory {
-    // TODO(CookiePie): The lock id should be configurable.
-    lock_id: i64,
+    lock_id: u64,
     table_name: String,
 }
 
 impl ElectionSqlFactory {
-    fn new(lock_id: i64, table_name: String) -> Self {
+    fn new(lock_id: u64, table_name: String) -> Self {
         Self {
             lock_id,
             table_name,
@@ -215,9 +214,9 @@ impl PgElection {
         store_key_prefix: String,
         candidate_lease_ttl_secs: u64,
         table_name: String,
+        lock_id: u64,
     ) -> Result<ElectionRef> {
-        // TODO(CookiePie): The lock id should be configurable.
-        let sql_factory = ElectionSqlFactory::new(28319, table_name.clone());
+        let sql_factory = ElectionSqlFactory::new(lock_id, table_name.clone());
         // Set idle session timeout to IDLE_SESSION_TIMEOUT to avoid dead advisory lock.
         client
             .execute(&sql_factory.set_idle_session_timeout_sql(), &[])
