@@ -38,6 +38,7 @@ impl TypedExpr {
         let mut group_expr = vec![];
         match groupings.len() {
             1 => {
+                // TODO(discord9): replace this grouping with `expression_references` instead
                 for e in &groupings[0].grouping_expressions {
                     let x = TypedExpr::from_substrait_rex(e, typ, extensions).await?;
                     group_expr.push(x);
@@ -344,7 +345,6 @@ impl TypedPlan {
 
 #[cfg(test)]
 mod test {
-    use std::collections::BTreeMap;
     use std::time::Duration;
 
     use bytes::BytesMut;
@@ -449,13 +449,14 @@ mod test {
                                                 false,
                                             )])
                                             .into_unnamed(),
-                                            extensions: FunctionExtensions::from_functions(
-                                                BTreeMap::from([
+                                            extensions: FunctionExtensions::from_iter(
+                                                [
                                                     (0, "tumble_start".to_string()),
                                                     (1, "tumble_end".to_string()),
                                                     (2, "abs".to_string()),
                                                     (3, "sum".to_string()),
-                                                ]),
+                                                ]
+                                                .into_iter(),
                                             ),
                                         },
                                     )
@@ -610,12 +611,15 @@ mod test {
                                     true,
                                 )])
                                 .into_unnamed(),
-                                extensions: FunctionExtensions::from_functions(BTreeMap::from([
-                                    (0, "abs".to_string()),
-                                    (1, "tumble_start".to_string()),
-                                    (2, "tumble_end".to_string()),
-                                    (3, "sum".to_string()),
-                                ])),
+                                extensions: FunctionExtensions::from_iter(
+                                    [
+                                        (0, "abs".to_string()),
+                                        (1, "tumble_start".to_string()),
+                                        (2, "tumble_end".to_string()),
+                                        (3, "sum".to_string()),
+                                    ]
+                                    .into_iter(),
+                                ),
                             })
                             .await
                             .unwrap(),
@@ -1525,13 +1529,13 @@ mod test {
                                                 false,
                                             )])
                                             .into_unnamed(),
-                                            extensions: FunctionExtensions::from_functions(BTreeMap::from([
+                                            extensions: FunctionExtensions::from_iter([
                                                     (0, "subtract".to_string()),
                                                     (1, "divide".to_string()),
                                                     (2, "date_bin".to_string()),
                                                     (3, "max".to_string()),
                                                     (4, "min".to_string()),
-                                                ])),
+                                                ]),
                                         },
                                     )
                                     .await
