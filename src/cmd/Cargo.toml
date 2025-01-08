@@ -10,10 +10,8 @@ name = "greptime"
 path = "src/bin/greptime.rs"
 
 [features]
-default = ["python", "servers/pprof", "servers/mem-prof"]
+default = ["servers/pprof", "servers/mem-prof"]
 tokio-console = ["common-telemetry/tokio-console"]
-# Some actions may still use this feature, we don't remove the python feature now.
-python = []
 
 [lints]
 workspace = true

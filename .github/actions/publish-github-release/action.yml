@@ -9,8 +9,8 @@ runs:
   steps:
     # Download artifacts from previous jobs, the artifacts will be downloaded to:
     # ${WORKING_DIR}
-    #   |- greptime-darwin-amd64-pyo3-v0.5.0/greptime-darwin-amd64-pyo3-v0.5.0.tar.gz
-    #   |- greptime-darwin-amd64-pyo3-v0.5.0.sha256sum/greptime-darwin-amd64-pyo3-v0.5.0.sha256sum
+    #   |- greptime-darwin-amd64-v0.5.0/greptime-darwin-amd64-v0.5.0.tar.gz
+    #   |- greptime-darwin-amd64-v0.5.0.sha256sum/greptime-darwin-amd64-v0.5.0.sha256sum
     #   |- greptime-darwin-amd64-v0.5.0/greptime-darwin-amd64-v0.5.0.tar.gz
     #   |- greptime-darwin-amd64-v0.5.0.sha256sum/greptime-darwin-amd64-v0.5.0.sha256sum
     #   ...
