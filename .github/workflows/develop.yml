@@ -659,19 +659,18 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: KyleMayes/install-llvm-action@v1
-        with:
-          version: "14.0"
+      - uses: rui314/setup-mold@v1
       - name: Install toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          components: llvm-tools-preview
+          components: llvm-tools
           cache: false
-      # - name: Rust Cache
-      #   uses: Swatinem/rust-cache@v2
-      #   with:
-      #     # Shares cross multiple jobs
-      #     shared-key: "coverage-test"
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares cross multiple jobs
+          shared-key: "coverage-test"
+          save-if: ${{ github.event_name == 'merge_group' }}
       # Disabled temporarily to see performance
       # - name: Docker Cache
       #   uses: ScribeMD/docker-cache@0.5.0
@@ -687,7 +686,7 @@ jobs:
       - name: Run nextest cases
         run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend
         env:
-          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
           RUST_BACKTRACE: 1
           CARGO_INCREMENTAL: 0
           GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
