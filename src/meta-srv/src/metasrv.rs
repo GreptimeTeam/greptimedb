@@ -71,6 +71,11 @@ pub const TABLE_ID_SEQ: &str = "table_id";
 pub const FLOW_ID_SEQ: &str = "flow_id";
 pub const METASRV_HOME: &str = "/tmp/metasrv";
 
+#[cfg(feature = "pg_kvbackend")]
+pub const DEFAULT_META_TABLE_NAME: &str = "greptime_metakv";
+#[cfg(feature = "pg_kvbackend")]
+pub const DEFAULT_META_ELECTION_LOCK_ID: u64 = 1;
+
 // The datastores that implements metadata kvbackend.
 #[derive(Clone, Debug, PartialEq, Serialize, Default, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
@@ -140,6 +145,12 @@ pub struct MetasrvOptions {
     pub tracing: TracingOptions,
     /// The datastore for kv metadata.
     pub backend: BackendImpl,
+    #[cfg(feature = "pg_kvbackend")]
+    /// Table name of rds kv backend.
+    pub meta_table_name: String,
+    #[cfg(feature = "pg_kvbackend")]
+    /// Lock id for meta kv election. Only effect when using pg_kvbackend.
+    pub meta_election_lock_id: u64,
 }
 
 const DEFAULT_METASRV_ADDR_PORT: &str = "3002";
@@ -177,6 +188,10 @@ impl Default for MetasrvOptions {
             flush_stats_factor: 3,
             tracing: TracingOptions::default(),
             backend: BackendImpl::EtcdStore,
+            #[cfg(feature = "pg_kvbackend")]
+            meta_table_name: DEFAULT_META_TABLE_NAME.to_string(),
+            #[cfg(feature = "pg_kvbackend")]
+            meta_election_lock_id: DEFAULT_META_ELECTION_LOCK_ID,
         }
     }
 }

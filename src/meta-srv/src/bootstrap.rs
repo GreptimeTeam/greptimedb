@@ -230,7 +230,7 @@ pub async fn metasrv_builder(
         (None, BackendImpl::PostgresStore) => {
             let pool = create_postgres_pool(opts).await?;
             // TODO(CookiePie): use table name from config.
-            let kv_backend = PgStore::with_pg_pool(pool, "greptime_metakv", opts.max_txn_ops)
+            let kv_backend = PgStore::with_pg_pool(pool, &opts.meta_table_name, opts.max_txn_ops)
                 .await
                 .context(error::KvBackendSnafu)?;
             // Client for election should be created separately since we need a different session keep-alive idle time.
@@ -240,6 +240,8 @@ pub async fn metasrv_builder(
                 election_client,
                 opts.store_key_prefix.clone(),
                 CANDIDATE_LEASE_SECS,
+                &opts.meta_table_name,
+                opts.meta_election_lock_id,
             )
             .await?;
             (kv_backend, Some(election))
