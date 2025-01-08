@@ -64,6 +64,9 @@ pub enum LogQueryExpr {
     AggrFunc {
         name: String,
         args: Vec<LogQueryExpr>,
+        /// Optional range function parameter. Stands for the time range for both step and align.
+        range: Option<String>,
+        by: Vec<LogQueryExpr>,
     },
     Decompose {
         expr: Box<LogQueryExpr>,
