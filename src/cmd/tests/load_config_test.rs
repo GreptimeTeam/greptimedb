@@ -139,7 +139,7 @@ fn test_load_frontend_example_config() {
                 remote_write: Some(Default::default()),
                 ..Default::default()
             },
-            grpc: GrpcOptions::default().with_hostname("127.0.0.1"),
+            grpc: GrpcOptions::default().with_hostname("127.0.0.1:4001"),
             ..Default::default()
         },
         ..Default::default()
