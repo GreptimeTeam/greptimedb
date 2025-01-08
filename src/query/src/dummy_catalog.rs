@@ -24,7 +24,6 @@ use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_recordbatch::OrderOption;
 use datafusion::catalog::{CatalogProvider, CatalogProviderList, SchemaProvider, Session};
 use datafusion::datasource::TableProvider;
-use datafusion::execution::context::SessionState;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::DataFusionError;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
