@@ -35,50 +35,117 @@ use crate::error::{
 };
 use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
 
-// TODO(CookiePie): The lock id should be configurable.
-const CAMPAIGN: &str = "SELECT pg_try_advisory_lock({})";
-const STEP_DOWN: &str = "SELECT pg_advisory_unlock({})";
-// Currently the session timeout is longer than the leader lease time, so the leader lease may expire while the session is still alive.
-// Either the leader reconnects and step down or the session expires and the lock is released.
-const SET_IDLE_SESSION_TIMEOUT: &str = "SET idle_session_timeout = '10s';";
-
 // Separator between value and expire time.
 const LEASE_SEP: &str = r#"||__metadata_lease_sep||"#;
 
-// SQL to put a value with expire time. Parameters: key, value, LEASE_SEP, expire_time
-const PUT_IF_NOT_EXISTS_WITH_EXPIRE_TIME: &str = r#"
-WITH prev AS (
-    SELECT k, v FROM greptime_metakv WHERE k = $1
-), insert AS (
-    INSERT INTO greptime_metakv
-    VALUES($1, convert_to($2 || $3 || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $4, 'YYYY-MM-DD HH24:MI:SS.MS'), 'UTF8'))
-    ON CONFLICT (k) DO NOTHING
-)
-
-SELECT k, v FROM prev;
-"#;
-
-// SQL to update a value with expire time. Parameters: key, prev_value_with_lease, updated_value, LEASE_SEP, expire_time
-const CAS_WITH_EXPIRE_TIME: &str = r#"
-UPDATE greptime_metakv
-SET k=$1,
-v=convert_to($3 || $4 || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $5, 'YYYY-MM-DD HH24:MI:SS.MS'), 'UTF8')
-WHERE 
-    k=$1 AND v=$2
-"#;
-
-const GET_WITH_CURRENT_TIMESTAMP: &str = r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM greptime_metakv WHERE k = $1"#;
-
-const PREFIX_GET_WITH_CURRENT_TIMESTAMP: &str = r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM greptime_metakv WHERE k LIKE $1"#;
-
-const POINT_DELETE: &str = "DELETE FROM greptime_metakv WHERE k = $1 RETURNING k,v;";
-
-fn campaign_sql(lock_id: u64) -> String {
-    CAMPAIGN.replace("{}", &lock_id.to_string())
+struct ElectionSqlFactory {
+    // TODO(CookiePie): The lock id should be configurable.
+    lock_id: i64,
+    table_name: String,
 }
 
-fn step_down_sql(lock_id: u64) -> String {
-    STEP_DOWN.replace("{}", &lock_id.to_string())
+impl ElectionSqlFactory {
+    fn new(lock_id: i64, table_name: String) -> Self {
+        Self {
+            lock_id,
+            table_name,
+        }
+    }
+
+    /// Currently the session timeout is longer than the leader lease time, so the leader lease may expire while the session is still alive.
+    /// Either the leader reconnects and step down or the session expires and the lock is released.
+    fn set_idle_session_timeout_sql(&self) -> String {
+        "SET idle_session_timeout = '10s';".to_string()
+    }
+
+    fn campaign_sql(&self) -> String {
+        format!("SELECT pg_try_advisory_lock({})", self.lock_id)
+    }
+
+    fn step_down_sql(&self) -> String {
+        format!("SELECT pg_advisory_unlock({})", self.lock_id)
+    }
+
+    /// SQL to put a value with expire time.
+    ///
+    /// Parameters for the query:
+    /// `$1`: key,
+    /// `$2`: value,
+    /// `$3`: lease time in seconds
+    ///
+    /// Returns:
+    /// If the key already exists, return the previous value.
+    fn put_value_with_lease_sql(&self) -> String {
+        format!(
+            r#"WITH prev AS (
+                SELECT k, v FROM {} WHERE k = $1
+            ), insert AS (
+                INSERT INTO {}
+                VALUES($1, convert_to($2 || {} || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $3, 'YYYY-MM-DD HH24:MI:SS.MS'), 'UTF8'))
+                ON CONFLICT (k) DO NOTHING
+            )
+            SELECT k, v FROM prev;
+            "#,
+            self.table_name, self.table_name, LEASE_SEP
+        )
+    }
+
+    /// SQL to update a value with expire time.
+    ///
+    /// Parameters for the query:
+    /// `$1`: key,
+    /// `$2`: previous value,
+    /// `$3`: updated value,
+    /// `$4`: lease time in seconds
+    fn update_value_with_lease_sql(&self) -> String {
+        format!(
+            r#"UPDATE {} 
+               SET v = convert_to($3 || {} || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $4, 'YYYY-MM-DD HH24:MI:SS.MS'), 'UTF8')
+               WHERE k = $1 AND v = $2"#,
+            self.table_name, LEASE_SEP
+        )
+    }
+
+    /// SQL to get a value with expire time.
+    ///
+    /// Parameters:
+    /// `$1`: key
+    fn get_value_with_lease_sql(&self) -> String {
+        format!(
+            r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM {} WHERE k = $1"#,
+            self.table_name
+        )
+    }
+
+    /// SQL to get all values with expire time with the given key prefix.
+    ///
+    /// Parameters:
+    /// `$1`: key prefix like 'prefix%'
+    ///
+    /// Returns:
+    /// column 0: value,
+    /// column 1: current timestamp
+    fn get_value_with_lease_by_prefix_sql(&self) -> String {
+        format!(
+            r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM {} WHERE k LIKE $1"#,
+            self.table_name
+        )
+    }
+
+    /// SQL to delete a value.
+    ///
+    /// Parameters:
+    /// `$1`: key
+    ///
+    /// Returns:
+    /// column 0: key deleted,
+    /// column 1: value deleted
+    fn delete_value_sql(&self) -> String {
+        format!(
+            "DELETE FROM {} WHERE k = $1 RETURNING k,v;",
+            self.table_name
+        )
+    }
 }
 
 /// Parse the value and expire time from the given string. The value should be in the format "value || LEASE_SEP || expire_time".
@@ -138,7 +205,7 @@ pub struct PgElection {
     leader_watcher: broadcast::Sender<LeaderChangeMessage>,
     store_key_prefix: String,
     candidate_lease_ttl_secs: u64,
-    lock_id: u64,
+    sql_factory: ElectionSqlFactory,
 }
 
 impl PgElection {
@@ -147,10 +214,13 @@ impl PgElection {
         client: Client,
         store_key_prefix: String,
         candidate_lease_ttl_secs: u64,
+        table_name: String,
     ) -> Result<ElectionRef> {
+        // TODO(CookiePie): The lock id should be configurable.
+        let sql_factory = ElectionSqlFactory::new(28319, table_name.clone());
         // Set idle session timeout to IDLE_SESSION_TIMEOUT to avoid dead advisory lock.
         client
-            .execute(SET_IDLE_SESSION_TIMEOUT, &[])
+            .execute(&sql_factory.set_idle_session_timeout_sql(), &[])
             .await
             .context(PostgresExecutionSnafu)?;
 
@@ -163,8 +233,7 @@ impl PgElection {
             leader_watcher: tx,
             store_key_prefix,
             candidate_lease_ttl_secs,
-            // TODO(CookiePie): The lock id should be configurable.
-            lock_id: 28319,
+            sql_factory,
         }))
     }
 
@@ -276,7 +345,7 @@ impl Election for PgElection {
         loop {
             let res = self
                 .client
-                .query(&campaign_sql(self.lock_id), &[])
+                .query(&self.sql_factory.campaign_sql(), &[])
                 .await
                 .context(PostgresExecutionSnafu)?;
             if let Some(row) = res.first() {
@@ -336,7 +405,10 @@ impl PgElection {
         let key = key.as_bytes().to_vec();
         let res = self
             .client
-            .query(GET_WITH_CURRENT_TIMESTAMP, &[&key as &(dyn ToSql + Sync)])
+            .query(
+                &self.sql_factory.get_value_with_lease_sql(),
+                &[&key as &(dyn ToSql + Sync)],
+            )
             .await
             .context(PostgresExecutionSnafu)?;
 
@@ -379,7 +451,7 @@ impl PgElection {
         let res = self
             .client
             .query(
-                PREFIX_GET_WITH_CURRENT_TIMESTAMP,
+                &self.sql_factory.get_value_with_lease_by_prefix_sql(),
                 &[(&key_prefix as &(dyn ToSql + Sync))],
             )
             .await
@@ -411,12 +483,11 @@ impl PgElection {
         let res = self
             .client
             .execute(
-                CAS_WITH_EXPIRE_TIME,
+                &self.sql_factory.update_value_with_lease_sql(),
                 &[
                     &key as &(dyn ToSql + Sync),
                     &prev as &(dyn ToSql + Sync),
                     &updated,
-                    &LEASE_SEP,
                     &(self.candidate_lease_ttl_secs as f64),
                 ],
             )
@@ -445,12 +516,11 @@ impl PgElection {
         let params: Vec<&(dyn ToSql + Sync)> = vec![
             &key as &(dyn ToSql + Sync),
             &value as &(dyn ToSql + Sync),
-            &LEASE_SEP,
             &lease_ttl_secs,
         ];
         let res = self
             .client
-            .query(PUT_IF_NOT_EXISTS_WITH_EXPIRE_TIME, &params)
+            .query(&self.sql_factory.put_value_with_lease_sql(), &params)
             .await
             .context(PostgresExecutionSnafu)?;
         Ok(res.is_empty())
@@ -462,7 +532,10 @@ impl PgElection {
         let key = key.as_bytes().to_vec();
         let res = self
             .client
-            .query(POINT_DELETE, &[&key as &(dyn ToSql + Sync)])
+            .query(
+                &self.sql_factory.delete_value_sql(),
+                &[&key as &(dyn ToSql + Sync)],
+            )
             .await
             .context(PostgresExecutionSnafu)?;
 
@@ -574,7 +647,7 @@ impl PgElection {
         {
             self.delete_value(&key).await?;
             self.client
-                .query(&step_down_sql(self.lock_id), &[])
+                .query(&self.sql_factory.step_down_sql(), &[])
                 .await
                 .context(PostgresExecutionSnafu)?;
             if let Err(e) = self
@@ -686,7 +759,7 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: uuid::Uuid::new_v4().to_string(),
             candidate_lease_ttl_secs: 10,
-            lock_id: 28319,
+            sql_factory: ElectionSqlFactory::new(28319, "greptime_metakv".to_string()),
         };
 
         let res = pg_election
@@ -760,7 +833,7 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix,
             candidate_lease_ttl_secs,
-            lock_id: 28319,
+            sql_factory: ElectionSqlFactory::new(28319, "greptime_metakv".to_string()),
         };
 
         let node_info = MetasrvNodeInfo {
@@ -802,7 +875,7 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: store_key_prefix.clone(),
             candidate_lease_ttl_secs,
-            lock_id: 28319,
+            sql_factory: ElectionSqlFactory::new(28319, "greptime_metakv".to_string()),
         };
 
         let candidates = pg_election.all_candidates().await.unwrap();
@@ -843,7 +916,7 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: uuid::Uuid::new_v4().to_string(),
             candidate_lease_ttl_secs,
-            lock_id: 28320,
+            sql_factory: ElectionSqlFactory::new(28320, "greptime_metakv".to_string()),
         };
 
         leader_pg_election.elected().await.unwrap();
@@ -952,13 +1025,13 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix,
             candidate_lease_ttl_secs,
-            lock_id: 28321,
+            sql_factory: ElectionSqlFactory::new(28321, "greptime_metakv".to_string()),
         };
 
         // Step 1: No leader exists, campaign and elected.
         let res = leader_pg_election
             .client
-            .query(&campaign_sql(leader_pg_election.lock_id), &[])
+            .query(&leader_pg_election.sql_factory.campaign_sql(), &[])
             .await
             .unwrap();
         let res: bool = res[0].get(0);
@@ -989,7 +1062,7 @@ mod tests {
         // Step 2: As a leader, renew the lease.
         let res = leader_pg_election
             .client
-            .query(&campaign_sql(leader_pg_election.lock_id), &[])
+            .query(&leader_pg_election.sql_factory.campaign_sql(), &[])
             .await
             .unwrap();
         let res: bool = res[0].get(0);
@@ -1009,7 +1082,7 @@ mod tests {
 
         let res = leader_pg_election
             .client
-            .query(&campaign_sql(leader_pg_election.lock_id), &[])
+            .query(&leader_pg_election.sql_factory.campaign_sql(), &[])
             .await
             .unwrap();
         let res: bool = res[0].get(0);
@@ -1037,7 +1110,7 @@ mod tests {
         // Step 4: Re-campaign and elected.
         let res = leader_pg_election
             .client
-            .query(&campaign_sql(leader_pg_election.lock_id), &[])
+            .query(&leader_pg_election.sql_factory.campaign_sql(), &[])
             .await
             .unwrap();
         let res: bool = res[0].get(0);
@@ -1094,7 +1167,7 @@ mod tests {
         // Step 6: Re-campaign and elected.
         let res = leader_pg_election
             .client
-            .query(&campaign_sql(leader_pg_election.lock_id), &[])
+            .query(&leader_pg_election.sql_factory.campaign_sql(), &[])
             .await
             .unwrap();
         let res: bool = res[0].get(0);
@@ -1125,7 +1198,7 @@ mod tests {
         // Step 7: Something wrong, the leader key changed by others.
         let res = leader_pg_election
             .client
-            .query(&campaign_sql(leader_pg_election.lock_id), &[])
+            .query(&leader_pg_election.sql_factory.campaign_sql(), &[])
             .await
             .unwrap();
         let res: bool = res[0].get(0);
@@ -1162,7 +1235,7 @@ mod tests {
         // Clean up
         leader_pg_election
             .client
-            .query(&step_down_sql(leader_pg_election.lock_id), &[])
+            .query(&leader_pg_election.sql_factory.step_down_sql(), &[])
             .await
             .unwrap();
     }
@@ -1183,7 +1256,7 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: store_key_prefix.clone(),
             candidate_lease_ttl_secs,
-            lock_id: 28322,
+            sql_factory: ElectionSqlFactory::new(28322, "greptime_metakv".to_string()),
         };
 
         let leader_client = create_postgres_client().await.unwrap();
@@ -1196,12 +1269,12 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix,
             candidate_lease_ttl_secs,
-            lock_id: 28322,
+            sql_factory: ElectionSqlFactory::new(28322, "greptime_metakv".to_string()),
         };
 
         leader_pg_election
             .client
-            .query(&campaign_sql(leader_pg_election.lock_id), &[])
+            .query(&leader_pg_election.sql_factory.campaign_sql(), &[])
             .await
             .unwrap();
         leader_pg_election.elected().await.unwrap();
@@ -1242,7 +1315,7 @@ mod tests {
         // Clean up
         leader_pg_election
             .client
-            .query(&step_down_sql(leader_pg_election.lock_id), &[])
+            .query(&leader_pg_election.sql_factory.step_down_sql(), &[])
             .await
             .unwrap();
     }

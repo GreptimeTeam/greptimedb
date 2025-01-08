@@ -24,6 +24,9 @@ store_key_prefix = ""
 ## - `postgres_store`
 backend = "etcd_store"
 
+## Table name in RDS to store metadata. Effect when using a RDS kvbackend.
+meta_table_name = "greptime_metakv"
+
 ## Datanode selector type.
 ## - `round_robin` (default value)
 ## - `lease_based`

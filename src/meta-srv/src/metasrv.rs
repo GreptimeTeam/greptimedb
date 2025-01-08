@@ -71,6 +71,9 @@ pub const TABLE_ID_SEQ: &str = "table_id";
 pub const FLOW_ID_SEQ: &str = "flow_id";
 pub const METASRV_HOME: &str = "/tmp/metasrv";
 
+#[cfg(feature = "pg_kvbackend")]
+pub const DEFAULT_META_TABLE_NAME: &str = "greptime_metakv";
+
 // The datastores that implements metadata kvbackend.
 #[derive(Clone, Debug, PartialEq, Serialize, Default, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
@@ -140,6 +143,9 @@ pub struct MetasrvOptions {
     pub tracing: TracingOptions,
     /// The datastore for kv metadata.
     pub backend: BackendImpl,
+    #[cfg(feature = "pg_kvbackend")]
+    /// Table name of rds kv backend.
+    pub meta_table_name: String,
 }
 
 impl Default for MetasrvOptions {
@@ -174,6 +180,8 @@ impl Default for MetasrvOptions {
             flush_stats_factor: 3,
             tracing: TracingOptions::default(),
             backend: BackendImpl::EtcdStore,
+            #[cfg(feature = "pg_kvbackend")]
+            meta_table_name: DEFAULT_META_TABLE_NAME.to_string(),
         }
     }
 }
