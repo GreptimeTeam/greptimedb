@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use auth::UserProviderRef;
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::DefaultBodyLimit;
+use axum::http::StatusCode as HttpStatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use axum::{middleware, routing, BoxError, Router};
 use common_base::readable_size::ReadableSize;
@@ -48,6 +49,7 @@ use tower_http::trace::TraceLayer;
 use self::authorize::AuthState;
 use self::result::table_result::TableResponse;
 use crate::configurator::ConfiguratorRef;
+use crate::elasticsearch;
 use crate::error::{AddressBindSnafu, AlreadyStartedSnafu, Error, HyperSnafu, Result, ToJsonSnafu};
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::prometheus::{
@@ -597,7 +599,19 @@ impl HttpServerBuilder {
 
         let router = router.nest(
             &format!("/{HTTP_API_VERSION}/loki"),
-            HttpServer::route_loki(log_state),
+            HttpServer::route_loki(log_state.clone()),
+        );
+
+        let router = router.nest(
+            &format!("/{HTTP_API_VERSION}/elasticsearch"),
+            HttpServer::route_elasticsearch(log_state.clone()),
+        );
+
+        let router = router.nest(
+            &format!("/{HTTP_API_VERSION}/elasticsearch/"),
+            Router::new()
+                .route("/", routing::get(elasticsearch::handle_get_version))
+                .with_state(log_state),
         );
 
         Self { router, ..self }
@@ -739,6 +753,82 @@ impl HttpServer {
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
+            )
+            .with_state(log_state)
+    }
+
+    fn route_elasticsearch<S>(log_state: LogState) -> Router<S> {
+        Router::new()
+            // Return fake responsefor HEAD '/' request.
+            .route(
+                "/",
+                routing::head((HttpStatusCode::OK, elasticsearch::elasticsearch_headers())),
+            )
+            // Return fake response for Elasticsearch version request.
+            .route("/", routing::get(elasticsearch::handle_get_version))
+            // Return fake response for Elasticsearch license request.
+            .route("/_license", routing::get(elasticsearch::handle_get_license))
+            .route("/_bulk", routing::post(elasticsearch::handle_bulk_api))
+            // Return fake response for Elasticsearch ilm request.
+            .route(
+                "/_ilm/policy/*path",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            // Return fake response for Elasticsearch index template request.
+            .route(
+                "/_index_template/*path",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            // Return fake response for Elasticsearch ingest pipeline request.
+            // See: https://www.elastic.co/guide/en/elasticsearch/reference/8.8/put-pipeline-api.html.
+            .route(
+                "/_ingest/*path",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            // Return fake response for Elasticsearch nodes discovery request.
+            // See: https://www.elastic.co/guide/en/elasticsearch/reference/8.8/cluster.html.
+            .route(
+                "/_nodes/*path",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            // Return fake response for Logstash APIs requests.
+            // See: https://www.elastic.co/guide/en/elasticsearch/reference/8.8/logstash-apis.html
+            .route(
+                "/logstash/*path",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            .route(
+                "/_logstash/*path",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            .layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(handle_error))
+                    .layer(RequestDecompressionLayer::new()),
             )
             .with_state(log_state)
     }

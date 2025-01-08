@@ -23,6 +23,7 @@ use datatypes::schema::Schema;
 
 pub mod addrs;
 pub mod configurator;
+pub(crate) mod elasticsearch;
 pub mod error;
 pub mod export_metrics;
 pub mod grpc;
