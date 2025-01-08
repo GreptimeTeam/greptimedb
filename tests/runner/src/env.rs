@@ -356,6 +356,8 @@ impl Env {
                         "--log-dir={}/greptimedb-frontend/logs",
                         self.sqlness_home.display()
                     ),
+                    "-c".to_string(),
+                    self.generate_config_file(subcommand, db_ctx),
                 ];
                 (
                     args,
@@ -456,6 +458,7 @@ impl Env {
             "start".to_string(),
         ];
         args.push(format!("--rpc-addr=127.0.0.1:2941{id}"));
+        args.push(format!("--rpc-hostname=127.0.0.1:2941{id}"));
         args.push(format!("--http-addr=127.0.0.1:2943{id}"));
         args.push(format!("--data-home={}", data_home.display()));
         args.push(format!("--log-dir={}/logs", data_home.display()));
@@ -480,6 +483,7 @@ impl Env {
             "start".to_string(),
         ];
         args.push(format!("--rpc-addr=127.0.0.1:2968{id}"));
+        args.push(format!("--rpc-hostname=127.0.0.1:2968{id}"));
         args.push(format!("--node-id={id}"));
         args.push(format!(
             "--log-dir={}/greptimedb-flownode/logs",

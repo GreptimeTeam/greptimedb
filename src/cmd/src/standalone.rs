@@ -461,7 +461,8 @@ impl StartCommand {
 
         let mut plugins = Plugins::new();
         let plugin_opts = opts.plugins;
-        let opts = opts.component;
+        let mut opts = opts.component;
+        opts.grpc.detect_hostname();
         let fe_opts = opts.frontend_options();
         let dn_opts = opts.datanode_options();
 

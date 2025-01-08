@@ -349,7 +349,9 @@ pub(crate) fn create_datanode_opts(
             providers,
             store: default_store,
         },
-        grpc: GrpcOptions::default().with_addr(PEER_PLACEHOLDER_ADDR),
+        grpc: GrpcOptions::default()
+            .with_addr(PEER_PLACEHOLDER_ADDR)
+            .with_hostname(PEER_PLACEHOLDER_ADDR),
         mode,
         wal: wal_config,
         ..Default::default()

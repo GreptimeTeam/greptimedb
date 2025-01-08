@@ -44,12 +44,32 @@ pub struct MockInfo {
 pub async fn mock_with_memstore() -> MockInfo {
     let kv_backend = Arc::new(MemoryKvBackend::new());
     let in_memory = Arc::new(MemoryKvBackend::new());
-    mock(Default::default(), kv_backend, None, None, Some(in_memory)).await
+    mock(
+        MetasrvOptions {
+            server_addr: "127.0.0.1:3002".to_string(),
+            ..Default::default()
+        },
+        kv_backend,
+        None,
+        None,
+        Some(in_memory),
+    )
+    .await
 }
 
 pub async fn mock_with_etcdstore(addr: &str) -> MockInfo {
     let kv_backend = EtcdStore::with_endpoints([addr], 128).await.unwrap();
-    mock(Default::default(), kv_backend, None, None, None).await
+    mock(
+        MetasrvOptions {
+            server_addr: "127.0.0.1:3002".to_string(),
+            ..Default::default()
+        },
+        kv_backend,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 pub async fn mock(

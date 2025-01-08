@@ -850,7 +850,7 @@ is_strict_mode = false
 
 [grpc]
 addr = "127.0.0.1:4001"
-hostname = "127.0.0.1"
+hostname = "127.0.0.1:4001"
 max_recv_message_size = "512MiB"
 max_send_message_size = "512MiB"
 runtime_size = 8
