@@ -71,7 +71,7 @@ impl LogQueryPlanner {
 
         // Column filters and projections
         let mut projected_columns = Vec::new();
-        for column_filter in &query.columns {
+        for column_filter in &query.filters {
             if let Some(expr) = self.build_column_filter(column_filter)? {
                 filters.push(expr);
             }
@@ -267,7 +267,7 @@ mod tests {
                 end: Some("2021-01-02T00:00:00Z".to_string()),
                 span: None,
             },
-            columns: vec![ColumnFilters {
+            filters: vec![ColumnFilters {
                 column_name: "message".to_string(),
                 filters: vec![ContentFilter::Contains("error".to_string())],
             }],
@@ -380,7 +380,7 @@ mod tests {
                 end: Some("2021-01-02T00:00:00Z".to_string()),
                 span: None,
             },
-            columns: vec![ColumnFilters {
+            filters: vec![ColumnFilters {
                 column_name: "message".to_string(),
                 filters: vec![ContentFilter::Contains("error".to_string())],
             }],
@@ -413,7 +413,7 @@ mod tests {
                 end: Some("2021-01-02T00:00:00Z".to_string()),
                 span: None,
             },
-            columns: vec![ColumnFilters {
+            filters: vec![ColumnFilters {
                 column_name: "message".to_string(),
                 filters: vec![ContentFilter::Contains("error".to_string())],
             }],

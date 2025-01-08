@@ -24,16 +24,56 @@ use crate::error::{
 /// GreptimeDB's log query request.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LogQuery {
+    // Global query parameters
     /// A fully qualified table name to query logs from.
     pub table: TableName,
     /// Specifies the time range for the log query. See [`TimeFilter`] for more details.
     pub time_filter: TimeFilter,
-    /// Columns with filters to query.
-    pub columns: Vec<ColumnFilters>,
-    /// Controls row skipping and fetch count for logs.
+    /// Controls row skipping and fetch on the result set.
     pub limit: Limit,
-    /// Adjacent lines to return.
+    /// Columns to return in the result set.
+    ///
+    /// The columns can be either from the original log or derived from processing exprs.
+    /// Default (empty) means all columns.
+    ///
+    /// TODO: Do we need negative select?
+    pub columns: Vec<String>,
+
+    // Filters
+    /// Conjunction of filters to apply for the raw logs.
+    ///
+    /// Filters here can only refer to the columns from the original log.
+    pub filters: Vec<ColumnFilters>,
+    /// Adjacent lines to return. Applies to all filters above.
     pub context: Context,
+
+    // Processors
+    /// Expressions to calculate after filter.
+    pub exprs: Vec<LogQueryExpr>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum LogQueryExpr {
+    NamedIdent(String),
+    PositionalIdent(usize),
+    Literal(String),
+    Call {
+        name: String,
+        args: Vec<LogQueryExpr>,
+    },
+    BinaryOp {
+        left: Box<LogQueryExpr>,
+        op: String,
+        right: Box<LogQueryExpr>,
+    },
+    Alias {
+        expr: Box<LogQueryExpr>,
+        alias: String,
+    },
+    Filter {
+        expr: Box<LogQueryExpr>,
+        filter: ContentFilter,
+    },
 }
 
 impl Default for LogQuery {
@@ -41,9 +81,11 @@ impl Default for LogQuery {
         Self {
             table: TableName::new("", "", ""),
             time_filter: Default::default(),
-            columns: vec![],
+            filters: vec![],
             limit: Limit::default(),
             context: Default::default(),
+            columns: vec![],
+            exprs: vec![],
         }
     }
 }
@@ -246,7 +288,10 @@ pub enum ContentFilter {
     Contains(String),
     /// Match the content with a regex pattern. The pattern should be a valid Rust regex.
     Regex(String),
+    /// Content exists, a.k.a. not null.
+    Exist,
     Compound(Vec<ContentFilter>, BinaryOperator),
+    // TODO: arithmetic operations
 }
 
 #[derive(Debug, Serialize, Deserialize)]
