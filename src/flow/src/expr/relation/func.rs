@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::OnceLock;
 
 use datatypes::prelude::ConcreteDataType;
@@ -21,10 +20,10 @@ use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
-use snafu::{IntoError, OptionExt};
+use snafu::OptionExt;
 use strum::{EnumIter, IntoEnumIterator};
 
-use crate::error::{DatafusionSnafu, Error, InvalidQuerySnafu};
+use crate::error::{Error, InvalidQuerySnafu};
 use crate::expr::error::EvalError;
 use crate::expr::relation::accum::{Accum, Accumulator};
 use crate::expr::signature::{GenericFn, Signature};
@@ -220,28 +219,14 @@ impl AggregateFunc {
             }
             spec
         });
-        use datafusion_expr::aggregate_function::AggregateFunction as DfAggrFunc;
-        let df_aggr_func = DfAggrFunc::from_str(name).or_else(|err| {
-            if let datafusion_common::DataFusionError::NotImplemented(msg) = err {
-                InvalidQuerySnafu {
-                    reason: format!("Unsupported aggregate function: {}", msg),
-                }
-                .fail()
-            } else {
-                Err(DatafusionSnafu {
-                    context: "Error when parsing aggregate function",
-                }
-                .into_error(err))
-            }
-        })?;
 
-        let generic_fn = match df_aggr_func {
-            DfAggrFunc::Max => GenericFn::Max,
-            DfAggrFunc::Min => GenericFn::Min,
-            DfAggrFunc::Sum => GenericFn::Sum,
-            DfAggrFunc::Count => GenericFn::Count,
-            DfAggrFunc::BoolOr => GenericFn::Any,
-            DfAggrFunc::BoolAnd => GenericFn::All,
+        let generic_fn = match name {
+            "max" => GenericFn::Max,
+            "min" => GenericFn::Min,
+            "sum" => GenericFn::Sum,
+            "count" => GenericFn::Count,
+            "bool_or" => GenericFn::Any,
+            "bool_and" => GenericFn::All,
             _ => {
                 return InvalidQuerySnafu {
                     reason: format!("Unknown aggregate function: {}", name),

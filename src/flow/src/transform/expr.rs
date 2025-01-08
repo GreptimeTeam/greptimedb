@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use common_error::ext::BoxedError;
 use common_telemetry::debug;
+use datafusion::execution::SessionStateBuilder;
 use datafusion_physical_expr::PhysicalExpr;
 use datatypes::data_type::ConcreteDataType as CDT;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -89,10 +90,10 @@ pub(crate) async fn from_scalar_fn_to_df_fn_impl(
     let df_expr =
         // TODO(discord9): consider coloring everything async....
         substrait::df_logical_plan::consumer::from_substrait_rex(
-            &datafusion::prelude::SessionContext::new(),
+            &SessionStateBuilder::new().build(),
             &e,
             &schema,
-            &extensions.inner_ref(),
+            &extensions.to_extensions(),
         )
         .await
     ;

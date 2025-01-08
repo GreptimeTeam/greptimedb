@@ -449,14 +449,14 @@ mod test {
                                                 false,
                                             )])
                                             .into_unnamed(),
-                                            extensions: FunctionExtensions {
-                                                anchor_to_name: BTreeMap::from([
+                                            extensions: FunctionExtensions::from_functions(
+                                                BTreeMap::from([
                                                     (0, "tumble_start".to_string()),
                                                     (1, "tumble_end".to_string()),
                                                     (2, "abs".to_string()),
                                                     (3, "sum".to_string()),
                                                 ]),
-                                            },
+                                            ),
                                         },
                                     )
                                     .await
@@ -610,14 +610,12 @@ mod test {
                                     true,
                                 )])
                                 .into_unnamed(),
-                                extensions: FunctionExtensions {
-                                    anchor_to_name: BTreeMap::from([
-                                        (0, "abs".to_string()),
-                                        (1, "tumble_start".to_string()),
-                                        (2, "tumble_end".to_string()),
-                                        (3, "sum".to_string()),
-                                    ]),
-                                },
+                                extensions: FunctionExtensions::from_functions(BTreeMap::from([
+                                    (0, "abs".to_string()),
+                                    (1, "tumble_start".to_string()),
+                                    (2, "tumble_end".to_string()),
+                                    (3, "sum".to_string()),
+                                ])),
                             })
                             .await
                             .unwrap(),
@@ -1527,15 +1525,13 @@ mod test {
                                                 false,
                                             )])
                                             .into_unnamed(),
-                                            extensions: FunctionExtensions {
-                                                anchor_to_name: BTreeMap::from([
+                                            extensions: FunctionExtensions::from_functions(BTreeMap::from([
                                                     (0, "subtract".to_string()),
                                                     (1, "divide".to_string()),
                                                     (2, "date_bin".to_string()),
                                                     (3, "max".to_string()),
                                                     (4, "min".to_string()),
-                                                ]),
-                                            },
+                                                ])),
                                         },
                                     )
                                     .await

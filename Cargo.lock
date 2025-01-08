@@ -4369,6 +4369,7 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datafusion-physical-expr",
+ "datafusion-substrait",
  "datatypes",
  "enum-as-inner",
  "enum_dispatch",
