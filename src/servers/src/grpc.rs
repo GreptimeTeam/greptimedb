@@ -89,7 +89,7 @@ impl Default for GrpcOptions {
     fn default() -> Self {
         Self {
             addr: "127.0.0.1:4001".to_string(),
-            hostname: "127.0.0.1:4001".to_string(),
+            hostname: "127.0.0.1".to_string(),
             auto_hostname: false,
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
