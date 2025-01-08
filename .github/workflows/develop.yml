@@ -646,7 +646,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Merge Conflict finder
+      - name: Merge Conflict Finder
         uses: olivernybroe/action-conflict-finder@v4.0
 
   coverage:
