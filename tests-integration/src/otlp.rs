@@ -190,12 +190,14 @@ mod test {
                             description: "my ignored desc".into(),
                             unit: "my ignored unit".into(),
                             data: Some(metric::Data::Gauge(gauge)),
+                            ..Default::default()
                         },
                         Metric {
                             name: "my.test.histo".into(),
                             description: "my ignored desc".into(),
                             unit: "my ignored unit".into(),
                             data: Some(metric::Data::Histogram(histo)),
+                            ..Default::default()
                         },
                     ],
                     scope: Some(InstrumentationScope {

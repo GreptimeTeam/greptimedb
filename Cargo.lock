@@ -6276,16 +6276,6 @@ dependencies = [
 [[package]]
 name = "loki-api"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "674883a98273598ac3aad4301724c56734bea90574c5033af067e8f9fb5eb399"
-dependencies = [
- "prost 0.12.6",
- "prost-types 0.12.6",
-]
-
-[[package]]
-name = "loki-api"
-version = "0.1.2"
 source = "git+https://github.com/shuiyisong/tracing-loki?branch=chore%2Fprost_version#ad135292a77b6ce638d126571804c19fdaa36215"
 dependencies = [
  "prost 0.13.3",
@@ -10457,7 +10447,7 @@ dependencies = [
  "json5",
  "jsonb",
  "lazy_static",
- "loki-api 0.1.2 (git+https://github.com/shuiyisong/tracing-loki?branch=chore%2Fprost_version)",
+ "loki-api",
  "mime_guess",
  "mysql_async",
  "notify",
@@ -11742,8 +11732,9 @@ dependencies = [
  "futures",
  "futures-util",
  "hex",
+ "hyper-util",
  "itertools 0.10.5",
- "loki-api 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "loki-api",
  "meta-client",
  "meta-srv",
  "moka",
