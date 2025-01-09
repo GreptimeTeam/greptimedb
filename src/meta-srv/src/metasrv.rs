@@ -228,7 +228,7 @@ impl MetasrvOptions {
     }
 
     #[cfg(target_os = "android")]
-    pub fn detect_hostname(&mut self) {
+    pub fn detect_server_addr(&mut self) {
         if self.server_addr.is_empty() {
             common_telemetry::debug!("detect local IP is not supported on Android");
         }
