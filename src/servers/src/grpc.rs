@@ -67,6 +67,7 @@ pub struct GrpcOptions {
 
 impl GrpcOptions {
     /// Detect hostname if `auto_hostname` is true.
+    #[cfg(not(target_os = "android"))]
     pub fn detect_hostname(&mut self) {
         if self.hostname.is_empty() {
             match local_ip_address::local_ip() {
@@ -86,6 +87,13 @@ impl GrpcOptions {
                     error!("Failed to detect local ip address: {}", e);
                 }
             }
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn detect_hostname(&mut self) {
+        if self.hostname.is_empty() {
+            common_telemetry::debug!("detect local IP is not supported on Android");
         }
     }
 }
