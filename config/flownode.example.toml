@@ -6,7 +6,7 @@ mode = "distributed"
 node_id = 14
 
 ## The number of flow worker in flownode
-num_workers = 2
+num_workers = 8
 
 ## The gRPC server options.
 [grpc]
