@@ -363,6 +363,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("Wrong digest pattern: {pattern}"))]
+    PresetPatternInvalid {
+        pattern: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
     #[snafu(display("Url decoding error"))]
     UrlEncodingDecode {
         #[snafu(source)]
