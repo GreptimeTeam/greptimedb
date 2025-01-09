@@ -98,7 +98,7 @@ impl TransformRule for TypeAliasTransformRule {
                 data_type,
                 ..
             } if matches!(data_type, DataType::Int64 | DataType::Float64) => {
-                if let Some(new_type) = get_data_type_by_alias_name(&data_type.to_string()) {
+                if let Some(new_type) = get_type_by_alias(&data_type) {
                     if let Ok(new_type) = sql_data_type_to_concrete_data_type(&new_type) {
                         *expr = Expr::Function(cast_expr_to_arrow_cast_func(
                             (**cast_expr).clone(),
@@ -151,20 +151,43 @@ impl TransformRule for TypeAliasTransformRule {
 }
 
 fn replace_type_alias(data_type: &mut DataType) {
-    match data_type {
-        // TODO(dennis): The sqlparser latest version contains the Int8 alias for Postgres Bigint.
-        // Which means 8 bytes in postgres (not 8 bits). If we upgrade the sqlparser, need to process it.
-        // See https://docs.rs/sqlparser/latest/sqlparser/ast/enum.DataType.html#variant.Int8
-        DataType::Custom(name, tokens) if name.0.len() == 1 && tokens.is_empty() => {
-            if let Some(new_type) = get_data_type_by_alias_name(name.0[0].value.as_str()) {
-                *data_type = new_type;
-            }
-        }
-        _ => {}
+    if let Some(new_type) = get_type_by_alias(data_type) {
+        *data_type = new_type;
     }
 }
 
-pub fn get_data_type_by_alias_name(name: &str) -> Option<DataType> {
+/// Get data type from alias type.
+// Remember to update `get_data_type_by_alias_name()` if you modify this method.
+pub(crate) fn get_type_by_alias(data_type: &DataType) -> Option<DataType> {
+    match data_type {
+        // The sqlparser latest version contains the Int8 alias for Postgres Bigint.
+        // Which means 8 bytes in postgres (not 8 bits).
+        // See https://docs.rs/sqlparser/latest/sqlparser/ast/enum.DataType.html#variant.Int8
+        DataType::Custom(name, tokens) if name.0.len() == 1 && tokens.is_empty() => {
+            get_data_type_by_alias_name(name.0[0].value.as_str())
+        }
+        DataType::Int8(None) => Some(DataType::TinyInt(None)),
+        DataType::Int16 => Some(DataType::SmallInt(None)),
+        DataType::Int32 => Some(DataType::Int(None)),
+        DataType::Int64 => Some(DataType::BigInt(None)),
+        DataType::UInt8 => Some(DataType::UnsignedTinyInt(None)),
+        DataType::UInt16 => Some(DataType::UnsignedSmallInt(None)),
+        DataType::UInt32 => Some(DataType::UnsignedInt(None)),
+        DataType::UInt64 => Some(DataType::UnsignedBigInt(None)),
+        DataType::Float32 => Some(DataType::Float(None)),
+        DataType::Float64 => Some(DataType::Double),
+        _ => None,
+    }
+}
+
+/// Get the mapped data type from alias name.
+/// It only supports the following types of alias:
+/// - timestamps
+/// - ints
+/// - floats
+/// - texts
+// Remember to update `get_type_alias()` if you modify this method.
+pub(crate) fn get_data_type_by_alias_name(name: &str) -> Option<DataType> {
     match name.to_uppercase().as_ref() {
         // Timestamp type alias
         "TIMESTAMP_S" | "TIMESTAMP_SEC" | "TIMESTAMPSECOND" => {
@@ -181,6 +204,7 @@ pub fn get_data_type_by_alias_name(name: &str) -> Option<DataType> {
             Some(DataType::Timestamp(Some(9), TimezoneInfo::None))
         }
         // Number type alias
+        // We keep them for backward compatibility.
         "INT8" => Some(DataType::TinyInt(None)),
         "INT16" => Some(DataType::SmallInt(None)),
         "INT32" => Some(DataType::Int(None)),
@@ -382,13 +406,13 @@ CREATE TABLE data_types (
   tt TEXT,
   mt TEXT,
   lt TEXT,
-  tint INT8,
+  tint TINYINT,
   sint SMALLINT,
   i INT,
-  bint INT64,
+  bint BIGINT,
   v VARCHAR,
   f FLOAT,
-  d FLOAT64,
+  d DOUBLE,
   b BOOLEAN,
   vb VARBINARY,
   dt DATE,

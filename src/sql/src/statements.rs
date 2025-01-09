@@ -27,7 +27,7 @@ pub mod set_variables;
 pub mod show;
 pub mod statement;
 pub mod tql;
-mod transform;
+pub(crate) mod transform;
 pub mod truncate;
 
 use std::str::FromStr;
@@ -61,7 +61,7 @@ use crate::error::{
 };
 use crate::statements::create::Column;
 pub use crate::statements::option_map::OptionMap;
-pub use crate::statements::transform::{get_data_type_by_alias_name, transform_statements};
+pub(crate) use crate::statements::transform::transform_statements;
 
 const VECTOR_TYPE_NAME: &str = "VECTOR";
 

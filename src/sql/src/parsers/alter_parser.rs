@@ -504,7 +504,7 @@ mod tests {
         let err = result.output_msg();
         assert_eq!(
             err,
-            "sql parser error: Expected COLUMN, found: a at Line: 1, Column 30"
+            "Invalid SQL syntax: sql parser error: Expected: COLUMN, found: a at Line: 1, Column: 30"
         );
 
         let sql = "ALTER TABLE my_metric_1 DROP COLUMN a";
@@ -650,7 +650,7 @@ mod tests {
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap_err();
         let err = result.output_msg();
-        assert_eq!(err, "sql parser error: Expected ADD or DROP or MODIFY or RENAME or SET after ALTER TABLE, found: table_t");
+        assert_eq!(err, "Invalid SQL syntax: sql parser error: Expected ADD or DROP or MODIFY or RENAME or SET after ALTER TABLE, found: table_t");
 
         let sql = "ALTER TABLE test_table RENAME table_t";
         let mut result =

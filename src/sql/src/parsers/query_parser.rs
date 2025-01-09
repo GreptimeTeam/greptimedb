@@ -56,6 +56,6 @@ mod tests {
         assert!(result
             .unwrap_err()
             .output_msg()
-            .contains("Expected an expression"));
+            .contains("Expected: an expression"));
     }
 }

@@ -672,8 +672,8 @@ CREATE TABLE t2 LIKE t1"#,
 CREATE EXTERNAL TABLE city (
   host STRING,
   ts TIMESTAMP,
-  cpu FLOAT64 DEFAULT 0,
-  memory FLOAT64,
+  cpu DOUBLE DEFAULT 0,
+  memory DOUBLE,
   TIME INDEX (ts),
   PRIMARY KEY (host)
 )
