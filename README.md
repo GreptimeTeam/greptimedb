@@ -229,4 +229,3 @@ Special thanks to all the contributors who have propelled GreptimeDB forward. Fo
 - GreptimeDB's query engine is powered by [Apache Arrow DataFusion™](https://arrow.apache.org/datafusion/).
 - [Apache OpenDAL™](https://opendal.apache.org) gives GreptimeDB a very general and elegant data access abstraction layer.
 - GreptimeDB's meta service is based on [etcd](https://etcd.io/).
-- GreptimeDB uses [RustPython](https://github.com/RustPython/RustPython) for experimental embedded python scripting.

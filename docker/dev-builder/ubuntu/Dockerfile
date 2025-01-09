@@ -6,11 +6,8 @@ ARG DOCKER_BUILD_ROOT=.
 ENV LANG en_US.utf8
 WORKDIR /greptimedb
 
-# Add PPA for Python 3.10.
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common && \
-    add-apt-repository ppa:deadsnakes/ppa -y
-
+    DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common
 # Install dependencies.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     libssl-dev \
@@ -20,9 +17,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     ca-certificates \
     git \
     build-essential \
-    pkg-config \
-    python3.10 \
-    python3.10-dev
+    pkg-config
 
 ARG TARGETPLATFORM
 RUN echo "target platform: $TARGETPLATFORM"
@@ -38,12 +33,6 @@ fi
 RUN mv protoc3/bin/* /usr/local/bin/
 RUN mv protoc3/include/* /usr/local/include/
 
-# Remove Python 3.8 and install pip.
-RUN apt-get -y purge python3.8 && \
-    apt-get -y autoremove && \
-    ln -s /usr/bin/python3.10 /usr/bin/python3 && \
-    curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10
-
 # Silence all `safe.directory` warnings, to avoid the "detect dubious repository" error when building with submodules.
 # Disabling the safe directory check here won't pose extra security issues, because in our usage for this dev build
 # image, we use it solely on our own environment (that github action's VM, or ECS created dynamically by ourselves),
@@ -55,10 +44,6 @@ RUN apt-get -y purge python3.8 && \
 # It's troublesome to do this since the dev build runs in Docker, which is under user "root"; while outside the Docker,
 # it can be a different user that have prepared the submodules.
 RUN git config --global --add safe.directory '*'
-
-# Install Python dependencies.
-COPY $DOCKER_BUILD_ROOT/docker/python/requirements.txt /etc/greptime/requirements.txt
-RUN python3 -m pip install -r /etc/greptime/requirements.txt
 
 # Install Rust.
 SHELL ["/bin/bash", "-c"]
