@@ -1,3 +1,24 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Digest the input string by removing certain patterns.
+//!
+//! This processor can helps to extract useful information from a string by removing certain patterns,
+//! which is often a variable from the log message. Digested fields are stored in a new field with the
+//! `_digest` suffix. And can be used for further processing or analysis like template occurrences count
+//! or similarity analysis.
+
 use ahash::HashSet;
 use regex::Regex;
 use snafu::OptionExt;
@@ -15,7 +36,7 @@ use crate::etl_error::PresetPatternInvalidSnafu;
 
 pub(crate) const PROCESSOR_DIGEST: &str = "digest";
 
-const PRESET_PATTERNS_NAME: &str = "preset";
+const PRESETS_PATTERNS_NAME: &str = "presets";
 const REGEX_PATTERNS_NAME: &str = "regex";
 
 enum PresetPattern {
@@ -128,7 +149,7 @@ impl DigestProcessor {
         let mut result = None;
         for pattern in self.patterns.iter() {
             let new_result = pattern.replace_all(input, "");
-            if &new_result != input {
+            if new_result != input {
                 result = Some(new_result.to_string());
                 input = result.as_ref().unwrap();
             }
@@ -176,7 +197,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DigestProcessorBuilder {
                 IGNORE_MISSING_NAME => {
                     ignore_missing = yaml_bool(v, IGNORE_MISSING_NAME)?;
                 }
-                PRESET_PATTERNS_NAME => {
+                PRESETS_PATTERNS_NAME => {
                     let preset_patterns: Vec<String> = v
                         .as_vec()
                         .with_context(|| PresetPatternInvalidSnafu {
@@ -207,6 +228,10 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DigestProcessorBuilder {
                 }
                 _ => {}
             }
+        }
+
+        for field in fields.iter_mut() {
+            field.target_field = Some(format!("{}_digest", field.input_field()));
         }
 
         Ok(DigestProcessorBuilder {
