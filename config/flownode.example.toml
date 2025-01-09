@@ -7,7 +7,7 @@ node_id = 14
 
 ## The number of flow worker in flownode.
 ## Not setting this value will use the number of CPU cores divided by 2.
-num_workers = 8
+#+num_workers=8
 
 ## The gRPC server options.
 [grpc]
