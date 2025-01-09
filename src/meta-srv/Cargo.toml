@@ -11,6 +11,9 @@ pg_kvbackend = ["dep:tokio-postgres", "common-meta/pg_kvbackend"]
 [lints]
 workspace = true
 
+[target.'cfg(not(target_os = "android"))'.dependencies]
+local-ip-address.workspace = true
+
 [dependencies]
 api.workspace = true
 async-trait = "0.1"
@@ -45,7 +48,6 @@ humantime.workspace = true
 humantime-serde.workspace = true
 itertools.workspace = true
 lazy_static.workspace = true
-local-ip-address.workspace = true
 once_cell.workspace = true
 parking_lot.workspace = true
 prometheus.workspace = true
