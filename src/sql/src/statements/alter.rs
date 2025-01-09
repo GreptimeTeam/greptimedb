@@ -108,9 +108,9 @@ impl Display for AlterTableOperation {
             AlterTableOperation::AddColumns { add_columns } => {
                 let columns = add_columns
                     .iter()
-                    .map(|add_column| format!("{add_column}"))
-                    .join(",");
-                write!(f, "ADD COLUMN {columns}")
+                    .map(|add_column| format!("ADD COLUMN {add_column}"))
+                    .join(", ");
+                write!(f, "{columns}")
             }
             AlterTableOperation::DropColumn { name } => write!(f, r#"DROP COLUMN {name}"#),
             AlterTableOperation::RenameTable { new_table_name } => {
@@ -298,7 +298,7 @@ ALTER DATABASE db UNSET 'a','c'"#,
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
-ALTER TABLE monitor ADD COLUMN app STRING DEFAULT 'shop' PRIMARY KEY,foo INT"#,
+ALTER TABLE monitor ADD COLUMN app STRING DEFAULT 'shop' PRIMARY KEY, ADD COLUMN foo INT"#,
                     &new_sql
                 );
             }
