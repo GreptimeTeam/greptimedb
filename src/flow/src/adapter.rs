@@ -102,7 +102,7 @@ impl Default for FlownodeOptions {
             mode: servers::Mode::Standalone,
             cluster_id: None,
             node_id: None,
-            num_workers: 2,
+            num_workers: common_config::utils::get_cpus(),
             grpc: GrpcOptions::default().with_addr("127.0.0.1:3004"),
             meta_client: None,
             logging: LoggingOptions::default(),
@@ -121,19 +121,9 @@ impl Configurable for FlownodeOptions {
             ))
             .context(LoadLayeredConfigSnafu)?
         }
-        if self.num_workers > MAX_WORKERS {
-            Err(ConfigError::Message(format!(
-                "num_workers cannot exceed {}",
-                MAX_WORKERS
-            )))
-            .context(LoadLayeredConfigSnafu)?
-        }
         Ok(())
     }
 }
-
-/// Define a reasonable maximum number of workers
-const MAX_WORKERS: usize = 16;
 
 /// Arc-ed FlowNodeManager, cheaper to clone
 pub type FlowWorkerManagerRef = Arc<FlowWorkerManager>;
@@ -215,12 +205,14 @@ impl FlowWorkerManager {
         num_workers: usize,
     ) -> (Self, Vec<Worker<'s>>) {
         let mut zelf = Self::new(node_id, query_engine, table_meta);
-        let mut workers = Vec::new();
-        for _ in 0..num_workers {
-            let (handle, worker) = create_worker();
-            zelf.add_worker_handle(handle);
-            workers.push(worker);
-        }
+
+        let workers: Vec<_> = (0..num_workers)
+            .map(|_| {
+                let (handle, worker) = create_worker();
+                zelf.add_worker_handle(handle);
+                worker
+            })
+            .collect();
         (zelf, workers)
     }
 
