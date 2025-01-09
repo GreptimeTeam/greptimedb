@@ -272,7 +272,9 @@ impl StartCommand {
         info!("Metasrv options: {:#?}", opts);
 
         let plugin_opts = opts.plugins;
+        #[allow(unused_mut)]
         let mut opts = opts.component;
+        #[cfg(not(target_os = "android"))]
         opts.detect_server_addr();
         let mut plugins = Plugins::new();
         plugins::setup_metasrv_plugins(&mut plugins, &plugin_opts, &opts)
