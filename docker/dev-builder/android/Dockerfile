@@ -13,8 +13,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     git \
     build-essential \
-    pkg-config \
-    python3
+    pkg-config
 
 # Trust workdir
 RUN git config --global --add safe.directory /greptimedb
