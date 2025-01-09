@@ -19,6 +19,8 @@
 //! `_digest` suffix. And can be used for further processing or analysis like template occurrences count
 //! or similarity analysis.
 
+use std::borrow::Cow;
+
 use ahash::HashSet;
 use regex::Regex;
 use snafu::OptionExt;
@@ -78,7 +80,7 @@ impl PresetPattern {
     fn regex(&self) -> Regex {
         match self {
             PresetPattern::Numbers => Regex::new(r"\d+").unwrap(),
-            PresetPattern::Quoted => Regex::new(r#"[\"'“”‘’][^\"'“”‘’]*[\"'“”‘’]"#).unwrap(),
+            PresetPattern::Quoted => Regex::new(r#"["'“”‘’][^"'“”‘’]*["'“”‘’]"#).unwrap(),
             PresetPattern::Bracketed => Regex::new(r#"[({\[<「『【〔［｛〈《][^(){}\[\]<>「」『』【】〔〕［］｛｝〈〉《》]*[)}\]>」』】〕］｝〉》]"#).unwrap(),
             PresetPattern::Uuid => Regex::new(r"\b[0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12}\b").unwrap(),
             PresetPattern::Ip => Regex::new(r"((\d{1,3}\.){3}\d{1,3}(:\d+)?|(\[[0-9a-fA-F:]+\])(:\d+)?)").unwrap(),
@@ -112,7 +114,7 @@ impl ProcessorBuilder for DigestProcessorBuilder {
 
 impl DigestProcessorBuilder {
     fn build(self, intermediate_keys: &[String]) -> Result<DigestProcessor> {
-        let mut real_fields = vec![];
+        let mut real_fields = Vec::with_capacity(self.fields.len());
         for field in self.fields.into_iter() {
             let input = OneInputOneOutputField::build(
                 "digest",
@@ -145,21 +147,14 @@ impl DigestProcessor {
     }
 
     fn process_string(&self, val: &str) -> Result<Value> {
-        let mut input = val;
-        let mut result = None;
-        for pattern in self.patterns.iter() {
-            let new_result = pattern.replace_all(input, "");
-            if new_result != input {
-                result = Some(new_result.to_string());
-                input = result.as_ref().unwrap();
+        let mut input = Cow::from(val);
+        for pattern in &self.patterns {
+            if let Cow::Owned(new_string) = pattern.replace_all(&input, "") {
+                input = Cow::Owned(new_string);
             }
         }
 
-        if let Some(result) = result {
-            Ok(Value::String(result))
-        } else {
-            Ok(Value::String(val.to_string()))
-        }
+        Ok(Value::String(input.into_owned()))
     }
 
     fn process(&self, val: &Value) -> Result<Value> {
