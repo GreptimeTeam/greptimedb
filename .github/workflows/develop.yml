@@ -670,8 +670,7 @@ jobs:
         with:
           # Shares cross multiple jobs
           shared-key: "coverage-test"
-          cache-all-crates: "true"
-          save-if: ${{ github.event_name == 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Disabled temporarily to see performance
       # - name: Docker Cache
       #   uses: ScribeMD/docker-cache@0.5.0
