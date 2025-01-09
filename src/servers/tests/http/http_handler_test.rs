@@ -93,7 +93,7 @@ async fn test_sql_output_rows() {
   "schema": {
     "column_schemas": [
       {
-        "name": "SUM(numbers.uint32s)",
+        "name": "sum(numbers.uint32s)",
         "data_type": "UInt64"
       }
     ]
@@ -120,7 +120,7 @@ async fn test_sql_output_rows() {
       {
         "name": "",
         "columns": [
-          "SUM(numbers.uint32s)"
+          "sum(numbers.uint32s)"
         ],
         "values": [
           [
@@ -157,7 +157,7 @@ async fn test_sql_output_rows() {
                         .await
                         .unwrap(),
                     Bytes::from(
-                        r#"┌─SUM(numbers.uint32s)─┐
+                        r#"┌─sum(numbers.uint32s)─┐
 │ 4950                 │
 └──────────────────────┘
 "#
@@ -240,7 +240,7 @@ async fn test_sql_form() {
   "schema": {
     "column_schemas": [
       {
-        "name": "SUM(numbers.uint32s)",
+        "name": "sum(numbers.uint32s)",
         "data_type": "UInt64"
       }
     ]
@@ -267,7 +267,7 @@ async fn test_sql_form() {
       {
         "name": "",
         "columns": [
-          "SUM(numbers.uint32s)"
+          "sum(numbers.uint32s)"
         ],
         "values": [
           [
@@ -304,7 +304,7 @@ async fn test_sql_form() {
                         .await
                         .unwrap(),
                     Bytes::from(
-                        r#"┌─SUM(numbers.uint32s)─┐
+                        r#"┌─sum(numbers.uint32s)─┐
 │ 4950                 │
 └──────────────────────┘
 "#

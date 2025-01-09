@@ -120,7 +120,7 @@ mod tests {
         let data_str = format!("{:?}", re);
         assert_eq!(
             data_str,
-            r#"Data(Response { status: 200, version: HTTP/1.1, headers: {"content-type": "application/json", "x-greptime-format": "greptimedb_manage", "x-greptime-execution-time": "42"}, body: UnsyncBoxBody })"#
+            r#"Response { status: 200, version: HTTP/1.1, headers: {"content-type": "application/json", "x-greptime-format": "greptimedb_manage", "x-greptime-execution-time": "42"}, body: Body(UnsyncBoxBody) }"#
         );
 
         let body_bytes = to_bytes(re.into_body(), usize::MAX).await.unwrap();

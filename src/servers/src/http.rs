@@ -1032,9 +1032,11 @@ mod test {
 
     #[tokio::test]
     async fn test_http_server_request_timeout() {
+        common_telemetry::init_default_ut_logging();
+
         let (tx, _rx) = mpsc::channel(100);
         let app = make_test_app(tx);
-        let client = TestClient::new(app);
+        let client = TestClient::new(app).await;
         let res = client.get("/test/timeout").send().await;
         assert_eq!(res.status(), StatusCode::REQUEST_TIMEOUT);
 

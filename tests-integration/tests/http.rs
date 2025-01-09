@@ -115,7 +115,7 @@ pub async fn test_http_auth(store_type: StorageType) {
         Some(user_provider),
     )
     .await;
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // 1. no auth
     let res = client
@@ -147,7 +147,7 @@ pub async fn test_http_auth(store_type: StorageType) {
 
 pub async fn test_sql_api(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
     let res = client.get("/v1/sql").send().await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
@@ -402,7 +402,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
 pub async fn test_prometheus_promql_api(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     let res = client
         .get("/v1/promql?query=abs(demo{host=\"Hangzhou\"})&start=0&end=100&step=5s")
@@ -417,7 +417,7 @@ pub async fn test_prometheus_promql_api(store_type: StorageType) {
 pub async fn test_prom_http_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) = setup_test_prom_app_with_frontend(store_type, "promql_api").await;
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // format_query
     let res = client
@@ -693,7 +693,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
 pub async fn test_metrics_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) = setup_test_http_app(store_type, "metrics_api").await;
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // Send a sql
     let res = client
@@ -714,7 +714,7 @@ pub async fn test_metrics_api(store_type: StorageType) {
 pub async fn test_health_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, _guard) = setup_test_http_app_with_frontend(store_type, "health_api").await;
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // we can call health api with both `GET` and `POST` method.
     let res_post = client.post("/health").send().await;
@@ -736,7 +736,7 @@ pub async fn test_health_api(store_type: StorageType) {
 pub async fn test_status_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, _guard) = setup_test_http_app_with_frontend(store_type, "status_api").await;
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     let res_get = client.get("/status").send().await;
     assert_eq!(res_get.status(), StatusCode::OK);
@@ -753,7 +753,7 @@ pub async fn test_status_api(store_type: StorageType) {
 pub async fn test_config_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, _guard) = setup_test_http_app_with_frontend(store_type, "config_api").await;
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     let res_get = client.get("/config").send().await;
     assert_eq!(res_get.status(), StatusCode::OK);
@@ -972,7 +972,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
 pub async fn test_dashboard_path(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, _guard) = setup_test_http_app_with_frontend(store_type, "dashboard_path").await;
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     let res_post = client.post("/dashboard").send().await;
     assert_eq!(res_post.status(), StatusCode::OK);
@@ -991,7 +991,7 @@ pub async fn test_prometheus_remote_write(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
         setup_test_prom_app_with_frontend(store_type, "prometheus_remote_write").await;
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // write snappy encoded data
     let write_request = WriteRequest {
@@ -1019,7 +1019,7 @@ pub async fn test_vm_proto_remote_write(store_type: StorageType) {
         setup_test_prom_app_with_frontend(store_type, "vm_proto_remote_write").await;
 
     // handshake
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
     let res = client
         .post("/v1/prometheus/write?get_vm_proto_version=1")
         .send()
@@ -1077,7 +1077,7 @@ pub async fn test_pipeline_api(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_pipeline_api").await;
 
     // handshake
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     let body = r#"
 processors:
@@ -1208,7 +1208,7 @@ pub async fn test_identify_pipeline(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_pipeline_api").await;
 
     // handshake
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
     let body = r#"{"__time__":1453809242,"__topic__":"","__source__":"10.170.***.***","ip":"10.200.**.***","time":"26/Jan/2016:19:54:02 +0800","url":"POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","status":"200","user-agent":"aliyun-sdk-java"}
 {"__time__":1453809242,"__topic__":"","__source__":"10.170.***.***","ip":"10.200.**.***","time":"26/Jan/2016:19:54:02 +0800","url":"POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","status":"200","user-agent":"aliyun-sdk-java","hasagei":"hasagei","dongdongdong":"guaguagua"}"#;
     let res = client
@@ -1263,7 +1263,7 @@ pub async fn test_test_pipeline_api(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_pipeline_api").await;
 
     // handshake
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     let body = r#"
 processors:
@@ -1428,7 +1428,7 @@ pub async fn test_plain_text_ingestion(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_pipeline_api").await;
 
     // handshake
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     let body = r#"
 processors:
@@ -1527,7 +1527,7 @@ pub async fn test_otlp_metrics(store_type: StorageType) {
     let body = req.encode_to_vec();
 
     // handshake
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // write metrics data
     let res = send_req(&client, vec![], "/v1/otlp/v1/metrics", body.clone(), false).await;
@@ -1570,7 +1570,7 @@ pub async fn test_otlp_traces(store_type: StorageType) {
     let body = req.encode_to_vec();
 
     // handshake
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // write traces data
     let res = send_req(&client, vec![], "/v1/otlp/v1/traces", body.clone(), false).await;
@@ -1613,7 +1613,7 @@ pub async fn test_otlp_logs(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_otlp_logs").await;
 
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
     let content = r#"
 {"resourceLogs":[{"resource":{"attributes":[{"key":"resource-attr","value":{"stringValue":"resource-attr-val-1"}}]},"schemaUrl":"https://opentelemetry.io/schemas/1.0.0/resourceLogs","scopeLogs":[{"scope":{},"schemaUrl":"https://opentelemetry.io/schemas/1.0.0/scopeLogs","logRecords":[{"flags":1,"timeUnixNano":1581452773000009875,"observedTimeUnixNano":1581452773000009875,"severityNumber":9,"severityText":"Info","body":{"value":{"stringValue":"This is a log message"}},"attributes":[{"key":"app","value":{"stringValue":"server"}},{"key":"instance_num","value":{"intValue":1}}],"droppedAttributesCount":1,"traceId":[48,56,48,52,48,50,48,49,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48],"spanId":[48,49,48,50,48,52,48,56,48,48,48,48,48,48,48,48]},{"flags":1,"timeUnixNano":1581452773000000789,"observedTimeUnixNano":1581452773000000789,"severityNumber":9,"severityText":"Info","body":{"value":{"stringValue":"something happened"}},"attributes":[{"key":"customer","value":{"stringValue":"acme"}},{"key":"env","value":{"stringValue":"dev"}}],"droppedAttributesCount":1,"traceId":[48],"spanId":[48]}]}]}]}
 "#;
@@ -1677,7 +1677,7 @@ pub async fn test_loki_logs(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_loke_logs").await;
 
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // init loki request
     let req: PushRequest = PushRequest {

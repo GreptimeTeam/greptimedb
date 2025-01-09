@@ -13,7 +13,7 @@
 //!     let app = Router::new().route("/", get(|| async {}));
 //!
 //!     // initiate the TestClient with the previous declared Router
-//!     let client = TestClient::new(app);
+//!     let client = TestClient::new(app).await;
 //!
 //!     let res = client.get("/").await;
 //!     assert_eq!(res.status(), StatusCode::OK);
@@ -31,13 +31,14 @@
 //! ```
 
 use std::convert::TryFrom;
-use std::net::{SocketAddr, TcpListener};
+use std::net::SocketAddr;
 
 use axum::Router;
 use bytes::Bytes;
 use common_telemetry::info;
 use http::header::{HeaderName, HeaderValue};
 use http::StatusCode;
+use tokio::net::TcpListener;
 
 /// Test client to Axum servers.
 pub struct TestClient {
@@ -47,14 +48,14 @@ pub struct TestClient {
 
 impl TestClient {
     /// Create a new test client.
-    pub fn new(svc: Router) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("Could not bind ephemeral socket");
+    pub async fn new(svc: Router) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("Could not bind ephemeral socket");
         let addr = listener.local_addr().unwrap();
         info!("Listening on {}", addr);
 
         tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-
             axum::serve(listener, svc).await.expect("server error");
         });
 
@@ -76,6 +77,8 @@ impl TestClient {
 
     /// Create a GET request.
     pub fn get(&self, url: &str) -> RequestBuilder {
+        common_telemetry::info!("GET {} {}", self.addr, url);
+
         RequestBuilder {
             builder: self.client.get(format!("http://{}{}", self.addr, url)),
         }
@@ -83,6 +86,8 @@ impl TestClient {
 
     /// Create a HEAD request.
     pub fn head(&self, url: &str) -> RequestBuilder {
+        common_telemetry::info!("HEAD {} {}", self.addr, url);
+
         RequestBuilder {
             builder: self.client.head(format!("http://{}{}", self.addr, url)),
         }
@@ -90,6 +95,8 @@ impl TestClient {
 
     /// Create a POST request.
     pub fn post(&self, url: &str) -> RequestBuilder {
+        common_telemetry::info!("POST {} {}", self.addr, url);
+
         RequestBuilder {
             builder: self.client.post(format!("http://{}{}", self.addr, url)),
         }
@@ -97,6 +104,8 @@ impl TestClient {
 
     /// Create a PUT request.
     pub fn put(&self, url: &str) -> RequestBuilder {
+        common_telemetry::info!("PUT {} {}", self.addr, url);
+
         RequestBuilder {
             builder: self.client.put(format!("http://{}{}", self.addr, url)),
         }
@@ -104,6 +113,8 @@ impl TestClient {
 
     /// Create a PATCH request.
     pub fn patch(&self, url: &str) -> RequestBuilder {
+        common_telemetry::info!("PATCH {} {}", self.addr, url);
+
         RequestBuilder {
             builder: self.client.patch(format!("http://{}{}", self.addr, url)),
         }
@@ -111,6 +122,8 @@ impl TestClient {
 
     /// Create a DELETE request.
     pub fn delete(&self, url: &str) -> RequestBuilder {
+        common_telemetry::info!("DELETE {} {}", self.addr, url);
+
         RequestBuilder {
             builder: self.client.delete(format!("http://{}{}", self.addr, url)),
         }

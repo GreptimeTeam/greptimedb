@@ -117,10 +117,12 @@ fn make_test_app(tx: mpsc::Sender<String>) -> Router {
 
 #[tokio::test]
 async fn test_opentsdb_put() {
+    common_telemetry::init_default_ut_logging();
+
     let (tx, mut rx) = mpsc::channel(100);
 
     let app = make_test_app(tx);
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // single data point put
     let result = client
@@ -174,10 +176,12 @@ async fn test_opentsdb_put() {
 
 #[tokio::test]
 async fn test_opentsdb_debug_put() {
+    common_telemetry::init_default_ut_logging();
+
     let (tx, mut rx) = mpsc::channel(100);
 
     let app = make_test_app(tx);
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // single data point summary debug put
     let result = client
