@@ -534,7 +534,7 @@ mod test {
             .with_key(vec![2])
             .with_time_index(Some(1))
             .into_named(vec![
-                Some("abs(SUM(numbers_with_ts.number))".to_string()),
+                Some("abs(sum(numbers_with_ts.number))".to_string()),
                 Some("window_start".to_string()),
                 Some("window_end".to_string()),
             ]),
@@ -1495,7 +1495,7 @@ mod test {
             .with_key(vec![1])
             .into_named(vec![
                 Some(
-                    "MAX(numbers_with_ts.number) - MIN(numbers_with_ts.number) / Float64(30)"
+                    "max(numbers_with_ts.number) - min(numbers_with_ts.number) / Float64(30)"
                         .to_string(),
                 ),
                 Some("time_window".to_string()),
@@ -1527,7 +1527,7 @@ mod test {
                                     df_scalar_fn: DfScalarFunction::try_from_raw_fn(
                                         RawDfScalarFn {
                                             f: BytesMut::from(
-                                                b"\x08\x02\"I\x1aG\nE\x8a\x02?\x08\x03\x12+\n\x17interval-month-day-nano\x12\x10\0\xac#\xfc\x06\0\0\0\0\0\0\0\0\0\0\0\x1a\x06\x12\x04:\x02\x10\x02\x1a\x06\x12\x04:\x02\x10\x02\x98\x03\x03\"\n\x1a\x08\x12\x06\n\x04\x12\x02\x08\x01".as_ref(),
+                                                b"\x08\x02\"\x0f\x1a\r\n\x0b\xa2\x02\x08\n\0\x12\x04\x10\x1e \t\"\n\x1a\x08\x12\x06\n\x04\x12\x02\x08\x01".as_ref(),
                                             ),
                                             input_schema: RelationType::new(vec![ColumnType::new(
                                                 ConcreteDataType::interval_month_day_nano_datatype(),

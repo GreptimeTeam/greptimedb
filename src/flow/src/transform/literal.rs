@@ -17,7 +17,7 @@ use std::array::TryFromSliceError;
 use bytes::Bytes;
 use common_decimal::Decimal128;
 use common_time::timestamp::TimeUnit;
-use common_time::{Date, Timestamp};
+use common_time::{Date, IntervalMonthDayNano, Timestamp};
 use datafusion_common::ScalarValue;
 use datatypes::data_type::ConcreteDataType as CDT;
 use datatypes::value::Value;
@@ -26,6 +26,7 @@ use substrait::variation_const::{
     DATE_32_TYPE_VARIATION_REF, DATE_64_TYPE_VARIATION_REF, DEFAULT_TYPE_VARIATION_REF,
     UNSIGNED_INTEGER_TYPE_VARIATION_REF,
 };
+use substrait_proto::proto;
 use substrait_proto::proto::expression::literal::{LiteralType, PrecisionTimestamp};
 use substrait_proto::proto::expression::Literal;
 use substrait_proto::proto::r#type::Kind;
@@ -177,43 +178,88 @@ pub(crate) fn from_substrait_literal(lit: &Literal) -> Result<(Value, CDT), Erro
             )
         }
         Some(LiteralType::Null(ntype)) => (Value::Null, from_substrait_type(ntype)?),
-        Some(LiteralType::IntervalDayToSecond(interval)) => {
-            let (days, seconds, subseconds) =
-                (interval.days, interval.seconds, interval.subseconds);
-            let millis = if let Some(prec) = interval.precision_mode {
-                use substrait_proto::proto::expression::literal::interval_day_to_second::PrecisionMode;
-                match prec {
-                    PrecisionMode::Precision(e) => {
-                        if e >= 3 {
-                            subseconds / 10_i64.pow((e - 3) as _)
-                        } else {
-                            subseconds * 10_i64.pow((3 - e) as _)
-                        }
+        Some(LiteralType::IntervalDayToSecond(interval)) => from_interval_day_sec(&interval)?,
+        Some(LiteralType::IntervalYearToMonth(interval)) => from_interval_year_month(&interval)?,
+        Some(LiteralType::IntervalCompound(interval_compound)) => {
+            let interval_day_time = &interval_compound
+                .interval_day_to_second
+                .map(|i| from_interval_day_sec(&i))
+                .transpose()?;
+            let interval_year_month = &interval_compound
+                .interval_year_to_month
+                .map(|i| from_interval_year_month(&i))
+                .transpose()?;
+            let mut compound = IntervalMonthDayNano::new(0, 0, 0);
+            if let Some(day_sec) = interval_day_time {
+                let Value::IntervalDayTime(day_time) = day_sec.0 else {
+                    UnexpectedSnafu {
+                        reason: format!("Expect IntervalDayTime, found {:?}", day_sec),
                     }
-                    PrecisionMode::Microseconds(_) => subseconds / 1000,
-                }
-            } else if subseconds == 0 {
-                0
-            } else {
-                not_impl_err!("unsupported subseconds without precision_mode: {subseconds}")?
-            };
+                    .fail()?
+                };
+                compound.nanoseconds += day_time.milliseconds as i64 * 1_000_000;
+                compound.days += day_time.days;
+            }
 
-            let value_interval =
-                common_time::IntervalDayTime::new(days, seconds * 1000 + millis as i32);
+            if let Some(year_month) = interval_year_month {
+                let Value::IntervalYearMonth(year_month) = year_month.0 else {
+                    UnexpectedSnafu {
+                        reason: format!("Expect IntervalYearMonth, found {:?}", year_month),
+                    }
+                    .fail()?
+                };
+                compound.months += year_month.months;
+            }
+
             (
-                Value::IntervalDayTime(value_interval),
-                CDT::interval_day_time_datatype(),
+                Value::IntervalMonthDayNano(compound),
+                CDT::interval_month_day_nano_datatype(),
             )
         }
-        Some(LiteralType::IntervalYearToMonth(interval)) => (
-            Value::IntervalYearMonth(common_time::IntervalYearMonth::new(
-                interval.years * 12 + interval.months,
-            )),
-            CDT::interval_year_month_datatype(),
-        ),
         _ => not_impl_err!("unsupported literal_type: {:?}", &lit.literal_type)?,
     };
     Ok(scalar_value)
+}
+
+fn from_interval_day_sec(
+    interval: &proto::expression::literal::IntervalDayToSecond,
+) -> Result<(Value, CDT), Error> {
+    let (days, seconds, subseconds) = (interval.days, interval.seconds, interval.subseconds);
+    let millis = if let Some(prec) = interval.precision_mode {
+        use substrait_proto::proto::expression::literal::interval_day_to_second::PrecisionMode;
+        match prec {
+            PrecisionMode::Precision(e) => {
+                if e >= 3 {
+                    subseconds / 10_i64.pow((e - 3) as _)
+                } else {
+                    subseconds * 10_i64.pow((3 - e) as _)
+                }
+            }
+            PrecisionMode::Microseconds(_) => subseconds / 1000,
+        }
+    } else if subseconds == 0 {
+        0
+    } else {
+        not_impl_err!("unsupported subseconds without precision_mode: {subseconds}")?
+    };
+
+    let value_interval = common_time::IntervalDayTime::new(days, seconds * 1000 + millis as i32);
+
+    Ok((
+        Value::IntervalDayTime(value_interval),
+        CDT::interval_day_time_datatype(),
+    ))
+}
+
+fn from_interval_year_month(
+    interval: &proto::expression::literal::IntervalYearToMonth,
+) -> Result<(Value, CDT), Error> {
+    let value_interval = common_time::IntervalYearMonth::new(interval.years * 12 + interval.months);
+
+    Ok((
+        Value::IntervalYearMonth(value_interval),
+        CDT::interval_year_month_datatype(),
+    ))
 }
 
 fn from_bytes<T: FromBytes>(i: &Bytes) -> Result<T, Error>
