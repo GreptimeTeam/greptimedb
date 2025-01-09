@@ -51,12 +51,12 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Shares across multiple jobs
-          # Shares with `Clippy` job
-          shared-key: "check-lint"
+      # - name: Rust Cache
+      #   uses: Swatinem/rust-cache@v2
+      #   with:
+      #     # Shares across multiple jobs
+      #     # Shares with `Clippy` job
+      #     shared-key: "check-lint"
       - name: Run cargo check
         run: cargo check --locked --workspace --all-targets
 
@@ -67,11 +67,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Shares across multiple jobs
-          shared-key: "check-toml"
+      # - name: Rust Cache
+      #   uses: Swatinem/rust-cache@v2
+      #   with:
+      #     # Shares across multiple jobs
+      #     shared-key: "check-toml"
       - name: Install taplo
         run: cargo +stable install taplo-cli --version ^0.9 --locked --force
       - name: Run taplo
@@ -142,11 +142,11 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Shares across multiple jobs
-          shared-key: "fuzz-test-targets"
+      # - name: Rust Cache
+      #   uses: Swatinem/rust-cache@v2
+      #   with:
+      #     # Shares across multiple jobs
+      #     shared-key: "fuzz-test-targets"
       - name: Set Rust Fuzz
         shell: bash
         run: |
@@ -200,11 +200,11 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Shares across multiple jobs
-          shared-key: "fuzz-test-targets"
+      # - name: Rust Cache
+      #   uses: Swatinem/rust-cache@v2
+      #   with:
+      #     # Shares across multiple jobs
+      #     shared-key: "fuzz-test-targets"
       - name: Set Rust Fuzz
         shell: bash
         run: |
@@ -317,11 +317,11 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Shares across multiple jobs
-          shared-key: "fuzz-test-targets"
+      # - name: Rust Cache
+      #   uses: Swatinem/rust-cache@v2
+      #   with:
+      #     # Shares across multiple jobs
+      #     shared-key: "fuzz-test-targets"
       - name: Set Rust Fuzz
         shell: bash
         run: |
@@ -466,11 +466,11 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Shares across multiple jobs
-          shared-key: "fuzz-test-targets"
+      # - name: Rust Cache
+      #   uses: Swatinem/rust-cache@v2
+      #   with:
+      #     # Shares across multiple jobs
+      #     shared-key: "fuzz-test-targets"
       - name: Set Rust Fuzz
         shell: bash
         run: |
@@ -612,11 +612,11 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: rustfmt
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Shares across multiple jobs
-          shared-key: "check-rust-fmt"
+      # - name: Rust Cache
+      #   uses: Swatinem/rust-cache@v2
+      #   with:
+      #     # Shares across multiple jobs
+      #     shared-key: "check-rust-fmt"
       - name: Check format
         run: make fmt-check
 
@@ -670,7 +670,7 @@ jobs:
         with:
           # Shares cross multiple jobs
           shared-key: "coverage-test"
-          save-if: ${{ github.event_name == 'merge_group' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Disabled temporarily to see performance
       # - name: Docker Cache
       #   uses: ScribeMD/docker-cache@0.5.0
