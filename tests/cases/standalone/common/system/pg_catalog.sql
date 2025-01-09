@@ -9,6 +9,10 @@ SELECT session_user is not null;
 -- SQLNESS PROTOCOL POSTGRES
 select current_schema();
 
+-- search_path for pg using schema for now FIXME when support real search_path
+-- SQLNESS PROTOCOL POSTGRES
+show search_path;
+
 -- make sure all the pg_catalog tables are only visible to postgres
 select * from pg_catalog.pg_class;
 select * from pg_catalog.pg_namespace;

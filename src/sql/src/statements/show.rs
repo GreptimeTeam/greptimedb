@@ -289,6 +289,16 @@ impl Display for ShowStatus {
     }
 }
 
+/// SQL structure for "SHOW SEARCH_PATH" postgres only
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub struct ShowSearchPath {}
+
+impl Display for ShowSearchPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SHOW SEARCH_PATH")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
