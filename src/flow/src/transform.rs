@@ -189,6 +189,7 @@ mod test {
     pub fn create_test_ctx() -> FlownodeContext {
         let mut schemas = HashMap::new();
         let mut tri_map = IdToNameMap::new();
+        // deprecated: use `numbers_with_ts` instead since this table has no timestamp column
         {
             let gid = GlobalId::User(0);
             let name = [

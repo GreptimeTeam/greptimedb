@@ -252,7 +252,7 @@ mod test {
 
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)])
-                .into_named(vec![Some("numbers.number".to_string())]),
+                .into_named(vec![Some("number".to_string())]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Get {

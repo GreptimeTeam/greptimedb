@@ -14,10 +14,10 @@
 
 use itertools::Itertools;
 use snafu::OptionExt;
+use substrait_proto::proto;
 use substrait_proto::proto::aggregate_function::AggregationInvocation;
 use substrait_proto::proto::aggregate_rel::{Grouping, Measure};
 use substrait_proto::proto::function_argument::ArgType;
-use substrait_proto::proto::{self};
 
 use crate::error::{Error, NotImplementedSnafu, PlanSnafu};
 use crate::expr::{
@@ -30,6 +30,7 @@ use crate::transform::{substrait_proto, FlownodeContext, FunctionExtensions};
 impl TypedExpr {
     async fn from_substrait_agg_grouping(
         ctx: &mut FlownodeContext,
+        grouping_expressions: &[proto::Expression],
         groupings: &[Grouping],
         typ: &RelationDesc,
         extensions: &FunctionExtensions,
@@ -38,8 +39,10 @@ impl TypedExpr {
         let mut group_expr = vec![];
         match groupings.len() {
             1 => {
-                // TODO(discord9): replace this grouping with `expression_references` instead
-                for e in &groupings[0].grouping_expressions {
+                for e in &groupings[0].expression_references {
+                    let e = grouping_expressions.get(*e as usize).context(PlanSnafu {
+                        reason: "Grouping expression not found",
+                    })?;
                     let x = TypedExpr::from_substrait_rex(e, typ, extensions).await?;
                     group_expr.push(x);
                 }
@@ -247,9 +250,14 @@ impl TypedPlan {
             return not_impl_err!("Aggregate without an input is not supported");
         };
 
-        let group_exprs =
-            TypedExpr::from_substrait_agg_grouping(ctx, &agg.groupings, &input.schema, extensions)
-                .await?;
+        let group_exprs = TypedExpr::from_substrait_agg_grouping(
+            ctx,
+            &agg.grouping_expressions,
+            &agg.groupings,
+            &input.schema,
+            extensions,
+        )
+        .await?;
 
         let time_index = find_time_index_in_group_exprs(&group_exprs);
 
@@ -385,7 +393,7 @@ mod test {
             .with_key(vec![2])
             .with_time_index(Some(1))
             .into_named(vec![
-                Some("SUM(abs(numbers_with_ts.number))".to_string()),
+                Some("sum(abs(numbers_with_ts.number))".to_string()),
                 Some("window_start".to_string()),
                 Some("window_end".to_string()),
             ]),
@@ -781,8 +789,8 @@ mod test {
             .with_key(vec![0, 3])
             .with_time_index(Some(2))
             .into_named(vec![
-                Some("numbers_with_ts.number".to_string()),
-                Some("AVG(numbers_with_ts.number)".to_string()),
+                Some("number".to_string()),
+                Some("avg(numbers_with_ts.number)".to_string()),
                 Some("window_start".to_string()),
                 Some("window_end".to_string()),
             ]),
@@ -815,7 +823,7 @@ mod test {
             .with_key(vec![2])
             .with_time_index(Some(1))
             .into_named(vec![
-                Some("SUM(numbers_with_ts.number)".to_string()),
+                Some("sum(numbers_with_ts.number)".to_string()),
                 Some("window_start".to_string()),
                 Some("window_end".to_string()),
             ]),
@@ -925,7 +933,7 @@ mod test {
             .with_key(vec![2])
             .with_time_index(Some(1))
             .into_named(vec![
-                Some("SUM(numbers_with_ts.number)".to_string()),
+                Some("sum(numbers_with_ts.number)".to_string()),
                 Some("window_start".to_string()),
                 Some("window_end".to_string()),
             ]),
@@ -1057,8 +1065,8 @@ mod test {
             ])
             .with_key(vec![1])
             .into_named(vec![
-                Some("AVG(numbers.number)".to_string()),
-                Some("numbers.number".to_string()),
+                Some("avg(numbers.number)".to_string()),
+                Some("number".to_string()),
             ]),
             plan: Plan::Mfp {
                 input: Box::new(
@@ -1189,7 +1197,7 @@ mod test {
         );
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::float64_datatype(), true)])
-                .into_named(vec![Some("AVG(numbers.number)".to_string())]),
+                .into_named(vec![Some("avg(numbers.number)".to_string())]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -1267,7 +1275,7 @@ mod test {
         };
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)])
-                .into_named(vec![Some("SUM(numbers.number)".to_string())]),
+                .into_named(vec![Some("sum(numbers.number)".to_string())]),
             plan: Plan::Reduce {
                 input: Box::new(
                     Plan::Get {
@@ -1329,8 +1337,8 @@ mod test {
             ])
             .with_key(vec![1])
             .into_named(vec![
-                Some("SUM(numbers.number)".to_string()),
-                Some("numbers.number".to_string()),
+                Some("sum(numbers.number)".to_string()),
+                Some("number".to_string()),
             ]),
             plan: Plan::Mfp {
                 input: Box::new(
@@ -1407,7 +1415,7 @@ mod test {
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)])
                 .into_named(vec![Some(
-                    "SUM(numbers.number + numbers.number)".to_string(),
+                    "sum(numbers.number + numbers.number)".to_string(),
                 )]),
             plan: Plan::Reduce {
                 input: Box::new(

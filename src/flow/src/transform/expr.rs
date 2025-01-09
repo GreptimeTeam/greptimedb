@@ -19,6 +19,7 @@ use std::sync::Arc;
 use common_error::ext::BoxedError;
 use common_telemetry::debug;
 use datafusion::execution::SessionStateBuilder;
+use datafusion::functions::all_default_functions;
 use datafusion_physical_expr::PhysicalExpr;
 use datatypes::data_type::ConcreteDataType as CDT;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -87,16 +88,15 @@ pub(crate) async fn from_scalar_fn_to_df_fn_impl(
     };
     let schema = input_schema.to_df_schema()?;
 
-    let df_expr =
-        // TODO(discord9): consider coloring everything async....
-        substrait::df_logical_plan::consumer::from_substrait_rex(
-            &SessionStateBuilder::new().build(),
-            &e,
-            &schema,
-            &extensions.to_extensions(),
-        )
-        .await
-    ;
+    let df_expr = substrait::df_logical_plan::consumer::from_substrait_rex(
+        &SessionStateBuilder::new()
+            .with_scalar_functions(all_default_functions())
+            .build(),
+        &e,
+        &schema,
+        &extensions.to_extensions(),
+    )
+    .await;
     let expr = df_expr.context({
         DatafusionSnafu {
             context: "Failed to convert substrait scalar function to datafusion scalar function",
@@ -552,7 +552,8 @@ mod test {
     #[tokio::test]
     async fn test_where_and() {
         let engine = create_test_query_engine();
-        let sql = "SELECT number FROM numbers WHERE number >= 1 AND number <= 3 AND number!=2";
+        let sql =
+            "SELECT number FROM numbers_with_ts WHERE number >= 1 AND number <= 3 AND number!=2";
         let plan = sql_to_substrait(engine.clone(), sql).await;
 
         let mut ctx = create_test_ctx();
@@ -578,18 +579,21 @@ mod test {
         };
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)])
-                .into_named(vec![Some("numbers.number".to_string())]),
+                .into_named(vec![Some("number".to_string())]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Get {
-                        id: crate::expr::Id::Global(GlobalId::User(0)),
+                        id: crate::expr::Id::Global(GlobalId::User(1)),
                     }
                     .with_types(
-                        RelationType::new(vec![ColumnType::new(
-                            ConcreteDataType::uint32_datatype(),
-                            false,
-                        )])
-                        .into_named(vec![Some("number".to_string())]),
+                        RelationType::new(vec![
+                            ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                            ColumnType::new(
+                                ConcreteDataType::timestamp_millisecond_datatype(),
+                                false,
+                            ),
+                        ])
+                        .into_named(vec![Some("number".to_string()), Some("ts".to_string())]),
                     ),
                 ),
                 mfp: MapFilterProject::new(1).filter(vec![filter]).unwrap(),
