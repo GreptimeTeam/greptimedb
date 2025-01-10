@@ -505,7 +505,11 @@ mod test {
 
         let plan = LogicalPlanBuilder::scan_with_filters("t", left_source, None, vec![])
             .unwrap()
-            .join_using(right_plan, JoinType::LeftSemi, vec!["number"])
+            .join_on(
+                right_plan,
+                JoinType::LeftSemi,
+                vec![col("t.number").eq(col("right.number"))],
+            )
             .unwrap()
             .limit(0, Some(1))
             .unwrap()
@@ -515,7 +519,7 @@ mod test {
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
         let expected = "Limit: skip=0, fetch=1\
-            \n  LeftSemi Join: Using t.number = right.number\
+            \n  LeftSemi Join:  Filter: t.number = right.number\
             \n    MergeScan [is_placeholder=false]\
             \n    SubqueryAlias: right\
             \n      MergeScan [is_placeholder=false]";

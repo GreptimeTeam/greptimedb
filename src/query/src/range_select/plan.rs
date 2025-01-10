@@ -1334,6 +1334,7 @@ mod test {
                             vec![Arc::new(Column::new("value", 1))],
                         )
                         .schema(input_schema.clone())
+                        .alias("MIN(value)")
                         .build()
                         .unwrap(),
                     ),
@@ -1348,6 +1349,7 @@ mod test {
                             vec![Arc::new(Column::new("value", 1))],
                         )
                         .schema(input_schema.clone())
+                        .alias("MAX(value)")
                         .build()
                         .unwrap(),
                     ),
