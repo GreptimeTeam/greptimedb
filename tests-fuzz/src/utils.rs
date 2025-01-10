@@ -59,8 +59,11 @@ pub async fn init_greptime_connections_via_env() -> Connections {
 /// Connects to GreptimeDB.
 pub async fn init_greptime_connections(mysql: Option<String>) -> Connections {
     let mysql = if let Some(addr) = mysql {
-        let mut opts: MySqlConnectOptions = format!("mysql://{addr}/public").parse().unwrap();
-        opts.log_statements(LevelFilter::Off);
+        let opts = format!("mysql://{addr}/public")
+            .parse::<MySqlConnectOptions>()
+            .unwrap()
+            .log_statements(LevelFilter::Off);
+
         Some(MySqlPoolOptions::new().connect_with(opts).await.unwrap())
     } else {
         None
