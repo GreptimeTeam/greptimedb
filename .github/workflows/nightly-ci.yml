@@ -111,6 +111,7 @@ jobs:
   cleanbuild-linux-nix:
     name: Run clean build on Linux
     runs-on: ubuntu-latest
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
