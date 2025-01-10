@@ -260,6 +260,15 @@ pub fn sql_value_to_value(
             (*b).into()
         }
         SqlValue::DoubleQuotedString(s) | SqlValue::SingleQuotedString(s) => {
+            // ensure data_type is not interval type when parsing string
+            ensure!(
+                !matches!(data_type, ConcreteDataType::Interval(_)),
+                ColumnTypeMismatchSnafu {
+                    column_name,
+                    expect: ConcreteDataType::string_datatype(),
+                    actual: data_type.clone(),
+                }
+            );
             parse_string_to_value(column_name, s.clone(), data_type, timezone)?
         }
         SqlValue::HexStringLiteral(s) => {
