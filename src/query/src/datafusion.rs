@@ -575,12 +575,11 @@ mod tests {
             .await
             .unwrap();
 
-        // TODO(sunng87): do not rely on to_string for compare
         assert_eq!(
-            format!("{plan:?}"),
+            plan.to_string(),
             r#"Limit: skip=0, fetch=20
-  Projection: SUM(numbers.number)
-    Aggregate: groupBy=[[]], aggr=[[SUM(numbers.number)]]
+  Projection: sum(numbers.number)
+    Aggregate: groupBy=[[]], aggr=[[sum(numbers.number)]]
       TableScan: numbers"#
         );
     }
@@ -606,7 +605,7 @@ mod tests {
                 assert_eq!(numbers[0].num_columns(), 1);
                 assert_eq!(1, numbers[0].schema.num_columns());
                 assert_eq!(
-                    "SUM(numbers.number)",
+                    "sum(numbers.number)",
                     numbers[0].schema.column_schemas()[0].name
                 );
 
@@ -684,11 +683,11 @@ mod tests {
         assert_eq!(
             schema.column_schemas()[0],
             ColumnSchema::new(
-                "SUM(numbers.number)",
+                "sum(numbers.number)",
                 ConcreteDataType::uint64_datatype(),
                 true
             )
         );
-        assert_eq!("Limit: skip=0, fetch=20\n  Aggregate: groupBy=[[]], aggr=[[SUM(CAST(numbers.number AS UInt64))]]\n    TableScan: numbers projection=[number]", format!("{}", logical_plan.display_indent()));
+        assert_eq!("Limit: skip=0, fetch=20\n  Aggregate: groupBy=[[]], aggr=[[sum(CAST(numbers.number AS UInt64))]]\n    TableScan: numbers projection=[number]", format!("{}", logical_plan.display_indent()));
     }
 }

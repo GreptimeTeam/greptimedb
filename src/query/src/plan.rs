@@ -174,7 +174,7 @@ pub(crate) mod tests {
 
         assert_eq!(
             "Filter: devices.id > Int32(500)\n  TableScan: greptime.test.devices",
-            format!("{:?}", plan)
+            plan.to_string()
         );
     }
 }

@@ -415,7 +415,7 @@ mod test {
             "          TableScan: t",
         ]
         .join("\n");
-        assert_eq!(expected, format!("{:?}", result));
+        assert_eq!(expected, result.to_string());
     }
 
     #[test]
@@ -435,7 +435,7 @@ mod test {
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
         let expected = "MergeScan [is_placeholder=false]";
-        assert_eq!(expected, format!("{:?}", result));
+        assert_eq!(expected, result.to_string());
     }
 
     #[test]
@@ -462,7 +462,7 @@ mod test {
             "    MergeScan [is_placeholder=false]",
         ]
         .join("\n");
-        assert_eq!(expected, format!("{:?}", result));
+        assert_eq!(expected, result.to_string());
     }
 
     #[test]
@@ -482,7 +482,7 @@ mod test {
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
         let expected = "MergeScan [is_placeholder=false]";
-        assert_eq!(expected, format!("{:?}", result));
+        assert_eq!(expected, result.to_string());
     }
 
     #[test]
@@ -519,6 +519,6 @@ mod test {
             \n    MergeScan [is_placeholder=false]\
             \n    SubqueryAlias: right\
             \n      MergeScan [is_placeholder=false]";
-        assert_eq!(expected, format!("{:?}", result));
+        assert_eq!(expected, result.to_string());
     }
 }

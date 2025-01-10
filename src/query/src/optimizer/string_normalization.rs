@@ -113,7 +113,7 @@ mod tests {
             let expected = format!("Projection: CAST(Utf8(\"2017-07-23 13:10:11\") AS Timestamp({:#?}, None))\n  TableScan: t",
                                    time_unit
             );
-            assert_eq!(expected, format!("{:?}", result));
+            assert_eq!(expected, result.to_string());
         }
     }
 
@@ -131,7 +131,7 @@ mod tests {
         let expected = String::from(
             "Projection: CAST(Int64(158412331400600000) AS Timestamp(Nanosecond, None))\n  TableScan: t"
         );
-        assert_eq!(expected, format!("{:?}", result));
+        assert_eq!(expected, result.to_string());
 
         let proj_string_to_int = vec![Expr::Cast(Cast::new(
             Box::new(lit("  5   ")),
@@ -142,7 +142,7 @@ mod tests {
             .analyze(string_to_int_plan, &ConfigOptions::default())
             .unwrap();
         let expected = String::from("Projection: CAST(Utf8(\"  5   \") AS Int32)\n  TableScan: t");
-        assert_eq!(expected, format!("{:?}", result));
+        assert_eq!(expected, result.to_string());
     }
 
     fn create_test_plan_with_project(proj: Vec<Expr>) -> LogicalPlan {

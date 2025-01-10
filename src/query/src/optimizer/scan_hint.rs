@@ -290,7 +290,8 @@ mod test {
             .unwrap();
 
         let context = OptimizerContext::default();
-        ScanHintRule.try_optimize(&plan, &context).unwrap();
+        assert!(ScanHintRule.supports_rewrite());
+        ScanHintRule.rewrite(plan, &context).unwrap();
 
         // should read the first (with `.sort(true, false)`) sort option
         let scan_req = provider.scan_request();
@@ -332,7 +333,8 @@ mod test {
             .unwrap();
 
         let context = OptimizerContext::default();
-        ScanHintRule.try_optimize(&plan, &context).unwrap();
+        assert!(ScanHintRule.supports_rewrite());
+        ScanHintRule.rewrite(plan, &context).unwrap();
 
         let scan_req = provider.scan_request();
         let _ = scan_req.series_row_selector.unwrap();

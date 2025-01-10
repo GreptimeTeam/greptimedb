@@ -281,35 +281,10 @@ mod test {
     fn parse_sql_simple() {
         let sql = "select * from t1";
         let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
-        let expected = String::from("Sql(Query(Query { \
-            inner: Query { \
-                with: None, body: Select(Select { \
-                    distinct: None, \
-                    top: None, \
-                    projection: \
-                    [Wildcard(WildcardAdditionalOptions { opt_exclude: None, opt_except: None, opt_rename: None, opt_replace: None })], \
-                    into: None, \
-                    from: [TableWithJoins { relation: Table { name: ObjectName([Ident { value: \"t1\", quote_style: None }]\
-                ), \
-                alias: None, \
-                args: None, \
-                with_hints: [], \
-                version: None, \
-                partitions: [] \
-            }, \
-            joins: [] }], \
-            lateral_views: [], \
-            selection: None, \
-            group_by: Expressions([]), \
-            cluster_by: [], \
-            distribute_by: [], \
-            sort_by: [], \
-            having: None, \
-            named_window: [], \
-            qualify: None, \
-            value_table_mode: None \
-            }), order_by: [], limit: None, limit_by: [], offset: None, fetch: None, locks: [], for_clause: None } }))");
-        assert_eq!(format!("{stmt:?}"), expected);
+        let QueryStatement::Sql(sql_stmt) = stmt else {
+            panic!("Expected SQL statement, got {:?}", stmt);
+        };
+        assert_eq!("SELECT * FROM t1", sql_stmt.to_string());
     }
 
     #[test]

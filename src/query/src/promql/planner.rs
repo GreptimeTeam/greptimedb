@@ -2677,28 +2677,28 @@ mod test {
 
     #[tokio::test]
     async fn aggregate_sum() {
-        do_aggregate_expr_plan("sum", "SUM").await;
+        do_aggregate_expr_plan("sum", "sum").await;
     }
 
     #[tokio::test]
     async fn aggregate_avg() {
-        do_aggregate_expr_plan("avg", "AVG").await;
+        do_aggregate_expr_plan("avg", "avg").await;
     }
 
     #[tokio::test]
     #[should_panic] // output type doesn't match
     async fn aggregate_count() {
-        do_aggregate_expr_plan("count", "COUNT").await;
+        do_aggregate_expr_plan("count", "count").await;
     }
 
     #[tokio::test]
     async fn aggregate_min() {
-        do_aggregate_expr_plan("min", "MIN").await;
+        do_aggregate_expr_plan("min", "min").await;
     }
 
     #[tokio::test]
     async fn aggregate_max() {
-        do_aggregate_expr_plan("max", "MAX").await;
+        do_aggregate_expr_plan("max", "max").await;
     }
 
     #[tokio::test]
@@ -2709,12 +2709,12 @@ mod test {
 
     #[tokio::test]
     async fn aggregate_stddev() {
-        do_aggregate_expr_plan("stddev", "STDDEV_POP").await;
+        do_aggregate_expr_plan("stddev", "stddev_pop").await;
     }
 
     #[tokio::test]
     async fn aggregate_stdvar() {
-        do_aggregate_expr_plan("stdvar", "VAR_POP").await;
+        do_aggregate_expr_plan("stdvar", "var_pop").await;
     }
 
     #[tokio::test]

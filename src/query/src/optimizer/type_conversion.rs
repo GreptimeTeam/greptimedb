@@ -492,7 +492,7 @@ mod tests {
             .analyze(plan, &context, &ConfigOptions::default())
             .unwrap();
         let expected = String::from(
-            "Aggregate: groupBy=[[]], aggr=[[COUNT(column1)]]\
+            "Aggregate: groupBy=[[]], aggr=[[count(column1)]]\
             \n  Filter: TimestampSecond(-28800, None) <= column3\
             \n    Filter: column3 > TimestampSecond(-28800, None)\
             \n      Values: (Int64(1), Float64(1), TimestampMillisecond(1, None))",
