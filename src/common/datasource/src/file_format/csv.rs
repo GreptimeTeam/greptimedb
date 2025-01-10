@@ -254,7 +254,7 @@ mod tests {
                 "c7: Int64: NULL",
                 "c8: Int64: NULL",
                 "c9: Int64: NULL",
-                "c10: Int64: NULL",
+                "c10: Utf8: NULL",
                 "c11: Float64: NULL",
                 "c12: Float64: NULL",
                 "c13: Utf8: NULL"
