@@ -21,6 +21,9 @@ drop database test;
 -- SQLNESS PROTOCOL POSTGRES
 set search_path to 'public';
 
+-- SQLNESS PROTOCOL POSTGRES
+select current_schema();
+
 -- make sure all the pg_catalog tables are only visible to postgres
 select * from pg_catalog.pg_class;
 select * from pg_catalog.pg_namespace;

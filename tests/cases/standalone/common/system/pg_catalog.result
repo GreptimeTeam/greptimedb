@@ -52,6 +52,15 @@ set search_path to 'public';
 
 Affected Rows: 0
 
+-- SQLNESS PROTOCOL POSTGRES
+select current_schema();
+
++------------------+
+| current_schema() |
++------------------+
+| public           |
++------------------+
+
 -- make sure all the pg_catalog tables are only visible to postgres
 select * from pg_catalog.pg_class;
 
