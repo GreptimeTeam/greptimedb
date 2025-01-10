@@ -92,7 +92,7 @@ pub async fn handle_bulk_api(
     TypedHeader(_content_type): TypedHeader<ContentType>,
     payload: String,
 ) -> impl IntoResponse {
-    do_handle_bulk_api(None, log_state, params, query_ctx, payload).await
+    do_handle_bulk_api(log_state, None, params, query_ctx, payload).await
 }
 
 /// Process `/${index}/_bulk` API requests. Only support to create logs.
@@ -106,12 +106,12 @@ pub async fn handle_bulk_api_with_index(
     TypedHeader(_content_type): TypedHeader<ContentType>,
     payload: String,
 ) -> impl IntoResponse {
-    do_handle_bulk_api(Some(index), log_state, params, query_ctx, payload).await
+    do_handle_bulk_api(log_state, Some(index), params, query_ctx, payload).await
 }
 
 async fn do_handle_bulk_api(
-    index: Option<String>,
     log_state: LogState,
+    index: Option<String>,
     params: LogIngesterQueryParams,
     mut query_ctx: QueryContext,
     payload: String,
@@ -279,15 +279,7 @@ fn parse_bulk_request(
     // For Elasticsearch post `_bulk` API, each chunk contains two objects:
     //   1. The first object is the command, it should be `create` or `index`.
     //   2. The second object is the document data.
-    loop {
-        // Read the first object to get the command, it should be `create` or `index`.
-        // Stop the loop if there is no command.
-        let next_cmd = values.next();
-        if next_cmd.is_none() {
-            break;
-        }
-        let mut cmd = next_cmd.unwrap();
-
+    while let Some(mut cmd) = values.next() {
         // NOTE: Although the native Elasticsearch API supports upsert in `index` command, we don't support change any data in `index` command and it's same as `create` command.
         let index = if let Some(cmd) = cmd.get_mut("create") {
             get_index_from_cmd(cmd.take())?
@@ -304,30 +296,26 @@ fn parse_bulk_request(
         };
 
         // Read the second object to get the document data. Stop the loop if there is no document.
-        let document = values.next();
-        if document.is_none() {
-            break;
+        if let Some(document) = values.next() {
+            // If the msg_field is provided, fetch the value of the field from the document data.
+            let log_value = if let Some(msg_field) = msg_field {
+                get_log_value_from_msg_field(document, msg_field)
+            } else {
+                document
+            };
+
+            ensure!(
+                index.is_some() || index_from_url.is_some(),
+                InvalidElasticsearchInputSnafu {
+                    reason: "missing index in bulk request".to_string(),
+                }
+            );
+
+            requests.push(LogIngestRequest {
+                table: index.unwrap_or_else(|| index_from_url.as_ref().unwrap().clone()),
+                values: vec![log_value],
+            });
         }
-        let document = document.unwrap();
-
-        // If the msg_field is provided, fetch the value of the field from the document data.
-        let log_value = if let Some(msg_field) = msg_field {
-            get_log_value_from_msg_field(document, msg_field)
-        } else {
-            document
-        };
-
-        ensure!(
-            index.is_some() || index_from_url.is_some(),
-            InvalidElasticsearchInputSnafu {
-                reason: "missing index in bulk request".to_string(),
-            }
-        );
-
-        requests.push(LogIngestRequest {
-            table: index.unwrap_or_else(|| index_from_url.as_ref().unwrap().clone()),
-            values: vec![log_value],
-        });
     }
 
     debug!(
