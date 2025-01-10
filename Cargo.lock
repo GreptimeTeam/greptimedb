@@ -761,6 +761,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-lc-rs"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f409eb70b561706bf8abba8ca9c112729c481595893fd06a2dd9af8ed8441148"
+dependencies = [
+ "aws-lc-sys",
+ "paste",
+ "zeroize",
+]
+
+[[package]]
+name = "aws-lc-sys"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "923ded50f602b3007e5e63e3f094c479d9c8a9b42d7f4034e4afe456aa48bfd2"
+dependencies = [
+ "bindgen 0.69.5",
+ "cc",
+ "cmake",
+ "dunce",
+ "fs_extra",
+ "paste",
+]
+
+[[package]]
 name = "axum"
 version = "0.6.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -926,6 +951,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "bindgen"
+version = "0.69.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "271383c67ccabffb7381723dea0672a673f292304fcb45c01cc648c7a8d58088"
+dependencies = [
+ "bitflags 2.6.0",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.10.5",
+ "lazy_static",
+ "lazycell",
+ "log",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash 1.1.0",
+ "shlex",
+ "syn 2.0.90",
+ "which",
 ]
 
 [[package]]
@@ -2335,7 +2383,7 @@ dependencies = [
  "humantime-serde",
  "num_cpus",
  "rskafka",
- "rustls 0.23.13",
+ "rustls 0.23.14",
  "rustls-native-certs 0.7.3",
  "rustls-pemfile 2.2.0",
  "serde",
@@ -3575,6 +3623,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
+name = "dunce"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
+
+[[package]]
 name = "duration-str"
 version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4154,6 +4208,12 @@ dependencies = [
  "rustix",
  "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "fs_extra"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
 name = "fsevent-sys"
@@ -4969,14 +5029,14 @@ dependencies = [
 [[package]]
 name = "hyper-rustls"
 version = "0.27.3"
-source = "git+https://github.com/GreptimeTeam/hyper-rustls#a951e03fb914f1830e244400472814d38775118d"
+source = "git+https://github.com/GreptimeTeam/hyper-rustls?rev=a951e03#a951e03fb914f1830e244400472814d38775118d"
 dependencies = [
  "futures-util",
  "http 1.1.0",
  "hyper 1.4.1",
  "hyper-util",
  "log",
- "rustls 0.23.13",
+ "rustls 0.23.14",
  "rustls-native-certs 0.8.0",
  "rustls-pki-types",
  "tokio",
@@ -5608,7 +5668,7 @@ dependencies = [
  "k8s-openapi",
  "kube-core",
  "pem",
- "rustls 0.23.13",
+ "rustls 0.23.14",
  "rustls-pemfile 2.2.0",
  "secrecy",
  "serde",
@@ -5721,6 +5781,12 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 dependencies = [
  "spin 0.9.8",
 ]
+
+[[package]]
+name = "lazycell"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
 name = "levenshtein_automata"
@@ -6573,7 +6639,7 @@ dependencies = [
  "named_pipe",
  "pem",
  "percent-encoding",
- "rustls 0.23.13",
+ "rustls 0.23.14",
  "rustls-pemfile 2.2.0",
  "serde",
  "serde_json",
@@ -6665,7 +6731,7 @@ checksum = "06f19e4cfa0ab5a76b627cec2d81331c49b034988eaf302c3bafeada684eadef"
 dependencies = [
  "base64 0.21.7",
  "bigdecimal 0.4.5",
- "bindgen",
+ "bindgen 0.70.1",
  "bitflags 2.6.0",
  "bitvec",
  "btoi",
@@ -6704,7 +6770,7 @@ checksum = "478b0ff3f7d67b79da2b96f56f334431aef65e15ba4b29dd74a4236e29582bdc"
 dependencies = [
  "base64 0.21.7",
  "bigdecimal 0.4.5",
- "bindgen",
+ "bindgen 0.70.1",
  "bitflags 2.6.0",
  "bitvec",
  "btoi",
@@ -8754,7 +8820,7 @@ dependencies = [
  "rand",
  "ring 0.17.8",
  "rustc-hash 2.0.0",
- "rustls 0.23.13",
+ "rustls 0.23.14",
  "slab",
  "thiserror 1.0.64",
  "tinyvec",
@@ -9112,7 +9178,7 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "quinn",
- "rustls 0.23.13",
+ "rustls 0.23.14",
  "rustls-native-certs 0.8.0",
  "rustls-pemfile 2.2.0",
  "rustls-pki-types",
@@ -9305,7 +9371,7 @@ dependencies = [
  "parking_lot 0.12.3",
  "rand",
  "rsasl",
- "rustls 0.23.13",
+ "rustls 0.23.14",
  "snap",
  "thiserror 1.0.64",
  "tokio",
@@ -9577,9 +9643,11 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.13"
-source = "git+https://github.com/GreptimeTeam/rustls#e0917109155435821c4416d699babe749b597a03"
+version = "0.23.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "415d9944693cb90382053259f89fbb077ea730ad7273047ec63b19bc9b160ba8"
 dependencies = [
+ "aws-lc-rs",
  "log",
  "once_cell",
  "ring 0.17.8",
@@ -9655,6 +9723,7 @@ version = "0.102.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64ca1bc8749bd4cf37b5ce386cc146580777b4e8572c7b97baf22c83f444bee9"
 dependencies = [
+ "aws-lc-rs",
  "ring 0.17.8",
  "rustls-pki-types",
  "untrusted 0.9.0",
@@ -10151,7 +10220,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rust-embed",
- "rustls 0.23.13",
+ "rustls 0.23.14",
  "rustls-pemfile 2.2.0",
  "rustls-pki-types",
  "serde",
@@ -11739,7 +11808,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04fb792ccd6bbcd4bba408eb8a292f70fc4a3589e5d793626f45190e6454b6ab"
 dependencies = [
  "ring 0.17.8",
- "rustls 0.23.13",
+ "rustls 0.23.14",
  "tokio",
  "tokio-postgres",
  "tokio-rustls 0.26.0",
@@ -11781,9 +11850,9 @@ dependencies = [
 [[package]]
 name = "tokio-rustls"
 version = "0.26.0"
-source = "git+https://github.com/GreptimeTeam/tokio-rustls#4604ca6badfd1d10424718e5570cc481ab787fc8"
+source = "git+https://github.com/GreptimeTeam/tokio-rustls?rev=4604ca6#4604ca6badfd1d10424718e5570cc481ab787fc8"
 dependencies = [
- "rustls 0.23.13",
+ "rustls 0.23.14",
  "rustls-pki-types",
  "tokio",
 ]
@@ -13310,3 +13379,8 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
+
+[[patch.unused]]
+name = "rustls"
+version = "0.23.20"
+source = "git+https://github.com/GreptimeTeam/rustls?rev=34fd0c6#34fd0c6244af1501ca8f5b5c1c69afda67ce8fbb"
