@@ -97,30 +97,14 @@ impl TransformRule for TypeAliasTransformRule {
                 expr: cast_expr,
                 data_type,
                 ..
-            } if matches!(data_type, DataType::Int64 | DataType::Float64) => {
-                if let Some(new_type) = get_type_by_alias(&data_type) {
-                    if let Ok(new_type) = sql_data_type_to_concrete_data_type(&new_type) {
-                        *expr = Expr::Function(cast_expr_to_arrow_cast_func(
-                            (**cast_expr).clone(),
-                            new_type.as_arrow_type().to_string(),
-                        ));
-                    }
-                }
-            }
-
-            // Type alias
-            Expr::Cast {
-                data_type: DataType::Custom(name, tokens),
-                expr: cast_expr,
-                ..
-            } if name.0.len() == 1 && tokens.is_empty() => {
-                if let Some(new_type) = get_data_type_by_alias_name(name.0[0].value.as_str()) {
-                    if let Ok(new_type) = sql_data_type_to_concrete_data_type(&new_type) {
-                        *expr = Expr::Function(cast_expr_to_arrow_cast_func(
-                            (**cast_expr).clone(),
-                            new_type.as_arrow_type().to_string(),
-                        ));
-                    }
+            } if get_type_by_alias(data_type).is_some() => {
+                // Safety: checked in the match arm.
+                let new_type = get_type_by_alias(&data_type).unwrap();
+                if let Ok(new_type) = sql_data_type_to_concrete_data_type(&new_type) {
+                    *expr = Expr::Function(cast_expr_to_arrow_cast_func(
+                        (**cast_expr).clone(),
+                        new_type.as_arrow_type().to_string(),
+                    ));
                 }
             }
 
@@ -157,6 +141,7 @@ fn replace_type_alias(data_type: &mut DataType) {
 }
 
 /// Get data type from alias type.
+/// Returns the mapped data type if the input data type is an alias that we need to replace.
 // Remember to update `get_data_type_by_alias_name()` if you modify this method.
 pub(crate) fn get_type_by_alias(data_type: &DataType) -> Option<DataType> {
     match data_type {
