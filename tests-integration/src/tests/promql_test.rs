@@ -272,7 +272,7 @@ async fn aggregators_simple_sum(instance: Arc<dyn MockInstance>) {
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+------------+---------------------+--------------------------+\
-        \n| group      | ts                  | SUM(http_requests.value) |\
+        \n| group      | ts                  | sum(http_requests.value) |\
         \n+------------+---------------------+--------------------------+\
         \n| production | 1970-01-01T00:00:00 | 300.0                    |\
         \n| canary     | 1970-01-01T00:00:00 | 700.0                    |\
@@ -299,7 +299,7 @@ async fn aggregators_simple_avg(instance: Arc<dyn MockInstance>) {
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+------------+---------------------+--------------------------+\
-        \n| group      | ts                  | AVG(http_requests.value) |\
+        \n| group      | ts                  | avg(http_requests.value) |\
         \n+------------+---------------------+--------------------------+\
         \n| production | 1970-01-01T00:00:00 | 150.0                    |\
         \n| canary     | 1970-01-01T00:00:00 | 350.0                    |\
@@ -326,7 +326,7 @@ async fn aggregators_simple_count(instance: Arc<dyn MockInstance>) {
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+------------+---------------------+----------------------------+\
-        \n| group      | ts                  | COUNT(http_requests.value) |\
+        \n| group      | ts                  | count(http_requests.value) |\
         \n+------------+---------------------+----------------------------+\
         \n| canary     | 1970-01-01T00:00:00 | 2                          |\
         \n| production | 1970-01-01T00:00:00 | 2                          |\
@@ -353,7 +353,7 @@ async fn aggregators_simple_without(instance: Arc<dyn MockInstance>) {
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+------------+------------+---------------------+--------------------------+\
-        \n| group      | job        | ts                  | SUM(http_requests.value) |\
+        \n| group      | job        | ts                  | sum(http_requests.value) |\
         \n+------------+------------+---------------------+--------------------------+\
         \n| production | api-server | 1970-01-01T00:00:00 | 300.0                    |\
         \n| canary     | api-server | 1970-01-01T00:00:00 | 700.0                    |\
@@ -379,7 +379,7 @@ async fn aggregators_empty_by(instance: Arc<dyn MockInstance>) {
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+---------------------+--------------------------+\
-        \n| ts                  | SUM(http_requests.value) |\
+        \n| ts                  | sum(http_requests.value) |\
         \n+---------------------+--------------------------+\
         \n| 1970-01-01T00:00:00 | 1000.0                   |\
         \n+---------------------+--------------------------+",
@@ -404,7 +404,7 @@ async fn aggregators_no_by_without(instance: Arc<dyn MockInstance>) {
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+---------------------+--------------------------+\
-        \n| ts                  | SUM(http_requests.value) |\
+        \n| ts                  | sum(http_requests.value) |\
         \n+---------------------+--------------------------+\
         \n| 1970-01-01T00:00:00 | 1000.0                   |\
         \n+---------------------+--------------------------+",
@@ -430,7 +430,7 @@ async fn aggregators_empty_without(instance: Arc<dyn MockInstance>) {
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+------------+----------+------------+---------------------+--------------------------+\
-        \n| group      | instance | job        | ts                  | SUM(http_requests.value) |\
+        \n| group      | instance | job        | ts                  | sum(http_requests.value) |\
         \n+------------+----------+------------+---------------------+--------------------------+\
         \n| production | 0        | api-server | 1970-01-01T00:00:00 | 100.0                    |\
         \n| production | 1        | api-server | 1970-01-01T00:00:00 | 200.0                    |\
