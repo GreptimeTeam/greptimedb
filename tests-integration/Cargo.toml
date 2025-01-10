@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+pg_kvbackend = ["common-meta/pg_kvbackend", "meta-srv/pg_kvbackend"]
+default = ["pg_kvbackend"]
 dashboard = []
 
 [lints]

@@ -703,6 +703,25 @@ jobs:
           GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
           GT_KAFKA_SASL_ENDPOINTS: 127.0.0.1:9093
           UNITTEST_LOG_DIR: "__unittest_logs"
+      - name: Run integration test with pg kvbackend
+        run: cargo test integration
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+          RUST_BACKTRACE: 1
+          CARGO_INCREMENTAL: 0
+          GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
+          GT_S3_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+          GT_S3_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+          GT_S3_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+          GT_MINIO_BUCKET: greptime
+          GT_MINIO_ACCESS_KEY_ID: superpower_ci_user
+          GT_MINIO_ACCESS_KEY: superpower_password
+          GT_MINIO_REGION: us-west-2
+          GT_MINIO_ENDPOINT_URL: http://127.0.0.1:9000
+          GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
+          GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
+          GT_KAFKA_SASL_ENDPOINTS: 127.0.0.1:9093
+          UNITTEST_LOG_DIR: "__unittest_logs"
       - name: Codecov upload
         uses: codecov/codecov-action@v4
         with:

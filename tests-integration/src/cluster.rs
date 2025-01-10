@@ -36,11 +36,14 @@ use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
+#[cfg(feature = "pg_kvbackend")]
+use common_meta::kv_backend::postgres::PgStore;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::DatanodeId;
 use common_runtime::runtime::BuilderBuild;
 use common_runtime::Builder as RuntimeBuilder;
+use common_telemetry::info;
 use common_test_util::temp_dir::create_temp_dir;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::config::{DatanodeOptions, ObjectStoreConfig};
@@ -94,21 +97,35 @@ pub struct GreptimeDbClusterBuilder {
 
 impl GreptimeDbClusterBuilder {
     pub async fn new(cluster_name: &str) -> Self {
-        let endpoints = env::var("GT_ETCD_ENDPOINTS").unwrap_or_default();
+        let etcd_endpoints = env::var("GT_ETCD_ENDPOINTS").unwrap_or_default();
+        let pg_endpoint = env::var("GT_PG_ENDPOINTS").unwrap_or_default();
 
-        let kv_backend: KvBackendRef = if endpoints.is_empty() {
-            Arc::new(MemoryKvBackend::new())
-        } else {
-            let endpoints = endpoints
-                .split(',')
-                .map(|s| s.to_string())
-                .collect::<Vec<String>>();
-            let backend = EtcdStore::with_endpoints(endpoints, 128)
-                .await
-                .expect("malformed endpoints");
-            // Each retry requires a new isolation namespace.
-            let chroot = format!("{}{}", cluster_name, Uuid::new_v4());
-            Arc::new(ChrootKvBackend::new(chroot.into(), backend))
+        let kv_backend: KvBackendRef = match (etcd_endpoints.is_empty(), pg_endpoint.is_empty()) {
+            (true, true) => {
+                info!("Using memory kv backend");
+                Arc::new(MemoryKvBackend::new())
+            }
+            (false, _) => {
+                info!("Using etcd endpoints: {}", etcd_endpoints);
+                let endpoints = etcd_endpoints
+                    .split(',')
+                    .map(|s| s.to_string())
+                    .collect::<Vec<String>>();
+                let backend = EtcdStore::with_endpoints(endpoints, 128)
+                    .await
+                    .expect("malformed endpoints");
+                // Each retry requires a new isolation namespace.
+                let chroot = format!("{}{}", cluster_name, Uuid::new_v4());
+                Arc::new(ChrootKvBackend::new(chroot.into(), backend))
+            }
+            (true, false) => {
+                info!("Using pg endpoint: {}", pg_endpoint);
+                let backend = PgStore::with_url(&pg_endpoint, "greptime_metakv", 128)
+                    .await
+                    .expect("malformed pg endpoint");
+                let chroot = format!("{}{}", cluster_name, Uuid::new_v4());
+                Arc::new(ChrootKvBackend::new(chroot.into(), backend))
+            }
         };
 
         Self {
