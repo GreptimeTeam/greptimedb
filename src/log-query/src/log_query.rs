@@ -51,43 +51,44 @@ pub struct LogQuery {
 
     // Processors
     /// Expressions to calculate after filter.
-    pub exprs: Vec<LogQueryExpr>,
+    pub exprs: Vec<LogExpr>,
 }
 
+/// Expression to calculate on log after filtering.
 #[derive(Debug, Serialize, Deserialize)]
-pub enum LogQueryExpr {
+pub enum LogExpr {
     NamedIdent(String),
     PositionalIdent(usize),
     Literal(String),
     ScalarFunc {
         name: String,
-        args: Vec<LogQueryExpr>,
+        args: Vec<LogExpr>,
     },
     AggrFunc {
         name: String,
-        args: Vec<LogQueryExpr>,
+        args: Vec<LogExpr>,
         /// Optional range function parameter. Stands for the time range for both step and align.
         range: Option<String>,
-        by: Vec<LogQueryExpr>,
+        by: Vec<LogExpr>,
     },
     Decompose {
-        expr: Box<LogQueryExpr>,
+        expr: Box<LogExpr>,
         /// JSON, CSV, etc.
         schema: String,
         /// Fields with type name to extract from the decomposed value.
         fields: Vec<(String, String)>,
     },
     BinaryOp {
-        left: Box<LogQueryExpr>,
+        left: Box<LogExpr>,
         op: String,
-        right: Box<LogQueryExpr>,
+        right: Box<LogExpr>,
     },
     Alias {
-        expr: Box<LogQueryExpr>,
+        expr: Box<LogExpr>,
         alias: String,
     },
     Filter {
-        expr: Box<LogQueryExpr>,
+        expr: Box<LogExpr>,
         filter: ContentFilter,
     },
 }
