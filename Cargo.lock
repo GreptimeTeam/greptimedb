@@ -2335,7 +2335,7 @@ dependencies = [
  "humantime-serde",
  "num_cpus",
  "rskafka",
- "rustls 0.23.13",
+ "rustls 0.23.20",
  "rustls-native-certs 0.7.3",
  "rustls-pemfile 2.2.0",
  "serde",
@@ -4969,14 +4969,14 @@ dependencies = [
 [[package]]
 name = "hyper-rustls"
 version = "0.27.3"
-source = "git+https://github.com/GreptimeTeam/hyper-rustls#a951e03fb914f1830e244400472814d38775118d"
+source = "git+https://github.com/GreptimeTeam/hyper-rustls?rev=a951e03#a951e03fb914f1830e244400472814d38775118d"
 dependencies = [
  "futures-util",
  "http 1.1.0",
  "hyper 1.4.1",
  "hyper-util",
  "log",
- "rustls 0.23.13",
+ "rustls 0.23.20",
  "rustls-native-certs 0.8.0",
  "rustls-pki-types",
  "tokio",
@@ -5608,7 +5608,7 @@ dependencies = [
  "k8s-openapi",
  "kube-core",
  "pem",
- "rustls 0.23.13",
+ "rustls 0.23.20",
  "rustls-pemfile 2.2.0",
  "secrecy",
  "serde",
@@ -6573,7 +6573,7 @@ dependencies = [
  "named_pipe",
  "pem",
  "percent-encoding",
- "rustls 0.23.13",
+ "rustls 0.23.20",
  "rustls-pemfile 2.2.0",
  "serde",
  "serde_json",
@@ -8737,7 +8737,7 @@ dependencies = [
  "quinn-proto",
  "quinn-udp",
  "rustc-hash 2.0.0",
- "rustls 0.23.13",
+ "rustls 0.23.20",
  "socket2",
  "thiserror 1.0.64",
  "tokio",
@@ -8754,7 +8754,7 @@ dependencies = [
  "rand",
  "ring 0.17.8",
  "rustc-hash 2.0.0",
- "rustls 0.23.13",
+ "rustls 0.23.20",
  "slab",
  "thiserror 1.0.64",
  "tinyvec",
@@ -9112,7 +9112,7 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "quinn",
- "rustls 0.23.13",
+ "rustls 0.23.20",
  "rustls-native-certs 0.8.0",
  "rustls-pemfile 2.2.0",
  "rustls-pki-types",
@@ -9305,7 +9305,7 @@ dependencies = [
  "parking_lot 0.12.3",
  "rand",
  "rsasl",
- "rustls 0.23.13",
+ "rustls 0.23.20",
  "snap",
  "thiserror 1.0.64",
  "tokio",
@@ -9577,8 +9577,8 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.13"
-source = "git+https://github.com/GreptimeTeam/rustls#e0917109155435821c4416d699babe749b597a03"
+version = "0.23.20"
+source = "git+https://github.com/GreptimeTeam/rustls?rev=34fd0c6#34fd0c6244af1501ca8f5b5c1c69afda67ce8fbb"
 dependencies = [
  "log",
  "once_cell",
@@ -9635,9 +9635,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-pki-types"
-version = "1.9.0"
+version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e696e35370c65c9c541198af4543ccd580cf17fc25d8e05c5a242b202488c55"
+checksum = "d2bf47e6ff922db3825eb750c4e2ff784c6ff8fb9e13046ef6a1d1c5401b0b37"
 
 [[package]]
 name = "rustls-webpki"
@@ -10151,7 +10151,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rust-embed",
- "rustls 0.23.13",
+ "rustls 0.23.20",
  "rustls-pemfile 2.2.0",
  "rustls-pki-types",
  "serde",
@@ -11739,7 +11739,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04fb792ccd6bbcd4bba408eb8a292f70fc4a3589e5d793626f45190e6454b6ab"
 dependencies = [
  "ring 0.17.8",
- "rustls 0.23.13",
+ "rustls 0.23.20",
  "tokio",
  "tokio-postgres",
  "tokio-rustls 0.26.0",
@@ -11781,9 +11781,9 @@ dependencies = [
 [[package]]
 name = "tokio-rustls"
 version = "0.26.0"
-source = "git+https://github.com/GreptimeTeam/tokio-rustls#4604ca6badfd1d10424718e5570cc481ab787fc8"
+source = "git+https://github.com/GreptimeTeam/tokio-rustls?rev=4604ca6#4604ca6badfd1d10424718e5570cc481ab787fc8"
 dependencies = [
- "rustls 0.23.13",
+ "rustls 0.23.20",
  "rustls-pki-types",
  "tokio",
 ]

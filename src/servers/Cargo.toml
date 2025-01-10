@@ -93,7 +93,7 @@ rand.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 rust-embed = { version = "6.6", features = ["debug-embed"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls = { workspace = true, default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-pemfile = "2.0"
 rustls-pki-types = "1.0"
 serde.workspace = true
@@ -105,7 +105,7 @@ sql.workspace = true
 strum.workspace = true
 table.workspace = true
 tokio.workspace = true
-tokio-rustls = "0.26"
+tokio-rustls.workspace = true
 tokio-stream = { workspace = true, features = ["net"] }
 tokio-util.workspace = true
 tonic.workspace = true
