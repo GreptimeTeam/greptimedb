@@ -563,16 +563,16 @@ mod test {
         let filter = ScalarExpr::CallVariadic {
             func: VariadicFunc::And,
             exprs: vec![
-                ScalarExpr::Column(0).call_binary(
-                    ScalarExpr::Literal(Value::from(1u32), CDT::uint32_datatype()),
+                ScalarExpr::Column(2).call_binary(
+                    ScalarExpr::Literal(Value::from(1i64), CDT::int64_datatype()),
                     BinaryFunc::Gte,
                 ),
-                ScalarExpr::Column(0).call_binary(
-                    ScalarExpr::Literal(Value::from(3u32), CDT::uint32_datatype()),
+                ScalarExpr::Column(2).call_binary(
+                    ScalarExpr::Literal(Value::from(3i64), CDT::int64_datatype()),
                     BinaryFunc::Lte,
                 ),
-                ScalarExpr::Column(0).call_binary(
-                    ScalarExpr::Literal(Value::from(2u32), CDT::uint32_datatype()),
+                ScalarExpr::Column(2).call_binary(
+                    ScalarExpr::Literal(Value::from(2i64), CDT::int64_datatype()),
                     BinaryFunc::NotEq,
                 ),
             ],
@@ -596,7 +596,20 @@ mod test {
                         .into_named(vec![Some("number".to_string()), Some("ts".to_string())]),
                     ),
                 ),
-                mfp: MapFilterProject::new(1).filter(vec![filter]).unwrap(),
+                mfp: MapFilterProject::new(2)
+                    .map(vec![
+                        ScalarExpr::CallUnary {
+                            func: UnaryFunc::Cast(CDT::int64_datatype()),
+                            expr: Box::new(ScalarExpr::Column(0)),
+                        },
+                        ScalarExpr::Column(0),
+                        ScalarExpr::Column(3),
+                    ])
+                    .unwrap()
+                    .filter(vec![filter])
+                    .unwrap()
+                    .project(vec![4])
+                    .unwrap(),
             },
         };
         assert_eq!(flow_plan.unwrap(), expected);
