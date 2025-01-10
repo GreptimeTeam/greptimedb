@@ -27,6 +27,7 @@ use crate::puffin_manager::stager::Stager;
 use crate::puffin_manager::PuffinManager;
 
 /// `FsPuffinManager` is a `PuffinManager` that provides readers and writers for puffin data in filesystem.
+#[derive(Clone)]
 pub struct FsPuffinManager<S, F> {
     /// The stager.
     stager: S,
