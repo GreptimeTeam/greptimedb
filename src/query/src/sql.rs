@@ -726,6 +726,20 @@ pub async fn show_status(_query_ctx: QueryContextRef) -> Result<Output> {
     Ok(Output::new_with_record_batches(records))
 }
 
+pub async fn show_search_path(_query_ctx: QueryContextRef) -> Result<Output> {
+    let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+        "search_path",
+        ConcreteDataType::string_datatype(),
+        false,
+    )]));
+    let records = RecordBatches::try_from_columns(
+        schema,
+        vec![Arc::new(StringVector::from(vec![_query_ctx.current_schema()])) as _],
+    )
+    .context(error::CreateRecordBatchSnafu)?;
+    Ok(Output::new_with_record_batches(records))
+}
+
 pub fn show_create_database(database_name: &str, options: OptionMap) -> Result<Output> {
     let stmt = CreateDatabase {
         name: ObjectName(vec![Ident {

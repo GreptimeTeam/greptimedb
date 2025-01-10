@@ -352,6 +352,7 @@ impl StatementExecutor {
             }
             Statement::ShowIndex(show_index) => self.show_index(show_index, query_ctx).await,
             Statement::ShowStatus(_) => self.show_status(query_ctx).await,
+            Statement::ShowSearchPath(_) => self.show_search_path(query_ctx).await,
             Statement::Use(db) => self.use_database(db, query_ctx).await,
             Statement::Admin(admin) => self.execute_admin_command(admin, query_ctx).await,
         }

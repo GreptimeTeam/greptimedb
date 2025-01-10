@@ -22,8 +22,8 @@ use crate::error::{
 use crate::parser::ParserContext;
 use crate::statements::show::{
     ShowColumns, ShowCreateDatabase, ShowCreateFlow, ShowCreateTable, ShowCreateTableVariant,
-    ShowCreateView, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowStatus, ShowTableStatus,
-    ShowTables, ShowVariables, ShowViews,
+    ShowCreateView, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowSearchPath, ShowStatus,
+    ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
 use crate::statements::statement::Statement;
 
@@ -107,6 +107,8 @@ impl ParserContext<'_> {
             Ok(Statement::ShowVariables(ShowVariables { variable }))
         } else if self.consume_token("STATUS") {
             Ok(Statement::ShowStatus(ShowStatus {}))
+        } else if self.consume_token("SEARCH_PATH") {
+            Ok(Statement::ShowSearchPath(ShowSearchPath {}))
         } else {
             self.unsupported(self.peek_token_as_string())
         }
