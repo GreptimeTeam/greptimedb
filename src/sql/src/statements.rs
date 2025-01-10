@@ -265,8 +265,8 @@ pub fn sql_value_to_value(
                 !matches!(data_type, ConcreteDataType::Interval(_)),
                 ColumnTypeMismatchSnafu {
                     column_name,
-                    expect: ConcreteDataType::string_datatype(),
-                    actual: data_type.clone(),
+                    expect: data_type.clone(),
+                    actual: ConcreteDataType::string_datatype(),
                 }
             );
             parse_string_to_value(column_name, s.clone(), data_type, timezone)?
