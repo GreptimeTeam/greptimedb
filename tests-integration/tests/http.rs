@@ -1517,13 +1517,10 @@ pub async fn test_otlp_metrics(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_otlp_metrics").await;
 
     let content = r#"
-{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeMetrics":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"metrics":[{"name":"gen","description":"","unit":"","data":{"gauge":{"dataPoints":[{"attributes":[],"startTimeUnixNano":0,"timeUnixNano":1726053452870391000,"exemplars":[],"flags":0,"value":{"asInt":9471}}]}}}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.13.0"}
+{"resourceMetrics":[{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeMetrics":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"metrics":[{"name":"gen","description":"","unit":"","metadata":[],"gauge":{"dataPoints":[{"attributes":[],"startTimeUnixNano":"0","timeUnixNano":"1736489291872539000","exemplars":[],"flags":0,"asInt":0}]}}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.13.0"},{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeMetrics":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"metrics":[{"name":"gen","description":"","unit":"","metadata":[],"gauge":{"dataPoints":[{"attributes":[],"startTimeUnixNano":"0","timeUnixNano":"1736489291919917000","exemplars":[],"flags":0,"asInt":1}]}}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.13.0"}]}
     "#;
 
-    let metrics: ResourceMetrics = serde_json::from_str(content).unwrap();
-    let req = ExportMetricsServiceRequest {
-        resource_metrics: vec![metrics],
-    };
+    let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
     let body = req.encode_to_vec();
 
     // handshake
@@ -1534,7 +1531,7 @@ pub async fn test_otlp_metrics(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // select metrics data
-    let expected = r#"[[1726053452870391000,9471.0]]"#;
+    let expected = "[[1736489291872539000,0.0],[1736489291919917000,1.0]]";
     validate_data("otlp_metrics", &client, "select * from gen;", expected).await;
 
     // drop table
