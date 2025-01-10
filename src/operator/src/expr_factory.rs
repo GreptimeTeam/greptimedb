@@ -507,8 +507,7 @@ pub(crate) fn to_alter_table_expr(
                     Ok(AddColumn {
                         column_def: Some(column_def),
                         location: add_column.location.as_ref().map(From::from),
-                        // TODO(yingwen): We don't support `IF NOT EXISTS` for `ADD COLUMN` yet.
-                        add_if_not_exists: false,
+                        add_if_not_exists: add_column.add_if_not_exists,
                     })
                 })
                 .collect::<Result<Vec<AddColumn>>>()?,

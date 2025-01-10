@@ -19,6 +19,10 @@ ALTER TABLE test ADD COLUMN k INTEGER;
 
 Affected Rows: 0
 
+ALTER TABLE test ADD COLUMN IF NOT EXISTS k INTEGER;
+
+Affected Rows: 0
+
 SELECT * FROM test;
 
 +---+-------------------------+---+
@@ -105,6 +109,14 @@ DESC TABLE test;
 +--------+----------------------+-----+------+---------+---------------+
 
 ALTER TABLE test ADD COLUMN "foo" STRING default 'foo' PRIMARY KEY, ADD COLUMN "bar" STRING default 'bar' PRIMARY KEY;
+
+Affected Rows: 0
+
+ALTER TABLE test ADD COLUMN IF NOT EXISTS  "foo" STRING default 'foo' PRIMARY KEY, ADD COLUMN "bar" STRING default 'bar' PRIMARY KEY;
+
+Error: 4003(TableColumnExists), Column bar already exists in table test
+
+ALTER TABLE test ADD COLUMN IF NOT EXISTS  "foo" STRING default 'foo' PRIMARY KEY, ADD COLUMN IF NOT EXISTS "bar" STRING default 'bar' PRIMARY KEY;
 
 Affected Rows: 0
 

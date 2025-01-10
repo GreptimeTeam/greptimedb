@@ -291,6 +291,7 @@ fn parse_string_options(parser: &mut Parser) -> std::result::Result<(String, Str
 fn parse_add_columns(parser: &mut Parser) -> std::result::Result<AddColumn, ParserError> {
     parser.expect_keyword(Keyword::ADD)?;
     let _ = parser.parse_keyword(Keyword::COLUMN);
+    let add_if_not_exists = parser.parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
     let mut column_def = parser.parse_column_def()?;
     column_def.name = ParserContext::canonicalize_identifier(column_def.name);
     let location = if parser.parse_keyword(Keyword::FIRST) {
@@ -312,6 +313,7 @@ fn parse_add_columns(parser: &mut Parser) -> std::result::Result<AddColumn, Pars
     Ok(AddColumn {
         column_def,
         location,
+        add_if_not_exists,
     })
 }
 

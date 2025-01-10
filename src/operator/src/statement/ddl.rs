@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
@@ -885,12 +885,13 @@ impl StatementExecutor {
         Ok(Output::new_with_affected_rows(0))
     }
 
+    /// Verifies an alter and returns whether it is necessary to perform the alter.
     fn verify_alter(
         &self,
         table_id: TableId,
         table_info: Arc<TableInfo>,
         expr: AlterTableExpr,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let request: AlterTableRequest = common_grpc_expr::alter_expr_to_request(table_id, expr)
             .context(AlterExprToRequestSnafu)?;
 
@@ -907,6 +908,21 @@ impl StatementExecutor {
                     violated: format!("Invalid table name: {}", new_table_name)
                 }
             );
+        } else if let AlterKind::AddColumns { columns } = alter_kind {
+            // If all the columns are marked as add_if_not_exists and they already exist in the table,
+            // there is no need to perform the alter.
+            let column_names: HashSet<String> = table_info
+                .meta
+                .schema
+                .column_schemas()
+                .iter()
+                .map(|schema| schema.name.clone())
+                .collect();
+            if columns.iter().all(|column| {
+                column_names.contains(&column.column_schema.name) && column.add_if_not_exists
+            }) {
+                return Ok(false);
+            }
         }
 
         let _ = table_info
@@ -916,7 +932,7 @@ impl StatementExecutor {
             .build()
             .context(error::BuildTableMetaSnafu { table_name })?;
 
-        Ok(())
+        Ok(true)
     }
 
     #[tracing::instrument(skip_all)]
@@ -971,8 +987,10 @@ impl StatementExecutor {
             })?;
 
         let table_id = table.table_info().ident.table_id;
-        self.verify_alter(table_id, table.table_info(), expr.clone())?;
-
+        let need_alter = self.verify_alter(table_id, table.table_info(), expr.clone())?;
+        if !need_alter {
+            return Ok(Output::new_with_affected_rows(0));
+        }
         info!(
             "Table info before alter is {:?}, expr: {:?}",
             table.table_info(),
