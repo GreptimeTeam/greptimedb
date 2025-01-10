@@ -769,6 +769,10 @@ impl HttpServer {
             // Return fake response for Elasticsearch license request.
             .route("/_license", routing::get(elasticsearch::handle_get_license))
             .route("/_bulk", routing::post(elasticsearch::handle_bulk_api))
+            .route(
+                "/:index/_bulk",
+                routing::post(elasticsearch::handle_bulk_api_with_index),
+            )
             // Return fake response for Elasticsearch ilm request.
             .route(
                 "/_ilm/policy/*path",
