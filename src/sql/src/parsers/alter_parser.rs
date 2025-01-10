@@ -26,7 +26,8 @@ use crate::error::{self, InvalidColumnOptionSnafu, Result, SetFulltextOptionSnaf
 use crate::parser::ParserContext;
 use crate::parsers::utils::validate_column_fulltext_create_option;
 use crate::statements::alter::{
-    AlterDatabase, AlterDatabaseOperation, AlterTable, AlterTableOperation, KeyValueOption,
+    AddColumn, AlterDatabase, AlterDatabaseOperation, AlterTable, AlterTableOperation,
+    KeyValueOption,
 };
 use crate::statements::statement::Statement;
 use crate::util::parse_option_string;
@@ -120,7 +121,8 @@ impl ParserContext<'_> {
                                 .expect_keyword(Keyword::COLUMN)
                                 .context(error::SyntaxSnafu)?;
                             let name = Self::canonicalize_identifier(
-                                self.parse_identifier().context(error::SyntaxSnafu)?,
+                                Self::parse_identifier(&mut self.parser)
+                                    .context(error::SyntaxSnafu)?,
                             );
                             AlterTableOperation::DropColumn { name }
                         }
@@ -185,30 +187,12 @@ impl ParserContext<'_> {
         {
             Ok(AlterTableOperation::AddConstraint(constraint))
         } else {
-            let _ = self.parser.parse_keyword(Keyword::COLUMN);
-            let mut column_def = self.parser.parse_column_def().context(error::SyntaxSnafu)?;
-            column_def.name = Self::canonicalize_identifier(column_def.name);
-            let location = if self.parser.parse_keyword(Keyword::FIRST) {
-                Some(AddColumnLocation::First)
-            } else if let Token::Word(word) = self.parser.peek_token().token {
-                if word.value.eq_ignore_ascii_case("AFTER") {
-                    let _ = self.parser.next_token();
-                    let name = Self::canonicalize_identifier(
-                        self.parse_identifier().context(error::SyntaxSnafu)?,
-                    );
-                    Some(AddColumnLocation::After {
-                        column_name: name.value,
-                    })
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            Ok(AlterTableOperation::AddColumn {
-                column_def,
-                location,
-            })
+            self.parser.prev_token();
+            let add_columns = self
+                .parser
+                .parse_comma_separated(parse_add_columns)
+                .context(error::SyntaxSnafu)?;
+            Ok(AlterTableOperation::AddColumns { add_columns })
         }
     }
 
@@ -304,6 +288,33 @@ fn parse_string_options(parser: &mut Parser) -> std::result::Result<(String, Str
     Ok((name, value))
 }
 
+fn parse_add_columns(parser: &mut Parser) -> std::result::Result<AddColumn, ParserError> {
+    parser.expect_keyword(Keyword::ADD)?;
+    let _ = parser.parse_keyword(Keyword::COLUMN);
+    let mut column_def = parser.parse_column_def()?;
+    column_def.name = ParserContext::canonicalize_identifier(column_def.name);
+    let location = if parser.parse_keyword(Keyword::FIRST) {
+        Some(AddColumnLocation::First)
+    } else if let Token::Word(word) = parser.peek_token().token {
+        if word.value.eq_ignore_ascii_case("AFTER") {
+            let _ = parser.next_token();
+            let name =
+                ParserContext::canonicalize_identifier(ParserContext::parse_identifier(parser)?);
+            Some(AddColumnLocation::After {
+                column_name: name.value,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    Ok(AddColumn {
+        column_def,
+        location,
+    })
+}
+
 /// Parses a comma separated list of string literals.
 fn parse_string_option_names(parser: &mut Parser) -> std::result::Result<String, ParserError> {
     parser.parse_literal_string()
@@ -315,7 +326,7 @@ mod tests {
 
     use common_error::ext::ErrorExt;
     use datatypes::schema::{FulltextAnalyzer, FulltextOptions};
-    use sqlparser::ast::{ColumnOption, DataType};
+    use sqlparser::ast::{ColumnDef, ColumnOption, ColumnOptionDef, DataType};
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
@@ -397,19 +408,18 @@ mod tests {
                 assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
 
                 let alter_operation = alter_table.alter_operation();
-                assert_matches!(alter_operation, AlterTableOperation::AddColumn { .. });
+                assert_matches!(alter_operation, AlterTableOperation::AddColumns { .. });
                 match alter_operation {
-                    AlterTableOperation::AddColumn {
-                        column_def,
-                        location,
-                    } => {
-                        assert_eq!("tagk_i", column_def.name.value);
-                        assert_eq!(DataType::String(None), column_def.data_type);
-                        assert!(column_def
+                    AlterTableOperation::AddColumns { add_columns } => {
+                        assert_eq!(add_columns.len(), 1);
+                        assert_eq!("tagk_i", add_columns[0].column_def.name.value);
+                        assert_eq!(DataType::String(None), add_columns[0].column_def.data_type);
+                        assert!(add_columns[0]
+                            .column_def
                             .options
                             .iter()
                             .any(|o| matches!(o.option, ColumnOption::Null)));
-                        assert_eq!(&None, location);
+                        assert_eq!(&None, &add_columns[0].location);
                     }
                     _ => unreachable!(),
                 }
@@ -433,19 +443,17 @@ mod tests {
                 assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
 
                 let alter_operation = alter_table.alter_operation();
-                assert_matches!(alter_operation, AlterTableOperation::AddColumn { .. });
+                assert_matches!(alter_operation, AlterTableOperation::AddColumns { .. });
                 match alter_operation {
-                    AlterTableOperation::AddColumn {
-                        column_def,
-                        location,
-                    } => {
-                        assert_eq!("tagk_i", column_def.name.value);
-                        assert_eq!(DataType::String(None), column_def.data_type);
-                        assert!(column_def
+                    AlterTableOperation::AddColumns { add_columns } => {
+                        assert_eq!("tagk_i", add_columns[0].column_def.name.value);
+                        assert_eq!(DataType::String(None), add_columns[0].column_def.data_type);
+                        assert!(add_columns[0]
+                            .column_def
                             .options
                             .iter()
                             .any(|o| matches!(o.option, ColumnOption::Null)));
-                        assert_eq!(&Some(AddColumnLocation::First), location);
+                        assert_eq!(&Some(AddColumnLocation::First), &add_columns[0].location);
                     }
                     _ => unreachable!(),
                 }
@@ -456,7 +464,8 @@ mod tests {
 
     #[test]
     fn test_parse_alter_add_column_with_after() {
-        let sql = "ALTER TABLE my_metric_1 ADD tagk_i STRING Null AFTER ts;";
+        let sql =
+            "ALTER TABLE my_metric_1 ADD tagk_i STRING Null AFTER ts, add column tagl_i String;";
         let mut result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -469,24 +478,42 @@ mod tests {
                 assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
 
                 let alter_operation = alter_table.alter_operation();
-                assert_matches!(alter_operation, AlterTableOperation::AddColumn { .. });
+                assert_matches!(alter_operation, AlterTableOperation::AddColumns { .. });
                 match alter_operation {
-                    AlterTableOperation::AddColumn {
-                        column_def,
-                        location,
-                    } => {
-                        assert_eq!("tagk_i", column_def.name.value);
-                        assert_eq!(DataType::String(None), column_def.data_type);
-                        assert!(column_def
-                            .options
+                    AlterTableOperation::AddColumns { add_columns } => {
+                        let expecteds: Vec<(Option<AddColumnLocation>, ColumnDef)> = vec![
+                            (
+                                Some(AddColumnLocation::After {
+                                    column_name: "ts".to_string(),
+                                }),
+                                ColumnDef {
+                                    name: Ident::new("tagk_i"),
+                                    data_type: DataType::String(None),
+                                    options: vec![ColumnOptionDef {
+                                        name: None,
+                                        option: ColumnOption::Null,
+                                    }],
+                                    collation: None,
+                                },
+                            ),
+                            (
+                                None,
+                                ColumnDef {
+                                    name: Ident::new("tagl_i"),
+                                    data_type: DataType::String(None),
+                                    options: vec![],
+                                    collation: None,
+                                },
+                            ),
+                        ];
+                        for (add_column, expected) in add_columns
                             .iter()
-                            .any(|o| matches!(o.option, ColumnOption::Null)));
-                        assert_eq!(
-                            &Some(AddColumnLocation::After {
-                                column_name: "ts".to_string()
-                            }),
-                            location
-                        );
+                            .zip(expecteds)
+                            .collect::<Vec<(&AddColumn, (Option<AddColumnLocation>, ColumnDef))>>()
+                        {
+                            assert_eq!(add_column.column_def, expected.1);
+                            assert_eq!(&expected.0, &add_column.location);
+                        }
                     }
                     _ => unreachable!(),
                 }
