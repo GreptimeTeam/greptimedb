@@ -242,8 +242,10 @@ lazy_static! {
 }
 
 lazy_static! {
-    pub static ref TOPIC_REGION_MAP_PATTERN: Regex =
-        Regex::new(&format!("^{TOPIC_REGION_MAP_PREFIX}/({NAME_PATTERN})/([0-9]+)$")).unwrap();
+    pub static ref TOPIC_REGION_MAP_PATTERN: Regex = Regex::new(&format!(
+        "^{TOPIC_REGION_MAP_PREFIX}/({NAME_PATTERN})/([0-9]+)$"
+    ))
+    .unwrap();
 }
 
 /// The key of metadata.
