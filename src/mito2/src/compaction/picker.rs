@@ -45,6 +45,8 @@ pub struct PickerOutput {
     pub outputs: Vec<CompactionOutput>,
     pub expired_ssts: Vec<FileHandle>,
     pub time_window_size: i64,
+    /// Max single output file size in bytes.
+    pub max_file_size: Option<usize>,
 }
 
 /// SerializedPickerOutput is a serialized version of PickerOutput by replacing [CompactionOutput] and [FileHandle] with [SerializedCompactionOutput] and [FileMeta].
@@ -53,6 +55,7 @@ pub struct SerializedPickerOutput {
     pub outputs: Vec<SerializedCompactionOutput>,
     pub expired_ssts: Vec<FileMeta>,
     pub time_window_size: i64,
+    pub max_file_size: Option<usize>,
 }
 
 impl From<&PickerOutput> for SerializedPickerOutput {
@@ -61,7 +64,6 @@ impl From<&PickerOutput> for SerializedPickerOutput {
             .outputs
             .iter()
             .map(|output| SerializedCompactionOutput {
-                output_file_id: output.output_file_id,
                 output_level: output.output_level,
                 inputs: output.inputs.iter().map(|s| s.meta_ref().clone()).collect(),
                 filter_deleted: output.filter_deleted,
@@ -77,6 +79,7 @@ impl From<&PickerOutput> for SerializedPickerOutput {
             outputs,
             expired_ssts,
             time_window_size: input.time_window_size,
+            max_file_size: input.max_file_size,
         }
     }
 }
@@ -91,7 +94,6 @@ impl PickerOutput {
             .outputs
             .into_iter()
             .map(|output| CompactionOutput {
-                output_file_id: output.output_file_id,
                 output_level: output.output_level,
                 inputs: output
                     .inputs
@@ -113,6 +115,7 @@ impl PickerOutput {
             outputs,
             expired_ssts,
             time_window_size: input.time_window_size,
+            max_file_size: input.max_file_size,
         }
     }
 }
@@ -167,14 +170,12 @@ mod tests {
         let picker_output = PickerOutput {
             outputs: vec![
                 CompactionOutput {
-                    output_file_id: FileId::random(),
                     output_level: 0,
                     inputs: inputs_file_handle.clone(),
                     filter_deleted: false,
                     output_time_range: None,
                 },
                 CompactionOutput {
-                    output_file_id: FileId::random(),
                     output_level: 0,
                     inputs: inputs_file_handle.clone(),
                     filter_deleted: false,
@@ -183,6 +184,7 @@ mod tests {
             ],
             expired_ssts: expired_ssts_file_handle.clone(),
             time_window_size: 1000,
+            max_file_size: None,
         };
 
         let picker_output_str =
@@ -205,7 +207,6 @@ mod tests {
             .iter()
             .zip(picker_output_from_serialized.outputs.iter())
             .for_each(|(expected, actual)| {
-                assert_eq!(expected.output_file_id, actual.output_file_id);
                 assert_eq!(expected.output_level, actual.output_level);
                 expected
                     .inputs

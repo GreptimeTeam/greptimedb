@@ -26,7 +26,7 @@ use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion};
 use crate::compaction::picker::{Picker, PickerOutput};
 use crate::compaction::{get_expired_ssts, CompactionOutput};
-use crate::sst::file::{FileHandle, FileId};
+use crate::sst::file::FileHandle;
 
 /// Compaction picker that splits the time range of all involved files to windows, and merges
 /// the data segments intersects with those windows of files together so that the output files
@@ -115,6 +115,7 @@ impl Picker for WindowedCompactionPicker {
             outputs,
             expired_ssts,
             time_window_size: time_window,
+            max_file_size: None, // todo (hl): we may need to support `max_file_size` parameter in manual compaction.
         })
     }
 }
@@ -132,7 +133,6 @@ fn build_output(windows: BTreeMap<i64, (i64, Vec<FileHandle>)>) -> Vec<Compactio
         );
 
         let output = CompactionOutput {
-            output_file_id: FileId::random(),
             output_level: 1,
             inputs: files,
             filter_deleted: false,
