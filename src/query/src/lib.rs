@@ -42,6 +42,7 @@ pub mod sql;
 pub mod stats;
 pub(crate) mod window_sort;
 
+mod process_list;
 #[cfg(test)]
 pub(crate) mod test_util;
 #[cfg(test)]

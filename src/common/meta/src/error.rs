@@ -741,6 +741,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid process list key: {}", key))]
+    InvalidProcessKey {
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid topic name prefix: {}", prefix))]
     InvalidTopicNamePrefix {
         prefix: String,
@@ -898,6 +905,7 @@ impl ErrorExt for Error {
             #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
             RdsTransactionRetryFailed { .. } => StatusCode::Internal,
             Error::DatanodeTableInfoNotFound { .. } => StatusCode::Internal,
+            InvalidProcessKey { .. } => StatusCode::Internal
         }
     }
 
