@@ -31,11 +31,15 @@ impl CreateLogicalTablesProcedure {
         &self,
         peer: &Peer,
         region_routes: &[RegionRoute],
-    ) -> Result<RegionRequest> {
+    ) -> Result<Option<RegionRequest>> {
         let tasks = &self.data.tasks;
+        let table_ids_already_exists = &self.data.table_ids_already_exists;
         let regions_on_this_peer = find_leader_regions(region_routes, peer);
         let mut requests = Vec::with_capacity(tasks.len() * regions_on_this_peer.len());
-        for task in tasks {
+        for (task, table_id_already_exists) in tasks.iter().zip(table_ids_already_exists) {
+            if table_id_already_exists.is_some() {
+                continue;
+            }
             let create_table_expr = &task.create_table;
             let catalog = &create_table_expr.catalog_name;
             let schema = &create_table_expr.schema_name;
@@ -51,13 +55,17 @@ impl CreateLogicalTablesProcedure {
             }
         }
 
-        Ok(RegionRequest {
+        if requests.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(RegionRequest {
             header: Some(RegionRequestHeader {
                 tracing_context: TracingContext::from_current_span().to_w3c(),
                 ..Default::default()
             }),
             body: Some(region_request::Body::Creates(CreateRequests { requests })),
-        })
+        }))
     }
 
     fn create_region_request_builder(
