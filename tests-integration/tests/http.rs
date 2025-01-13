@@ -98,6 +98,7 @@ macro_rules! http_tests {
                 test_loki_pb_logs,
                 test_loki_json_logs,
                 test_elasticsearch_logs,
+                test_elasticsearch_logs_with_index,
             );
         )*
     };
@@ -1990,7 +1991,7 @@ pub async fn test_elasticsearch_logs(store_type: StorageType) {
             HeaderName::from_static("content-type"),
             HeaderValue::from_static("application/json"),
         )],
-        "/v1/elasticsearch/_bulk?table=elasticsearch_logs_test",
+        "/v1/elasticsearch/_bulk",
         body.as_bytes().to_vec(),
         false,
     )
@@ -1998,12 +1999,64 @@ pub async fn test_elasticsearch_logs(store_type: StorageType) {
 
     assert_eq!(StatusCode::OK, res.status());
 
-    let expected = "[[\"foo_value2\",\"value2\"],[\"foo_value1\",\"value1\"]]";
+    let expected = "[[\"foo_value1\",\"value1\"],[\"foo_value2\",\"value2\"]]";
 
     validate_data(
         "test_elasticsearch_logs",
         &client,
-        "select foo, bar from elasticsearch_logs_test;",
+        "select foo, bar from test;",
+        expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_elasticsearch_logs_with_index(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_elasticsearch_logs_with_index").await;
+
+    let client = TestClient::new(app);
+
+    // It will write to test_index1 and test_index2(specified in the path).
+    let body = r#"
+        {"create":{"_index":"test_index1","_id":"1"}}
+        {"foo":"foo_value1", "bar":"value1"}
+        {"create":{"_id":"2"}}
+        {"foo":"foo_value2","bar":"value2"}
+    "#;
+
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )],
+        "/v1/elasticsearch/test_index2/_bulk",
+        body.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+
+    assert_eq!(StatusCode::OK, res.status());
+
+    // test content of test_index1
+    let expected = "[[\"foo_value1\",\"value1\"]]";
+    validate_data(
+        "test_elasticsearch_logs_with_index",
+        &client,
+        "select foo, bar from test_index1;",
+        expected,
+    )
+    .await;
+
+    // test content of test_index2
+    let expected = "[[\"foo_value2\",\"value2\"]]";
+    validate_data(
+        "test_elasticsearch_logs_with_index_2",
+        &client,
+        "select foo, bar from test_index2;",
         expected,
     )
     .await;
