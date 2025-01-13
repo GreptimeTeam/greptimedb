@@ -144,34 +144,16 @@ impl<T> RepeatedField<T> {
         &self.as_ref()[start..end]
     }
 
-    /// Get mutable subslice of this container.
-    #[inline]
-    pub fn slice_mut(&mut self, start: usize, end: usize) -> &mut [T] {
-        &mut self.as_mut_slice()[start..end]
-    }
-
     /// Get slice from given index.
     #[inline]
     pub fn slice_from(&self, start: usize) -> &[T] {
         &self.as_ref()[start..]
     }
 
-    /// Get mutable slice from given index.
-    #[inline]
-    pub fn slice_from_mut(&mut self, start: usize) -> &mut [T] {
-        &mut self.as_mut_slice()[start..]
-    }
-
     /// Get slice to given index.
     #[inline]
     pub fn slice_to(&self, end: usize) -> &[T] {
         &self.as_ref()[..end]
-    }
-
-    /// Get mutable slice to given index.
-    #[inline]
-    pub fn slice_to_mut(&mut self, end: usize) -> &mut [T] {
-        &mut self.as_mut_slice()[..end]
     }
 
     /// View this container as two slices split at given index.
