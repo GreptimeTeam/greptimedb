@@ -63,6 +63,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aligned-vec"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e0966165eaf052580bd70eb1b32cb3d6245774c0104d1b2793e9650bf83b52a"
+dependencies = [
+ "equator",
+]
+
+[[package]]
 name = "alloc-no-stdlib"
 version = "2.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2133,7 +2142,7 @@ version = "0.12.0"
 dependencies = [
  "common-error",
  "common-macro",
- "pprof",
+ "pprof 0.14.0",
  "prost 0.12.6",
  "snafu 0.8.5",
  "tokio",
@@ -3622,6 +3631,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa18ce2bc66555b3218614519ac839ddb759a7d6720732f979ef8d13be147ecd"
 dependencies = [
  "once_cell",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.90",
+]
+
+[[package]]
+name = "equator"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c35da53b5a021d2484a7cc49b2ac7f2d840f8236a286f84202369bd338d761ea"
+dependencies = [
+ "equator-macro",
+]
+
+[[package]]
+name = "equator-macro"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3bf679796c0322556351f287a51b49e48f7c4986e727b5dd78c972d30e2e16cc"
+dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.90",
@@ -8253,6 +8282,28 @@ dependencies = [
  "nix 0.26.4",
  "once_cell",
  "parking_lot 0.12.3",
+ "smallvec",
+ "symbolic-demangle",
+ "tempfile",
+ "thiserror 1.0.64",
+]
+
+[[package]]
+name = "pprof"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebbe2f8898beba44815fdc9e5a4ae9c929e21c5dc29b0c774a15555f7f58d6d0"
+dependencies = [
+ "aligned-vec",
+ "backtrace",
+ "cfg-if",
+ "findshlibs",
+ "inferno",
+ "libc",
+ "log",
+ "nix 0.26.4",
+ "once_cell",
+ "parking_lot 0.12.3",
  "prost 0.12.6",
  "prost-build 0.12.6",
  "prost-derive 0.12.6",
@@ -10199,7 +10250,7 @@ dependencies = [
  "pin-project",
  "pipeline",
  "postgres-types",
- "pprof",
+ "pprof 0.13.0",
  "prometheus",
  "promql-parser",
  "prost 0.12.6",
