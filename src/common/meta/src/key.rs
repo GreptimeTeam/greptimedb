@@ -158,6 +158,7 @@ pub const CATALOG_NAME_KEY_PREFIX: &str = "__catalog_name";
 pub const SCHEMA_NAME_KEY_PREFIX: &str = "__schema_name";
 pub const TABLE_ROUTE_PREFIX: &str = "__table_route";
 pub const NODE_ADDRESS_PREFIX: &str = "__node_address";
+pub const KAFKA_TOPIC_KEY_PREFIX: &str = "__created_wal_topics/kafka";
 
 /// The keys with these prefixes will be loaded into the cache when the leader starts.
 pub const CACHE_KEY_PREFIXES: [&str; 5] = [
@@ -221,6 +222,11 @@ lazy_static! {
 lazy_static! {
     static ref NODE_ADDRESS_PATTERN: Regex =
         Regex::new(&format!("^{NODE_ADDRESS_PREFIX}/([0-9]+)/([0-9]+)$")).unwrap();
+}
+
+lazy_static! {
+    pub static ref KAFKA_TOPIC_KEY_PATTERN: Regex =
+        Regex::new(&format!("^{KAFKA_TOPIC_KEY_PREFIX}/({NAME_PATTERN})$")).unwrap();
 }
 
 /// The key of metadata.

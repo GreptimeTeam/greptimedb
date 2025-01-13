@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashSet;
+use std::fmt::{self, Display};
 use std::sync::Arc;
 
 use common_telemetry::{error, info};
@@ -25,24 +26,94 @@ use rskafka::client::partition::{Compression, UnknownTopicHandling};
 use rskafka::client::{Client, ClientBuilder};
 use rskafka::record::Record;
 use rskafka::BackoffConfig;
-use snafu::{ensure, ResultExt};
+use serde::{Deserialize, Serialize};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
     BuildKafkaClientSnafu, BuildKafkaCtrlClientSnafu, BuildKafkaPartitionClientSnafu,
-    CreateKafkaWalTopicSnafu, DecodeJsonSnafu, EncodeJsonSnafu, InvalidNumTopicsSnafu,
+    CreateKafkaWalTopicSnafu, Error, InvalidMetadataSnafu, InvalidNumTopicsSnafu,
     ProduceRecordSnafu, ResolveKafkaEndpointSnafu, Result, TlsConfigSnafu,
 };
+use crate::key::{MetadataKey, KAFKA_TOPIC_KEY_PATTERN, KAFKA_TOPIC_KEY_PREFIX};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::store::PutRequest;
+use crate::rpc::store::{BatchPutRequest, RangeRequest};
+use crate::rpc::KeyValue;
 use crate::wal_options_allocator::kafka::topic_selector::{
     RoundRobinTopicSelector, TopicSelectorRef,
 };
 
-const CREATED_TOPICS_KEY: &str = "__created_wal_topics/kafka/";
-
 // Each topic only has one partition for now.
 // The `DEFAULT_PARTITION` refers to the index of the partition.
 const DEFAULT_PARTITION: i32 = 0;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TopicNameKey<'a> {
+    pub topic: &'a str,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TopicNameValue;
+
+impl<'a> TopicNameKey<'a> {
+    pub fn new(topic: &'a str) -> Self {
+        Self { topic }
+    }
+
+    pub fn gen_with_id_and_prefix(id: u64, prefix: &'a str) -> String {
+        format!("{}_{}", prefix, id)
+    }
+
+    pub fn range_start_key(prefix: &'a str) -> String {
+        format!("{}/{}", KAFKA_TOPIC_KEY_PREFIX, prefix)
+    }
+}
+
+impl<'a> MetadataKey<'a, TopicNameKey<'a>> for TopicNameKey<'_> {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.to_string().into_bytes()
+    }
+
+    fn from_bytes(bytes: &'a [u8]) -> Result<TopicNameKey<'a>> {
+        let key = std::str::from_utf8(bytes).map_err(|e| {
+            InvalidMetadataSnafu {
+                err_msg: format!(
+                    "TopicNameKey '{}' is not a valid UTF8 string: {e}",
+                    String::from_utf8_lossy(bytes)
+                ),
+            }
+            .build()
+        })?;
+        TopicNameKey::try_from(key)
+    }
+}
+
+impl Display for TopicNameKey<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", KAFKA_TOPIC_KEY_PREFIX, self.topic)
+    }
+}
+
+impl<'a> TryFrom<&'a str> for TopicNameKey<'a> {
+    type Error = Error;
+
+    fn try_from(value: &'a str) -> Result<TopicNameKey<'a>> {
+        let captures = KAFKA_TOPIC_KEY_PATTERN
+            .captures(value)
+            .context(InvalidMetadataSnafu {
+                err_msg: format!("Invalid topic name key: {}", value),
+            })?;
+
+        // Safety: pass the regex check above
+        Ok(TopicNameKey {
+            topic: captures.get(1).unwrap().as_str(),
+        })
+    }
+}
+
+fn topic_decoder(kv: &KeyValue) -> Result<String> {
+    let key = TopicNameKey::from_bytes(&kv.key)?;
+    Ok(key.topic.to_string())
+}
 
 /// Manages topic initialization and selection.
 pub struct TopicManager {
@@ -57,7 +128,12 @@ impl TopicManager {
     pub fn new(config: MetasrvKafkaConfig, kv_backend: KvBackendRef) -> Self {
         // Topics should be created.
         let topics = (0..config.kafka_topic.num_topics)
-            .map(|topic_id| format!("{}_{topic_id}", config.kafka_topic.topic_name_prefix))
+            .map(|topic_id| {
+                TopicNameKey::gen_with_id_and_prefix(
+                    topic_id as u64,
+                    &config.kafka_topic.topic_name_prefix,
+                )
+            })
             .collect::<Vec<_>>();
 
         let selector = match config.kafka_topic.selector_type {
@@ -88,7 +164,8 @@ impl TopicManager {
 
         // Topics already created.
         // There may have extra topics created but it's okay since those topics won't break topic allocation.
-        let created_topics = Self::restore_created_topics(&self.kv_backend)
+        let created_topics = self
+            .restore_created_topics(&self.kv_backend)
             .await?
             .into_iter()
             .collect::<HashSet<String>>();
@@ -107,7 +184,7 @@ impl TopicManager {
 
         if !to_be_created.is_empty() {
             self.try_create_topics(topics, &to_be_created).await?;
-            Self::persist_created_topics(topics, &self.kv_backend).await?;
+            self.persist_created_topics(&self.kv_backend).await?;
         }
         Ok(())
     }
@@ -218,26 +295,37 @@ impl TopicManager {
         }
     }
 
-    async fn restore_created_topics(kv_backend: &KvBackendRef) -> Result<Vec<String>> {
-        kv_backend
-            .get(CREATED_TOPICS_KEY.as_bytes())
-            .await?
-            .map_or_else(
-                || Ok(vec![]),
-                |key_value| serde_json::from_slice(&key_value.value).context(DecodeJsonSnafu),
-            )
+    async fn restore_created_topics(&self, kv_backend: &KvBackendRef) -> Result<Vec<String>> {
+        let req = RangeRequest::new().with_prefix(
+            TopicNameKey::range_start_key(&self.config.kafka_topic.topic_name_prefix).as_bytes(),
+        );
+        let resp = kv_backend.range(req).await?;
+        let topics = resp
+            .kvs
+            .iter()
+            .map(topic_decoder)
+            .collect::<Result<Vec<String>>>()?;
+        Ok(topics)
     }
 
-    async fn persist_created_topics(topics: &[String], kv_backend: &KvBackendRef) -> Result<()> {
-        let raw_topics = serde_json::to_vec(topics).context(EncodeJsonSnafu)?;
-        kv_backend
-            .put(PutRequest {
-                key: CREATED_TOPICS_KEY.as_bytes().to_vec(),
-                value: raw_topics,
-                prev_kv: false,
-            })
-            .await
-            .map(|_| ())
+    async fn persist_created_topics(&self, kv_backend: &KvBackendRef) -> Result<()> {
+        let topic_name_keys = self
+            .topic_pool
+            .iter()
+            .map(|topic| TopicNameKey::new(topic))
+            .collect::<Vec<_>>();
+        let req = BatchPutRequest {
+            kvs: topic_name_keys
+                .iter()
+                .map(|key| KeyValue {
+                    key: key.to_bytes(),
+                    value: vec![],
+                })
+                .collect(),
+            prev_kv: false,
+        };
+        kv_backend.batch_put(req).await?;
+        Ok(())
     }
 
     fn is_topic_already_exist_err(e: &RsKafkaError) -> bool {
@@ -267,21 +355,36 @@ mod tests {
         let num_topics = 16;
 
         // Constructs mock topics.
-        let topics = (0..num_topics)
-            .map(|topic| format!("{topic_name_prefix}{topic}"))
-            .collect::<Vec<_>>();
+        let topic_manager = TopicManager::new(
+            MetasrvKafkaConfig {
+                auto_create_topics: true,
+                kafka_topic: KafkaTopicConfig {
+                    num_topics,
+                    topic_name_prefix: topic_name_prefix.to_string(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            kv_backend.clone(),
+        );
 
         // Persists topics to kv backend.
-        TopicManager::persist_created_topics(&topics, &kv_backend)
+        topic_manager
+            .persist_created_topics(&kv_backend)
             .await
             .unwrap();
 
         // Restores topics from kv backend.
-        let restored_topics = TopicManager::restore_created_topics(&kv_backend)
+        let mut restored_topics = topic_manager
+            .restore_created_topics(&kv_backend)
             .await
             .unwrap();
+        restored_topics.sort();
 
-        assert_eq!(topics, restored_topics);
+        let mut expected = topic_manager.topic_pool.clone();
+        expected.sort();
+
+        assert_eq!(expected, restored_topics);
     }
 
     /// Tests that the topic manager could allocate topics correctly.
