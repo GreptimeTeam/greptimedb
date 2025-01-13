@@ -306,6 +306,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_put() {
+        common_telemetry::init_default_ut_logging();
         let metasrv = new_metasrv().await;
 
         let mut req = BatchPutRequest::default();

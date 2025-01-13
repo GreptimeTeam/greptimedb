@@ -80,7 +80,6 @@ macro_rules! http_tests {
                 test_prometheus_promql_api,
                 test_prom_http_api,
                 test_metrics_api,
-                test_scripts_api,
                 test_health_api,
                 test_status_api,
                 test_config_api,
@@ -98,6 +97,7 @@ macro_rules! http_tests {
                 test_otlp_logs,
                 test_loki_pb_logs,
                 test_loki_json_logs,
+                test_elasticsearch_logs,
             );
         )*
     };
@@ -721,46 +721,6 @@ pub async fn test_metrics_api(store_type: StorageType) {
     guard.remove_all().await;
 }
 
-pub async fn test_scripts_api(store_type: StorageType) {
-    common_telemetry::init_default_ut_logging();
-    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "script_api").await;
-    let client = TestClient::new(app);
-
-    let res = client
-        .post("/v1/scripts?db=schema_test&name=test")
-        .body(
-            r#"
-@copr(sql='select number from numbers limit 10', args=['number'], returns=['n'])
-def test(n) -> vector[f64]:
-    return n + 1;
-"#,
-        )
-        .send()
-        .await;
-    assert_eq!(res.status(), StatusCode::OK);
-
-    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
-    assert!(body.output().is_empty());
-
-    // call script
-    let res = client
-        .post("/v1/run-script?db=schema_test&name=test")
-        .send()
-        .await;
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
-    let output = body.output();
-    assert_eq!(output.len(), 1);
-    assert_eq!(
-        output[0],
-        serde_json::from_value::<GreptimeQueryOutput>(json!({
-            "records":{"schema":{"column_schemas":[{"name":"n","data_type":"Float64"}]},"rows":[[1.0],[2.0],[3.0],[4.0],[5.0],[6.0],[7.0],[8.0],[9.0],[10.0]],"total_rows": 10}
-        })).unwrap()
-    );
-
-    guard.remove_all().await;
-}
-
 pub async fn test_health_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, _guard) = setup_test_http_app_with_frontend(store_type, "health_api").await;
@@ -850,7 +810,7 @@ is_strict_mode = false
 
 [grpc]
 addr = "127.0.0.1:4001"
-hostname = "127.0.0.1"
+hostname = "127.0.0.1:4001"
 max_recv_message_size = "512MiB"
 max_send_message_size = "512MiB"
 runtime_size = 8
@@ -1873,7 +1833,7 @@ pub async fn test_loki_pb_logs(store_type: StorageType) {
     // init loki request
     let req: PushRequest = PushRequest {
         streams: vec![StreamAdapter {
-            labels: r#"{service="test",source="integration","wadaxi"="do anything"}"#.to_string(),
+            labels: r#"{service="test",source="integration",wadaxi="do anything"}"#.to_string(),
             entries: vec![
                 EntryAdapter {
                     timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
@@ -1953,7 +1913,8 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
   "streams": [
     {
       "stream": {
-        "source": "test"
+        "source": "test",
+        "sender": "integration"
       },
       "values": [
           [ "1735901380059465984", "this is line one" ],
@@ -1987,7 +1948,7 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // test schema
-    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"source\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"sender\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"sender\\\", \\\"source\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
     validate_data(
         "loki_json_schema",
         &client,
@@ -1997,11 +1958,52 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
     .await;
 
     // test content
-    let expected = "[[1735901380059465984,\"this is line one\",\"test\"],[1735901398478897920,\"this is line two\",\"test\"]]";
+    let expected = "[[1735901380059465984,\"this is line one\",\"integration\",\"test\"],[1735901398478897920,\"this is line two\",\"integration\",\"test\"]]";
     validate_data(
         "loki_json_content",
         &client,
         "select * from loki_table_name;",
+        expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_elasticsearch_logs(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_elasticsearch_logs").await;
+
+    let client = TestClient::new(app);
+
+    let body = r#"
+        {"create":{"_index":"test","_id":"1"}}
+        {"foo":"foo_value1", "bar":"value1"}
+        {"create":{"_index":"test","_id":"2"}}
+        {"foo":"foo_value2","bar":"value2"}
+    "#;
+
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )],
+        "/v1/elasticsearch/_bulk?table=elasticsearch_logs_test",
+        body.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+
+    assert_eq!(StatusCode::OK, res.status());
+
+    let expected = "[[\"foo_value2\",\"value2\"],[\"foo_value1\",\"value1\"]]";
+
+    validate_data(
+        "test_elasticsearch_logs",
+        &client,
+        "select foo, bar from elasticsearch_logs_test;",
         expected,
     )
     .await;
@@ -2018,7 +2020,10 @@ async fn validate_data(test_name: &str, client: &TestClient, sql: &str, expected
     let resp = res.text().await;
     let v = get_rows_from_output(&resp);
 
-    assert_eq!(v, expected, "validate {test_name} fail");
+    assert_eq!(
+        v, expected,
+        "validate {test_name} fail, expected: {expected}, actual: {v}"
+    );
 }
 
 async fn send_req(

@@ -1,6 +1,29 @@
 -- should not able to create pg_catalog
 create database pg_catalog;
 
+-- session_user because session_user is based on the current user so is not null is for test 
+-- SQLNESS PROTOCOL POSTGRES
+SELECT session_user is not null;
+
+-- session_user and current_schema
+-- SQLNESS PROTOCOL POSTGRES
+select current_schema();
+
+-- search_path for pg using schema for now FIXME when support real search_path
+-- SQLNESS PROTOCOL POSTGRES
+show search_path;
+
+-- set search_path for pg using schema for now FIXME when support real search_path
+create database test;
+-- SQLNESS PROTOCOL POSTGRES
+set search_path to 'test';
+drop database test;
+-- SQLNESS PROTOCOL POSTGRES
+set search_path to 'public';
+
+-- SQLNESS PROTOCOL POSTGRES
+select current_schema();
+
 -- make sure all the pg_catalog tables are only visible to postgres
 select * from pg_catalog.pg_class;
 select * from pg_catalog.pg_namespace;

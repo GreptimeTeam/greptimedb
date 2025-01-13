@@ -51,12 +51,12 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Shares across multiple jobs
-          # Shares with `Clippy` job
-          shared-key: "check-lint"
+      # - name: Rust Cache
+      #   uses: Swatinem/rust-cache@v2
+      #   with:
+      #     # Shares across multiple jobs
+      #     # Shares with `Clippy` job
+      #     shared-key: "check-lint"
       - name: Run cargo check
         run: cargo check --locked --workspace --all-targets
 
@@ -67,11 +67,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Shares across multiple jobs
-          shared-key: "check-toml"
+      # - name: Rust Cache
+      #   uses: Swatinem/rust-cache@v2
+      #   with:
+      #     # Shares across multiple jobs
+      #     shared-key: "check-toml"
       - name: Install taplo
         run: cargo +stable install taplo-cli --version ^0.9 --locked --force
       - name: Run taplo
@@ -100,7 +100,7 @@ jobs:
       - name: Build greptime binaries
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
-        run: cargo gc -- --bin greptime --bin sqlness-runner
+        run: cargo gc -- --bin greptime --bin sqlness-runner --features pg_kvbackend
       - name: Pack greptime binaries
         shell: bash
         run: |
@@ -142,11 +142,11 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Shares across multiple jobs
-          shared-key: "fuzz-test-targets"
+      # - name: Rust Cache
+      #   uses: Swatinem/rust-cache@v2
+      #   with:
+      #     # Shares across multiple jobs
+      #     shared-key: "fuzz-test-targets"
       - name: Set Rust Fuzz
         shell: bash
         run: |
@@ -200,11 +200,11 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Shares across multiple jobs
-          shared-key: "fuzz-test-targets"
+      # - name: Rust Cache
+      #   uses: Swatinem/rust-cache@v2
+      #   with:
+      #     # Shares across multiple jobs
+      #     shared-key: "fuzz-test-targets"
       - name: Set Rust Fuzz
         shell: bash
         run: |
@@ -261,7 +261,7 @@ jobs:
       - name: Build greptime bianry
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
-        run: cargo gc --profile ci -- --bin greptime
+        run: cargo gc --profile ci -- --bin greptime --features pg_kvbackend
       - name: Pack greptime binary
         shell: bash
         run: |
@@ -317,11 +317,11 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Shares across multiple jobs
-          shared-key: "fuzz-test-targets"
+      # - name: Rust Cache
+      #   uses: Swatinem/rust-cache@v2
+      #   with:
+      #     # Shares across multiple jobs
+      #     shared-key: "fuzz-test-targets"
       - name: Set Rust Fuzz
         shell: bash
         run: |
@@ -466,11 +466,11 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Shares across multiple jobs
-          shared-key: "fuzz-test-targets"
+      # - name: Rust Cache
+      #   uses: Swatinem/rust-cache@v2
+      #   with:
+      #     # Shares across multiple jobs
+      #     shared-key: "fuzz-test-targets"
       - name: Set Rust Fuzz
         shell: bash
         run: |
@@ -573,6 +573,9 @@ jobs:
           - name: "Remote WAL"
             opts: "-w kafka -k 127.0.0.1:9092"
             kafka: true
+          - name: "Pg Kvbackend"
+            opts: "--setup-pg"
+            kafka: false
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -609,11 +612,11 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: rustfmt
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Shares across multiple jobs
-          shared-key: "check-rust-fmt"
+      # - name: Rust Cache
+      #   uses: Swatinem/rust-cache@v2
+      #   with:
+      #     # Shares across multiple jobs
+      #     shared-key: "check-rust-fmt"
       - name: Check format
         run: make fmt-check
 
@@ -638,28 +641,36 @@ jobs:
       - name: Run cargo clippy
         run: make clippy
 
+  conflict-check:
+    name: Check for conflict
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Merge Conflict Finder
+        uses: olivernybroe/action-conflict-finder@v4.0
+
   coverage:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-20.04-8-cores
     timeout-minutes: 60
-    needs:  [clippy, fmt]
+    needs:  [conflict-check, clippy, fmt]
     steps:
       - uses: actions/checkout@v4
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: KyleMayes/install-llvm-action@v1
-        with:
-          version: "14.0"
+      - uses: rui314/setup-mold@v1
       - name: Install toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          components: llvm-tools-preview
-      # - name: Rust Cache
-      #   uses: Swatinem/rust-cache@v2
-      #   with:
-      #     # Shares cross multiple jobs
-      #     shared-key: "coverage-test"
+          components: llvm-tools
+          cache: false
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares cross multiple jobs
+          shared-key: "coverage-test"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Disabled temporarily to see performance
       # - name: Docker Cache
       #   uses: ScribeMD/docker-cache@0.5.0
@@ -675,7 +686,7 @@ jobs:
       - name: Run nextest cases
         run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend
         env:
-          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
           RUST_BACKTRACE: 1
           CARGO_INCREMENTAL: 0
           GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}

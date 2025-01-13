@@ -122,13 +122,6 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to re-compile script due to internal error"))]
-    CompileScriptInternal {
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
-    },
-
     #[snafu(display("Failed to create table, table info: {}", table_info))]
     CreateTable {
         table_info: String,
@@ -343,9 +336,7 @@ impl ErrorExt for Error {
             Error::DecodePlan { source, .. } => source.status_code(),
             Error::InvalidTableInfoInCatalog { source, .. } => source.status_code(),
 
-            Error::CompileScriptInternal { source, .. } | Error::Internal { source, .. } => {
-                source.status_code()
-            }
+            Error::Internal { source, .. } => source.status_code(),
 
             Error::QueryAccessDenied { .. } => StatusCode::AccessDenied,
             Error::Datafusion { error, .. } => datafusion_status_code::<Self>(error, None),

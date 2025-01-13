@@ -72,7 +72,9 @@ use table::table_name::TableName;
 use table::table_reference::TableReference;
 use table::TableRef;
 
-use self::set::{set_bytea_output, set_datestyle, set_timezone, validate_client_encoding};
+use self::set::{
+    set_bytea_output, set_datestyle, set_search_path, set_timezone, validate_client_encoding,
+};
 use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, NotSupportedSnafu,
     PlanStatementSnafu, Result, SchemaNotFoundSnafu, StatementTimeoutSnafu,
@@ -352,6 +354,7 @@ impl StatementExecutor {
             }
             Statement::ShowIndex(show_index) => self.show_index(show_index, query_ctx).await,
             Statement::ShowStatus(_) => self.show_status(query_ctx).await,
+            Statement::ShowSearchPath(_) => self.show_search_path(query_ctx).await,
             Statement::Use(db) => self.use_database(db, query_ctx).await,
             Statement::Admin(admin) => self.execute_admin_command(admin, query_ctx).await,
         }
@@ -400,6 +403,16 @@ impl StatementExecutor {
             "STATEMENT_TIMEOUT" => {
                 if query_ctx.channel() == Channel::Postgres {
                     set_query_timeout(set_var.value, query_ctx)?
+                } else {
+                    return NotSupportedSnafu {
+                        feat: format!("Unsupported set variable {}", var_name),
+                    }
+                    .fail();
+                }
+            }
+            "SEARCH_PATH" => {
+                if query_ctx.channel() == Channel::Postgres {
+                    set_search_path(set_var.value, query_ctx)?
                 } else {
                     return NotSupportedSnafu {
                         feat: format!("Unsupported set variable {}", var_name),

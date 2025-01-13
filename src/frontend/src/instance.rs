@@ -21,7 +21,6 @@ mod opentsdb;
 mod otlp;
 mod prom_store;
 mod region_query;
-mod script;
 pub mod standalone;
 
 use std::sync::Arc;
@@ -66,7 +65,7 @@ use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{
     InfluxdbLineProtocolHandler, LogQueryHandler, OpenTelemetryProtocolHandler,
-    OpentsdbProtocolHandler, PipelineHandler, PromStoreProtocolHandler, ScriptHandler,
+    OpentsdbProtocolHandler, PipelineHandler, PromStoreProtocolHandler,
 };
 use servers::server::ServerHandlers;
 use session::context::QueryContextRef;
@@ -88,7 +87,6 @@ use crate::error::{
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::HeartbeatTask;
 use crate::limiter::LimiterRef;
-use crate::script::ScriptExecutor;
 
 #[async_trait]
 pub trait FrontendInstance:
@@ -98,7 +96,6 @@ pub trait FrontendInstance:
     + InfluxdbLineProtocolHandler
     + PromStoreProtocolHandler
     + OpenTelemetryProtocolHandler
-    + ScriptHandler
     + PrometheusHandler
     + PipelineHandler
     + LogQueryHandler
@@ -115,7 +112,6 @@ pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
 pub struct Instance {
     options: FrontendOptions,
     catalog_manager: CatalogManagerRef,
-    script_executor: Arc<ScriptExecutor>,
     pipeline_operator: Arc<PipelineOperator>,
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
@@ -204,8 +200,6 @@ impl FrontendInstance for Instance {
         if let Some(heartbeat_task) = &self.heartbeat_task {
             heartbeat_task.start().await?;
         }
-
-        self.script_executor.start(self)?;
 
         if let Some(t) = self.export_metrics_task.as_ref() {
             if t.send_by_handler {
@@ -571,6 +565,7 @@ pub fn check_permission(
             validate_db_permission!(stmt, query_ctx);
         }
         Statement::ShowStatus(_stmt) => {}
+        Statement::ShowSearchPath(_stmt) => {}
         Statement::DescribeTable(stmt) => {
             validate_param(stmt.name(), query_ctx)?;
         }

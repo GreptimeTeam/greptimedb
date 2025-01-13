@@ -222,7 +222,8 @@ impl StartCommand {
         info!("Flownode start command: {:#?}", self);
         info!("Flownode options: {:#?}", opts);
 
-        let opts = opts.component;
+        let mut opts = opts.component;
+        opts.grpc.detect_hostname();
 
         // TODO(discord9): make it not optionale after cluster id is required
         let cluster_id = opts.cluster_id.unwrap_or(0);

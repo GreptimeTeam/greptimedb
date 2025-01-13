@@ -40,7 +40,6 @@ datatypes.workspace = true
 enum-as-inner = "0.6.0"
 enum_dispatch = "0.3"
 futures = "0.3"
-get-size-derive2 = "0.1.2"
 get-size2 = "0.1.2"
 greptime-proto.workspace = true
 # This fork of hydroflow is simply for keeping our dependency in our org, and pin the version

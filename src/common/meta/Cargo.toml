@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 testing = []
-pg_kvbackend = ["dep:tokio-postgres"]
+pg_kvbackend = ["dep:tokio-postgres", "dep:backon"]
 
 [lints]
 workspace = true
@@ -17,6 +17,7 @@ api.workspace = true
 async-recursion = "1.0"
 async-stream = "0.3"
 async-trait.workspace = true
+backon = { workspace = true, optional = true }
 base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true

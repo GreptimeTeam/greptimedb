@@ -194,6 +194,7 @@ mod tests {
 
     use super::get_node_id;
     use crate::metasrv::builder::MetasrvBuilder;
+    use crate::metasrv::MetasrvOptions;
 
     #[tokio::test]
     async fn test_ask_leader() {
@@ -201,6 +202,10 @@ mod tests {
 
         let metasrv = MetasrvBuilder::new()
             .kv_backend(kv_backend)
+            .options(MetasrvOptions {
+                server_addr: "127.0.0.1:3002".to_string(),
+                ..Default::default()
+            })
             .build()
             .await
             .unwrap();

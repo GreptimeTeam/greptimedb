@@ -62,10 +62,7 @@ pub enum AlterTableOperation {
     /// `ADD <table_constraint>`
     AddConstraint(TableConstraint),
     /// `ADD [ COLUMN ] <column_def> [location]`
-    AddColumn {
-        column_def: ColumnDef,
-        location: Option<AddColumnLocation>,
-    },
+    AddColumns { add_columns: Vec<AddColumn> },
     /// `MODIFY <column_name> [target_type]`
     ModifyColumnType {
         column_name: Ident,
@@ -88,19 +85,32 @@ pub enum AlterTableOperation {
     UnsetColumnFulltext { column_name: Ident },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub struct AddColumn {
+    pub column_def: ColumnDef,
+    pub location: Option<AddColumnLocation>,
+}
+
+impl Display for AddColumn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(location) = &self.location {
+            write!(f, "{} {location}", self.column_def)
+        } else {
+            write!(f, "{}", self.column_def)
+        }
+    }
+}
+
 impl Display for AlterTableOperation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AlterTableOperation::AddConstraint(constraint) => write!(f, r#"ADD {constraint}"#),
-            AlterTableOperation::AddColumn {
-                column_def,
-                location,
-            } => {
-                if let Some(location) = location {
-                    write!(f, r#"ADD COLUMN {column_def} {location}"#)
-                } else {
-                    write!(f, r#"ADD COLUMN {column_def}"#)
-                }
+            AlterTableOperation::AddColumns { add_columns } => {
+                let columns = add_columns
+                    .iter()
+                    .map(|add_column| format!("ADD COLUMN {add_column}"))
+                    .join(", ");
+                write!(f, "{columns}")
             }
             AlterTableOperation::DropColumn { name } => write!(f, r#"DROP COLUMN {name}"#),
             AlterTableOperation::RenameTable { new_table_name } => {
@@ -275,7 +285,8 @@ ALTER DATABASE db UNSET 'a','c'"#,
             }
         }
 
-        let sql = r"alter table monitor add column app string default 'shop' primary key;";
+        let sql =
+            r"alter table monitor add column app string default 'shop' primary key, add foo INT;";
         let stmts =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -287,7 +298,7 @@ ALTER DATABASE db UNSET 'a','c'"#,
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
-ALTER TABLE monitor ADD COLUMN app STRING DEFAULT 'shop' PRIMARY KEY"#,
+ALTER TABLE monitor ADD COLUMN app STRING DEFAULT 'shop' PRIMARY KEY, ADD COLUMN foo INT"#,
                     &new_sql
                 );
             }

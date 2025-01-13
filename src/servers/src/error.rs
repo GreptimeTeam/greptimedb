@@ -149,28 +149,12 @@ pub enum Error {
     #[snafu(display("Failed to describe statement"))]
     DescribeStatement { source: BoxedError },
 
-    #[snafu(display("Failed to insert script with name: {}", name))]
-    InsertScript {
-        name: String,
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
-    },
-
     #[snafu(display("Pipeline management api error"))]
     Pipeline {
         #[snafu(source)]
         source: pipeline::error::Error,
         #[snafu(implicit)]
         location: Location,
-    },
-
-    #[snafu(display("Failed to execute script by name: {}", name))]
-    ExecuteScript {
-        name: String,
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
     },
 
     #[snafu(display("Not supported: {}", feat))]
@@ -506,10 +490,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse payload as json5"))]
-    ParseJson5 {
-        #[snafu(source)]
-        error: json5::Error,
+    #[snafu(display("Invalid Loki labels: {}", msg))]
+    InvalidLokiLabels {
+        msg: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -603,6 +586,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid elasticsearch input, reason: {}", reason))]
+    InvalidElasticsearchInput {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -634,9 +624,7 @@ impl ErrorExt for Error {
 
             CollectRecordbatch { .. } => StatusCode::EngineExecuteQuery,
 
-            InsertScript { source, .. }
-            | ExecuteScript { source, .. }
-            | ExecuteQuery { source, .. }
+            ExecuteQuery { source, .. }
             | ExecutePlan { source, .. }
             | ExecuteGrpcQuery { source, .. }
             | ExecuteGrpcRequest { source, .. }
@@ -666,7 +654,7 @@ impl ErrorExt for Error {
             | MissingQueryContext { .. }
             | MysqlValueConversion { .. }
             | ParseJson { .. }
-            | ParseJson5 { .. }
+            | InvalidLokiLabels { .. }
             | InvalidLokiPayload { .. }
             | UnsupportedContentType { .. }
             | TimestampOverflow { .. }
@@ -674,7 +662,8 @@ impl ErrorExt for Error {
             | UnsupportedJsonDataTypeForTag { .. }
             | InvalidTableName { .. }
             | PrepareStatementNotFound { .. }
-            | FailedToParseQuery { .. } => StatusCode::InvalidArguments,
+            | FailedToParseQuery { .. }
+            | InvalidElasticsearchInput { .. } => StatusCode::InvalidArguments,
 
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),

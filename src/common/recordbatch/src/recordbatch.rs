@@ -35,7 +35,7 @@ use crate::DfRecordBatch;
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecordBatch {
     pub schema: SchemaRef,
-    columns: Vec<VectorRef>,
+    pub columns: Vec<VectorRef>,
     df_record_batch: DfRecordBatch,
 }
 

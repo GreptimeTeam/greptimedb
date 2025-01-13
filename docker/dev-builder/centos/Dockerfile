@@ -12,8 +12,6 @@ RUN yum install -y epel-release  \
     openssl \
     openssl-devel  \
     centos-release-scl  \
-    rh-python38  \
-    rh-python38-python-devel \
     which
 
 # Install protoc
@@ -23,7 +21,7 @@ RUN unzip protoc-3.15.8-linux-x86_64.zip -d /usr/local/
 # Install Rust
 SHELL ["/bin/bash", "-c"]
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --no-modify-path --default-toolchain none -y
-ENV PATH /opt/rh/rh-python38/root/usr/bin:/usr/local/bin:/root/.cargo/bin/:$PATH
+ENV PATH /usr/local/bin:/root/.cargo/bin/:$PATH
 
 # Install Rust toolchains.
 ARG RUST_TOOLCHAIN

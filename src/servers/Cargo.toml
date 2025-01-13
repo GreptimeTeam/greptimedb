@@ -14,6 +14,9 @@ testing = []
 [lints]
 workspace = true
 
+[target.'cfg(not(target_os = "android"))'.dependencies]
+local-ip-address.workspace = true
+
 [dependencies]
 ahash = "0.8"
 api.workspace = true
@@ -63,7 +66,6 @@ humantime-serde.workspace = true
 hyper = { version = "0.14", features = ["full"] }
 influxdb_line_protocol = { git = "https://github.com/evenyag/influxdb_iox", branch = "feat/line-protocol" }
 itertools.workspace = true
-json5 = "0.4"
 jsonb.workspace = true
 lazy_static.workspace = true
 log-query.workspace = true
@@ -86,11 +88,12 @@ prometheus.workspace = true
 promql-parser.workspace = true
 prost.workspace = true
 query.workspace = true
+quoted-string = "0.6"
 rand.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 rust-embed = { version = "6.6", features = ["debug-embed"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls = { workspace = true, default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-pemfile = "2.0"
 rustls-pki-types = "1.0"
 serde.workspace = true
@@ -102,7 +105,7 @@ sql.workspace = true
 strum.workspace = true
 table.workspace = true
 tokio.workspace = true
-tokio-rustls = "0.26"
+tokio-rustls.workspace = true
 tokio-stream = { workspace = true, features = ["net"] }
 tokio-util.workspace = true
 tonic.workspace = true
@@ -123,12 +126,12 @@ client = { workspace = true, features = ["testing"] }
 common-base.workspace = true
 common-test-util.workspace = true
 criterion = "0.5"
+json5 = "0.4"
 mysql_async = { version = "0.33", default-features = false, features = [
     "default-rustls",
 ] }
 permutation = "0.4"
 rand.workspace = true
-script = { workspace = true, features = ["python"] }
 serde_json.workspace = true
 session = { workspace = true, features = ["testing"] }
 table.workspace = true
@@ -148,4 +151,8 @@ harness = false
 
 [[bench]]
 name = "to_http_output"
+harness = false
+
+[[bench]]
+name = "loki_labels"
 harness = false

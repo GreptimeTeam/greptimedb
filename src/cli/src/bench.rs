@@ -78,7 +78,9 @@ impl BenchTableMetadataCommand {
         #[cfg(feature = "pg_kvbackend")]
         let kv_backend = if let Some(postgres_addr) = &self.postgres_addr {
             info!("Using postgres as kv backend");
-            PgStore::with_url(postgres_addr, 128).await.unwrap()
+            PgStore::with_url(postgres_addr, "greptime_metakv", 128)
+                .await
+                .unwrap()
         } else {
             kv_backend
         };

@@ -65,11 +65,47 @@ pub struct GrpcOptions {
     pub tls: TlsOption,
 }
 
+impl GrpcOptions {
+    /// Detect hostname if `auto_hostname` is true.
+    #[cfg(not(target_os = "android"))]
+    pub fn detect_hostname(&mut self) {
+        if self.hostname.is_empty() {
+            match local_ip_address::local_ip() {
+                Ok(ip) => {
+                    let detected_addr = format!(
+                        "{}:{}",
+                        ip,
+                        self.addr
+                            .split(':')
+                            .nth(1)
+                            .unwrap_or(DEFAULT_GRPC_ADDR_PORT)
+                    );
+                    info!("Using detected: {} as server address", detected_addr);
+                    self.hostname = detected_addr;
+                }
+                Err(e) => {
+                    error!("Failed to detect local ip address: {}", e);
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn detect_hostname(&mut self) {
+        if self.hostname.is_empty() {
+            common_telemetry::debug!("detect local IP is not supported on Android");
+        }
+    }
+}
+
+const DEFAULT_GRPC_ADDR_PORT: &str = "4001";
+
 impl Default for GrpcOptions {
     fn default() -> Self {
         Self {
-            addr: "127.0.0.1:4001".to_string(),
-            hostname: "127.0.0.1".to_string(),
+            addr: format!("127.0.0.1:{}", DEFAULT_GRPC_ADDR_PORT),
+            // If hostname is not set, the server will use the local ip address as the hostname.
+            hostname: String::new(),
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
             runtime_size: 8,
@@ -81,6 +117,11 @@ impl Default for GrpcOptions {
 impl GrpcOptions {
     pub fn with_addr(mut self, addr: &str) -> Self {
         self.addr = addr.to_string();
+        self
+    }
+
+    pub fn with_hostname(mut self, hostname: &str) -> Self {
+        self.hostname = hostname.to_string();
         self
     }
 }

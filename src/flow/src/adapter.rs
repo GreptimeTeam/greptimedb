@@ -804,6 +804,8 @@ impl FlowWorkerManager {
             }
         }
 
+        node_ctx.add_flow_plan(flow_id, flow_plan.clone());
+
         let _ = comment;
         let _ = flow_options;
 

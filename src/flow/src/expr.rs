@@ -22,6 +22,7 @@ mod linear;
 pub(crate) mod relation;
 mod scalar;
 mod signature;
+pub(crate) mod utils;
 
 use arrow::compute::FilterBuilder;
 use datatypes::prelude::{ConcreteDataType, DataType};
@@ -52,6 +53,16 @@ pub struct Batch {
     row_count: usize,
     /// describe if corresponding rows in batch is insert or delete, None means all rows are insert
     diffs: Option<VectorRef>,
+}
+
+impl From<common_recordbatch::RecordBatch> for Batch {
+    fn from(value: common_recordbatch::RecordBatch) -> Self {
+        Self {
+            row_count: value.num_rows(),
+            batch: value.columns,
+            diffs: None,
+        }
+    }
 }
 
 impl PartialEq for Batch {
