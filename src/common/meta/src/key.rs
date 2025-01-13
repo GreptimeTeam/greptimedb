@@ -226,7 +226,7 @@ lazy_static! {
 
 lazy_static! {
     pub static ref KAFKA_TOPIC_KEY_PATTERN: Regex =
-        Regex::new(&format!("^{KAFKA_TOPIC_KEY_PREFIX}/({NAME_PATTERN})$")).unwrap();
+        Regex::new(&format!("^{KAFKA_TOPIC_KEY_PREFIX}/(.*)$")).unwrap();
 }
 
 /// The key of metadata.
