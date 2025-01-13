@@ -25,6 +25,7 @@ use crate::key::{MetadataKey, PROCESS_LIST_PATTERN, PROCESS_LIST_PREFIX};
 /// Layout: `__process/{frontend ip}-{query id}`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProcessKey {
+    //todo(hl): maybe we don't have to own a string
     pub frontend_ip: String,
     pub id: u64,
 }
@@ -93,15 +94,15 @@ mod tests {
     #[test]
     fn test_capture_process_list() {
         check_serialization(ProcessKey {
-            frontend_ip: "192.168.0.1".to_string(),
+            frontend_ip: "192.168.0.1:4001".to_string(),
             id: 1,
         });
         check_serialization(ProcessKey {
-            frontend_ip: "192.168.0.1".to_string(),
+            frontend_ip: "192.168.0.1:4002".to_string(),
             id: 0,
         });
         check_serialization(ProcessKey {
-            frontend_ip: "255.255.255.255".to_string(),
+            frontend_ip: "255.255.255.255:80".to_string(),
             id: 0,
         });
     }
