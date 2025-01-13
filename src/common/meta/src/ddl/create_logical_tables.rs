@@ -145,7 +145,9 @@ impl CreateLogicalTablesProcedure {
             let requester = self.context.node_manager.datanode(&peer).await;
             let Some(request) = self.make_request(&peer, region_routes)? else {
                 info!("no region request to send to datanode {}", peer);
-                continue;
+                // We can skip the rest of the datanodes,
+                // the rest of the datanodes should have the same result.
+                break;
             };
 
             create_region_tasks.push(async move {
