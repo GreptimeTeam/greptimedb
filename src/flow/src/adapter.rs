@@ -102,7 +102,7 @@ impl Default for FlownodeOptions {
             mode: servers::Mode::Standalone,
             cluster_id: None,
             node_id: None,
-            num_workers: common_config::utils::get_cpus() / 2,
+            num_workers: (common_config::utils::get_cpus() / 2).max(1),
             grpc: GrpcOptions::default().with_addr("127.0.0.1:3004"),
             meta_client: None,
             logging: LoggingOptions::default(),
