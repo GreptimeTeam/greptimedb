@@ -39,6 +39,10 @@ pub enum TypeSignature {
     Any(usize),
     /// One of a list of signatures
     OneOf(Vec<TypeSignature>),
+    /// Zero argument
+    /// This is the new signature for functions with zero arguments
+    /// TODO(discord9): make all other usize nonzero usize
+    NullAry,
 }
 
 ///The Signature of a function defines its supported input types as well as its volatility.
@@ -112,6 +116,13 @@ impl Signature {
             volatility,
         }
     }
+
+    pub fn nullary(volatility: Volatility) -> Self {
+        Signature {
+            type_signature: TypeSignature::NullAry,
+            volatility,
+        }
+    }
 }
 
 /// Conversations between datafusion signature and our signature
@@ -122,16 +133,25 @@ impl From<TypeSignature> for DfTypeSignature {
                 DfTypeSignature::Variadic(concrete_types_to_arrow_types(types))
             }
             TypeSignature::Uniform(n, types) => {
+                if n == 0 {
+                    return DfTypeSignature::NullAry;
+                }
                 DfTypeSignature::Uniform(n, concrete_types_to_arrow_types(types))
             }
             TypeSignature::Exact(types) => {
                 DfTypeSignature::Exact(concrete_types_to_arrow_types(types))
             }
-            TypeSignature::Any(n) => DfTypeSignature::Any(n),
+            TypeSignature::Any(n) => {
+                if n == 0 {
+                    return DfTypeSignature::NullAry;
+                }
+                DfTypeSignature::Any(n)
+            }
             TypeSignature::OneOf(ts) => {
                 DfTypeSignature::OneOf(ts.into_iter().map(Into::into).collect())
             }
             TypeSignature::VariadicAny => DfTypeSignature::VariadicAny,
+            TypeSignature::NullAry => DfTypeSignature::NullAry,
         }
     }
 }

@@ -171,6 +171,8 @@ fn args_to_vector(
             }
             .fail()
         }
+
+        TypeSignature::NullAry => Ok(vec![]),
     }
 }
 

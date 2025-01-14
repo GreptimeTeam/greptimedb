@@ -38,7 +38,7 @@ impl Function for TimezoneFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::uniform(0, vec![], Volatility::Immutable)
+        Signature::nullary(Volatility::Immutable)
     }
 
     fn eval(&self, func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
