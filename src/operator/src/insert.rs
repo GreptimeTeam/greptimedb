@@ -211,12 +211,12 @@ impl Inserter {
             .create_or_alter_tables_on_demand(&requests, &ctx, create_type, statement_executor)
             .await?;
 
-        let name2info = table_infos
+        let name_to_info = table_infos
             .values()
             .map(|info| (info.name.clone(), info.clone()))
             .collect::<HashMap<_, _>>();
         let inserts = RowToRegion::new(
-            name2info,
+            name_to_info,
             instant_table_ids,
             self.partition_manager.as_ref(),
         )
@@ -259,11 +259,11 @@ impl Inserter {
                 statement_executor,
             )
             .await?;
-        let name2info = table_infos
+        let name_to_info = table_infos
             .values()
             .map(|info| (info.name.clone(), info.clone()))
             .collect::<HashMap<_, _>>();
-        let inserts = RowToRegion::new(name2info, instant_table_ids, &self.partition_manager)
+        let inserts = RowToRegion::new(name_to_info, instant_table_ids, &self.partition_manager)
             .convert(requests)
             .await?;
 
