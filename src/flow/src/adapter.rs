@@ -27,7 +27,6 @@ use common_meta::key::TableMetadataManagerRef;
 use common_runtime::JoinHandle;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_telemetry::{debug, info, trace};
-use config::ConfigError;
 use datatypes::schema::ColumnSchema;
 use datatypes::value::Value;
 use greptime_proto::v1;
@@ -128,13 +127,9 @@ impl Default for FlownodeOptions {
 }
 
 impl Configurable for FlownodeOptions {
-    fn validate(&self) -> common_config::error::Result<()> {
-        use common_config::error::LoadLayeredConfigSnafu;
+    fn validate_sanitize(&mut self) -> common_config::error::Result<()> {
         if self.flow.num_workers == 0 {
-            Err(ConfigError::Message(
-                "num_workers must be at least 1".to_string(),
-            ))
-            .context(LoadLayeredConfigSnafu)?
+            self.flow.num_workers = (common_config::utils::get_cpus() / 2).max(1);
         }
         Ok(())
     }

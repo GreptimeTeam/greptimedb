@@ -73,18 +73,18 @@ pub trait Configurable: Serialize + DeserializeOwned + Default + Sized {
             layered_config = layered_config.add_source(File::new(config_file, FileFormat::Toml));
         }
 
-        let opts: Self = layered_config
+        let mut opts: Self = layered_config
             .build()
             .and_then(|x| x.try_deserialize())
             .context(LoadLayeredConfigSnafu)?;
 
-        opts.validate()?;
+        opts.validate_sanitize()?;
 
         Ok(opts)
     }
 
-    /// Validate the configuration.
-    fn validate(&self) -> Result<()> {
+    /// Validate(and possibly sanitize) the configuration.
+    fn validate_sanitize(&mut self) -> Result<()> {
         Ok(())
     }
 
