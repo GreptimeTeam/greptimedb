@@ -14,7 +14,7 @@
 
 //! Digest the input string by removing certain patterns.
 //!
-//! This processor can helps to extract useful information from a string by removing certain patterns,
+//! This processor can help to extract useful information from a string by removing certain patterns,
 //! which is often a variable from the log message. Digested fields are stored in a new field with the
 //! `_digest` suffix. And can be used for further processing or analysis like template occurrences count
 //! or similarity analysis.
