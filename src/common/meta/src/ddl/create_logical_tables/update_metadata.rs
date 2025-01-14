@@ -81,10 +81,6 @@ impl CreateLogicalTablesProcedure {
 
     pub(crate) async fn create_logical_tables_metadata(&mut self) -> Result<Vec<TableId>> {
         let remaining_tasks = self.data.remaining_tasks();
-        if remaining_tasks.is_empty() {
-            info!("no logical tables to create metadata");
-            return Ok(vec![]);
-        }
         let num_tables = remaining_tasks.len();
 
         if num_tables > 0 {

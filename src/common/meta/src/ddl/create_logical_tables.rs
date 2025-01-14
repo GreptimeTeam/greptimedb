@@ -21,7 +21,7 @@ use api::v1::CreateTableExpr;
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
-use common_telemetry::{info, warn};
+use common_telemetry::{debug, warn};
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -144,7 +144,7 @@ impl CreateLogicalTablesProcedure {
         for peer in leaders {
             let requester = self.context.node_manager.datanode(&peer).await;
             let Some(request) = self.make_request(&peer, region_routes)? else {
-                info!("no region request to send to datanode {}", peer);
+                debug!("no region request to send to datanode {}", peer);
                 // We can skip the rest of the datanodes,
                 // the rest of the datanodes should have the same result.
                 break;
@@ -156,12 +156,6 @@ impl CreateLogicalTablesProcedure {
                     .await
                     .map_err(add_peer_context_if_needed(peer))
             });
-        }
-
-        if create_region_tasks.is_empty() {
-            info!("no region request to send to datanodes");
-            self.data.state = CreateTablesState::CreateMetadata;
-            return Ok(Status::executing(true));
         }
 
         // Collects response from datanodes.
