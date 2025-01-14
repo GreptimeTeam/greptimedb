@@ -28,6 +28,8 @@ use crate::repr::{ColumnType, RelationDesc, RelationType};
 use crate::transform::{substrait_proto, FlownodeContext, FunctionExtensions};
 
 impl TypedExpr {
+    /// Allow `deprecated` due to the usage of deprecated grouping_expressions on datafusion to substrait side
+    #[allow(deprecated)]
     async fn from_substrait_agg_grouping(
         ctx: &mut FlownodeContext,
         grouping_expressions: &[proto::Expression],
@@ -39,10 +41,34 @@ impl TypedExpr {
         let mut group_expr = vec![];
         match groupings.len() {
             1 => {
-                for e in &groupings[0].expression_references {
-                    let e = grouping_expressions.get(*e as usize).context(PlanSnafu {
-                        reason: "Grouping expression not found",
-                    })?;
+                // handle case when deprecated grouping_expressions is referenced by index is empty
+                let expressions: Box<dyn Iterator<Item = &proto::Expression> + Send> = if groupings
+                    [0]
+                .expression_references
+                .is_empty()
+                {
+                    Box::new(groupings[0].grouping_expressions.iter())
+                } else {
+                    if groupings[0]
+                        .expression_references
+                        .iter()
+                        .any(|idx| *idx as usize >= grouping_expressions.len())
+                    {
+                        return PlanSnafu {
+                            reason: format!("Invalid grouping expression reference: {:?} for grouping expr: {:?}", 
+                            groupings[0].expression_references,
+                            grouping_expressions
+                        ),
+                        }.fail()?;
+                    }
+                    Box::new(
+                        groupings[0]
+                            .expression_references
+                            .iter()
+                            .map(|idx| &grouping_expressions[*idx as usize]),
+                    )
+                };
+                for e in expressions {
                     let x = TypedExpr::from_substrait_rex(e, typ, extensions).await?;
                     group_expr.push(x);
                 }
@@ -343,7 +369,6 @@ impl TypedPlan {
             reduce_plan: ReducePlan::Accumulable(accum_plan),
         };
         // FIX(discord9): deal with key first
-
         return Ok(TypedPlan {
             schema: output_type,
             plan,
@@ -1312,6 +1337,61 @@ mod test {
             },
         };
         assert_eq!(flow_plan.unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_distinct_number() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT DISTINCT number FROM numbers";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
+            .await
+            .unwrap();
+
+        let expected = TypedPlan {
+            schema: RelationType::new(vec![
+                ColumnType::new(CDT::uint32_datatype(), false), // col number
+            ])
+            .with_key(vec![0])
+            .into_named(vec![Some("number".to_string())]),
+            plan: Plan::Reduce {
+                input: Box::new(
+                    Plan::Get {
+                        id: crate::expr::Id::Global(GlobalId::User(0)),
+                    }
+                    .with_types(
+                        RelationType::new(vec![ColumnType::new(
+                            ConcreteDataType::uint32_datatype(),
+                            false,
+                        )])
+                        .into_named(vec![Some("number".to_string())]),
+                    )
+                    .mfp(MapFilterProject::new(1).into_safe())
+                    .unwrap(),
+                ),
+                key_val_plan: KeyValPlan {
+                    key_plan: MapFilterProject::new(1)
+                        .map(vec![ScalarExpr::Column(0)])
+                        .unwrap()
+                        .project(vec![1])
+                        .unwrap()
+                        .into_safe(),
+                    val_plan: MapFilterProject::new(1)
+                        .project(vec![0])
+                        .unwrap()
+                        .into_safe(),
+                },
+                reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
+                    full_aggrs: vec![],
+                    simple_aggrs: vec![],
+                    distinct_aggrs: vec![],
+                }),
+            },
+        };
+
+        assert_eq!(flow_plan, expected);
     }
 
     #[tokio::test]

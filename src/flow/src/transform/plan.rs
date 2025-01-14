@@ -83,6 +83,7 @@ impl TypedPlan {
 
         // because this `input.schema` is incorrect for pre-expand substrait plan, so we have to use schema before expand multi-value
         // function to correctly transform it, and late rewrite it
+        // TODO(discord9): this logic is obselete since now expand happens in datafusion optimizer
         let schema_before_expand = {
             let input_schema = input.schema.clone();
             let auto_columns: HashSet<usize> =
@@ -177,6 +178,7 @@ impl TypedPlan {
                 .fail()?,
             };
             let table = ctx.table(&table_reference)?;
+
             let get_table = Plan::Get {
                 id: crate::expr::Id::Global(table.0),
             };

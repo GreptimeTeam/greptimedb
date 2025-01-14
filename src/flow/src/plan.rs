@@ -63,6 +63,7 @@ impl TypedPlan {
     pub fn projection(self, exprs: Vec<TypedExpr>) -> Result<Self, Error> {
         let input_arity = self.schema.typ.column_types.len();
         let output_arity = exprs.len();
+
         let (exprs, _expr_typs): (Vec<_>, Vec<_>) = exprs
             .into_iter()
             .map(|TypedExpr { expr, typ }| (expr, typ))
@@ -72,6 +73,7 @@ impl TypedPlan {
             .project(input_arity..input_arity + output_arity)?
             .into_safe();
         let out_typ = self.schema.apply_mfp(&mfp)?;
+
         let mfp = mfp.mfp;
         // special case for mfp to compose when the plan is already mfp
         let plan = match self.plan {
