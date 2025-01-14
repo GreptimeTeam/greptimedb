@@ -123,6 +123,14 @@ impl ColumnSchema {
         self.default_constraint.as_ref()
     }
 
+    /// Check if the default constraint is a impure function.
+    pub fn is_default_impure(&self) -> bool {
+        self.default_constraint
+            .as_ref()
+            .map(|c| c.is_function())
+            .unwrap_or(false)
+    }
+
     #[inline]
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
@@ -287,6 +295,15 @@ impl ColumnSchema {
                     Ok(None)
                 }
             }
+        }
+    }
+
+    /// Creates an impure default value for this column, only if it have a impure default constraint.
+    /// Otherwise, returns `Ok(None)`.
+    pub fn create_impure_default(&self) -> Result<Option<Value>> {
+        match &self.default_constraint {
+            Some(c) => c.create_impure_default(&self.data_type),
+            None => Ok(None),
         }
     }
 
