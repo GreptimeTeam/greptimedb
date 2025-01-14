@@ -188,7 +188,7 @@ pub(crate) async fn remove_region_dir_once(
         // no parquet file found, delete the region path
         // first delete all files other than the marker
         object_store
-            .remove(files_to_remove_first)
+            .delete_iter(files_to_remove_first)
             .await
             .context(OpenDalSnafu)?;
         // then remove the marker with this dir
