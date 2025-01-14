@@ -3858,12 +3858,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ce7134b9999ecaf8bcd65542e436736ef32ddca1b3e06094cb6ec5755203b80"
 
 [[package]]
-name = "flagset"
-version = "0.4.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3ea1ec5f8307826a5b71094dd91fc04d4ae75d5709b20ad351c7fb4815c86ec"
-
-[[package]]
 name = "flatbuffers"
 version = "23.5.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7160,8 +7154,9 @@ checksum = "b410bbe7e14ab526a0e86877eb47c6996a2bd7746f027ba551028c925390e4e9"
 
 [[package]]
 name = "opendal"
-version = "0.50.2"
-source = "git+https://github.com/GreptimeTeam/opendal.git?rev=c82605177f2feec83e49dcaa537c505639d94024#c82605177f2feec83e49dcaa537c505639d94024"
+version = "0.51.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c9dcfa7a3615e3c60eb662ed6b46b6f244cf2658098f593c0c0915430b3a268"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7170,7 +7165,6 @@ dependencies = [
  "bytes",
  "chrono",
  "crc32c",
- "flagset",
  "futures",
  "getrandom",
  "http 1.1.0",

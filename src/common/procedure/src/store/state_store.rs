@@ -189,7 +189,7 @@ impl StateStore for ObjectStateStore {
 
     async fn batch_delete(&self, keys: &[String]) -> Result<()> {
         self.store
-            .remove(keys.to_vec())
+            .delete_iter(keys.to_vec())
             .await
             .with_context(|_| DeleteStateSnafu {
                 key: format!("{:?}", keys),
