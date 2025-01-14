@@ -60,9 +60,6 @@ use crate::region_query::RegionQueryHandlerRef;
 use crate::QueryEngineContext;
 
 /// Query engine global state
-// TODO(yingwen): This QueryEngineState still relies on datafusion, maybe we can define a trait for it,
-// which allows different implementation use different engine state. The state can also be an associated
-// type in QueryEngine trait.
 #[derive(Clone)]
 pub struct QueryEngineState {
     df_context: SessionContext,
@@ -216,6 +213,11 @@ impl QueryEngineState {
             .cloned()
     }
 
+    /// Retrieve udf function names.
+    pub fn udf_names(&self) -> Vec<String> {
+        self.udf_functions.read().unwrap().keys().cloned().collect()
+    }
+
     /// Retrieve the aggregate function by name
     pub fn aggregate_function(&self, function_name: &str) -> Option<AggregateFunctionMetaRef> {
         self.aggregate_functions
@@ -223,6 +225,16 @@ impl QueryEngineState {
             .unwrap()
             .get(function_name)
             .cloned()
+    }
+
+    /// Retrieve aggregate function names.
+    pub fn udaf_names(&self) -> Vec<String> {
+        self.aggregate_functions
+            .read()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// Register a [`ScalarUdf`].

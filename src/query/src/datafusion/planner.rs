@@ -154,8 +154,8 @@ impl ContextProvider for DfContextProviderAdapter {
         )
     }
 
-    fn get_window_meta(&self, _name: &str) -> Option<Arc<WindowUDF>> {
-        None
+    fn get_window_meta(&self, name: &str) -> Option<Arc<WindowUDF>> {
+        self.session_state.window_functions().get(name).cloned()
     }
 
     fn get_variable_type(&self, variable_names: &[String]) -> Option<DataType> {
@@ -181,17 +181,22 @@ impl ContextProvider for DfContextProviderAdapter {
     }
 
     fn udf_names(&self) -> Vec<String> {
-        // TODO(LFC): Impl it.
-        vec![]
+        let mut names = self.engine_state.udf_names();
+        names.extend(self.session_state.scalar_functions().keys().cloned());
+        names
     }
 
     fn udaf_names(&self) -> Vec<String> {
-        // TODO(LFC): Impl it.
-        vec![]
+        let mut names = self.engine_state.udaf_names();
+        names.extend(self.session_state.aggregate_functions().keys().cloned());
+        names
     }
 
     fn udwf_names(&self) -> Vec<String> {
-        // TODO(LFC): Impl it.
-        vec![]
+        self.session_state
+            .window_functions()
+            .keys()
+            .cloned()
+            .collect()
     }
 }
