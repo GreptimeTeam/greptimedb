@@ -5,6 +5,8 @@ mode = "distributed"
 ## @toml2docs:none-default
 node_id = 14
 
+## flow engine options.
+[flow]
 ## The number of flow worker in flownode.
 ## Not setting this value will use the number of CPU cores divided by 2.
 #+num_workers=8

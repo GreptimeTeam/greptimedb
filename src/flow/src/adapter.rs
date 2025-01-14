@@ -103,7 +103,7 @@ pub struct FlownodeOptions {
     pub mode: Mode,
     pub cluster_id: Option<u64>,
     pub node_id: Option<u64>,
-    pub opts: FlowConfig,
+    pub flow: FlowConfig,
     pub grpc: GrpcOptions,
     pub meta_client: Option<MetaClientOptions>,
     pub logging: LoggingOptions,
@@ -117,7 +117,7 @@ impl Default for FlownodeOptions {
             mode: servers::Mode::Standalone,
             cluster_id: None,
             node_id: None,
-            opts: FlowConfig::default(),
+            flow: FlowConfig::default(),
             grpc: GrpcOptions::default().with_addr("127.0.0.1:3004"),
             meta_client: None,
             logging: LoggingOptions::default(),
@@ -130,7 +130,7 @@ impl Default for FlownodeOptions {
 impl Configurable for FlownodeOptions {
     fn validate(&self) -> common_config::error::Result<()> {
         use common_config::error::LoadLayeredConfigSnafu;
-        if self.opts.num_workers == 0 {
+        if self.flow.num_workers == 0 {
             Err(ConfigError::Message(
                 "num_workers must be at least 1".to_string(),
             ))

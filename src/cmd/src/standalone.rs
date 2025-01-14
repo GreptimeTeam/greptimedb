@@ -526,7 +526,7 @@ impl StartCommand {
 
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
         let flownode_options = FlownodeOptions {
-            opts: opts.flow.clone(),
+            flow: opts.flow.clone(),
             ..Default::default()
         };
         let flow_builder = FlownodeBuilder::new(

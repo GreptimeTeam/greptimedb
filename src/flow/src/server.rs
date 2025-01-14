@@ -414,7 +414,7 @@ impl FlownodeBuilder {
 
         register_function_to_query_engine(&query_engine);
 
-        let num_workers = self.opts.opts.num_workers;
+        let num_workers = self.opts.flow.num_workers;
 
         let node_id = self.opts.node_id.map(|id| id as u32);
 
