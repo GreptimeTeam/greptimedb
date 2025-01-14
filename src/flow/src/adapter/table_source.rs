@@ -17,6 +17,8 @@
 use common_error::ext::BoxedError;
 use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
 use common_meta::key::table_name::{TableNameKey, TableNameManager};
+use datatypes::schema::ColumnDefaultConstraint;
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
 
@@ -27,6 +29,32 @@ use crate::error::{
 };
 use crate::repr::RelationDesc;
 
+/// Table description, include relation desc and default values, which is the minimal information flow needed for table
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableDesc {
+    pub relation_desc: RelationDesc,
+    pub default_values: Vec<Option<ColumnDefaultConstraint>>,
+}
+
+impl TableDesc {
+    pub fn new(
+        relation_desc: RelationDesc,
+        default_values: Vec<Option<ColumnDefaultConstraint>>,
+    ) -> Self {
+        Self {
+            relation_desc,
+            default_values,
+        }
+    }
+
+    pub fn new_no_default(relation_desc: RelationDesc) -> Self {
+        Self {
+            relation_desc,
+            default_values: vec![],
+        }
+    }
+}
+
 /// Table source but for flow, provide table schema by table name/id
 #[async_trait::async_trait]
 pub trait FlowTableSource: Send + Sync + std::fmt::Debug {
@@ -34,11 +62,11 @@ pub trait FlowTableSource: Send + Sync + std::fmt::Debug {
     async fn table_id_from_name(&self, name: &TableName) -> Result<TableId, Error>;
 
     /// Get the table schema by table name
-    async fn table(&self, name: &TableName) -> Result<RelationDesc, Error> {
+    async fn table(&self, name: &TableName) -> Result<TableDesc, Error> {
         let id = self.table_id_from_name(name).await?;
         self.table_from_id(&id).await
     }
-    async fn table_from_id(&self, table_id: &TableId) -> Result<RelationDesc, Error>;
+    async fn table_from_id(&self, table_id: &TableId) -> Result<TableDesc, Error>;
 }
 
 /// managed table source information, query from table info manager and table name manager
@@ -51,7 +79,7 @@ pub struct ManagedTableSource {
 
 #[async_trait::async_trait]
 impl FlowTableSource for ManagedTableSource {
-    async fn table_from_id(&self, table_id: &TableId) -> Result<RelationDesc, Error> {
+    async fn table_from_id(&self, table_id: &TableId) -> Result<TableDesc, Error> {
         let table_info_value = self
             .get_table_info_value(table_id)
             .await?
@@ -150,7 +178,7 @@ impl ManagedTableSource {
     pub async fn get_table_name_schema(
         &self,
         table_id: &TableId,
-    ) -> Result<(TableName, RelationDesc), Error> {
+    ) -> Result<(TableName, TableDesc), Error> {
         let table_info_value = self
             .get_table_info_value(table_id)
             .await?
@@ -186,7 +214,7 @@ pub(crate) mod test {
     use crate::repr::{ColumnType, RelationType};
 
     pub struct FlowDummyTableSource {
-        pub id_names_to_desc: Vec<(TableId, TableName, RelationDesc)>,
+        pub id_names_to_desc: Vec<(TableId, TableName, TableDesc)>,
         id_to_idx: HashMap<TableId, usize>,
         name_to_idx: HashMap<TableName, usize>,
     }
@@ -201,8 +229,10 @@ pub(crate) mod test {
                         "public".to_string(),
                         "numbers".to_string(),
                     ],
-                    RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)])
-                        .into_named(vec![Some("number".to_string())]),
+                    TableDesc::new_no_default(
+                        RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)])
+                            .into_named(vec![Some("number".to_string())]),
+                    ),
                 ),
                 (
                     1025,
@@ -211,11 +241,13 @@ pub(crate) mod test {
                         "public".to_string(),
                         "numbers_with_ts".to_string(),
                     ],
-                    RelationType::new(vec![
-                        ColumnType::new(CDT::uint32_datatype(), false),
-                        ColumnType::new(CDT::timestamp_millisecond_datatype(), false),
-                    ])
-                    .into_named(vec![Some("number".to_string()), Some("ts".to_string())]),
+                    TableDesc::new_no_default(
+                        RelationType::new(vec![
+                            ColumnType::new(CDT::uint32_datatype(), false),
+                            ColumnType::new(CDT::timestamp_millisecond_datatype(), false),
+                        ])
+                        .into_named(vec![Some("number".to_string()), Some("ts".to_string())]),
+                    ),
                 ),
             ];
             let id_to_idx = id_names_to_desc
@@ -238,7 +270,7 @@ pub(crate) mod test {
 
     #[async_trait::async_trait]
     impl FlowTableSource for FlowDummyTableSource {
-        async fn table_from_id(&self, table_id: &TableId) -> Result<RelationDesc, Error> {
+        async fn table_from_id(&self, table_id: &TableId) -> Result<TableDesc, Error> {
             let idx = self.id_to_idx.get(table_id).context(TableNotFoundSnafu {
                 name: format!("Table id = {:?}, couldn't found table desc", table_id),
             })?;
