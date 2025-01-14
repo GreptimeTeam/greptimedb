@@ -25,11 +25,13 @@ use api::v1::{ColumnDataType, ColumnDataTypeExtension, JsonTypeExtension, Semant
 use coerce::{coerce_columns, coerce_value};
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
-use serde_json::{Map, Number};
+use serde_json::{Map, Number, Value as JsonValue};
+use snafu::ResultExt;
 
 use crate::etl::error::{
-    IdentifyPipelineColumnTypeMismatchSnafu, Result, TransformColumnNameMustBeUniqueSnafu,
-    TransformEmptySnafu, TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu,
+    IdentifyPipelineColumnTypeMismatchSnafu, ReachedMaxNestedLevelsSnafu, Result,
+    SerializeToJsonSnafu, TransformColumnNameMustBeUniqueSnafu, TransformEmptySnafu,
+    TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu,
     UnsupportedNumberTypeSnafu,
 };
 use crate::etl::field::{InputFieldInfo, OneInputOneOutputField};
@@ -38,6 +40,7 @@ use crate::etl::transform::{Transform, Transformer, Transforms};
 use crate::etl::value::{Timestamp, Value};
 
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
+const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
 
 /// fields not in the columns will be discarded
 /// to prevent automatic column creation in GreptimeDB
@@ -370,7 +373,10 @@ fn identity_pipeline_inner<'a>(
     let mut schema_info = SchemaInfo::default();
     for value in array {
         if let serde_json::Value::Object(map) = value {
-            let row = json_value_to_row(&mut schema_info, map)?;
+            let row = json_value_to_row(
+                &mut schema_info,
+                flatten_json_object(map, DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING)?,
+            )?;
             rows.push(row);
         }
     }
@@ -431,11 +437,72 @@ pub fn identity_pipeline(
     }
 }
 
+/// Consumes the JSON object and consumes it into a single-level object.
+///
+/// The `max_nested_levels` parameter is used to limit the nested levels of the JSON object.
+/// The error will be returned if the nested levels is greater than the `max_nested_levels`.
+pub fn flatten_json_object(
+    object: Map<String, JsonValue>,
+    max_nested_levels: usize,
+) -> Result<Map<String, JsonValue>> {
+    let mut flattened = Map::new();
+
+    if !object.is_empty() {
+        // it will use recursion to flatten the object.
+        do_flatten_json_object(&mut flattened, None, object, 1, max_nested_levels)?;
+    }
+
+    Ok(flattened)
+}
+
+fn do_flatten_json_object(
+    dest: &mut Map<String, JsonValue>,
+    base: Option<&str>,
+    object: Map<String, JsonValue>,
+    current_level: usize,
+    max_nested_levels: usize,
+) -> Result<()> {
+    // For safety, we do not allow the depth to be greater than the max_object_depth.
+    if current_level > max_nested_levels {
+        return ReachedMaxNestedLevelsSnafu { max_nested_levels }.fail();
+    }
+
+    for (key, value) in object {
+        let new_key = base.map_or_else(|| key.clone(), |base_key| format!("{base_key}.{key}"));
+
+        match value {
+            JsonValue::Object(object) => {
+                do_flatten_json_object(
+                    dest,
+                    Some(&new_key),
+                    object,
+                    current_level + 1,
+                    max_nested_levels,
+                )?;
+            }
+            // To simplify the process of logs collection scenario, we will convert the array into a string that can be easily handled by full-text search.
+            JsonValue::Array(array) => {
+                let array_str = serde_json::to_string(&array).context(SerializeToJsonSnafu {
+                    input: format!("{array:?}"),
+                })?;
+                dest.insert(new_key, JsonValue::String(array_str));
+            }
+            _ => {
+                dest.insert(new_key, value);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use api::v1::SemanticType;
 
-    use crate::etl::transform::transformer::greptime::identity_pipeline_inner;
+    use crate::etl::transform::transformer::greptime::{
+        flatten_json_object, identity_pipeline_inner,
+    };
     use crate::identity_pipeline;
 
     #[test]
@@ -577,6 +644,80 @@ mod tests {
                     .count(),
                 2
             );
+        }
+    }
+
+    #[test]
+    fn test_flatten() {
+        let test_cases = vec![
+            // Basic case.
+            (
+                serde_json::json!(
+                    {
+                        "a": {
+                            "b": {
+                                "c": [1, 2, 3]
+                            }
+                        },
+                        "d": [
+                            "foo",
+                            "bar"
+                        ],
+                        "e": {
+                            "f": [7, 8, 9],
+                            "g": {
+                                "h": 123,
+                                "i": "hello",
+                                "j": {
+                                    "k": true
+                                }
+                            }
+                        }
+                    }
+                ),
+                10,
+                Some(serde_json::json!(
+                    {
+                        "a.b.c": "[1,2,3]",
+                        "d": "[\"foo\",\"bar\"]",
+                        "e.f": "[7,8,9]",
+                        "e.g.h": 123,
+                        "e.g.i": "hello",
+                        "e.g.j.k": true
+                    }
+                )),
+            ),
+            // Test the case where the object has more than 3 nested levels.
+            (
+                serde_json::json!(
+                    {
+                        "a": {
+                            "b": {
+                                "c": {
+                                    "d": [1, 2, 3]
+                                }
+                            }
+                        },
+                        "e": [
+                            "foo",
+                            "bar"
+                        ]
+                    }
+                ),
+                3,
+                None,
+            ),
+        ];
+
+        for (input, max_depth, expected) in test_cases {
+            let flattened_object =
+                flatten_json_object(input.as_object().unwrap().clone(), max_depth);
+            match flattened_object {
+                Ok(flattened_object) => {
+                    assert_eq!(&flattened_object, expected.unwrap().as_object().unwrap())
+                }
+                Err(_) => assert_eq!(None, expected),
+            }
         }
     }
 }
