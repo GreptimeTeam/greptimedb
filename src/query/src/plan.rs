@@ -167,7 +167,7 @@ pub(crate) mod tests {
 
     use super::*;
 
-    pub(crate) fn mock_plan() -> LogicalPlan {
+    fn mock_plan() -> LogicalPlan {
         let schema = Schema::new(vec![
             Field::new("id", DataType::Int32, true),
             Field::new("name", DataType::Utf8, true),

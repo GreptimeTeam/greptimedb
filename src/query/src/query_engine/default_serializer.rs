@@ -133,13 +133,28 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
 
 #[cfg(test)]
 mod tests {
+    use datafusion::catalog::TableProvider;
+    use datafusion_expr::{col, lit, LogicalPlanBuilder, LogicalTableSource};
+    use datatypes::arrow::datatypes::SchemaRef;
     use session::context::QueryContext;
 
     use super::*;
     use crate::dummy_catalog::DummyCatalogList;
     use crate::optimizer::test_util::mock_table_provider;
-    use crate::plan::tests::mock_plan;
     use crate::QueryEngineFactory;
+
+    fn mock_plan(schema: SchemaRef) -> LogicalPlan {
+        let table_source = LogicalTableSource::new(schema);
+        let projection = None;
+        let builder =
+            LogicalPlanBuilder::scan("devices", Arc::new(table_source), projection).unwrap();
+
+        builder
+            .filter(col("k0").eq(lit("hello")))
+            .unwrap()
+            .build()
+            .unwrap()
+    }
 
     #[tokio::test]
     async fn test_serializer_decode_plan() {
@@ -148,7 +163,8 @@ mod tests {
 
         let engine = factory.query_engine();
 
-        let plan = mock_plan();
+        let table_provider = Arc::new(mock_table_provider(1.into()));
+        let plan = mock_plan(table_provider.schema().clone());
 
         let bytes = DFLogicalSubstraitConvertor
             .encode(&plan, DefaultSerializer)
@@ -158,7 +174,6 @@ mod tests {
             .engine_context(QueryContext::arc())
             .new_plan_decoder()
             .unwrap();
-        let table_provider = Arc::new(mock_table_provider(1.into()));
         let catalog_list = Arc::new(DummyCatalogList::with_table_provider(table_provider));
 
         let decode_plan = plan_decoder
@@ -167,9 +182,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            "Filter: devices.k0 > Int32(500)
-  TableScan: devices projection=[k0, ts, v0]",
-            format!("{:?}", decode_plan),
+            "Filter: devices.k0 = Utf8(\"hello\")
+  TableScan: devices",
+            decode_plan.to_string(),
         );
     }
 }
