@@ -17,11 +17,8 @@ use common_time::date::Date;
 use common_time::{DateTime, Timestamp};
 use datatypes::value::Value;
 use snafu::{ensure, ResultExt};
-use sqlx::database::HasArguments;
-use sqlx::{
-    Column, ColumnIndex, Database, Decode, Encode, Executor, IntoArguments, Row, Type, TypeInfo,
-    ValueRef,
-};
+use sqlx::mysql::MySqlRow;
+use sqlx::{Column, ColumnIndex, Database, MySqlPool, Row, TypeInfo, ValueRef};
 
 use crate::error::{self, Result};
 use crate::ir::insert_expr::{RowValue, RowValues};
@@ -151,33 +148,17 @@ pub struct ValueCount {
     pub count: i64,
 }
 
-pub async fn count_values<'a, DB, E>(e: E, sql: &'a str) -> Result<ValueCount>
-where
-    DB: Database,
-    <DB as HasArguments<'a>>::Arguments: IntoArguments<'a, DB>,
-    for<'c> E: 'a + Executor<'c, Database = DB>,
-    for<'c> i64: Decode<'c, DB> + Type<DB>,
-    for<'c> String: Encode<'c, DB> + Type<DB>,
-    for<'c> &'c str: ColumnIndex<<DB as Database>::Row>,
-{
-    Ok(sqlx::query_as::<_, ValueCount>(sql)
-        .fetch_all(e)
+pub async fn count_values(db: &MySqlPool, sql: &str) -> Result<ValueCount> {
+    sqlx::query_as::<_, ValueCount>(sql)
+        .fetch_one(db)
         .await
-        .context(error::ExecuteQuerySnafu { sql })?
-        .remove(0))
+        .context(error::ExecuteQuerySnafu { sql })
 }
 
 /// Returns all [RowEntry] of the `table_name`.
-pub async fn fetch_values<'a, DB, E>(e: E, sql: &'a str) -> Result<Vec<<DB as Database>::Row>>
-where
-    DB: Database,
-    <DB as HasArguments<'a>>::Arguments: IntoArguments<'a, DB>,
-    for<'c> E: 'a + Executor<'c, Database = DB>,
-    for<'c> String: Decode<'c, DB> + Type<DB>,
-    for<'c> String: Encode<'c, DB> + Type<DB>,
-{
+pub async fn fetch_values(db: &MySqlPool, sql: &str) -> Result<Vec<MySqlRow>> {
     sqlx::query(sql)
-        .fetch_all(e)
+        .fetch_all(db)
         .await
         .context(error::ExecuteQuerySnafu { sql })
 }

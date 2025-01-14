@@ -1,4 +1,6 @@
 on:
+  schedule:
+    - cron: "0 15 * * 1-5"
   merge_group:
   pull_request:
     types: [ opened, synchronize, reopened, ready_for_review ]
@@ -51,12 +53,6 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      # - name: Rust Cache
-      #   uses: Swatinem/rust-cache@v2
-      #   with:
-      #     # Shares across multiple jobs
-      #     # Shares with `Clippy` job
-      #     shared-key: "check-lint"
       - name: Run cargo check
         run: cargo check --locked --workspace --all-targets
 
@@ -67,11 +63,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      # - name: Rust Cache
-      #   uses: Swatinem/rust-cache@v2
-      #   with:
-      #     # Shares across multiple jobs
-      #     shared-key: "check-toml"
       - name: Install taplo
         run: cargo +stable install taplo-cli --version ^0.9 --locked --force
       - name: Run taplo
@@ -94,6 +85,8 @@ jobs:
         with:
           # Shares across multiple jobs
           shared-key: "build-binaries"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-gc-bin
         shell: bash
         run: cargo install cargo-gc-bin --force
@@ -142,11 +135,6 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      # - name: Rust Cache
-      #   uses: Swatinem/rust-cache@v2
-      #   with:
-      #     # Shares across multiple jobs
-      #     shared-key: "fuzz-test-targets"
       - name: Set Rust Fuzz
         shell: bash
         run: |
@@ -200,11 +188,6 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      # - name: Rust Cache
-      #   uses: Swatinem/rust-cache@v2
-      #   with:
-      #     # Shares across multiple jobs
-      #     shared-key: "fuzz-test-targets"
       - name: Set Rust Fuzz
         shell: bash
         run: |
@@ -255,6 +238,8 @@ jobs:
         with:
           # Shares across multiple jobs
           shared-key: "build-greptime-ci"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-gc-bin
         shell: bash
         run: cargo install cargo-gc-bin --force
@@ -317,11 +302,6 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      # - name: Rust Cache
-      #   uses: Swatinem/rust-cache@v2
-      #   with:
-      #     # Shares across multiple jobs
-      #     shared-key: "fuzz-test-targets"
       - name: Set Rust Fuzz
         shell: bash
         run: |
@@ -466,11 +446,6 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      # - name: Rust Cache
-      #   uses: Swatinem/rust-cache@v2
-      #   with:
-      #     # Shares across multiple jobs
-      #     shared-key: "fuzz-test-targets"
       - name: Set Rust Fuzz
         shell: bash
         run: |
@@ -612,11 +587,6 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: rustfmt
-      # - name: Rust Cache
-      #   uses: Swatinem/rust-cache@v2
-      #   with:
-      #     # Shares across multiple jobs
-      #     shared-key: "check-rust-fmt"
       - name: Check format
         run: make fmt-check
 
@@ -638,6 +608,8 @@ jobs:
           # Shares across multiple jobs
           # Shares with `Check` job
           shared-key: "check-lint"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run cargo clippy
         run: make clippy
 
@@ -670,6 +642,7 @@ jobs:
         with:
           # Shares cross multiple jobs
           shared-key: "coverage-test"
+          cache-all-crates: "true"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # Disabled temporarily to see performance
       # - name: Docker Cache

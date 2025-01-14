@@ -13,8 +13,7 @@
 // limitations under the License.
 
 use snafu::{ensure, ResultExt};
-use sqlx::database::HasArguments;
-use sqlx::{ColumnIndex, Database, Decode, Encode, Executor, IntoArguments, Row, Type};
+use sqlx::{MySqlPool, Row};
 
 use crate::error::{self, Result, UnexpectedSnafu};
 use crate::ir::alter_expr::AlterTableOption;
@@ -47,17 +46,9 @@ fn parse_show_create(show_create: &str) -> Result<Vec<AlterTableOption>> {
 }
 
 /// Fetches table options from the context
-pub async fn fetch_table_options<'a, DB, E>(e: E, sql: &'a str) -> Result<Vec<AlterTableOption>>
-where
-    DB: Database,
-    <DB as HasArguments<'a>>::Arguments: IntoArguments<'a, DB>,
-    for<'c> E: 'a + Executor<'c, Database = DB>,
-    for<'c> String: Decode<'c, DB> + Type<DB>,
-    for<'c> String: Encode<'c, DB> + Type<DB>,
-    usize: ColumnIndex<<DB as Database>::Row>,
-{
+pub async fn fetch_table_options(db: &MySqlPool, sql: &str) -> Result<Vec<AlterTableOption>> {
     let fetched_rows = sqlx::query(sql)
-        .fetch_all(e)
+        .fetch_all(db)
         .await
         .context(error::ExecuteQuerySnafu { sql })?;
     ensure!(
