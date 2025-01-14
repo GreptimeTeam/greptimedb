@@ -24,6 +24,7 @@ use common_error::ext::BoxedError;
 use common_meta::error::{ExternalSnafu, Result, UnexpectedSnafu};
 use common_meta::node_manager::Flownode;
 use common_telemetry::{debug, trace};
+use datatypes::value::Value;
 use itertools::Itertools;
 use snafu::{IntoError, OptionExt, ResultExt};
 use store_api::storage::RegionId;
@@ -178,14 +179,32 @@ impl Flownode for FlowWorkerManager {
                     .table_from_id(&table_id)
                     .await
                     .map_err(to_meta_err(snafu::location!()))?;
+                let default_vals = table_schema
+                    .default_values
+                    .iter()
+                    .zip(table_schema.relation_desc.typ().column_types.iter())
+                    .map(|(v, ty)| {
+                        v.as_ref().and_then(|v| {
+                            match v.create_default(ty.scalar_type(), ty.nullable()) {
+                                Ok(v) => Some(v),
+                                Err(err) => {
+                                    common_telemetry::error!(err; "Failed to create default value");
+                                    None
+                                }
+                            }
+                        })
+                    })
+                    .collect_vec();
+
                 let table_types = table_schema
+                    .relation_desc
                     .typ()
                     .column_types
                     .clone()
                     .into_iter()
                     .map(|t| t.scalar_type)
                     .collect_vec();
-                let table_col_names = table_schema.names;
+                let table_col_names = table_schema.relation_desc.names;
                 let table_col_names = table_col_names
                     .iter().enumerate()
                     .map(|(idx,name)| match name {
@@ -202,31 +221,35 @@ impl Flownode for FlowWorkerManager {
                         .enumerate()
                         .map(|(i, name)| (&name.column_name, i)),
                 );
-                let fetch_order: Vec<usize> = table_col_names
+
+                let fetch_order: Vec<FetchFromRow> = table_col_names
                     .iter()
-                    .map(|col_name| {
+                    .zip(default_vals.into_iter())
+                    .map(|(col_name, col_default_val)| {
                         name_to_col
                             .get(col_name)
                             .copied()
+                            .map(FetchFromRow::Idx)
+                            .or_else(|| col_default_val.clone().map(FetchFromRow::Default))
                             .with_context(|| UnexpectedSnafu {
-                                err_msg: format!("Column not found: {}", col_name),
+                                err_msg: format!(
+                                    "Column not found: {}, default_value: {:?}",
+                                    col_name, col_default_val
+                                ),
                             })
                     })
                     .try_collect()?;
-                if !fetch_order.iter().enumerate().all(|(i, &v)| i == v) {
-                    trace!("Reordering columns: {:?}", fetch_order)
-                }
+
+                trace!("Reordering columns: {:?}", fetch_order);
                 (table_types, fetch_order)
             };
 
+            // TODO(discord9): use column instead of row
             let rows: Vec<DiffRow> = rows_proto
                 .into_iter()
                 .map(|r| {
                     let r = repr::Row::from(r);
-                    let reordered = fetch_order
-                        .iter()
-                        .map(|&i| r.inner[i].clone())
-                        .collect_vec();
+                    let reordered = fetch_order.iter().map(|i| i.fetch(&r)).collect_vec();
                     repr::Row::new(reordered)
                 })
                 .map(|r| (r, now, 1))
@@ -256,5 +279,22 @@ impl Flownode for FlowWorkerManager {
             }
         }
         Ok(Default::default())
+    }
+}
+
+/// Simple helper enum for fetching value from row with default value
+#[derive(Debug, Clone)]
+enum FetchFromRow {
+    Idx(usize),
+    Default(Value),
+}
+
+impl FetchFromRow {
+    /// Panic if idx is out of bound
+    fn fetch(&self, row: &repr::Row) -> Value {
+        match self {
+            FetchFromRow::Idx(idx) => row.get(*idx).unwrap().clone(),
+            FetchFromRow::Default(v) => v.clone(),
+        }
     }
 }
