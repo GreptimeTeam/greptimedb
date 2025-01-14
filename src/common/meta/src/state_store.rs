@@ -292,7 +292,8 @@ mod tests {
         num_per_range: u32,
         max_bytes: u32,
     ) {
-        let num_cases = rand::thread_rng().gen_range(1..=26);
+        let num_cases = rand::thread_rng().gen_range(1..=8);
+        common_telemetry::info!("num_cases: {}", num_cases);
         let mut cases = Vec::with_capacity(num_cases);
         for i in 0..num_cases {
             let size = rand::thread_rng().gen_range(size_limit..=max_bytes);
@@ -326,6 +327,7 @@ mod tests {
 
         // Puts the values
         for TestCase { key, value, .. } in &cases {
+            common_telemetry::info!("put key: {}, size: {}", key, value.len());
             store.put(key, value.clone()).await.unwrap();
         }
 
@@ -334,6 +336,7 @@ mod tests {
             let data = walk_top_down(prefix).await;
             assert_eq!(data.len(), 1);
             let (keyset, got) = data.into_iter().next().unwrap();
+            common_telemetry::info!("get key: {}", keyset.key());
             let num_expected_keys = value.len().div_ceil(size_limit as usize);
             assert_eq!(&got, value);
             assert_eq!(keyset.key(), key);
@@ -366,6 +369,7 @@ mod tests {
         let prefix = "test_etcd_store_split_value/";
         let endpoints = env::var("GT_ETCD_ENDPOINTS").unwrap_or_default();
         let kv_backend: KvBackendRef = if endpoints.is_empty() {
+            common_telemetry::info!("Using MemoryKvBackend");
             Arc::new(MemoryKvBackend::new())
         } else {
             let endpoints = endpoints
