@@ -148,7 +148,7 @@ SELECT b, a FROM test WHERE a < 13 ORDER BY b DESC;
 SELECT b % 2 AS f, SUM(a) FROM test GROUP BY f ORDER BY b % 2;
 
 +---+-------------+
-| f | SUM(test.a) |
+| f | sum(test.a) |
 +---+-------------+
 | 0 | 24          |
 | 1 | 12          |
@@ -167,7 +167,7 @@ SELECT b % 2 AS f, a FROM test ORDER BY b % 2, a;
 SELECT b % 2 AS f, SUM(a) FROM test GROUP BY f ORDER BY f;
 
 +---+-------------+
-| f | SUM(test.a) |
+| f | sum(test.a) |
 +---+-------------+
 | 0 | 24          |
 | 1 | 12          |
@@ -176,7 +176,7 @@ SELECT b % 2 AS f, SUM(a) FROM test GROUP BY f ORDER BY f;
 SELECT b % 2 AS f, SUM(a) FROM test GROUP BY f ORDER BY 1;
 
 +---+-------------+
-| f | SUM(test.a) |
+| f | sum(test.a) |
 +---+-------------+
 | 0 | 24          |
 | 1 | 12          |

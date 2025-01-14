@@ -56,36 +56,44 @@ Affected Rows: 0
 
 -- Append table
 create table count_where_bug (
-    tag String,
+    `tag` String,
     ts TimestampMillisecond time index,
     num Int64,
-    primary key (tag),
+    primary key (`tag`),
 ) engine=mito with('append_mode'='true');
 
-Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Cannot use keyword 'tag' as column name. Hint: add quotes to the name.
+Affected Rows: 0
 
-insert into count_where_bug (tag, ts, num)
+insert into count_where_bug (`tag`, ts, num)
 values  ('a', '2024-09-06T06:00:01Z', 1),
         ('a', '2024-09-06T06:00:02Z', 2),
         ('a', '2024-09-06T06:00:03Z', 3),
         ('b', '2024-09-06T06:00:04Z', 4),
         ('b', '2024-09-06T06:00:05Z', 5);
 
-Error: 4001(TableNotFound), Table not found: greptime.public.count_where_bug
+Affected Rows: 5
 
-select count(1) from count_where_bug where tag = 'b';
+select count(1) from count_where_bug where `tag` = 'b';
 
 Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.count_where_bug
 
 select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
 
-Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.count_where_bug
++-----------------+
+| count(Int64(1)) |
++-----------------+
+| 1               |
++-----------------+
 
 select count(1) from count_where_bug where num != 3;
 
-Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.count_where_bug
++-----------------+
+| count(Int64(1)) |
++-----------------+
+| 4               |
++-----------------+
 
 drop table count_where_bug;
 
-Error: 4001(TableNotFound), Table not found: greptime.public.count_where_bug
+Affected Rows: 0
 

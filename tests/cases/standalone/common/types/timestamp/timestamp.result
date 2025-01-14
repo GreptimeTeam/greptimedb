@@ -32,7 +32,7 @@ SELECT timestamp '    2017-07-23     13:10:11    ';
 
 SELECT timestamp '    2017-07-23     13:10:11    AA';
 
-Error: 3001(EngineExecuteQuery), Parser error: Invalid timezone "AA": 'AA' is not a valid timezone
+Error: 3001(EngineExecuteQuery), Parser error: Invalid timezone "AA": failed to parse timezone
 
 SELECT timestamp 'AA2017-07-23 13:10:11';
 
@@ -60,7 +60,7 @@ SELECT t FROM timestamp ORDER BY t;
 SELECT MIN(t) FROM timestamp;
 
 +---------------------+
-| MIN(timestamp.t)    |
+| min(timestamp.t)    |
 +---------------------+
 | 2007-01-01T00:00:01 |
 +---------------------+
@@ -68,22 +68,22 @@ SELECT MIN(t) FROM timestamp;
 SELECT MAX(t) FROM timestamp;
 
 +---------------------+
-| MAX(timestamp.t)    |
+| max(timestamp.t)    |
 +---------------------+
 | 2008-02-01T00:00:01 |
 +---------------------+
 
 SELECT SUM(t) FROM timestamp;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: User-defined coercion failed with Execution("Sum not supported for Timestamp(Millisecond, None)") and No function matches the given name and argument types 'SUM(Timestamp(Millisecond, None))'. You might need to add explicit type casts.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: User-defined coercion failed with Execution("Sum not supported for Timestamp(Millisecond, None)") No function matches the given name and argument types 'sum(Timestamp(Millisecond, None))'. You might need to add explicit type casts.
 	Candidate functions:
-	SUM(UserDefined)
+	sum(UserDefined)
 
 SELECT AVG(t) FROM timestamp;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: No function matches the given name and argument types 'AVG(Timestamp(Millisecond, None))'. You might need to add explicit type casts.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: User-defined coercion failed with Plan("The function \"avg\" does not support inputs of type Timestamp(Millisecond, None).") No function matches the given name and argument types 'avg(Timestamp(Millisecond, None))'. You might need to add explicit type casts.
 	Candidate functions:
-	AVG(Int8/Int16/Int32/Int64/UInt8/UInt16/UInt32/UInt64/Float32/Float64)
+	avg(UserDefined)
 
 SELECT t+t FROM timestamp;
 

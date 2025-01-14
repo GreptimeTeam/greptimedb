@@ -1,7 +1,7 @@
 SELECT SUM(number) FROM numbers;
 
 +---------------------+
-| SUM(numbers.number) |
+| sum(numbers.number) |
 +---------------------+
 | 4950                |
 +---------------------+
@@ -25,7 +25,7 @@ SELECT SUM(-1) FROM numbers;
 SELECT SUM(-1) FROM numbers WHERE number=-1;
 
 +----------------+
-| SUM(Int64(-1)) |
+| sum(Int64(-1)) |
 +----------------+
 |                |
 +----------------+
@@ -33,7 +33,7 @@ SELECT SUM(-1) FROM numbers WHERE number=-1;
 SELECT SUM(-1) FROM numbers WHERE number>10000 limit 1000;
 
 +----------------+
-| SUM(Int64(-1)) |
+| sum(Int64(-1)) |
 +----------------+
 |                |
 +----------------+
@@ -49,7 +49,7 @@ Affected Rows: 3
 SELECT SUM(b) FROM bigints;
 
 +----------------------+
-| SUM(bigints.b)       |
+| sum(bigints.b)       |
 +----------------------+
 | -9223372036854774807 |
 +----------------------+
@@ -65,7 +65,7 @@ Affected Rows: 4
 SELECT sum(n) from doubles;
 
 +--------------------+
-| SUM(doubles.n)     |
+| sum(doubles.n)     |
 +--------------------+
 | 9007199254740992.0 |
 +--------------------+
