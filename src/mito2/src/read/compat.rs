@@ -26,7 +26,7 @@ use store_api::storage::ColumnId;
 use crate::error::{CompatReaderSnafu, CreateDefaultSnafu, Result};
 use crate::read::projection::ProjectionMapper;
 use crate::read::{Batch, BatchColumn, BatchReader};
-use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyEncoder, SortField};
 
 /// Reader to adapt schema of underlying reader to expected schema.
 pub struct CompatReader<R> {
@@ -127,7 +127,7 @@ pub(crate) fn has_same_columns(left: &RegionMetadata, right: &RegionMetadata) ->
 #[derive(Debug)]
 struct CompatPrimaryKey {
     /// Row converter to append values to primary keys.
-    converter: McmpRowCodec,
+    converter: DensePrimaryKeyCodec,
     /// Default values to append.
     values: Vec<Value>,
 }
@@ -138,10 +138,10 @@ impl CompatPrimaryKey {
         let mut buffer =
             Vec::with_capacity(batch.primary_key().len() + self.converter.estimated_size());
         buffer.extend_from_slice(batch.primary_key());
-        self.converter.encode_to_vec(
-            self.values.iter().map(|value| value.as_value_ref()),
-            &mut buffer,
-        )?;
+        {
+            let mut encoder = self.converter.encoder(&mut buffer);
+            encoder.encode(self.values.iter().map(|value| value.as_value_ref()))?;
+        }
 
         batch.set_primary_key(buffer);
 
@@ -268,7 +268,7 @@ fn may_compat_primary_key(
             })?;
         values.push(default_value);
     }
-    let converter = McmpRowCodec::new(fields);
+    let converter = DensePrimaryKeyCodec::with_fields(fields);
 
     Ok(Some(CompatPrimaryKey { converter, values }))
 }
@@ -366,6 +366,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
+    use crate::row_converter::PrimaryKeyCodecExt;
     use crate::test_util::{check_reader_result, VecBatchReader};
 
     /// Creates a new [RegionMetadata].
@@ -400,7 +401,7 @@ mod tests {
         let fields = (0..keys.len())
             .map(|_| SortField::new(ConcreteDataType::string_datatype()))
             .collect();
-        let converter = McmpRowCodec::new(fields);
+        let converter = DensePrimaryKeyCodec::with_fields(fields);
         let row = keys.iter().map(|str_opt| match str_opt {
             Some(v) => ValueRef::String(v),
             None => ValueRef::Null,

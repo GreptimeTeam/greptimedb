@@ -19,6 +19,9 @@ use datatypes::value::ValueRef;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::SequenceNumber;
 
+use crate::error::Result;
+use crate::row_converter::PrimaryKeyEncoder;
+
 /// Key value view of a mutation.
 #[derive(Debug)]
 pub struct KeyValues {
@@ -146,6 +149,11 @@ pub struct KeyValue<'a> {
 }
 
 impl KeyValue<'_> {
+    // Encode primary key to a buffer.
+    pub fn encode_primary_key(&self, encoder: &mut impl PrimaryKeyEncoder) -> Result<()> {
+        encoder.encode(self.primary_keys())
+    }
+
     /// Get primary key columns.
     pub fn primary_keys(&self) -> impl Iterator<Item = ValueRef> {
         self.helper.indices[..self.helper.num_primary_key_column]

@@ -115,8 +115,9 @@ impl RegionOpener {
 
     /// Builds the region metadata.
     ///
-    /// Panics if `options` is not set.
-    /// Panics if `metadata_builder` is not set.
+    /// # Panics
+    /// - Panics if `options` is not set.
+    /// - Panics if `metadata_builder` is not set.
     pub(crate) fn build_metadata(&mut self) -> Result<RegionMetadata> {
         let options = self.options.as_ref().unwrap();
         let mut metadata_builder = self.metadata_builder.take().unwrap();

@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum PrimaryKeyEncoding {
     #[default]
-    /// Full primary key encoding.
-    Full,
+    /// Dense primary key encoding.
+    Dense,
     /// Sparse primary key encoding.
     Sparse,
 }

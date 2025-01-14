@@ -318,7 +318,7 @@ mod tests {
     use crate::cache::index::inverted_index::InvertedIndexCache;
     use crate::metrics::CACHE_BYTES;
     use crate::read::BatchColumn;
-    use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+    use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
     use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
     use crate::sst::location;
@@ -384,7 +384,7 @@ mod tests {
             SortField::new(ConcreteDataType::string_datatype()),
             SortField::new(ConcreteDataType::int32_datatype()),
         ];
-        let codec = McmpRowCodec::new(fields);
+        let codec = DensePrimaryKeyCodec::with_fields(fields);
         let row: [ValueRef; 2] = [str_tag.as_ref().into(), i32_tag.into().into()];
         let primary_key = codec.encode(row.into_iter()).unwrap();
 

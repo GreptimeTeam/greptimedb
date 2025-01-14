@@ -338,7 +338,7 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::read::BatchColumn;
-    use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+    use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
     pub fn mock_object_store() -> ObjectStore {
@@ -412,7 +412,7 @@ pub(crate) mod tests {
 
     pub fn new_batch(str_tag: impl AsRef<str>, u64_field: impl IntoIterator<Item = u64>) -> Batch {
         let fields = vec![SortField::new(ConcreteDataType::string_datatype())];
-        let codec = McmpRowCodec::new(fields);
+        let codec = DensePrimaryKeyCodec::with_fields(fields);
         let row: [ValueRef; 1] = [str_tag.as_ref().into()];
         let primary_key = codec.encode(row.into_iter()).unwrap();
 

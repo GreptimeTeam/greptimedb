@@ -48,7 +48,7 @@ use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::BulkPartIter;
 use crate::memtable::key_values::KeyValuesRef;
 use crate::memtable::BoxedBatchIterator;
-use crate::row_converter::{McmpRowCodec, RowCodec};
+use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt};
 use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::to_sst_arrow_schema;
@@ -103,7 +103,7 @@ pub struct BulkPartMeta {
 
 pub struct BulkPartEncoder {
     metadata: RegionMetadataRef,
-    pk_encoder: McmpRowCodec,
+    pk_encoder: DensePrimaryKeyCodec,
     row_group_size: usize,
     dedup: bool,
     writer_props: Option<WriterProperties>,
@@ -115,7 +115,7 @@ impl BulkPartEncoder {
         dedup: bool,
         row_group_size: usize,
     ) -> BulkPartEncoder {
-        let codec = McmpRowCodec::new_with_primary_keys(&metadata);
+        let codec = DensePrimaryKeyCodec::new(&metadata);
         let writer_props = Some(
             WriterProperties::builder()
                 .set_write_batch_size(row_group_size)
@@ -174,7 +174,7 @@ impl BulkPartEncoder {
 fn mutations_to_record_batch(
     mutations: &[Mutation],
     metadata: &RegionMetadataRef,
-    pk_encoder: &McmpRowCodec,
+    pk_encoder: &DensePrimaryKeyCodec,
     dedup: bool,
 ) -> Result<Option<(RecordBatch, i64, i64)>> {
     let total_rows: usize = mutations
@@ -538,7 +538,7 @@ mod tests {
             .map(|r| r.rows.len())
             .sum();
 
-        let pk_encoder = McmpRowCodec::new_with_primary_keys(&metadata);
+        let pk_encoder = DensePrimaryKeyCodec::new(&metadata);
 
         let (batch, _, _) = mutations_to_record_batch(&mutations, &metadata, &pk_encoder, dedup)
             .unwrap()
@@ -557,7 +557,7 @@ mod tests {
         let batch_values = batches
             .into_iter()
             .map(|b| {
-                let pk_values = pk_encoder.decode(b.primary_key()).unwrap();
+                let pk_values = pk_encoder.decode_dense(b.primary_key()).unwrap();
                 let timestamps = b
                     .timestamps()
                     .as_any()

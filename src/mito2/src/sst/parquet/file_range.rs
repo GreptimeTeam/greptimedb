@@ -33,7 +33,7 @@ use crate::read::compat::CompatBatch;
 use crate::read::last_row::RowGroupLastRowCachedReader;
 use crate::read::prune::PruneReader;
 use crate::read::Batch;
-use crate::row_converter::{McmpRowCodec, RowCodec};
+use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext};
@@ -156,7 +156,7 @@ impl FileRangeContext {
         reader_builder: RowGroupReaderBuilder,
         filters: Vec<SimpleFilterContext>,
         read_format: ReadFormat,
-        codec: McmpRowCodec,
+        codec: DensePrimaryKeyCodec,
     ) -> Self {
         Self {
             reader_builder,
@@ -241,7 +241,7 @@ pub(crate) struct RangeBase {
     /// Helper to read the SST.
     pub(crate) read_format: ReadFormat,
     /// Decoder for primary keys
-    pub(crate) codec: McmpRowCodec,
+    pub(crate) codec: DensePrimaryKeyCodec,
     /// Optional helper to compat batches.
     pub(crate) compat_batch: Option<CompatBatch>,
 }

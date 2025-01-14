@@ -334,7 +334,7 @@ impl MemtableOptions {
     pub fn primary_key_encoding(&self) -> PrimaryKeyEncoding {
         match self {
             MemtableOptions::PartitionTree(opts) => opts.primary_key_encoding,
-            _ => PrimaryKeyEncoding::Full,
+            _ => PrimaryKeyEncoding::Dense,
         }
     }
 }
@@ -372,7 +372,7 @@ impl Default for PartitionTreeOptions {
             index_max_keys_per_shard: DEFAULT_MAX_KEYS_PER_SHARD,
             data_freeze_threshold: DEFAULT_FREEZE_THRESHOLD,
             fork_dictionary_bytes,
-            primary_key_encoding: PrimaryKeyEncoding::Full,
+            primary_key_encoding: PrimaryKeyEncoding::Dense,
         }
     }
 }
@@ -667,7 +667,7 @@ mod tests {
                 index_max_keys_per_shard: 2048,
                 data_freeze_threshold: 2048,
                 fork_dictionary_bytes: ReadableSize::mb(128),
-                primary_key_encoding: PrimaryKeyEncoding::Full,
+                primary_key_encoding: PrimaryKeyEncoding::Dense,
             })),
             merge_mode: Some(MergeMode::LastNonNull),
         };
@@ -703,7 +703,7 @@ mod tests {
                 index_max_keys_per_shard: 2048,
                 data_freeze_threshold: 2048,
                 fork_dictionary_bytes: ReadableSize::mb(128),
-                primary_key_encoding: PrimaryKeyEncoding::Full,
+                primary_key_encoding: PrimaryKeyEncoding::Dense,
             })),
             merge_mode: Some(MergeMode::LastNonNull),
         };
@@ -772,7 +772,7 @@ mod tests {
                 index_max_keys_per_shard: 2048,
                 data_freeze_threshold: 2048,
                 fork_dictionary_bytes: ReadableSize::mb(128),
-                primary_key_encoding: PrimaryKeyEncoding::Full,
+                primary_key_encoding: PrimaryKeyEncoding::Dense,
             })),
             merge_mode: Some(MergeMode::LastNonNull),
         };

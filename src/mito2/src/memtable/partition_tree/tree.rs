@@ -43,16 +43,16 @@ use crate::metrics::{PARTITION_TREE_READ_STAGE_ELAPSED, READ_ROWS_TOTAL, READ_ST
 use crate::read::dedup::LastNonNullIter;
 use crate::read::Batch;
 use crate::region::options::MergeMode;
-use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+use crate::row_converter::{PrimaryKeyCodec, PrimaryKeyFilterFactory, SortField};
 
 /// The partition tree.
-pub struct PartitionTree {
+pub struct PartitionTree<T: for<'a, 'b> PrimaryKeyCodec<'a, 'b>> {
     /// Config of the tree.
     config: PartitionTreeConfig,
     /// Metadata of the region.
     pub(crate) metadata: RegionMetadataRef,
     /// Primary key codec.
-    row_codec: Arc<McmpRowCodec>,
+    row_codec: Arc<T>,
     /// Partitions in the tree.
     partitions: RwLock<BTreeMap<PartitionKey, PartitionRef>>,
     /// Whether the tree has multiple partitions.
@@ -62,19 +62,14 @@ pub struct PartitionTree {
     sparse_encoder: Arc<SparseEncoder>,
 }
 
-impl PartitionTree {
+impl<T: for<'a, 'b> PrimaryKeyCodec<'a, 'b>> PartitionTree<T> {
     /// Creates a new partition tree.
     pub fn new(
+        row_codec: Arc<T>,
         metadata: RegionMetadataRef,
         config: &PartitionTreeConfig,
         write_buffer_manager: Option<WriteBufferManagerRef>,
-    ) -> PartitionTree {
-        let row_codec = McmpRowCodec::new(
-            metadata
-                .primary_key_columns()
-                .map(|c| SortField::new(c.column_schema.data_type.clone()))
-                .collect(),
-        );
+    ) -> PartitionTree<T> {
         let sparse_encoder = SparseEncoder {
             fields: metadata
                 .primary_key_columns()
@@ -93,7 +88,7 @@ impl PartitionTree {
         PartitionTree {
             config,
             metadata,
-            row_codec: Arc::new(row_codec),
+            row_codec,
             partitions: Default::default(),
             is_partitioned,
             write_buffer_manager,
@@ -141,7 +136,8 @@ impl PartitionTree {
                 self.sparse_encoder
                     .encode_to_vec(kv.primary_keys(), pk_buffer)?;
             } else {
-                self.row_codec.encode_to_vec(kv.primary_keys(), pk_buffer)?;
+                let mut encoder = self.row_codec.encoder(pk_buffer);
+                kv.encode_primary_key(&mut encoder)?;
             }
 
             // Write rows with
@@ -191,7 +187,8 @@ impl PartitionTree {
             self.sparse_encoder
                 .encode_to_vec(kv.primary_keys(), pk_buffer)?;
         } else {
-            self.row_codec.encode_to_vec(kv.primary_keys(), pk_buffer)?;
+            let mut encoder = self.row_codec.encoder(pk_buffer);
+            kv.encode_primary_key(&mut encoder)?;
         }
 
         // Write rows with
@@ -229,14 +226,14 @@ impl PartitionTree {
         let mut tree_iter_metric = TreeIterMetrics::default();
         let partitions = self.prune_partitions(&filters, &mut tree_iter_metric);
 
-        let mut iter = TreeIter {
+        let mut iter = TreeIter::<T::FilterFactory> {
             partitions,
             current_reader: None,
             metrics: tree_iter_metric,
         };
         let context = ReadPartitionContext::new(
             self.metadata.clone(),
-            self.row_codec.clone(),
+            |metadata, filters| self.row_codec.primary_key_filter_factory(metadata, filters),
             projection,
             filters,
         );
@@ -273,12 +270,17 @@ impl PartitionTree {
 
     /// Forks an immutable tree. Returns a mutable tree that inherits the index
     /// of this tree.
-    pub fn fork(&self, metadata: RegionMetadataRef) -> PartitionTree {
+    pub fn fork(&self, metadata: RegionMetadataRef) -> PartitionTree<T> {
         if self.metadata.schema_version != metadata.schema_version
             || self.metadata.column_metadatas != metadata.column_metadatas
         {
             // The schema has changed, we can't reuse the tree.
-            return PartitionTree::new(metadata, &self.config, self.write_buffer_manager.clone());
+            return PartitionTree::new(
+                self.row_codec.clone(),
+                metadata,
+                &self.config,
+                self.write_buffer_manager.clone(),
+            );
         }
 
         let mut total_shared_size = 0;
@@ -353,7 +355,7 @@ impl PartitionTree {
 
         partition.write_with_key(
             primary_key,
-            &self.row_codec,
+            self.row_codec.as_ref(),
             key_value,
             self.is_partitioned, // If tree is partitioned, re-encode is required to get the full primary key.
             metrics,
@@ -450,13 +452,13 @@ struct TreeIterMetrics {
     partitions_after_pruning: usize,
 }
 
-struct TreeIter {
+struct TreeIter<T: PrimaryKeyFilterFactory> {
     partitions: VecDeque<PartitionRef>,
-    current_reader: Option<PartitionReader>,
+    current_reader: Option<PartitionReader<T>>,
     metrics: TreeIterMetrics,
 }
 
-impl Drop for TreeIter {
+impl<T: PrimaryKeyFilterFactory> Drop for TreeIter<T> {
     fn drop(&mut self) {
         READ_ROWS_TOTAL
             .with_label_values(&["partition_tree_memtable"])
@@ -479,7 +481,7 @@ impl Drop for TreeIter {
     }
 }
 
-impl Iterator for TreeIter {
+impl<T: PrimaryKeyFilterFactory> Iterator for TreeIter<T> {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -490,9 +492,9 @@ impl Iterator for TreeIter {
     }
 }
 
-impl TreeIter {
+impl<T: PrimaryKeyFilterFactory> TreeIter<T> {
     /// Fetch next partition.
-    fn fetch_next_partition(&mut self, mut context: ReadPartitionContext) -> Result<()> {
+    fn fetch_next_partition(&mut self, mut context: ReadPartitionContext<T>) -> Result<()> {
         let start = Instant::now();
         while let Some(partition) = self.partitions.pop_front() {
             let part_reader = partition.read(context)?;
