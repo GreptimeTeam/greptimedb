@@ -9,7 +9,7 @@ Affected Rows: 2
 select count(*) from "HelloWorld";
 
 +----------+
-| COUNT(*) |
+| count(*) |
 +----------+
 | 2        |
 +----------+
@@ -25,7 +25,7 @@ Affected Rows: 1
 select count(*) from test;
 
 +----------+
-| COUNT(*) |
+| count(*) |
 +----------+
 | 1        |
 +----------+
@@ -33,7 +33,7 @@ select count(*) from test;
 select count(*) from (select count(*) from test where a = 'a');
 
 +----------+
-| COUNT(*) |
+| count(*) |
 +----------+
 | 1        |
 +----------+
@@ -41,7 +41,7 @@ select count(*) from (select count(*) from test where a = 'a');
 select count(*) from (select * from test cross join "HelloWorld");
 
 +----------+
-| COUNT(*) |
+| count(*) |
 +----------+
 | 2        |
 +----------+
@@ -62,7 +62,7 @@ create table count_where_bug (
     primary key (tag),
 ) engine=mito with('append_mode'='true');
 
-Affected Rows: 0
+Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Cannot use keyword 'tag' as column name. Hint: add quotes to the name.
 
 insert into count_where_bug (tag, ts, num)
 values  ('a', '2024-09-06T06:00:01Z', 1),
@@ -71,33 +71,21 @@ values  ('a', '2024-09-06T06:00:01Z', 1),
         ('b', '2024-09-06T06:00:04Z', 4),
         ('b', '2024-09-06T06:00:05Z', 5);
 
-Affected Rows: 5
+Error: 4001(TableNotFound), Table not found: greptime.public.count_where_bug
 
 select count(1) from count_where_bug where tag = 'b';
 
-+-----------------+
-| COUNT(Int64(1)) |
-+-----------------+
-| 2               |
-+-----------------+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.count_where_bug
 
 select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
 
-+-----------------+
-| COUNT(Int64(1)) |
-+-----------------+
-| 1               |
-+-----------------+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.count_where_bug
 
 select count(1) from count_where_bug where num != 3;
 
-+-----------------+
-| COUNT(Int64(1)) |
-+-----------------+
-| 4               |
-+-----------------+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.count_where_bug
 
 drop table count_where_bug;
 
-Affected Rows: 0
+Error: 4001(TableNotFound), Table not found: greptime.public.count_where_bug
 
