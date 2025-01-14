@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 use api::v1::region::{region_request, CreateRequests, RegionRequest, RegionRequestHeader};
+use common_telemetry::debug;
 use common_telemetry::tracing_context::TracingContext;
 use store_api::storage::RegionId;
 
@@ -56,6 +57,7 @@ impl CreateLogicalTablesProcedure {
         }
 
         if requests.is_empty() {
+            debug!("no region request to send to datanodes");
             return Ok(None);
         }
 
