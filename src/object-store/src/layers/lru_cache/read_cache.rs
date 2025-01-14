@@ -169,6 +169,10 @@ impl<C: Access> ReadCache<C> {
             .await?;
 
         while let Some((read_key, metadata)) = entries.pop() {
+            if !metadata.is_file() {
+                continue;
+            }
+
             let size = metadata.content_length();
             OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
             OBJECT_STORE_LRU_CACHE_BYTES.add(size as i64);
