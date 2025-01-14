@@ -136,9 +136,10 @@ fn parse_string_to_value(
             let v = parse_string_to_vector_type_value(&s, Some(d.dim)).context(DatatypeSnafu)?;
             Ok(Value::Binary(v.into()))
         }
-        _ => {
-            unreachable!()
+        _ => ParseSqlValueSnafu {
+            msg: format!("Failed to parse {s} to {data_type} value"),
         }
+        .fail(),
     }
 }
 
@@ -439,7 +440,13 @@ fn parse_column_default_constraint(
                 }
                 .fail();
             }
-            _ => unreachable!(),
+            _ => {
+                return UnsupportedDefaultValueSnafu {
+                    column_name,
+                    expr: Expr::Value(SqlValue::Null),
+                }
+                .fail();
+            }
         };
 
         Ok(Some(default_constraint))
@@ -689,9 +696,10 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
         ConcreteDataType::Duration(_)
         | ConcreteDataType::Null(_)
         | ConcreteDataType::List(_)
-        | ConcreteDataType::Dictionary(_) => {
-            unreachable!()
+        | ConcreteDataType::Dictionary(_) => error::ConcreteTypeNotSupportedSnafu {
+            t: data_type.clone(),
         }
+        .fail(),
     }
 }
 
