@@ -36,6 +36,7 @@ use crate::expr::{AggregateFunc, EvalError};
 use crate::repr::Diff;
 
 /// Accumulates values for the various types of accumulable aggregations.
+/// TODO(discord9): refactor it to be more like datafusion's Accumulator
 #[enum_dispatch]
 pub trait Accumulator: Sized {
     fn into_state(self) -> Vec<Value>;
