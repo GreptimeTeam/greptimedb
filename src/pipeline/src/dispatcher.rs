@@ -42,10 +42,10 @@ use crate::{
 ///
 /// If none of the rules match the value, this pipeline will continue to process
 /// current log entry
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct Dispatcher {
-    field: String,
-    rules: Vec<Rule>,
+    pub field: String,
+    pub rules: Vec<Rule>,
 }
 
 /// The rule definition for dispatcher
@@ -55,11 +55,11 @@ pub(crate) struct Dispatcher {
 ///   `greptime_identity`
 /// - `table_part`: the table name segment that we use to construct full table
 ///   name
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct Rule {
-    value: Value,
-    table_part: String,
-    pipeline: Option<String>,
+    pub value: Value,
+    pub table_part: String,
+    pub pipeline: Option<String>,
 }
 
 impl TryFrom<&Yaml> for Dispatcher {

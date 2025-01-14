@@ -153,7 +153,7 @@ where
 
             let transformer = T::new(transformers)?;
 
-            let dispatcher = if !doc[DISPATCHER].is_null() {
+            let dispatcher = if !doc[DISPATCHER].is_badvalue() {
                 Some(Dispatcher::try_from(&doc[DISPATCHER])?)
             } else {
                 None
@@ -586,6 +586,53 @@ transform:
                 1400301296000000000
             )),
             value_data
+        );
+    }
+
+    #[test]
+    fn test_dispatcher() {
+        let pipeline_yaml = r#"
+---
+description: Pipeline for Apache Tomcat
+
+processors:
+
+dispatcher:
+  field: typename
+  rules:
+    - value: http
+      table_part: http_events
+    - value: database
+      table_part: db_events
+      pipeline: database_pipeline
+
+transform:
+  - field: typename
+    type: string
+
+"#;
+        let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let dispatcher = pipeline.dispatcher.expect("expect dispatcher");
+        assert_eq!(dispatcher.field, "typename");
+
+        assert_eq!(dispatcher.rules.len(), 2);
+
+        assert_eq!(
+            dispatcher.rules[0],
+            crate::dispatcher::Rule {
+                value: Value::String("http".to_string()),
+                table_part: "http_events".to_string(),
+                pipeline: None
+            }
+        );
+
+        assert_eq!(
+            dispatcher.rules[1],
+            crate::dispatcher::Rule {
+                value: Value::String("database".to_string()),
+                table_part: "db_events".to_string(),
+                pipeline: Some("database_pipeline".to_string()),
+            }
         );
     }
 }
