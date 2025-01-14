@@ -16,7 +16,7 @@ Affected Rows: 0
 SELECT * FROM v1;
 
 +-------------------------+
-| i                       |
+| j                       |
 +-------------------------+
 | 1970-01-01T00:00:00.041 |
 | 1970-01-01T00:00:00.042 |
@@ -26,7 +26,11 @@ SELECT * FROM v1;
 -- https://github.com/apache/datafusion/issues/6489 --
 SELECT j FROM v1 WHERE j > 41;
 
-Error: 3000(PlanQuery), Failed to plan SQL: No field named j. Valid fields are v1.i.
++-------------------------+
+| j                       |
++-------------------------+
+| 1970-01-01T00:00:00.042 |
++-------------------------+
 
 SELECT x FROM v1 t1(x) WHERE x > 41;
 
