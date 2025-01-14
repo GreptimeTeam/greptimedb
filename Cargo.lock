@@ -3949,6 +3949,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "common-version",
+ "config",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",

@@ -54,7 +54,7 @@ use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, Sto
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::region_server::RegionServer;
 use file_engine::config::EngineConfig as FileEngineConfig;
-use flow::{FlowWorkerManager, FlownodeBuilder, FrontendInvoker};
+use flow::{FlowConfig, FlowWorkerManager, FlownodeBuilder, FlownodeOptions, FrontendInvoker};
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
@@ -145,6 +145,7 @@ pub struct StandaloneOptions {
     pub storage: StorageConfig,
     pub metadata_store: KvBackendConfig,
     pub procedure: ProcedureConfig,
+    pub flow: FlowConfig,
     pub logging: LoggingOptions,
     pub user_provider: Option<String>,
     /// Options for different store engines.
@@ -173,6 +174,7 @@ impl Default for StandaloneOptions {
             storage: StorageConfig::default(),
             metadata_store: KvBackendConfig::default(),
             procedure: ProcedureConfig::default(),
+            flow: FlowConfig::default(),
             logging: LoggingOptions::default(),
             export_metrics: ExportMetricsOption::default(),
             user_provider: None,
@@ -523,8 +525,12 @@ impl StartCommand {
             Self::create_table_metadata_manager(kv_backend.clone()).await?;
 
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
+        let flownode_options = FlownodeOptions {
+            flow: opts.flow.clone(),
+            ..Default::default()
+        };
         let flow_builder = FlownodeBuilder::new(
-            Default::default(),
+            flownode_options,
             plugins.clone(),
             table_metadata_manager.clone(),
             catalog_manager.clone(),

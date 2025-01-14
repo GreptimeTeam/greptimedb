@@ -284,6 +284,12 @@ max_retry_times = 3
 ## Initial retry delay of procedures, increases exponentially
 retry_delay = "500ms"
 
+## flow engine options.
+[flow]
+## The number of flow worker in flownode.
+## Not setting(or set to 0) this value will use the number of CPU cores divided by 2.
+#+num_workers=0
+
 # Example of using S3 as the storage.
 # [storage]
 # type = "S3"

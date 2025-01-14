@@ -28,12 +28,28 @@ use snafu::{OptionExt, ResultExt};
 use table::table_reference::TableReference;
 
 use crate::adapter::table_source::TableDesc;
-use crate::adapter::{TableName, AUTO_CREATED_PLACEHOLDER_TS_COL};
+use crate::adapter::{TableName, WorkerHandle, AUTO_CREATED_PLACEHOLDER_TS_COL};
 use crate::error::{Error, ExternalSnafu, UnexpectedSnafu};
 use crate::repr::{ColumnType, RelationDesc, RelationType};
 use crate::FlowWorkerManager;
 
 impl FlowWorkerManager {
+    /// Get a worker handle for creating flow, using round robin to select a worker
+    pub(crate) async fn get_worker_handle_for_create_flow(
+        &self,
+    ) -> tokio::sync::MutexGuard<WorkerHandle> {
+        let mut selector = self.worker_selector.lock().await;
+
+        *selector += 1;
+        if *selector >= self.worker_handles.len() {
+            *selector = 0
+        };
+
+        // Safety: selector is always in bound
+        let handle = &self.worker_handles[*selector];
+        handle.lock().await
+    }
+
     /// Create table from given schema(will adjust to add auto column if needed), return true if table is created
     pub(crate) async fn create_table_from_relation(
         &self,

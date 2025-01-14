@@ -91,6 +91,8 @@
 | `procedure` | -- | -- | Procedure storage options. |
 | `procedure.max_retry_times` | Integer | `3` | Procedure max retry time. |
 | `procedure.retry_delay` | String | `500ms` | Initial retry delay of procedures, increases exponentially |
+| `flow` | -- | -- | flow engine options. |
+| `flow.num_workers` | Integer | `0` | The number of flow worker in flownode.<br/>Not setting(or set to 0) this value will use the number of CPU cores divided by 2. |
 | `storage` | -- | -- | The data storage options. |
 | `storage.data_home` | String | `/tmp/greptimedb/` | The working home directory. |
 | `storage.type` | String | `File` | The storage type used to store the data.<br/>- `File`: the data is stored in the local file system.<br/>- `S3`: the data is stored in the S3 object storage.<br/>- `Gcs`: the data is stored in the Google Cloud Storage.<br/>- `Azblob`: the data is stored in the Azure Blob Storage.<br/>- `Oss`: the data is stored in the Aliyun OSS. |
@@ -536,6 +538,8 @@
 | --- | -----| ------- | ----------- |
 | `mode` | String | `distributed` | The running mode of the flownode. It can be `standalone` or `distributed`. |
 | `node_id` | Integer | Unset | The flownode identifier and should be unique in the cluster. |
+| `flow` | -- | -- | flow engine options. |
+| `flow.num_workers` | Integer | `0` | The number of flow worker in flownode.<br/>Not setting(or set to 0) this value will use the number of CPU cores divided by 2. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.addr` | String | `127.0.0.1:6800` | The address to bind the gRPC server. |
 | `grpc.hostname` | String | `127.0.0.1` | The hostname advertised to the metasrv,<br/>and used for connections from outside the host |
