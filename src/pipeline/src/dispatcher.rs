@@ -15,7 +15,6 @@
 use snafu::OptionExt;
 use yaml_rust::Yaml;
 
-use crate::etl::error::{Error, Result};
 use crate::etl_error::{
     FieldRequiredForDispatcherSnafu, TablePartRequiredForDispatcherRuleSnafu,
     ValueRequiredForDispatcherRuleSnafu,
