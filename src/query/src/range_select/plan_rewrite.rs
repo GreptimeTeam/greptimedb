@@ -47,6 +47,7 @@ use crate::error::{
     CatalogSnafu, DataFusionSnafu, RangeQuerySnafu, Result, TimeIndexNotFoundSnafu,
     UnknownTableSnafu,
 };
+use crate::plan::ExtractExpr;
 use crate::range_select::plan::{RangeFn, RangeSelect};
 
 /// `RangeExprRewriter` will recursively search certain `Expr`, find all `range_fn` scalar udf contained in `Expr`,
@@ -452,7 +453,7 @@ impl RangePlanRewriter {
                                 .context(DataFusionSnafu)?
                                 .build()
                         }
-                        _ => plan.with_new_exprs(plan.expressions(), inputs),
+                        _ => plan.with_new_exprs(plan.expressions_consider_join(), inputs),
                     }
                     .context(DataFusionSnafu)?;
                     Ok(Some(plan))

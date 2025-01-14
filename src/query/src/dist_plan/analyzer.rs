@@ -33,6 +33,7 @@ use crate::dist_plan::commutativity::{
     partial_commutative_transformer, Categorizer, Commutativity,
 };
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
+use crate::plan::ExtractExpr;
 use crate::query_engine::DefaultSerializer;
 
 #[derive(Debug)]
@@ -65,7 +66,7 @@ impl AnalyzerRule for DistPlannerAnalyzer {
 impl DistPlannerAnalyzer {
     fn inspect_plan_with_subquery(plan: LogicalPlan) -> DfResult<Transformed<LogicalPlan>> {
         let exprs = plan
-            .expressions()
+            .expressions_consider_join()
             .into_iter()
             .map(|e| e.transform(&Self::transform_subquery).map(|x| x.data))
             .collect::<DfResult<Vec<_>>>()?;
@@ -268,7 +269,8 @@ impl PlanRewriter {
 
         // expand stages
         for new_stage in self.stage.drain(..) {
-            node = new_stage.with_new_exprs(new_stage.expressions(), vec![node.clone()])?;
+            node = new_stage
+                .with_new_exprs(new_stage.expressions_consider_join(), vec![node.clone()])?;
         }
         self.set_expanded();
 

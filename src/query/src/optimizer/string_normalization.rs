@@ -20,6 +20,8 @@ use datafusion_common::{Result, ScalarValue};
 use datafusion_expr::{Expr, LogicalPlan};
 use datafusion_optimizer::analyzer::AnalyzerRule;
 
+use crate::plan::ExtractExpr;
+
 /// StringNormalizationRule normalizes(trims) string values in logical plan.
 /// Mainly used for timestamp trimming
 #[derive(Debug)]
@@ -31,7 +33,7 @@ impl AnalyzerRule for StringNormalizationRule {
             let mut converter = StringNormalizationConverter;
             let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
             let expr = plan
-                .expressions()
+                .expressions_consider_join()
                 .into_iter()
                 .map(|e| e.rewrite(&mut converter).map(|x| x.data))
                 .collect::<Result<Vec<_>>>()?;

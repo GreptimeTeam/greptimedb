@@ -26,6 +26,7 @@ use datatypes::arrow::datatypes::DataType;
 use session::context::QueryContextRef;
 
 use crate::optimizer::ExtensionAnalyzerRule;
+use crate::plan::ExtractExpr;
 use crate::QueryEngineContext;
 
 /// TypeConversionRule converts some literal values in logical plan to other types according
@@ -97,7 +98,7 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
                 };
                 let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
                 let expr = plan
-                    .expressions()
+                    .expressions_consider_join()
                     .into_iter()
                     .map(|e| e.rewrite(&mut converter).map(|x| x.data))
                     .collect::<Result<Vec<_>>>()?;
