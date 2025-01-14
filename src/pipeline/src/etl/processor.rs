@@ -247,7 +247,7 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorBuilders> {
         .get(key)
         .unwrap()
         .as_hash()
-        .expect("processor value must be a map");
+        .context(ProcessorMustBeMapSnafu)?;
 
     let str_key = key.as_str().context(ProcessorKeyMustBeStringSnafu)?;
 
