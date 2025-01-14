@@ -26,7 +26,7 @@ use store_api::storage::ColumnId;
 use crate::error::{CompatReaderSnafu, CreateDefaultSnafu, Result};
 use crate::read::projection::ProjectionMapper;
 use crate::read::{Batch, BatchColumn, BatchReader};
-use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyEncoder, SortField};
+use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, SortField};
 
 /// Reader to adapt schema of underlying reader to expected schema.
 pub struct CompatReader<R> {
@@ -138,10 +138,7 @@ impl CompatPrimaryKey {
         let mut buffer =
             Vec::with_capacity(batch.primary_key().len() + self.converter.estimated_size());
         buffer.extend_from_slice(batch.primary_key());
-        {
-            let mut encoder = self.converter.encoder(&mut buffer);
-            encoder.encode(self.values.iter().map(|value| value.as_value_ref()))?;
-        }
+        self.converter.encode_values(&self.values, &mut buffer)?;
 
         batch.set_primary_key(buffer);
 

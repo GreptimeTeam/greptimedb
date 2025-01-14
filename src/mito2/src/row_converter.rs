@@ -14,6 +14,8 @@
 
 mod dense;
 
+use std::sync::Arc;
+
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::value::{Value, ValueRef};
 pub use dense::{DensePrimaryKeyCodec, SortField};
@@ -21,6 +23,7 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 
 use crate::error::Result;
+use crate::memtable::key_values::KeyValue;
 
 /// Row value encoder/decoder.
 pub trait PrimaryKeyCodecExt {
@@ -47,34 +50,27 @@ pub trait PrimaryKeyCodecExt {
     fn decode(&self, bytes: &[u8]) -> Result<Vec<Value>>;
 }
 
-pub trait PrimaryKeyFilterFactory: Send + Sync {
-    type Filter: PrimaryKeyFilter + 'static;
-
-    /// Builds a new primary key filter.
-    fn build(&self) -> Self::Filter;
-}
-
 pub trait PrimaryKeyFilter: Send + Sync {
     /// Returns true if need to prune the primary key.
     fn prune_primary_key(&mut self, pk: &[u8]) -> bool;
 }
 
-pub trait PrimaryKeyCodec<'a, 'b>: Send + Sync {
-    type Encoder: PrimaryKeyEncoder;
-    type FilterFactory: PrimaryKeyFilterFactory + 'static;
+pub trait PrimaryKeyCodec: Send + Sync {
+    /// Encodes a key value to bytes.
+    fn encode_key_value(&self, key_value: &KeyValue, buffer: &mut Vec<u8>) -> Result<()>;
 
-    /// Returns a primary key encoder.
-    fn encoder(&'a self, buf: &'b mut Vec<u8>) -> Self::Encoder;
+    /// Encodes values to bytes.
+    fn encode_values(&self, values: &[Value], buffer: &mut Vec<u8>) -> Result<()>;
 
     /// Returns the number of fields in the primary key.
     fn num_fields(&self) -> usize;
 
     /// Returns a primary key filter factory.
-    fn primary_key_filter_factory(
-        &'a self,
+    fn primary_key_filter(
+        &self,
         metadata: &RegionMetadataRef,
-        filters: Vec<SimpleFilterEvaluator>,
-    ) -> Self::FilterFactory;
+        filters: Arc<Vec<SimpleFilterEvaluator>>,
+    ) -> Box<dyn PrimaryKeyFilter>;
 
     /// Returns the estimated size of the primary key.
     fn estimated_size(&self) -> Option<usize> {
@@ -91,11 +87,4 @@ pub trait PrimaryKeyCodec<'a, 'b>: Send + Sync {
 
     /// Decode the leftmost value from bytes.
     fn decode_leftmost(&self, bytes: &[u8]) -> Result<Option<Value>>;
-}
-
-/// Primary key encoder.
-pub trait PrimaryKeyEncoder {
-    fn encode<'a, I>(&mut self, row: I) -> Result<()>
-    where
-        I: Iterator<Item = ValueRef<'a>>;
 }

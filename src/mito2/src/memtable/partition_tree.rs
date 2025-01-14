@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
-pub(crate) use partition::DensePrimaryKeyFilterFactory;
+pub(crate) use partition::DensePrimaryKeyFilter;
 use serde::{Deserialize, Serialize};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
@@ -110,9 +110,9 @@ impl Default for PartitionTreeConfig {
 }
 
 /// Memtable based on a partition tree.
-pub struct PartitionTreeMemtable<T: for<'a, 'b> PrimaryKeyCodec<'a, 'b>> {
+pub struct PartitionTreeMemtable {
     id: MemtableId,
-    tree: Arc<PartitionTree<T>>,
+    tree: Arc<PartitionTree>,
     alloc_tracker: AllocTracker,
     max_timestamp: AtomicI64,
     min_timestamp: AtomicI64,
@@ -121,7 +121,7 @@ pub struct PartitionTreeMemtable<T: for<'a, 'b> PrimaryKeyCodec<'a, 'b>> {
     num_rows: AtomicUsize,
 }
 
-impl<T: for<'a, 'b> PrimaryKeyCodec<'a, 'b>> fmt::Debug for PartitionTreeMemtable<T> {
+impl fmt::Debug for PartitionTreeMemtable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PartitionTreeMemtable")
             .field("id", &self.id)
@@ -129,7 +129,7 @@ impl<T: for<'a, 'b> PrimaryKeyCodec<'a, 'b>> fmt::Debug for PartitionTreeMemtabl
     }
 }
 
-impl<T: for<'a, 'b> PrimaryKeyCodec<'a, 'b> + 'static> Memtable for PartitionTreeMemtable<T> {
+impl Memtable for PartitionTreeMemtable {
     fn id(&self) -> MemtableId {
         self.id
     }
@@ -262,11 +262,11 @@ impl<T: for<'a, 'b> PrimaryKeyCodec<'a, 'b> + 'static> Memtable for PartitionTre
     }
 }
 
-impl<T: for<'a, 'b> PrimaryKeyCodec<'a, 'b>> PartitionTreeMemtable<T> {
+impl PartitionTreeMemtable {
     /// Returns a new memtable.
     pub fn new(
         id: MemtableId,
-        row_codec: Arc<T>,
+        row_codec: Arc<dyn PrimaryKeyCodec>,
         metadata: RegionMetadataRef,
         write_buffer_manager: Option<WriteBufferManagerRef>,
         config: &PartitionTreeConfig,
@@ -280,7 +280,7 @@ impl<T: for<'a, 'b> PrimaryKeyCodec<'a, 'b>> PartitionTreeMemtable<T> {
     /// Creates a mutable memtable from the tree.
     ///
     /// It also adds the bytes used by shared parts (e.g. index) to the memory usage.
-    fn with_tree(id: MemtableId, tree: PartitionTree<T>) -> Self {
+    fn with_tree(id: MemtableId, tree: PartitionTree) -> Self {
         let alloc_tracker = AllocTracker::new(tree.write_buffer_manager());
 
         Self {
@@ -343,13 +343,13 @@ impl MemtableBuilder for PartitionTreeMemtableBuilder {
     }
 }
 
-struct PartitionTreeIterBuilder<T: for<'a, 'b> PrimaryKeyCodec<'a, 'b>> {
-    tree: Arc<PartitionTree<T>>,
+struct PartitionTreeIterBuilder {
+    tree: Arc<PartitionTree>,
     projection: Option<Vec<ColumnId>>,
     predicate: Option<Predicate>,
 }
 
-impl<T: for<'a, 'b> PrimaryKeyCodec<'a, 'b> + 'static> IterBuilder for PartitionTreeIterBuilder<T> {
+impl IterBuilder for PartitionTreeIterBuilder {
     fn build(&self) -> Result<BoxedBatchIterator> {
         self.tree
             .read(self.projection.as_deref(), self.predicate.clone())

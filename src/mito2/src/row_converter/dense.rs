@@ -31,11 +31,13 @@ use snafu::ResultExt;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 
+use super::PrimaryKeyFilter;
 use crate::error::{
     self, FieldTypeMismatchSnafu, NotSupportedFieldSnafu, Result, SerializeFieldSnafu,
 };
-use crate::memtable::partition_tree::DensePrimaryKeyFilterFactory;
-use crate::row_converter::{PrimaryKeyCodec, PrimaryKeyCodecExt, PrimaryKeyEncoder};
+use crate::memtable::key_values::KeyValue;
+use crate::memtable::partition_tree::DensePrimaryKeyFilter;
+use crate::row_converter::{PrimaryKeyCodec, PrimaryKeyCodecExt};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SortField {
@@ -308,10 +310,7 @@ impl PrimaryKeyCodecExt for DensePrimaryKeyCodec {
     where
         I: Iterator<Item = ValueRef<'a>>,
     {
-        buffer.reserve(self.estimated_size());
-        let mut encoder = self.encoder(buffer);
-        encoder.encode_dense(row)?;
-        Ok(())
+        self.encode_dense(row, buffer)
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<Vec<Value>> {
@@ -323,15 +322,17 @@ impl PrimaryKeyCodecExt for DensePrimaryKeyCodec {
 #[derive(Clone, Debug)]
 pub struct DensePrimaryKeyCodec {
     /// Primary key fields.
-    ordered_primary_key_columns: Vec<SortField>,
+    ordered_primary_key_columns: Arc<Vec<SortField>>,
 }
 
 impl DensePrimaryKeyCodec {
     pub fn new(metadata: &RegionMetadata) -> Self {
-        let ordered_primary_key_columns = metadata
-            .primary_key_columns()
-            .map(|c| SortField::new(c.column_schema.data_type.clone()))
-            .collect();
+        let ordered_primary_key_columns = Arc::new(
+            metadata
+                .primary_key_columns()
+                .map(|c| SortField::new(c.column_schema.data_type.clone()))
+                .collect::<Vec<_>>(),
+        );
 
         Self {
             ordered_primary_key_columns,
@@ -340,8 +341,19 @@ impl DensePrimaryKeyCodec {
 
     pub fn with_fields(fields: Vec<SortField>) -> Self {
         Self {
-            ordered_primary_key_columns: fields,
+            ordered_primary_key_columns: Arc::new(fields),
         }
+    }
+
+    fn encode_dense<'a, I>(&self, row: I, buffer: &mut Vec<u8>) -> Result<()>
+    where
+        I: Iterator<Item = ValueRef<'a>>,
+    {
+        let mut serializer = Serializer::new(buffer);
+        for (value, field) in row.zip(self.ordered_primary_key_columns.iter()) {
+            field.serialize(&mut serializer, &value)?;
+        }
+        Ok(())
     }
 
     /// Decode value at `pos` in `bytes`.
@@ -400,20 +412,13 @@ impl DensePrimaryKeyCodec {
     }
 }
 
-pub struct DensePrimaryKeyEncoder<'a, 'b> {
-    codec: &'a DensePrimaryKeyCodec,
-    serializer: Serializer<&'b mut Vec<u8>>,
-}
+impl PrimaryKeyCodec for DensePrimaryKeyCodec {
+    fn encode_key_value(&self, key_value: &KeyValue, buffer: &mut Vec<u8>) -> Result<()> {
+        self.encode_dense(key_value.primary_keys(), buffer)
+    }
 
-impl<'a, 'b> PrimaryKeyCodec<'a, 'b> for DensePrimaryKeyCodec {
-    type Encoder = DensePrimaryKeyEncoder<'a, 'b>;
-    type FilterFactory = DensePrimaryKeyFilterFactory;
-
-    fn encoder(&'a self, buf: &'b mut Vec<u8>) -> Self::Encoder {
-        DensePrimaryKeyEncoder {
-            codec: self,
-            serializer: Serializer::new(buf),
-        }
+    fn encode_values(&self, values: &[Value], buffer: &mut Vec<u8>) -> Result<()> {
+        self.encode_dense(values.iter().map(|v| v.as_value_ref()), buffer)
     }
 
     fn estimated_size(&self) -> Option<usize> {
@@ -428,22 +433,22 @@ impl<'a, 'b> PrimaryKeyCodec<'a, 'b> for DensePrimaryKeyCodec {
         PrimaryKeyEncoding::Dense
     }
 
-    fn primary_key_filter_factory(
+    fn primary_key_filter(
         &self,
         metadata: &RegionMetadataRef,
-        filters: Vec<SimpleFilterEvaluator>,
-    ) -> Self::FilterFactory {
-        DensePrimaryKeyFilterFactory::new(
+        filters: Arc<Vec<SimpleFilterEvaluator>>,
+    ) -> Box<dyn PrimaryKeyFilter> {
+        Box::new(DensePrimaryKeyFilter::new(
             metadata.clone(),
-            Arc::new(filters),
-            Arc::new(self.clone()),
-        )
+            filters,
+            self.clone(),
+        ))
     }
 
     fn decode_dense(&self, bytes: &[u8]) -> Result<Vec<Value>> {
         let mut deserializer = Deserializer::new(bytes);
         let mut values = Vec::with_capacity(self.ordered_primary_key_columns.len());
-        for f in &self.ordered_primary_key_columns {
+        for f in self.ordered_primary_key_columns.iter() {
             let value = f.deserialize(&mut deserializer)?;
             values.push(value);
         }
@@ -454,27 +459,6 @@ impl<'a, 'b> PrimaryKeyCodec<'a, 'b> for DensePrimaryKeyCodec {
         // TODO(weny, yinwen): avoid decoding the whole primary key.
         let mut values = self.decode_dense(bytes)?;
         Ok(values.pop())
-    }
-}
-
-impl PrimaryKeyEncoder for DensePrimaryKeyEncoder<'_, '_> {
-    fn encode<'c, I>(&mut self, row: I) -> Result<()>
-    where
-        I: Iterator<Item = ValueRef<'c>>,
-    {
-        self.encode_dense(row)
-    }
-}
-
-impl DensePrimaryKeyEncoder<'_, '_> {
-    fn encode_dense<'c, I>(&mut self, row: I) -> Result<()>
-    where
-        I: Iterator<Item = ValueRef<'c>>,
-    {
-        for (value, field) in row.zip(self.codec.ordered_primary_key_columns.iter()) {
-            field.serialize(&mut self.serializer, &value)?;
-        }
-        Ok(())
     }
 }
 
