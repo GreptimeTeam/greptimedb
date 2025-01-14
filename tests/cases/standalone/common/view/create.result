@@ -5,11 +5,11 @@ Affected Rows: 0
 
 CREATE VIEW test_view;
 
-Error: 2000(InvalidSyntax), sql parser error: Expected AS, found: ; at Line: 1, Column 22
+Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Expected: AS, found: ; at Line: 1, Column: 22
 
 CREATE VIEW test_view as DELETE FROM public.numbers;
 
-Error: 2000(InvalidSyntax), sql parser error: Expected SELECT, VALUES, or a subquery in the query body, found: DELETE at Line: 1, Column 26
+Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Expected: SELECT, VALUES, or a subquery in the query body, found: DELETE at Line: 1, Column: 26
 
 --- Table already exists ---
 CREATE VIEW test_table as SELECT * FROM public.numbers;

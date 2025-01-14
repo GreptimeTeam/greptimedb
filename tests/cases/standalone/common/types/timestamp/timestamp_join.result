@@ -17,7 +17,7 @@ Affected Rows: 1
 select count(*) from timestamp2 inner join timestamp1 on (timestamp1.i = timestamp2.i);
 
 +----------+
-| COUNT(*) |
+| count(*) |
 +----------+
 | 1        |
 +----------+
