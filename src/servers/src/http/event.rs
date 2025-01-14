@@ -84,6 +84,16 @@ pub struct LogIngesterQueryParams {
     pub msg_field: Option<String>,
 }
 
+/// LogIngestRequest is the internal request for log ingestion. The raw log input can be transformed into multiple LogIngestRequests.
+/// Multiple LogIngestRequests will be ingested into the same database with the same pipeline.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct LogIngestRequest {
+    /// The table where the log data will be written to.
+    pub table: String,
+    /// The log data to be ingested.
+    pub values: Vec<Value>,
+}
+
 pub struct PipelineContent(String);
 
 #[async_trait]
@@ -513,8 +523,10 @@ pub async fn log_ingester(
         handler,
         pipeline_name,
         version,
-        table_name,
-        value,
+        vec![LogIngestRequest {
+            table: table_name,
+            values: value,
+        }],
         query_ctx,
     )
     .await
@@ -543,74 +555,78 @@ pub(crate) async fn ingest_logs_inner(
     state: PipelineHandlerRef,
     pipeline_name: String,
     version: PipelineVersion,
-    table_name: String,
-    pipeline_data: Vec<Value>,
+    log_ingest_requests: Vec<LogIngestRequest>,
     query_ctx: QueryContextRef,
 ) -> Result<HttpResponse> {
     let db = query_ctx.get_db_string();
     let exec_timer = std::time::Instant::now();
 
-    let mut results = Vec::with_capacity(pipeline_data.len());
-    let transformed_data: Rows;
-    if pipeline_name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME {
-        let table = state
-            .get_table(&table_name, &query_ctx)
-            .await
-            .context(CatalogSnafu)?;
-        let rows = pipeline::identity_pipeline(pipeline_data, table)
-            .context(PipelineTransformSnafu)
-            .context(PipelineSnafu)?;
+    let mut insert_requests = Vec::with_capacity(log_ingest_requests.len());
 
-        transformed_data = rows
-    } else {
-        let pipeline = state
-            .get_pipeline(&pipeline_name, version, query_ctx.clone())
-            .await?;
-
-        let transform_timer = std::time::Instant::now();
-        let mut intermediate_state = pipeline.init_intermediate_state();
-
-        for v in pipeline_data {
-            pipeline
-                .prepare(v, &mut intermediate_state)
-                .inspect_err(|_| {
-                    METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                        .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
-                        .observe(transform_timer.elapsed().as_secs_f64());
-                })
+    for request in log_ingest_requests {
+        let transformed_data: Rows = if pipeline_name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME {
+            let table = state
+                .get_table(&request.table, &query_ctx)
+                .await
+                .context(CatalogSnafu)?;
+            pipeline::identity_pipeline(request.values, table)
                 .context(PipelineTransformSnafu)
-                .context(PipelineSnafu)?;
-            let r = pipeline
-                .exec_mut(&mut intermediate_state)
-                .inspect_err(|_| {
-                    METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                        .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
-                        .observe(transform_timer.elapsed().as_secs_f64());
-                })
-                .context(PipelineTransformSnafu)
-                .context(PipelineSnafu)?;
-            results.push(r);
-            pipeline.reset_intermediate_state(&mut intermediate_state);
-        }
+                .context(PipelineSnafu)?
+        } else {
+            let pipeline = state
+                .get_pipeline(&pipeline_name, version, query_ctx.clone())
+                .await?;
 
-        METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-            .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
-            .observe(transform_timer.elapsed().as_secs_f64());
+            let transform_timer = std::time::Instant::now();
+            let mut intermediate_state = pipeline.init_intermediate_state();
+            let mut results = Vec::with_capacity(request.values.len());
+            for v in request.values {
+                pipeline
+                    .prepare(v, &mut intermediate_state)
+                    .inspect_err(|_| {
+                        METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                            .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
+                            .observe(transform_timer.elapsed().as_secs_f64());
+                    })
+                    .context(PipelineTransformSnafu)
+                    .context(PipelineSnafu)?;
+                let r = pipeline
+                    .exec_mut(&mut intermediate_state)
+                    .inspect_err(|_| {
+                        METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                            .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
+                            .observe(transform_timer.elapsed().as_secs_f64());
+                    })
+                    .context(PipelineTransformSnafu)
+                    .context(PipelineSnafu)?;
+                results.push(r);
+                pipeline.reset_intermediate_state(&mut intermediate_state);
+            }
 
-        transformed_data = Rows {
-            rows: results,
-            schema: pipeline.schemas().clone(),
+            METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
+                .observe(transform_timer.elapsed().as_secs_f64());
+
+            Rows {
+                rows: results,
+                schema: pipeline.schemas().clone(),
+            }
         };
+
+        insert_requests.push(RowInsertRequest {
+            rows: Some(transformed_data),
+            table_name: request.table.clone(),
+        });
     }
 
-    let insert_request = RowInsertRequest {
-        rows: Some(transformed_data),
-        table_name: table_name.clone(),
-    };
-    let insert_requests = RowInsertRequests {
-        inserts: vec![insert_request],
-    };
-    let output = state.insert(insert_requests, query_ctx).await;
+    let output = state
+        .insert(
+            RowInsertRequests {
+                inserts: insert_requests,
+            },
+            query_ctx,
+        )
+        .await;
 
     if let Ok(Output {
         data: OutputData::AffectedRows(rows),
