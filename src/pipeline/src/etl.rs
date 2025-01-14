@@ -30,12 +30,14 @@ use transform::{TransformBuilders, Transformer, Transforms};
 use value::Value;
 use yaml_rust::YamlLoader;
 
+use crate::dispatcher::Dispatcher;
 use crate::etl::error::Result;
 
 const DESCRIPTION: &str = "description";
 const PROCESSORS: &str = "processors";
 const TRANSFORM: &str = "transform";
 const TRANSFORMS: &str = "transforms";
+const DISPATCHER: &str = "dispatcher";
 
 pub enum Content<'a> {
     Json(&'a str),
@@ -151,10 +153,17 @@ where
 
             let transformer = T::new(transformers)?;
 
+            let dispatcher = if !doc[DISPATCHER].is_null() {
+                Some(Dispatcher::try_from(&doc[DISPATCHER])?)
+            } else {
+                None
+            };
+
             Ok(Pipeline {
                 description,
                 processors,
                 transformer,
+                dispatcher,
                 required_keys,
                 output_keys,
                 intermediate_keys: final_intermediate_keys,
@@ -171,6 +180,7 @@ where
 {
     description: Option<String>,
     processors: processor::Processors,
+    dispatcher: Option<Dispatcher>,
     transformer: T,
     /// required keys for the preprocessing from map data from user
     /// include all processor required and transformer required keys
