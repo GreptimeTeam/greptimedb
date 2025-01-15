@@ -105,6 +105,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to encode primary key"))]
+    EncodePrimaryKey {
+        source: mito2::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Mito write operation fails"))]
     MitoWriteOperation {
         source: BoxedError,
@@ -282,6 +289,8 @@ impl ErrorExt for Error {
             | MitoWriteOperation { source, .. }
             | MitoCatchupOperation { source, .. }
             | MitoFlushOperation { source, .. } => source.status_code(),
+
+            EncodePrimaryKey { source, .. } => source.status_code(),
 
             CollectRecordBatchStream { source, .. } => source.status_code(),
 

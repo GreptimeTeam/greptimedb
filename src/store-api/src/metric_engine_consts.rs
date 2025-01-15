@@ -33,6 +33,7 @@ pub const METADATA_SCHEMA_VALUE_COLUMN_INDEX: usize = 2;
 /// Column name of internal column `__metric` that stores the original metric name
 pub const DATA_SCHEMA_TABLE_ID_COLUMN_NAME: &str = "__table_id";
 pub const DATA_SCHEMA_TSID_COLUMN_NAME: &str = "__tsid";
+pub const DATA_SCHEMA_ENCODED_PRIMARY_KEY_COLUMN_NAME: &str = "__encoded_primary_key";
 
 pub const METADATA_REGION_SUBDIR: &str = "metadata";
 pub const DATA_REGION_SUBDIR: &str = "data";

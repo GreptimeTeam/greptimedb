@@ -6492,6 +6492,7 @@ dependencies = [
  "prometheus",
  "serde",
  "serde_json",
+ "smallvec",
  "snafu 0.8.5",
  "store-api",
  "tokio",
