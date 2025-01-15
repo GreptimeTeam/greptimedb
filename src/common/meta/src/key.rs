@@ -264,8 +264,10 @@ lazy_static! {
 }
 
 lazy_static! {
-    static ref PROCESS_LIST_PATTERN: Regex =
-        Regex::new(&format!("^{PROCESS_LIST_PREFIX}/([0-9.]+)-([0-9]+)$")).unwrap();
+    static ref PROCESS_LIST_PATTERN: Regex = Regex::new(&format!(
+        "^{PROCESS_LIST_PREFIX}/([0-9.]+:[0-9]+)-([0-9]+)$"
+    ))
+    .unwrap();
 }
 
 /// The key of metadata.

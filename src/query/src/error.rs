@@ -323,20 +323,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Failed to serialize process value when registering."))]
-    RegisterProcess {
-        source: common_meta::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to list all running processes."))]
-    ListProcesses {
-        source: common_meta::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
 }
 
 impl ErrorExt for Error {
@@ -390,8 +376,6 @@ impl ErrorExt for Error {
             GetFulltextOptions { source, .. } | GetSkippingIndexOptions { source, .. } => {
                 source.status_code()
             }
-            RegisterProcess { .. } => StatusCode::Internal,
-            ListProcesses { .. } => StatusCode::StorageUnavailable,
         }
     }
 
