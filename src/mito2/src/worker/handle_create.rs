@@ -17,13 +17,12 @@
 use std::sync::Arc;
 
 use common_telemetry::info;
-use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataBuilder;
 use store_api::region_request::{AffectedRows, RegionCreateRequest};
 use store_api::storage::RegionId;
 
-use crate::error::{InvalidMetadataSnafu, Result};
+use crate::error::Result;
 use crate::region::opener::{check_recovered_region, RegionOpener};
 use crate::worker::RegionWorkerLoop;
 
@@ -52,7 +51,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             builder.push_column_metadata(column);
         }
         builder.primary_key(request.primary_key);
-        let metadata = builder.build().context(InvalidMetadataSnafu)?;
+
         // Create a MitoRegion from the RegionMetadata.
         let region = RegionOpener::new(
             region_id,
@@ -64,7 +63,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.intermediate_manager.clone(),
             self.time_provider.clone(),
         )
-        .metadata(metadata)
+        .metadata_builder(builder)
         .parse_options(request.options)?
         .cache(Some(self.cache_manager.clone()))
         .create_or_open(&self.config, &self.wal)

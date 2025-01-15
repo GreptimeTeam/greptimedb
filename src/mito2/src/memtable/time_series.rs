@@ -51,7 +51,7 @@ use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::dedup::LastNonNullIter;
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::region::options::MergeMode;
-use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt};
 
 /// Initial vector builder capacity.
 const INITIAL_BUILDER_CAPACITY: usize = 0;
@@ -95,7 +95,7 @@ impl MemtableBuilder for TimeSeriesMemtableBuilder {
 pub struct TimeSeriesMemtable {
     id: MemtableId,
     region_metadata: RegionMetadataRef,
-    row_codec: Arc<McmpRowCodec>,
+    row_codec: Arc<DensePrimaryKeyCodec>,
     series_set: SeriesSet,
     alloc_tracker: AllocTracker,
     max_timestamp: AtomicI64,
@@ -115,12 +115,7 @@ impl TimeSeriesMemtable {
         dedup: bool,
         merge_mode: MergeMode,
     ) -> Self {
-        let row_codec = Arc::new(McmpRowCodec::new(
-            region_metadata
-                .primary_key_columns()
-                .map(|c| SortField::new(c.column_schema.data_type.clone()))
-                .collect(),
-        ));
+        let row_codec = Arc::new(DensePrimaryKeyCodec::new(&region_metadata));
         let series_set = SeriesSet::new(region_metadata.clone(), row_codec.clone());
         let dedup = if merge_mode == MergeMode::LastNonNull {
             false
@@ -350,11 +345,11 @@ type SeriesRwLockMap = RwLock<BTreeMap<Vec<u8>, Arc<RwLock<Series>>>>;
 struct SeriesSet {
     region_metadata: RegionMetadataRef,
     series: Arc<SeriesRwLockMap>,
-    codec: Arc<McmpRowCodec>,
+    codec: Arc<DensePrimaryKeyCodec>,
 }
 
 impl SeriesSet {
-    fn new(region_metadata: RegionMetadataRef, codec: Arc<McmpRowCodec>) -> Self {
+    fn new(region_metadata: RegionMetadataRef, codec: Arc<DensePrimaryKeyCodec>) -> Self {
         Self {
             region_metadata,
             series: Default::default(),
@@ -451,7 +446,7 @@ struct Iter {
     predicate: Vec<SimpleFilterEvaluator>,
     pk_schema: arrow::datatypes::SchemaRef,
     pk_datatypes: Vec<ConcreteDataType>,
-    codec: Arc<McmpRowCodec>,
+    codec: Arc<DensePrimaryKeyCodec>,
     dedup: bool,
     metrics: Metrics,
 }
@@ -465,7 +460,7 @@ impl Iter {
         predicate: Option<Predicate>,
         pk_schema: arrow::datatypes::SchemaRef,
         pk_datatypes: Vec<ConcreteDataType>,
-        codec: Arc<McmpRowCodec>,
+        codec: Arc<DensePrimaryKeyCodec>,
         dedup: bool,
     ) -> Result<Self> {
         let predicate = predicate
@@ -560,7 +555,7 @@ impl Iterator for Iter {
 }
 
 fn prune_primary_key(
-    codec: &Arc<McmpRowCodec>,
+    codec: &Arc<DensePrimaryKeyCodec>,
     pk: &[u8],
     series: &mut Series,
     datatypes: &[ConcreteDataType],
@@ -896,6 +891,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
+    use crate::row_converter::SortField;
 
     fn schema_for_test() -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
@@ -1160,7 +1156,7 @@ mod tests {
     #[test]
     fn test_series_set_concurrency() {
         let schema = schema_for_test();
-        let row_codec = Arc::new(McmpRowCodec::new(
+        let row_codec = Arc::new(DensePrimaryKeyCodec::with_fields(
             schema
                 .primary_key_columns()
                 .map(|c| SortField::new(c.column_schema.data_type.clone()))

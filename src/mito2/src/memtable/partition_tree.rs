@@ -28,7 +28,9 @@ use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
+pub(crate) use partition::DensePrimaryKeyFilter;
 use serde::{Deserialize, Serialize};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
@@ -43,6 +45,7 @@ use crate::memtable::{
     MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
 };
 use crate::region::options::MergeMode;
+use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec};
 
 /// Use `1/DICTIONARY_SIZE_FACTOR` of OS memory as dictionary size.
 pub(crate) const DICTIONARY_SIZE_FACTOR: u64 = 8;
@@ -263,13 +266,14 @@ impl PartitionTreeMemtable {
     /// Returns a new memtable.
     pub fn new(
         id: MemtableId,
+        row_codec: Arc<dyn PrimaryKeyCodec>,
         metadata: RegionMetadataRef,
         write_buffer_manager: Option<WriteBufferManagerRef>,
         config: &PartitionTreeConfig,
     ) -> Self {
         Self::with_tree(
             id,
-            PartitionTree::new(metadata, config, write_buffer_manager.clone()),
+            PartitionTree::new(row_codec, metadata, config, write_buffer_manager.clone()),
         )
     }
 
@@ -320,12 +324,22 @@ impl PartitionTreeMemtableBuilder {
 
 impl MemtableBuilder for PartitionTreeMemtableBuilder {
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
-        Arc::new(PartitionTreeMemtable::new(
-            id,
-            metadata.clone(),
-            self.write_buffer_manager.clone(),
-            &self.config,
-        ))
+        match metadata.primary_key_encoding {
+            PrimaryKeyEncoding::Dense => {
+                let codec = Arc::new(DensePrimaryKeyCodec::new(metadata));
+                Arc::new(PartitionTreeMemtable::new(
+                    id,
+                    codec,
+                    metadata.clone(),
+                    self.write_buffer_manager.clone(),
+                    &self.config,
+                ))
+            }
+            PrimaryKeyEncoding::Sparse => {
+                //TODO(weny): Implement sparse primary key encoding.
+                todo!()
+            }
+        }
     }
 }
 
@@ -358,7 +372,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+    use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
     use crate::test_util::memtable_util::{
         self, collect_iter_timestamps, region_metadata_to_row_schema,
     };
@@ -378,8 +392,14 @@ mod tests {
         let timestamps = (0..100).collect::<Vec<_>>();
         let kvs =
             memtable_util::build_key_values(&metadata, "hello".to_string(), 42, &timestamps, 1);
-        let memtable =
-            PartitionTreeMemtable::new(1, metadata, None, &PartitionTreeConfig::default());
+        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+        let memtable = PartitionTreeMemtable::new(
+            1,
+            codec,
+            metadata.clone(),
+            None,
+            &PartitionTreeConfig::default(),
+        );
         memtable.write(&kvs).unwrap();
 
         let expected_ts = kvs
@@ -414,8 +434,14 @@ mod tests {
         } else {
             memtable_util::metadata_with_primary_key(vec![], false)
         };
-        let memtable =
-            PartitionTreeMemtable::new(1, metadata.clone(), None, &PartitionTreeConfig::default());
+        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+        let memtable = PartitionTreeMemtable::new(
+            1,
+            codec,
+            metadata.clone(),
+            None,
+            &PartitionTreeConfig::default(),
+        );
 
         let kvs = memtable_util::build_key_values(
             &metadata,
@@ -510,8 +536,10 @@ mod tests {
 
     fn write_iter_multi_keys(max_keys: usize, freeze_threshold: usize) {
         let metadata = memtable_util::metadata_with_primary_key(vec![1, 0], true);
+        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
         let memtable = PartitionTreeMemtable::new(
             1,
+            codec,
             metadata.clone(),
             None,
             &PartitionTreeConfig {
@@ -719,12 +747,7 @@ mod tests {
         )
         .build(1, &metadata);
 
-        let codec = McmpRowCodec::new(
-            metadata
-                .primary_key_columns()
-                .map(|c| SortField::new(c.column_schema.data_type.clone()))
-                .collect(),
-        );
+        let codec = DensePrimaryKeyCodec::new(&metadata);
 
         memtable
             .write(&build_key_values(

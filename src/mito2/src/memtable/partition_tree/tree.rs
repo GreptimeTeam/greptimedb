@@ -43,7 +43,7 @@ use crate::metrics::{PARTITION_TREE_READ_STAGE_ELAPSED, READ_ROWS_TOTAL, READ_ST
 use crate::read::dedup::LastNonNullIter;
 use crate::read::Batch;
 use crate::region::options::MergeMode;
-use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+use crate::row_converter::{PrimaryKeyCodec, SortField};
 
 /// The partition tree.
 pub struct PartitionTree {
@@ -52,7 +52,7 @@ pub struct PartitionTree {
     /// Metadata of the region.
     pub(crate) metadata: RegionMetadataRef,
     /// Primary key codec.
-    row_codec: Arc<McmpRowCodec>,
+    row_codec: Arc<dyn PrimaryKeyCodec>,
     /// Partitions in the tree.
     partitions: RwLock<BTreeMap<PartitionKey, PartitionRef>>,
     /// Whether the tree has multiple partitions.
@@ -65,16 +65,11 @@ pub struct PartitionTree {
 impl PartitionTree {
     /// Creates a new partition tree.
     pub fn new(
+        row_codec: Arc<dyn PrimaryKeyCodec>,
         metadata: RegionMetadataRef,
         config: &PartitionTreeConfig,
         write_buffer_manager: Option<WriteBufferManagerRef>,
-    ) -> PartitionTree {
-        let row_codec = McmpRowCodec::new(
-            metadata
-                .primary_key_columns()
-                .map(|c| SortField::new(c.column_schema.data_type.clone()))
-                .collect(),
-        );
+    ) -> Self {
         let sparse_encoder = SparseEncoder {
             fields: metadata
                 .primary_key_columns()
@@ -93,7 +88,7 @@ impl PartitionTree {
         PartitionTree {
             config,
             metadata,
-            row_codec: Arc::new(row_codec),
+            row_codec,
             partitions: Default::default(),
             is_partitioned,
             write_buffer_manager,
@@ -141,7 +136,7 @@ impl PartitionTree {
                 self.sparse_encoder
                     .encode_to_vec(kv.primary_keys(), pk_buffer)?;
             } else {
-                self.row_codec.encode_to_vec(kv.primary_keys(), pk_buffer)?;
+                self.row_codec.encode_key_value(&kv, pk_buffer)?;
             }
 
             // Write rows with
@@ -191,7 +186,7 @@ impl PartitionTree {
             self.sparse_encoder
                 .encode_to_vec(kv.primary_keys(), pk_buffer)?;
         } else {
-            self.row_codec.encode_to_vec(kv.primary_keys(), pk_buffer)?;
+            self.row_codec.encode_key_value(&kv, pk_buffer)?;
         }
 
         // Write rows with
@@ -238,7 +233,7 @@ impl PartitionTree {
             self.metadata.clone(),
             self.row_codec.clone(),
             projection,
-            filters,
+            Arc::new(filters),
         );
         iter.fetch_next_partition(context)?;
 
@@ -278,7 +273,12 @@ impl PartitionTree {
             || self.metadata.column_metadatas != metadata.column_metadatas
         {
             // The schema has changed, we can't reuse the tree.
-            return PartitionTree::new(metadata, &self.config, self.write_buffer_manager.clone());
+            return PartitionTree::new(
+                self.row_codec.clone(),
+                metadata,
+                &self.config,
+                self.write_buffer_manager.clone(),
+            );
         }
 
         let mut total_shared_size = 0;
@@ -353,7 +353,7 @@ impl PartitionTree {
 
         partition.write_with_key(
             primary_key,
-            &self.row_codec,
+            self.row_codec.as_ref(),
             key_value,
             self.is_partitioned, // If tree is partitioned, re-encode is required to get the full primary key.
             metrics,
