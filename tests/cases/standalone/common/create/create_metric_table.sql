@@ -24,6 +24,8 @@ SELECT table_catalog, table_schema, table_name, table_type, engine FROM informat
 
 DESC TABLE phy;
 
+SHOW CREATE TABLE phy;
+
 DESC TABLE t1;
 
 DESC TABLE t2;

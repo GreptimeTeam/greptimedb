@@ -71,6 +71,27 @@ DESC TABLE phy;
 | job        | String               | PRI | YES  |         | TAG           |
 +------------+----------------------+-----+------+---------+---------------+
 
+SHOW CREATE TABLE phy;
+
++-------+------------------------------------+
+| Table | Create Table                       |
++-------+------------------------------------+
+| phy   | CREATE TABLE IF NOT EXISTS "phy" ( |
+|       |   "ts" TIMESTAMP(3) NOT NULL,      |
+|       |   "val" DOUBLE NULL,               |
+|       |   "host" STRING NULL,              |
+|       |   "job" STRING NULL,               |
+|       |   TIME INDEX ("ts"),               |
+|       |   PRIMARY KEY ("host", "job"),     |
+|       |   INVERTED INDEX ("host", "job")   |
+|       | )                                  |
+|       |                                    |
+|       | ENGINE=metric                      |
+|       | WITH(                              |
+|       |   physical_metric_table = ''       |
+|       | )                                  |
++-------+------------------------------------+
+
 DESC TABLE t1;
 
 +--------+----------------------+-----+------+---------+---------------+
@@ -256,8 +277,7 @@ SHOW CREATE TABLE phy;
 |       |   "val" DOUBLE NULL,                                                            |
 |       |   "host" STRING NULL SKIPPING INDEX WITH(granularity = '8192', type = 'BLOOM'), |
 |       |   TIME INDEX ("ts"),                                                            |
-|       |   PRIMARY KEY ("host"),                                                         |
-|       |   INVERTED INDEX ("__table_id")                                                 |
+|       |   PRIMARY KEY ("host")                                                          |
 |       | )                                                                               |
 |       |                                                                                 |
 |       | ENGINE=metric                                                                   |

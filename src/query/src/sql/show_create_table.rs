@@ -161,8 +161,8 @@ fn create_table_constraints(
             column: Ident::with_quote(quote_style, column_name),
         });
     }
+    let is_metric_engine = is_metric_engine(engine);
     if !table_meta.primary_key_indices.is_empty() {
-        let is_metric_engine = is_metric_engine(engine);
         let columns = table_meta
             .row_key_column_names()
             .flat_map(|name| {
@@ -179,12 +179,12 @@ fn create_table_constraints(
     let inverted_index_set = schema
         .column_schemas()
         .iter()
-        .any(|c| c.has_inverted_index_key());
+        .any(|c| !is_metric_engine_internal_column(&c.name) && c.has_inverted_index_key());
     if inverted_index_set {
         let inverted_index_cols = schema
             .column_schemas()
             .iter()
-            .filter(|c| c.is_inverted_indexed())
+            .filter(|c| !is_metric_engine_internal_column(&c.name) && c.is_inverted_indexed())
             .map(|c| Ident::with_quote(quote_style, &c.name))
             .collect::<Vec<_>>();
         constraints.push(TableConstraint::InvertedIndex {
