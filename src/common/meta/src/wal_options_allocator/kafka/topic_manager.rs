@@ -35,6 +35,7 @@ use crate::error::{
     ProduceRecordSnafu, ResolveKafkaEndpointSnafu, Result, TlsConfigSnafu,
 };
 use crate::key::{MetadataKey, KAFKA_TOPIC_KEY_PATTERN, KAFKA_TOPIC_KEY_PREFIX};
+use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::{BatchPutRequest, RangeRequest};
 use crate::rpc::KeyValue;
@@ -60,7 +61,7 @@ impl<'a> TopicNameKey<'a> {
     }
 
     pub fn gen_with_id_and_prefix(id: usize, prefix: &'a str) -> String {
-        format!("{}_{}", prefix, id)
+        format!("{}{}", prefix, id)
     }
 
     pub fn range_start_key(prefix: &'a str) -> String {
@@ -133,9 +134,18 @@ impl TopicPool {
         if let Some(kv) = kv_backend.get(KAFKA_TOPIC_KEY_PREFIX.as_bytes()).await? {
             let topics =
                 serde_json::from_slice::<Vec<String>>(&kv.value).context(DecodeJsonSnafu)?;
-            kv_backend
-                .delete(KAFKA_TOPIC_KEY_PREFIX.as_bytes(), false)
-                .await?;
+            // Should remove the legacy topics and update to the new format.
+            let mut reqs = topics
+                .iter()
+                .map(|topic| {
+                    let key = TopicNameKey::new(topic);
+                    TxnOp::Put(key.to_bytes(), vec![])
+                })
+                .collect::<Vec<_>>();
+            let delete_req = TxnOp::Delete(KAFKA_TOPIC_KEY_PREFIX.as_bytes().to_vec());
+            reqs.push(delete_req);
+            let txn = Txn::new().and_then(reqs);
+            kv_backend.txn(txn).await?;
             Ok(topics)
         } else {
             Ok(vec![])
@@ -156,12 +166,13 @@ impl TopicPool {
 
     /// Restores topics from kvbackend and return the topics that are not stored in kvbackend.
     async fn to_be_created(&self, kv_backend: &KvBackendRef) -> Result<Vec<&String>> {
-        // Caution: legacy restore will remove the legacy topics from kvbackend.
-        let legacy_topics = self.legacy_restore(kv_backend).await?;
         let topics = self.restore(kv_backend).await?;
+        // Caution: legacy restore will remove the legacy topics from kvbackend and update to the new format.
+        let legacy_topics = self.legacy_restore(kv_backend).await?;
         let mut topics_set = HashSet::with_capacity(topics.len() + legacy_topics.len());
         topics_set.extend(topics);
         topics_set.extend(legacy_topics);
+
         Ok(self
             .topics
             .iter()
@@ -360,6 +371,91 @@ mod tests {
 
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::rpc::store::PutRequest;
+
+    // Compatibility test for restoring topics from kvbackend with legacy key format.
+    #[tokio::test]
+    async fn test_restore_legacy_persisted_topics() {
+        let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
+        let topic_manager = TopicManager::new(
+            MetasrvKafkaConfig {
+                auto_create_topics: true,
+                kafka_topic: KafkaTopicConfig {
+                    num_topics: 16,
+                    topic_name_prefix: "greptimedb_wal_topic".to_string(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            kv_backend.clone(),
+        );
+
+        // No legacy topics stored in kvbackend.
+        let mut topics_to_be_created = topic_manager
+            .topic_pool
+            .to_be_created(&kv_backend)
+            .await
+            .unwrap();
+        topics_to_be_created.sort();
+        let mut expected = topic_manager.topic_pool.topics.iter().collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(expected, topics_to_be_created);
+
+        // A topic pool with 16 topics stored in kvbackend.
+        let topics: Vec<u8> = vec![
+            91, 34, 103, 114, 101, 112, 116, 105, 109, 101, 100, 98, 95, 119, 97, 108, 95, 116,
+            111, 112, 105, 99, 48, 34, 44, 34, 103, 114, 101, 112, 116, 105, 109, 101, 100, 98, 95,
+            119, 97, 108, 95, 116, 111, 112, 105, 99, 49, 34, 44, 34, 103, 114, 101, 112, 116, 105,
+            109, 101, 100, 98, 95, 119, 97, 108, 95, 116, 111, 112, 105, 99, 50, 34, 44, 34, 103,
+            114, 101, 112, 116, 105, 109, 101, 100, 98, 95, 119, 97, 108, 95, 116, 111, 112, 105,
+            99, 51, 34, 44, 34, 103, 114, 101, 112, 116, 105, 109, 101, 100, 98, 95, 119, 97, 108,
+            95, 116, 111, 112, 105, 99, 52, 34, 44, 34, 103, 114, 101, 112, 116, 105, 109, 101,
+            100, 98, 95, 119, 97, 108, 95, 116, 111, 112, 105, 99, 53, 34, 44, 34, 103, 114, 101,
+            112, 116, 105, 109, 101, 100, 98, 95, 119, 97, 108, 95, 116, 111, 112, 105, 99, 54, 34,
+            44, 34, 103, 114, 101, 112, 116, 105, 109, 101, 100, 98, 95, 119, 97, 108, 95, 116,
+            111, 112, 105, 99, 55, 34, 44, 34, 103, 114, 101, 112, 116, 105, 109, 101, 100, 98, 95,
+            119, 97, 108, 95, 116, 111, 112, 105, 99, 56, 34, 44, 34, 103, 114, 101, 112, 116, 105,
+            109, 101, 100, 98, 95, 119, 97, 108, 95, 116, 111, 112, 105, 99, 57, 34, 44, 34, 103,
+            114, 101, 112, 116, 105, 109, 101, 100, 98, 95, 119, 97, 108, 95, 116, 111, 112, 105,
+            99, 49, 48, 34, 44, 34, 103, 114, 101, 112, 116, 105, 109, 101, 100, 98, 95, 119, 97,
+            108, 95, 116, 111, 112, 105, 99, 49, 49, 34, 44, 34, 103, 114, 101, 112, 116, 105, 109,
+            101, 100, 98, 95, 119, 97, 108, 95, 116, 111, 112, 105, 99, 49, 50, 34, 44, 34, 103,
+            114, 101, 112, 116, 105, 109, 101, 100, 98, 95, 119, 97, 108, 95, 116, 111, 112, 105,
+            99, 49, 51, 34, 44, 34, 103, 114, 101, 112, 116, 105, 109, 101, 100, 98, 95, 119, 97,
+            108, 95, 116, 111, 112, 105, 99, 49, 52, 34, 44, 34, 103, 114, 101, 112, 116, 105, 109,
+            101, 100, 98, 95, 119, 97, 108, 95, 116, 111, 112, 105, 99, 49, 53, 34, 93,
+        ];
+        let put_req = PutRequest {
+            key: KAFKA_TOPIC_KEY_PREFIX.as_bytes().to_vec(),
+            value: topics,
+            prev_kv: true,
+        };
+        let res = kv_backend.put(put_req).await.unwrap();
+        assert!(res.prev_kv.is_none());
+
+        let topics_to_be_created = topic_manager
+            .topic_pool
+            .to_be_created(&kv_backend)
+            .await
+            .unwrap();
+        assert!(topics_to_be_created.is_empty());
+
+        // Legacy topics should be deleted after restoring.
+        let legacy_topics = topic_manager
+            .topic_pool
+            .legacy_restore(&kv_backend)
+            .await
+            .unwrap();
+        assert!(legacy_topics.is_empty());
+
+        // Then we can restore it from the new format.
+        let topics_to_be_created = topic_manager
+            .topic_pool
+            .to_be_created(&kv_backend)
+            .await
+            .unwrap();
+        assert!(topics_to_be_created.is_empty());
+    }
 
     // Tests that topics can be successfully persisted into the kv backend and can be successfully restored from the kv backend.
     #[tokio::test]
