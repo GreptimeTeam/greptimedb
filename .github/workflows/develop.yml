@@ -45,7 +45,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ windows-2022, ubuntu-20.04 ]
+        os: [ ubuntu-20.04 ]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +53,14 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          # Shares with `Clippy` job
+          shared-key: "check-lint"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run cargo check
         run: cargo check --locked --workspace --all-targets
 
@@ -621,8 +629,8 @@ jobs:
       - name: Merge Conflict Finder
         uses: olivernybroe/action-conflict-finder@v4.0
 
-  coverage:
-    if: github.event.pull_request.draft == false
+  test:
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-20.04-8-cores
     timeout-minutes: 60
     needs:  [conflict-check, clippy, fmt]
@@ -634,9 +642,6 @@ jobs:
       - uses: rui314/setup-mold@v1
       - name: Install toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          components: llvm-tools
-          cache: false
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -644,11 +649,52 @@ jobs:
           shared-key: "coverage-test"
           cache-all-crates: "true"
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # Disabled temporarily to see performance
-      # - name: Docker Cache
-      #   uses: ScribeMD/docker-cache@0.5.0
-      #   with:
-      #     key: docker-${{ runner.os }}-coverage
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
+      - name: Setup external services
+        working-directory: tests-integration/fixtures
+        run: docker compose up -d --wait
+      - name: Run nextest cases
+        run: cargo nextest run --workspace -F dashboard -F pg_kvbackend
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+          RUST_BACKTRACE: 1
+          CARGO_INCREMENTAL: 0
+          GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
+          GT_S3_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+          GT_S3_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+          GT_S3_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+          GT_MINIO_BUCKET: greptime
+          GT_MINIO_ACCESS_KEY_ID: superpower_ci_user
+          GT_MINIO_ACCESS_KEY: superpower_password
+          GT_MINIO_REGION: us-west-2
+          GT_MINIO_ENDPOINT_URL: http://127.0.0.1:9000
+          GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
+          GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
+          GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
+          GT_KAFKA_SASL_ENDPOINTS: 127.0.0.1:9093
+          UNITTEST_LOG_DIR: "__unittest_logs"
+
+  coverage:
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-20.04-8-cores
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: rui314/setup-mold@v1
+      - name: Install toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: llvm-tools
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares cross multiple jobs
+          shared-key: "coverage-test"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
       - name: Install cargo-llvm-cov
