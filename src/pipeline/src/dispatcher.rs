@@ -22,6 +22,12 @@ use crate::etl_error::{
 };
 use crate::Value;
 
+const FIELD: &str = "field";
+const TABLE_PARTIAL: &str = "table_part";
+const PIPELINE: &str = "pipeline";
+const VALUE: &str = "value";
+const RULES: &str = "rules";
+
 /// The dispatcher configuration.
 ///
 /// Dispatcher in a pipeline allows user to call another pipeline and specify
@@ -67,25 +73,25 @@ impl TryFrom<&Yaml> for Dispatcher {
     type Error = Error;
 
     fn try_from(value: &Yaml) -> Result<Self> {
-        let field = value["field"]
+        let field = value[FIELD]
             .as_str()
             .map(|s| s.to_string())
             .context(FieldRequiredForDispatcherSnafu)?;
 
-        let rules = if let Some(rules) = value["rules"].as_vec() {
+        let rules = if let Some(rules) = value[RULES].as_vec() {
             rules
                 .iter()
                 .map(|rule| {
-                    let table_part = rule["table_part"]
+                    let table_part = rule[TABLE_PARTIAL]
                         .as_str()
                         .map(|s| s.to_string())
                         .context(TablePartRequiredForDispatcherRuleSnafu)?;
-                    let pipeline = rule["pipeline"].as_str().map(|s| s.to_string());
+                    let pipeline = rule[PIPELINE].as_str().map(|s| s.to_string());
 
-                    if rule["value"].is_badvalue() {
+                    if rule[VALUE].is_badvalue() {
                         ValueRequiredForDispatcherRuleSnafu.fail()?;
                     }
-                    let value = Value::try_from(&rule["value"])?;
+                    let value = Value::try_from(&rule[VALUE])?;
 
                     Ok(Rule {
                         value,
