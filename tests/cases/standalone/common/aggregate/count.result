@@ -75,7 +75,11 @@ Affected Rows: 5
 
 select count(1) from count_where_bug where `tag` = 'b';
 
-Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.count_where_bug
++-----------------+
+| count(Int64(1)) |
++-----------------+
+| 2               |
++-----------------+
 
 select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
 

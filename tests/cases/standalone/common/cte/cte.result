@@ -129,3 +129,4 @@ Error: 3000(PlanQuery), Failed to plan SQL: No field named alias2. Valid fields 
 drop table a;
 
 Affected Rows: 0
+
