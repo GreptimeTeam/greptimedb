@@ -97,7 +97,6 @@ SELECT 1 UNION ALL (WITH cte AS (SELECT 42) SELECT * FROM cte) order by 1;
 | 42       |
 +----------+
 
--- Recursive CTEs are not supported in datafusion
 WITH RECURSIVE cte(d) AS (
 		SELECT 1
 	UNION ALL
@@ -109,7 +108,11 @@ WITH RECURSIVE cte(d) AS (
 )
 SELECT max(d) FROM cte;
 
-Error: 1001(Unsupported), Failed to plan SQL: This feature is not implemented: Recursive CTE is not implemented
++------------+
+| max(cte.d) |
++------------+
+| 1          |
++------------+
 
 -- Nested aliases is not supported in datafusion
 with cte (a) as (
@@ -126,4 +129,3 @@ Error: 3000(PlanQuery), Failed to plan SQL: No field named alias2. Valid fields 
 drop table a;
 
 Affected Rows: 0
-
