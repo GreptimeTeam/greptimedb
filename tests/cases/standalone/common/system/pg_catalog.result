@@ -74,6 +74,10 @@ select * from pg_catalog.pg_type;
 
 Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_type
 
+select * from pg_catalog.pg_database;
+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_database
+
 -- SQLNESS PROTOCOL POSTGRES
 select * from pg_catalog.pg_type order by oid;
 
@@ -101,6 +105,15 @@ select * from pg_catalog.pg_type order by oid;
 | 19  | Interval  | 16     |
 | 20  | List      | -1     |
 +-----+-----------+--------+
+
+-- SQLNESS PROTOCOL POSTGRES
+select * from pg_catalog.pg_database where datname = 'public';
+
++------------+---------+
+| oid        | datname |
++------------+---------+
+| 3927743705 | public  |
++------------+---------+
 
 -- \d
 -- SQLNESS PROTOCOL POSTGRES

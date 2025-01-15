@@ -28,9 +28,13 @@ select current_schema();
 select * from pg_catalog.pg_class;
 select * from pg_catalog.pg_namespace;
 select * from pg_catalog.pg_type;
+select * from pg_catalog.pg_database;
 
 -- SQLNESS PROTOCOL POSTGRES
 select * from pg_catalog.pg_type order by oid;
+
+-- SQLNESS PROTOCOL POSTGRES
+select * from pg_catalog.pg_database where datname = 'public';
 
 -- \d
 -- SQLNESS PROTOCOL POSTGRES
