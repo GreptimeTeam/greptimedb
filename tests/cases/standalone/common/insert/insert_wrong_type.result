@@ -1,0 +1,19 @@
+-- test for issue #3235
+CREATE TABLE b(i interval, ts timestamp time index);
+
+Affected Rows: 0
+
+-- should fail
+INSERT INTO b VALUES ('1 year', 1000);
+
+Error: 2000(InvalidSyntax), Failed to parse value: Failed to parse 1 year to IntervalMonthDayNano value
+
+-- success
+INSERT INTO b VALUES (interval '1 year', 1000);
+
+Affected Rows: 1
+
+DROP TABLE b;
+
+Affected Rows: 0
+
