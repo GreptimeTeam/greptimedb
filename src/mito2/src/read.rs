@@ -336,10 +336,10 @@ impl Batch {
 
     /// Filters rows by the given `sequence`. Only preserves rows with sequence less than or equal to `sequence`.
     pub fn filter_by_sequence(&mut self, sequence: Option<SequenceNumber>) -> Result<()> {
-        let (seq, _last_seq) = match (sequence, self.last_sequence()) {
+        let seq = match (sequence, self.last_sequence()) {
             (None, _) | (_, None) => return Ok(()),
             (Some(sequence), Some(last_sequence)) if sequence >= last_sequence => return Ok(()),
-            (Some(sequence), Some(last_sequence)) => (sequence, last_sequence),
+            (Some(sequence), Some(_)) => sequence,
         };
 
         let seqs = self.sequences.as_arrow();
