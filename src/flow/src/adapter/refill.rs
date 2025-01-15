@@ -342,6 +342,7 @@ impl RefillTask {
     ) -> Result<RefillTask, Error> {
         let (table_name, table_schema) = table_src.get_table_name_schema(&table_id).await?;
         let all_col_names: BTreeSet<_> = table_schema
+            .relation_desc
             .iter_names()
             .flatten()
             .map(|s| s.as_str())
@@ -374,7 +375,7 @@ impl RefillTask {
             data: TaskData {
                 flow_id,
                 table_id,
-                table_schema,
+                table_schema: table_schema.relation_desc,
             },
             state: TaskState::new(sql),
         })
