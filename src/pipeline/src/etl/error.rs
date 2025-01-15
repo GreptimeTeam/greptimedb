@@ -583,15 +583,11 @@ pub enum Error {
         location: Location,
     },
     #[snafu(display("Field is required for dispatcher"))]
-    FieldRequiredForDispatcher {
-        #[snafu(implicit)]
-        location: Location,
-    },
+    FieldRequiredForDispatcher,
     #[snafu(display("table_part is required for dispatcher rule"))]
-    TablePartRequiredForDispatcherRule {
-        #[snafu(implicit)]
-        location: Location,
-    },
+    TablePartRequiredForDispatcherRule,
+    #[snafu(display("value is required for dispatcher rule"))]
+    ValueRequiredForDispatcherRule,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -359,14 +359,13 @@ pub enum PipelineWay {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     use api::v1::Rows;
     use greptime_proto::v1::value::ValueData;
     use greptime_proto::v1::{self, ColumnDataType, SemanticType};
 
     use crate::etl::transform::GreptimeTransformer;
-    use crate::etl::{parse, Content, Pipeline};
-    use crate::Value;
 
     #[test]
     fn test_pipeline_prepare() {
@@ -634,5 +633,73 @@ transform:
                 pipeline: Some("database_pipeline".to_string()),
             }
         );
+
+        let bad_yaml1 = r#"
+---
+description: Pipeline for Apache Tomcat
+
+processors:
+
+dispatcher:
+  _field: typename
+  rules:
+    - value: http
+      table_part: http_events
+    - value: database
+      table_part: db_events
+      pipeline: database_pipeline
+
+transform:
+  - field: typename
+    type: string
+
+"#;
+        let bad_yaml2 = r#"
+---
+description: Pipeline for Apache Tomcat
+
+processors:
+
+dispatcher:
+  field: typename
+  rules:
+    - value: http
+      _table_part: http_events
+    - value: database
+      _table_part: db_events
+      pipeline: database_pipeline
+
+transform:
+  - field: typename
+    type: string
+
+"#;
+        let bad_yaml3 = r#"
+---
+description: Pipeline for Apache Tomcat
+
+processors:
+
+dispatcher:
+  field: typename
+  rules:
+    - _value: http
+      table_part: http_events
+    - _value: database
+      table_part: db_events
+      pipeline: database_pipeline
+
+transform:
+  - field: typename
+    type: string
+
+"#;
+
+        let r: Result<Pipeline<GreptimeTransformer>> = parse(&Content::Yaml(bad_yaml1));
+        assert!(r.is_err());
+        let r: Result<Pipeline<GreptimeTransformer>> = parse(&Content::Yaml(bad_yaml2));
+        assert!(r.is_err());
+        let r: Result<Pipeline<GreptimeTransformer>> = parse(&Content::Yaml(bad_yaml3));
+        assert!(r.is_err());
     }
 }

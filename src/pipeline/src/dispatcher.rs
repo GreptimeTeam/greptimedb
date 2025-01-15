@@ -16,7 +16,10 @@ use snafu::OptionExt;
 use yaml_rust::Yaml;
 
 use crate::etl::error::{Error, Result};
-use crate::etl_error::{FieldRequiredForDispatcherSnafu, TablePartRequiredForDispatcherRuleSnafu};
+use crate::etl_error::{
+    FieldRequiredForDispatcherSnafu, TablePartRequiredForDispatcherRuleSnafu,
+    ValueRequiredForDispatcherRuleSnafu,
+};
 use crate::Value;
 
 /// The dispatcher configuration.
@@ -78,7 +81,12 @@ impl TryFrom<&Yaml> for Dispatcher {
                         .map(|s| s.to_string())
                         .context(TablePartRequiredForDispatcherRuleSnafu)?;
                     let pipeline = rule["pipeline"].as_str().map(|s| s.to_string());
+
+                    if rule["value"].is_badvalue() {
+                        ValueRequiredForDispatcherRuleSnafu.fail()?;
+                    }
                     let value = Value::try_from(&rule["value"])?;
+
                     Ok(Rule {
                         value,
                         table_part,
