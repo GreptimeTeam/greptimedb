@@ -91,6 +91,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to parse region options: {}", reason))]
+    ParseRegionOptions {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Mito read operation fails"))]
     MitoReadOperation {
         source: BoxedError,
@@ -225,6 +232,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to set SKIPPING index option"))]
+    SetSkippingIndexOption {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -241,7 +255,8 @@ impl ErrorExt for Error {
             | PhysicalRegionBusy { .. }
             | MultipleFieldColumn { .. }
             | NoFieldColumn { .. }
-            | AddingFieldColumn { .. } => StatusCode::InvalidArguments,
+            | AddingFieldColumn { .. }
+            | ParseRegionOptions { .. } => StatusCode::InvalidArguments,
 
             ForbiddenPhysicalAlter { .. } | UnsupportedRegionRequest { .. } => {
                 StatusCode::Unsupported
@@ -251,7 +266,8 @@ impl ErrorExt for Error {
             | SerializeColumnMetadata { .. }
             | DecodeColumnValue { .. }
             | ParseRegionId { .. }
-            | InvalidMetadata { .. } => StatusCode::Unexpected,
+            | InvalidMetadata { .. }
+            | SetSkippingIndexOption { .. } => StatusCode::Unexpected,
 
             PhysicalRegionNotFound { .. } | LogicalRegionNotFound { .. } => {
                 StatusCode::RegionNotFound

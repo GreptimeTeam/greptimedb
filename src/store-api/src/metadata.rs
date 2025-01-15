@@ -704,7 +704,7 @@ impl RegionMetadataBuilder {
     ) -> Result<()> {
         for column_meta in self.column_metadatas.iter_mut() {
             if column_meta.column_schema.name == column_name {
-                column_meta.column_schema.with_inverted_index(value)
+                column_meta.column_schema.set_inverted_index(value)
             }
         }
         Ok(())

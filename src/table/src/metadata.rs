@@ -304,13 +304,13 @@ impl TableMeta {
                     columns.push(new_column_schema);
                 } else {
                     let mut new_column_schema = column_schema.clone();
-                    new_column_schema.with_inverted_index(value);
+                    new_column_schema.set_inverted_index(value);
                     columns.push(new_column_schema);
                 }
             } else if pk_as_inverted_index && self.primary_key_indices.contains(&i) {
                 // Need to set inverted_indexed=true for all other columns in primary key.
                 let mut new_column_schema = column_schema.clone();
-                new_column_schema.with_inverted_index(true);
+                new_column_schema.set_inverted_index(true);
                 columns.push(new_column_schema);
             } else {
                 columns.push(column_schema.clone());

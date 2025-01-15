@@ -158,7 +158,11 @@ impl ColumnSchema {
         self
     }
 
-    pub fn with_inverted_index(&mut self, value: bool) {
+    /// Set the inverted index for the column.
+    /// Similar to [with_inverted_index] but don't take the ownership.
+    ///
+    /// [with_inverted_index]: Self::with_inverted_index
+    pub fn set_inverted_index(&mut self, value: bool) {
         match value {
             true => {
                 self.metadata
@@ -168,6 +172,15 @@ impl ColumnSchema {
                 self.metadata.remove(INVERTED_INDEX_KEY);
             }
         }
+    }
+
+    /// Set the inverted index for the column.
+    /// Similar to [set_inverted_index] but take the ownership and return a owned value.
+    ///
+    /// [set_inverted_index]: Self::set_inverted_index
+    pub fn with_inverted_index(mut self, value: bool) -> Self {
+        self.set_inverted_index(value);
+        self
     }
 
     // Put a placeholder to invalidate schemas.all(!has_inverted_index_key).
