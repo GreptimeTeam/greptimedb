@@ -83,6 +83,7 @@ impl TryFrom<&Yaml> for Dispatcher {
                         .as_str()
                         .map(|s| s.to_string())
                         .context(TablePartRequiredForDispatcherRuleSnafu)?;
+
                     let pipeline = rule[PIPELINE].as_str().map(|s| s.to_string());
 
                     if rule[VALUE].is_badvalue() {
