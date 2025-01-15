@@ -673,15 +673,30 @@ impl HttpServer {
         {
             if !self.options.disable_dashboard {
                 info!("Enable dashboard service at '/dashboard'");
-                router = router.nest("/dashboard", dashboard::dashboard());
+                // redirect /dashboard to /dashboard/
+                router = router.route(
+                    "/dashboard",
+                    routing::get(|uri: axum::http::uri::Uri| async move {
+                        let path = uri.path();
+                        let query = uri.query().map(|q| format!("?{}", q)).unwrap_or_default();
+
+                        let new_uri = format!("{}/{}", path, query);
+                        axum::response::Redirect::permanent(&new_uri)
+                    }),
+                );
 
                 // "/dashboard" and "/dashboard/" are two different paths in Axum.
                 // We cannot nest "/dashboard/", because we already mapping "/dashboard/*x" while nesting "/dashboard".
                 // So we explicitly route "/dashboard/" here.
-                router = router.route(
-                    "/dashboard/",
-                    routing::get(dashboard::static_handler).post(dashboard::static_handler),
-                );
+                router = router
+                    .route(
+                        "/dashboard/",
+                        routing::get(dashboard::static_handler).post(dashboard::static_handler),
+                    )
+                    .route(
+                        "/dashboard/*x",
+                        routing::get(dashboard::static_handler).post(dashboard::static_handler),
+                    );
             }
         }
 
