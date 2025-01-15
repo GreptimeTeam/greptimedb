@@ -192,26 +192,6 @@ where
     // pub on_failure: processor::Processors,
 }
 
-impl<T> std::fmt::Display for Pipeline<T>
-where
-    T: Transformer,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        if let Some(description) = &self.description {
-            writeln!(f, "description: {description}")?;
-        }
-
-        let processors = self.processors.iter().map(|p| p.kind()).join(",");
-        writeln!(f, "processors: {processors}")?;
-
-        if let Some(dispatcher) = &self.dispatcher {
-            writeln!(f, "dispatcher: {}", dispatcher)?;
-        }
-
-        writeln!(f, "transformer: {}", self.transformer)
-    }
-}
-
 impl<T> Pipeline<T>
 where
     T: Transformer,
