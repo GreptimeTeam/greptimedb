@@ -18,6 +18,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use parquet::arrow::ProjectionMask;
 use parquet::file::metadata::ParquetMetaData;
+use store_api::storage::SequenceNumber;
 
 use crate::error;
 use crate::memtable::bulk::context::BulkIterContextRef;
@@ -31,6 +32,7 @@ pub struct BulkPartIter {
     row_groups_to_read: VecDeque<usize>,
     current_reader: Option<PruneReader>,
     builder: MemtableRowGroupReaderBuilder,
+    sequence: Option<SequenceNumber>,
 }
 
 impl BulkPartIter {
@@ -40,6 +42,7 @@ impl BulkPartIter {
         mut row_groups_to_read: VecDeque<usize>,
         parquet_meta: Arc<ParquetMetaData>,
         data: Bytes,
+        sequence: Option<SequenceNumber>,
     ) -> error::Result<Self> {
         let projection_mask = ProjectionMask::roots(
             parquet_meta.file_metadata().schema_descr(),
@@ -62,6 +65,7 @@ impl BulkPartIter {
             row_groups_to_read,
             current_reader: init_reader,
             builder,
+            sequence,
         })
     }
 

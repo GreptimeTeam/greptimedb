@@ -347,7 +347,11 @@ impl ScanRegion {
         let memtables = memtables
             .into_iter()
             .map(|mem| {
-                let ranges = mem.ranges(Some(mapper.column_ids()), Some(predicate.clone()));
+                let ranges = mem.ranges(
+                    Some(mapper.column_ids()),
+                    Some(predicate.clone()),
+                    self.request.sequence,
+                );
                 MemRangeBuilder::new(ranges)
             })
             .collect();

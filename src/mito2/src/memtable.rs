@@ -147,6 +147,7 @@ pub trait Memtable: Send + Sync + fmt::Debug {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
+        sequence: Option<SequenceNumber>,
     ) -> Result<BoxedBatchIterator>;
 
     /// Returns the ranges in the memtable.
@@ -155,6 +156,7 @@ pub trait Memtable: Send + Sync + fmt::Debug {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
+        sequence: Option<SequenceNumber>,
     ) -> MemtableRanges;
 
     /// Returns true if the memtable is empty.

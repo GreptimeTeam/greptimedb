@@ -33,7 +33,7 @@ use datatypes::vectors::{
 };
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error::{
@@ -236,6 +236,7 @@ impl Memtable for TimeSeriesMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         filters: Option<Predicate>,
+        sequence: Option<SequenceNumber>,
     ) -> Result<BoxedBatchIterator> {
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
@@ -248,7 +249,7 @@ impl Memtable for TimeSeriesMemtable {
 
         let iter = self
             .series_set
-            .iter_series(projection, filters, self.dedup)?;
+            .iter_series(projection, filters, self.dedup, sequence)?;
 
         if self.merge_mode == MergeMode::LastNonNull {
             let iter = LastNonNullIter::new(iter);
@@ -262,6 +263,7 @@ impl Memtable for TimeSeriesMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
+        sequence: Option<SequenceNumber>,
     ) -> MemtableRanges {
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
@@ -277,6 +279,7 @@ impl Memtable for TimeSeriesMemtable {
             predicate,
             dedup: self.dedup,
             merge_mode: self.merge_mode,
+            sequence,
         });
         let context = Arc::new(MemtableRangeContext::new(self.id, builder));
 
@@ -384,6 +387,7 @@ impl SeriesSet {
         projection: HashSet<ColumnId>,
         predicate: Option<Predicate>,
         dedup: bool,
+        sequence: Option<SequenceNumber>,
     ) -> Result<Iter> {
         let primary_key_schema = primary_key_schema(&self.region_metadata);
         let primary_key_datatypes = self
@@ -401,6 +405,7 @@ impl SeriesSet {
             primary_key_datatypes,
             self.codec.clone(),
             dedup,
+            sequence,
         )
     }
 }
@@ -448,6 +453,7 @@ struct Iter {
     pk_datatypes: Vec<ConcreteDataType>,
     codec: Arc<DensePrimaryKeyCodec>,
     dedup: bool,
+    sequence: Option<SequenceNumber>,
     metrics: Metrics,
 }
 
@@ -462,6 +468,7 @@ impl Iter {
         pk_datatypes: Vec<ConcreteDataType>,
         codec: Arc<DensePrimaryKeyCodec>,
         dedup: bool,
+        sequence: Option<SequenceNumber>,
     ) -> Result<Self> {
         let predicate = predicate
             .map(|predicate| {
@@ -482,6 +489,7 @@ impl Iter {
             pk_datatypes,
             codec,
             dedup,
+            sequence,
             metrics: Metrics::default(),
         })
     }
@@ -855,6 +863,7 @@ struct TimeSeriesIterBuilder {
     projection: HashSet<ColumnId>,
     predicate: Option<Predicate>,
     dedup: bool,
+    sequence: Option<SequenceNumber>,
     merge_mode: MergeMode,
 }
 
@@ -864,6 +873,7 @@ impl IterBuilder for TimeSeriesIterBuilder {
             self.projection.clone(),
             self.predicate.clone(),
             self.dedup,
+            self.sequence,
         )?;
 
         if self.merge_mode == MergeMode::LastNonNull {
@@ -1253,7 +1263,7 @@ mod tests {
             *expected_ts.entry(ts).or_default() += if dedup { 1 } else { 2 };
         }
 
-        let iter = memtable.iter(None, None).unwrap();
+        let iter = memtable.iter(None, None, None).unwrap();
         let mut read = HashMap::new();
 
         for ts in iter
@@ -1293,7 +1303,7 @@ mod tests {
         let memtable = TimeSeriesMemtable::new(schema, 42, None, true, MergeMode::LastRow);
         memtable.write(&kvs).unwrap();
 
-        let iter = memtable.iter(Some(&[3]), None).unwrap();
+        let iter = memtable.iter(Some(&[3]), None, None).unwrap();
 
         let mut v0_all = vec![];
 
