@@ -359,12 +359,11 @@ pub enum PipelineWay {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use api::v1::Rows;
     use greptime_proto::v1::value::ValueData;
     use greptime_proto::v1::{self, ColumnDataType, SemanticType};
 
+    use super::*;
     use crate::etl::transform::GreptimeTransformer;
 
     #[test]
