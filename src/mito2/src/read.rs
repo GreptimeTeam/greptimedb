@@ -35,7 +35,7 @@ use async_trait::async_trait;
 use common_time::Timestamp;
 use datafusion_common::arrow::array::UInt8Array;
 use datatypes::arrow;
-use datatypes::arrow::array::{Array, ArrayRef};
+use datatypes::arrow::array::{Array, ArrayRef, UInt64Array};
 use datatypes::arrow::compute::SortOptions;
 use datatypes::arrow::row::{RowConverter, SortField};
 use datatypes::prelude::{ConcreteDataType, DataType, ScalarVector};
@@ -330,6 +330,24 @@ impl Batch {
                 .filter(predicate)
                 .context(ComputeVectorSnafu)?;
         }
+
+        Ok(())
+    }
+
+    /// Filters rows by the given `sequence`. Only preserves rows with sequence less than or equal to `sequence`.
+    pub fn filter_by_sequence(&mut self, sequence: Option<SequenceNumber>) -> Result<()> {
+        let (seq, _last_seq) = match (sequence, self.last_sequence()) {
+            (None, _) | (_, None) => return Ok(()),
+            (Some(sequence), Some(last_sequence)) if sequence >= last_sequence => return Ok(()),
+            (Some(sequence), Some(last_sequence)) => (sequence, last_sequence),
+        };
+
+        let seqs = self.sequences.as_arrow();
+        let sequence = UInt64Array::new_scalar(seq);
+        let predicate = datafusion_common::arrow::compute::kernels::cmp::lt_eq(seqs, &sequence)
+            .context(ComputeArrowSnafu)?;
+        let predicate = BooleanVector::from(predicate);
+        self.filter(&predicate)?;
 
         Ok(())
     }

@@ -554,6 +554,12 @@ impl Iterator for Iter {
             self.metrics.num_batches += 1;
             self.metrics.num_rows += batch.as_ref().map(|b| b.num_rows()).unwrap_or(0);
             self.metrics.scan_cost += start.elapsed();
+
+            let mut batch = batch;
+            batch = batch.and_then(|mut batch| {
+                batch.filter_by_sequence(self.sequence)?;
+                Ok(batch)
+            });
             return Some(batch);
         }
         self.metrics.scan_cost += start.elapsed();

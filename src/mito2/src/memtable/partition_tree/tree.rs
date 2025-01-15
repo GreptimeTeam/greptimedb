@@ -523,6 +523,8 @@ impl TreeIter {
         if part_reader.is_valid() {
             self.metrics.rows_fetched += batch.num_rows();
             self.metrics.batches_fetched += 1;
+            let mut batch = batch;
+            batch.filter_by_sequence(self.sequence)?;
             return Ok(Some(batch));
         }
 
@@ -533,6 +535,8 @@ impl TreeIter {
 
         self.metrics.rows_fetched += batch.num_rows();
         self.metrics.batches_fetched += 1;
+        let mut batch = batch;
+        batch.filter_by_sequence(self.sequence)?;
         Ok(Some(batch))
     }
 }

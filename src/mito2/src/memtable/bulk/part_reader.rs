@@ -75,14 +75,16 @@ impl BulkPartIter {
             return Ok(None);
         };
 
-        if let Some(batch) = current.next_batch()? {
+        if let Some(mut batch) = current.next_batch()? {
+            batch.filter_by_sequence(self.sequence)?;
             return Ok(Some(batch));
         }
 
         // Previous row group exhausted, read next row group
         while let Some(next_row_group) = self.row_groups_to_read.pop_front() {
             current.reset(self.builder.build_row_group_reader(next_row_group, None)?);
-            if let Some(next_batch) = current.next_batch()? {
+            if let Some(mut next_batch) = current.next_batch()? {
+                next_batch.filter_by_sequence(self.sequence)?;
                 return Ok(Some(next_batch));
             }
         }
