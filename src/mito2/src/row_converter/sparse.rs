@@ -28,7 +28,7 @@ use crate::error::{DeserializeFieldSnafu, Result, SerializeFieldSnafu};
 use crate::row_converter::dense::SortField;
 use crate::row_converter::PrimaryKeyCodec;
 
-/// A codec for sparse row.
+/// A codec for sparse key of metrics.
 #[derive(Clone)]
 pub struct SparsePrimaryKeyCodec {
     inner: Arc<SparsePrimaryKeyCodecInner>,
@@ -78,7 +78,7 @@ const RESERVED_COLUMN_ID_TABLE_ID: ColumnId = ReservedColumnId::table_id();
 const COLUMN_ID_ENCODE_SIZE: usize = 4;
 
 impl SparsePrimaryKeyCodec {
-    /// Creates a new [`SchemaLessSparseRowCodec`] instance.
+    /// Creates a new [`SparsePrimaryKeyCodec`] instance.
     pub fn new(region_metadata: &RegionMetadataRef) -> Self {
         Self {
             inner: Arc::new(SparsePrimaryKeyCodecInner {
@@ -106,7 +106,7 @@ impl SparsePrimaryKeyCodec {
         }
     }
 
-    /// Encodes the given bytes into a [`SparseValue`].
+    /// Encodes the given bytes into a [`SparseValues`].
     pub(crate) fn encode_to_vec<'a, I>(&self, row: I, buffer: &mut Vec<u8>) -> Result<()>
     where
         I: Iterator<Item = (ColumnId, ValueRef<'a>)>,
@@ -130,8 +130,8 @@ impl SparsePrimaryKeyCodec {
         Ok(())
     }
 
-    /// Encodes the given bytes into a [`SparseValue`].
-    fn encode_sparse(&self, bytes: &[u8]) -> Result<SparseValues> {
+    /// Decodes the given bytes into a [`SparseValues`].
+    fn decode_sparse(&self, bytes: &[u8]) -> Result<SparseValues> {
         let mut deserializer = Deserializer::new(bytes);
         let mut values = SparseValues::new(HashMap::new());
 
@@ -367,7 +367,7 @@ mod tests {
         let row = test_row();
         codec.encode_to_vec(row.into_iter(), &mut buffer).unwrap();
         assert!(!buffer.is_empty());
-        let sparse_value = codec.encode_sparse(&buffer).unwrap();
+        let sparse_value = codec.decode_sparse(&buffer).unwrap();
         assert_eq!(
             sparse_value.get_or_null(RESERVED_COLUMN_ID_TABLE_ID),
             &Value::UInt32(42)
