@@ -790,6 +790,27 @@ pub enum Error {
         #[snafu(source)]
         source: common_procedure::error::Error,
     },
+    // #[snafu(display("Failed to serialize process value when registering."))]
+    // RegisterProcess {
+    //     source: crate::error::Error,
+    //     #[snafu(implicit)]
+    //     location: Location,
+    // },
+    //
+    // #[snafu(display("Failed to list all running processes."))]
+    // ListProcesses {
+    //     source: crate::error::Error,
+    //     #[snafu(implicit)]
+    //     location: Location,
+    // },
+    //
+    // #[snafu(display("Failed to delete process {}", msg))]
+    // DeleteProcess {
+    //     msg: String,
+    //     source: crate::error::Error,
+    //     #[snafu(implicit)]
+    //     location: Location,
+    // },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -905,7 +926,10 @@ impl ErrorExt for Error {
             #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
             RdsTransactionRetryFailed { .. } => StatusCode::Internal,
             Error::DatanodeTableInfoNotFound { .. } => StatusCode::Internal,
-            InvalidProcessKey { .. } => StatusCode::Internal
+            InvalidProcessKey { .. } => StatusCode::Internal,
+            // RegisterProcess { .. } | ListProcesses { .. } | DeleteProcess { .. } => {
+            //     StatusCode::Internal
+            // }
         }
     }
 
