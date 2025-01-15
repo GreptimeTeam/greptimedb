@@ -105,10 +105,16 @@ impl NumbersDataSource {
 
 impl DataSource for NumbersDataSource {
     fn get_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream, BoxedError> {
+        let projected_schema = match &request.projection {
+            Some(projection) => Arc::new(self.schema.try_project(projection).unwrap()),
+            None => self.schema.clone(),
+        };
         Ok(Box::pin(NumbersStream {
             limit: request.limit.unwrap_or(100) as u32,
             schema: self.schema.clone(),
             already_run: false,
+            projection: request.projection,
+            projected_schema,
         }))
     }
 }
@@ -118,11 +124,13 @@ struct NumbersStream {
     limit: u32,
     schema: SchemaRef,
     already_run: bool,
+    projection: Option<Vec<usize>>,
+    projected_schema: SchemaRef,
 }
 
 impl RecordBatchStream for NumbersStream {
     fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+        self.projected_schema.clone()
     }
 
     fn output_ordering(&self) -> Option<&[OrderOption]> {
@@ -143,14 +151,17 @@ impl Stream for NumbersStream {
         }
         self.already_run = true;
         let numbers: Vec<u32> = (0..self.limit).collect();
-        let batch = DfRecordBatch::try_new(
+        let mut batch = DfRecordBatch::try_new(
             self.schema.arrow_schema().clone(),
             vec![Arc::new(UInt32Array::from(numbers))],
         )
         .unwrap();
+        if let Some(projection) = &self.projection {
+            batch = batch.project(projection).unwrap();
+        }
 
         Poll::Ready(Some(RecordBatch::try_from_df_record_batch(
-            self.schema.clone(),
+            self.projected_schema.clone(),
             batch,
         )))
     }
