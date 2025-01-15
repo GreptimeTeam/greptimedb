@@ -142,10 +142,7 @@ impl TopicPool {
         }
     }
 
-    /// Restores topics from kvbackend and return the topics that are not stored in kvbackend.
-    async fn restore(&self, kv_backend: &KvBackendRef) -> Result<Vec<&String>> {
-        // Caution: legacy restore will remove the legacy topics from kvbackend.
-        let legacy_topics = self.legacy_restore(kv_backend).await?;
+    async fn restore(&self, kv_backend: &KvBackendRef) -> Result<Vec<String>> {
         let req =
             RangeRequest::new().with_prefix(TopicNameKey::range_start_key(&self.prefix).as_bytes());
         let resp = kv_backend.range(req).await?;
@@ -154,6 +151,14 @@ impl TopicPool {
             .iter()
             .map(topic_decoder)
             .collect::<Result<Vec<String>>>()?;
+        Ok(topics)
+    }
+
+    /// Restores topics from kvbackend and return the topics that are not stored in kvbackend.
+    async fn to_be_created(&self, kv_backend: &KvBackendRef) -> Result<Vec<&String>> {
+        // Caution: legacy restore will remove the legacy topics from kvbackend.
+        let legacy_topics = self.legacy_restore(kv_backend).await?;
+        let topics = self.restore(kv_backend).await?;
         let mut topics_set = HashSet::with_capacity(topics.len() + legacy_topics.len());
         topics_set.extend(topics);
         topics_set.extend(legacy_topics);
@@ -222,7 +227,7 @@ impl TopicManager {
         let num_topics = self.config.kafka_topic.num_topics;
         ensure!(num_topics > 0, InvalidNumTopicsSnafu { num_topics });
 
-        let topics_to_be_created = self.topic_pool.restore(&self.kv_backend).await?;
+        let topics_to_be_created = self.topic_pool.to_be_created(&self.kv_backend).await?;
 
         if !topics_to_be_created.is_empty() {
             self.try_create_topics(&topics_to_be_created).await?;
@@ -377,17 +382,24 @@ mod tests {
             kv_backend.clone(),
         );
 
-        // Persists topics to kv backend.
-        topic_manager.topic_pool.persist(&kv_backend).await.unwrap();
-
-        // Restores topics from kv backend.
-        let mut restored_topics = topic_manager.topic_pool.restore(&kv_backend).await.unwrap();
-        restored_topics.sort();
-
+        let mut topics_to_be_created = topic_manager
+            .topic_pool
+            .to_be_created(&kv_backend)
+            .await
+            .unwrap();
+        topics_to_be_created.sort();
         let mut expected = topic_manager.topic_pool.topics.iter().collect::<Vec<_>>();
         expected.sort();
+        assert_eq!(expected, topics_to_be_created);
 
-        assert_eq!(expected, restored_topics);
+        // Persists topics to kv backend.
+        topic_manager.topic_pool.persist(&kv_backend).await.unwrap();
+        let topics_to_be_created = topic_manager
+            .topic_pool
+            .to_be_created(&kv_backend)
+            .await
+            .unwrap();
+        assert!(topics_to_be_created.is_empty());
     }
 
     /// Tests that the topic manager could allocate topics correctly.
