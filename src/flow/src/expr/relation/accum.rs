@@ -20,6 +20,9 @@
 //! Currently support sum, count, any, all and min/max(with one caveat that min/max can't support delete with aggregate).
 //! TODO: think of better ways to not ser/de every time a accum needed to be updated, since it's in a tight loop
 
+mod accum_v2;
+mod min_max;
+
 use std::any::type_name;
 use std::fmt::Display;
 
