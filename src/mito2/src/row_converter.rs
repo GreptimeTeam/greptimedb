@@ -13,6 +13,9 @@
 // limitations under the License.
 
 mod dense;
+// TODO(weny): remove it.
+#[allow(unused)]
+mod sparse;
 
 use std::sync::Arc;
 

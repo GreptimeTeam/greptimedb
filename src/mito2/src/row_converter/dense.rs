@@ -163,7 +163,7 @@ impl SortField {
         Ok(())
     }
 
-    fn deserialize<B: Buf>(&self, deserializer: &mut Deserializer<B>) -> Result<Value> {
+    pub(crate) fn deserialize<B: Buf>(&self, deserializer: &mut Deserializer<B>) -> Result<Value> {
         use common_time::DateTime;
         macro_rules! deserialize_and_build_value {
             (
@@ -246,7 +246,7 @@ impl SortField {
     }
 
     /// Skip deserializing this field, returns the length of it.
-    fn skip_deserialize(
+    pub(crate) fn skip_deserialize(
         &self,
         bytes: &[u8],
         deserializer: &mut Deserializer<&[u8]>,
