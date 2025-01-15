@@ -31,7 +31,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
     BuildKafkaClientSnafu, BuildKafkaCtrlClientSnafu, BuildKafkaPartitionClientSnafu,
-    CreateKafkaWalTopicSnafu, Error, InvalidMetadataSnafu, InvalidNumTopicsSnafu,
+    CreateKafkaWalTopicSnafu, DecodeJsonSnafu, Error, InvalidMetadataSnafu, InvalidNumTopicsSnafu,
     ProduceRecordSnafu, ResolveKafkaEndpointSnafu, Result, TlsConfigSnafu,
 };
 use crate::key::{MetadataKey, KAFKA_TOPIC_KEY_PATTERN, KAFKA_TOPIC_KEY_PREFIX};
@@ -59,7 +59,7 @@ impl<'a> TopicNameKey<'a> {
         Self { topic }
     }
 
-    pub fn gen_with_id_and_prefix(id: u64, prefix: &'a str) -> String {
+    pub fn gen_with_id_and_prefix(id: usize, prefix: &'a str) -> String {
         format!("{}_{}", prefix, id)
     }
 
@@ -115,10 +115,81 @@ fn topic_decoder(kv: &KeyValue) -> Result<String> {
     Ok(key.topic.to_string())
 }
 
+pub struct TopicPool {
+    prefix: String,
+    pub(crate) topics: Vec<String>,
+}
+
+impl TopicPool {
+    fn new(num_topics: usize, prefix: String) -> Self {
+        let topics = (0..num_topics)
+            .map(|i| TopicNameKey::gen_with_id_and_prefix(i, &prefix))
+            .collect();
+        Self { prefix, topics }
+    }
+
+    /// Legacy restore for compatibility.
+    async fn legacy_restore(&self, kv_backend: &KvBackendRef) -> Result<Vec<String>> {
+        if let Some(kv) = kv_backend.get(KAFKA_TOPIC_KEY_PREFIX.as_bytes()).await? {
+            let topics =
+                serde_json::from_slice::<Vec<String>>(&kv.value).context(DecodeJsonSnafu)?;
+            kv_backend
+                .delete(KAFKA_TOPIC_KEY_PREFIX.as_bytes(), false)
+                .await?;
+            Ok(topics)
+        } else {
+            Ok(vec![])
+        }
+    }
+
+    /// Restores topics from kvbackend and return the topics that are not stored in kvbackend.
+    async fn restore(&self, kv_backend: &KvBackendRef) -> Result<Vec<&String>> {
+        // Caution: legacy restore will remove the legacy topics from kvbackend.
+        let legacy_topics = self.legacy_restore(kv_backend).await?;
+        let req =
+            RangeRequest::new().with_prefix(TopicNameKey::range_start_key(&self.prefix).as_bytes());
+        let resp = kv_backend.range(req).await?;
+        let topics = resp
+            .kvs
+            .iter()
+            .map(topic_decoder)
+            .collect::<Result<Vec<String>>>()?;
+        let mut topics_set = HashSet::with_capacity(topics.len() + legacy_topics.len());
+        topics_set.extend(topics);
+        topics_set.extend(legacy_topics);
+        Ok(self
+            .topics
+            .iter()
+            .filter(|topic| !topics_set.contains(*topic))
+            .collect::<Vec<_>>())
+    }
+
+    /// Persists topics into kvbackend.
+    async fn persist(&self, kv_backend: &KvBackendRef) -> Result<()> {
+        let topic_name_keys = self
+            .topics
+            .iter()
+            .map(|topic| TopicNameKey::new(topic))
+            .collect::<Vec<_>>();
+        let req = BatchPutRequest {
+            kvs: topic_name_keys
+                .iter()
+                .map(|key| KeyValue {
+                    key: key.to_bytes(),
+                    value: vec![],
+                })
+                .collect(),
+            prev_kv: false,
+        };
+        kv_backend.batch_put(req).await?;
+        Ok(())
+    }
+}
+
 /// Manages topic initialization and selection.
 pub struct TopicManager {
     config: MetasrvKafkaConfig,
-    pub(crate) topic_pool: Vec<String>,
+    pub(crate) topic_pool: TopicPool,
     pub(crate) topic_selector: TopicSelectorRef,
     kv_backend: KvBackendRef,
 }
@@ -126,23 +197,15 @@ pub struct TopicManager {
 impl TopicManager {
     /// Creates a new topic manager.
     pub fn new(config: MetasrvKafkaConfig, kv_backend: KvBackendRef) -> Self {
-        // Topics should be created.
-        let topics = (0..config.kafka_topic.num_topics)
-            .map(|topic_id| {
-                TopicNameKey::gen_with_id_and_prefix(
-                    topic_id as u64,
-                    &config.kafka_topic.topic_name_prefix,
-                )
-            })
-            .collect::<Vec<_>>();
-
         let selector = match config.kafka_topic.selector_type {
             TopicSelectorType::RoundRobin => RoundRobinTopicSelector::with_shuffle(),
         };
+        let num_topics = config.kafka_topic.num_topics;
+        let prefix = config.kafka_topic.topic_name_prefix.clone();
 
         Self {
             config,
-            topic_pool: topics,
+            topic_pool: TopicPool::new(num_topics, prefix),
             topic_selector: Arc::new(selector),
             kv_backend,
         }
@@ -159,38 +222,17 @@ impl TopicManager {
         let num_topics = self.config.kafka_topic.num_topics;
         ensure!(num_topics > 0, InvalidNumTopicsSnafu { num_topics });
 
-        // Topics should be created.
-        let topics = &self.topic_pool;
+        let topics_to_be_created = self.topic_pool.restore(&self.kv_backend).await?;
 
-        // Topics already created.
-        // There may have extra topics created but it's okay since those topics won't break topic allocation.
-        let created_topics = self
-            .restore_created_topics(&self.kv_backend)
-            .await?
-            .into_iter()
-            .collect::<HashSet<String>>();
-
-        // Creates missing topics.
-        let to_be_created = topics
-            .iter()
-            .enumerate()
-            .filter_map(|(i, topic)| {
-                if created_topics.contains(topic) {
-                    return None;
-                }
-                Some(i)
-            })
-            .collect::<Vec<_>>();
-
-        if !to_be_created.is_empty() {
-            self.try_create_topics(topics, &to_be_created).await?;
-            self.persist_created_topics(&self.kv_backend).await?;
+        if !topics_to_be_created.is_empty() {
+            self.try_create_topics(&topics_to_be_created).await?;
+            self.topic_pool.persist(&self.kv_backend).await?;
         }
         Ok(())
     }
 
     /// Tries to create topics specified by indexes in `to_be_created`.
-    async fn try_create_topics(&self, topics: &[String], to_be_created: &[usize]) -> Result<()> {
+    async fn try_create_topics(&self, topics: &[&String]) -> Result<()> {
         // Builds an kafka controller client for creating topics.
         let backoff_config = BackoffConfig {
             init_backoff: self.config.backoff.init,
@@ -221,11 +263,11 @@ impl TopicManager {
             .context(BuildKafkaCtrlClientSnafu)?;
 
         // Try to create missing topics.
-        let tasks = to_be_created
+        let tasks = topics
             .iter()
-            .map(|i| async {
-                self.try_create_topic(&topics[*i], &control_client).await?;
-                self.try_append_noop_record(&topics[*i], &client).await?;
+            .map(|topic| async {
+                self.try_create_topic(topic, &control_client).await?;
+                self.try_append_noop_record(topic, &client).await?;
                 Ok(())
             })
             .collect::<Vec<_>>();
@@ -234,13 +276,13 @@ impl TopicManager {
 
     /// Selects one topic from the topic pool through the topic selector.
     pub fn select(&self) -> Result<&String> {
-        self.topic_selector.select(&self.topic_pool)
+        self.topic_selector.select(&self.topic_pool.topics)
     }
 
     /// Selects a batch of topics from the topic pool through the topic selector.
     pub fn select_batch(&self, num_topics: usize) -> Result<Vec<&String>> {
         (0..num_topics)
-            .map(|_| self.topic_selector.select(&self.topic_pool))
+            .map(|_| self.topic_selector.select(&self.topic_pool.topics))
             .collect()
     }
 
@@ -295,39 +337,6 @@ impl TopicManager {
         }
     }
 
-    async fn restore_created_topics(&self, kv_backend: &KvBackendRef) -> Result<Vec<String>> {
-        let req = RangeRequest::new().with_prefix(
-            TopicNameKey::range_start_key(&self.config.kafka_topic.topic_name_prefix).as_bytes(),
-        );
-        let resp = kv_backend.range(req).await?;
-        let topics = resp
-            .kvs
-            .iter()
-            .map(topic_decoder)
-            .collect::<Result<Vec<String>>>()?;
-        Ok(topics)
-    }
-
-    async fn persist_created_topics(&self, kv_backend: &KvBackendRef) -> Result<()> {
-        let topic_name_keys = self
-            .topic_pool
-            .iter()
-            .map(|topic| TopicNameKey::new(topic))
-            .collect::<Vec<_>>();
-        let req = BatchPutRequest {
-            kvs: topic_name_keys
-                .iter()
-                .map(|key| KeyValue {
-                    key: key.to_bytes(),
-                    value: vec![],
-                })
-                .collect(),
-            prev_kv: false,
-        };
-        kv_backend.batch_put(req).await?;
-        Ok(())
-    }
-
     fn is_topic_already_exist_err(e: &RsKafkaError) -> bool {
         matches!(
             e,
@@ -369,19 +378,13 @@ mod tests {
         );
 
         // Persists topics to kv backend.
-        topic_manager
-            .persist_created_topics(&kv_backend)
-            .await
-            .unwrap();
+        topic_manager.topic_pool.persist(&kv_backend).await.unwrap();
 
         // Restores topics from kv backend.
-        let mut restored_topics = topic_manager
-            .restore_created_topics(&kv_backend)
-            .await
-            .unwrap();
+        let mut restored_topics = topic_manager.topic_pool.restore(&kv_backend).await.unwrap();
         restored_topics.sort();
 
-        let mut expected = topic_manager.topic_pool.clone();
+        let mut expected = topic_manager.topic_pool.topics.iter().collect::<Vec<_>>();
         expected.sort();
 
         assert_eq!(expected, restored_topics);
@@ -413,7 +416,7 @@ mod tests {
                 let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
                 let mut manager = TopicManager::new(config.clone(), kv_backend);
                 // Replaces the default topic pool with the constructed topics.
-                manager.topic_pool.clone_from(&topics);
+                manager.topic_pool.topics.clone_from(&topics);
                 // Replaces the default selector with a round-robin selector without shuffled.
                 manager.topic_selector = Arc::new(RoundRobinTopicSelector::default());
                 manager.start().await.unwrap();
