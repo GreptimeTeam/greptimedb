@@ -66,7 +66,7 @@ impl Partition {
     pub fn write_with_key(
         &self,
         primary_key: &mut Vec<u8>,
-        row_codec: &Arc<dyn PrimaryKeyCodec>,
+        row_codec: &dyn PrimaryKeyCodec,
         key_value: KeyValue,
         re_encode: bool,
         metrics: &mut WriteMetrics,
@@ -91,9 +91,7 @@ impl Partition {
                     // `primary_key` is sparse, re-encode the full primary key.
                     let sparse_key = primary_key.clone();
                     primary_key.clear();
-                    {
-                        row_codec.encode_key_value(&key_value, primary_key)?;
-                    }
+                    row_codec.encode_key_value(&key_value, primary_key)?;
                     let pk_id = inner.shard_builder.write_with_key(
                         primary_key,
                         Some(&sparse_key),
@@ -140,7 +138,7 @@ impl Partition {
     fn build_primary_key_filter(
         need_prune_key: bool,
         metadata: &RegionMetadataRef,
-        row_codec: &Arc<dyn PrimaryKeyCodec>,
+        row_codec: &dyn PrimaryKeyCodec,
         filters: &Arc<Vec<SimpleFilterEvaluator>>,
     ) -> Option<Box<dyn PrimaryKeyFilter>> {
         if need_prune_key {
@@ -180,7 +178,7 @@ impl Partition {
                 let primary_key_filter = Self::build_primary_key_filter(
                     context.need_prune_key,
                     &context.metadata,
-                    &context.row_codec,
+                    context.row_codec.as_ref(),
                     &context.filters,
                 );
                 Ok(ShardNode::new(ShardSource::Shard(
@@ -194,7 +192,7 @@ impl Partition {
             let primary_key_filter = Self::build_primary_key_filter(
                 context.need_prune_key,
                 &context.metadata,
-                &context.row_codec,
+                context.row_codec.as_ref(),
                 &context.filters,
             );
             // Move the initialization of ShardBuilderReader out of read lock.

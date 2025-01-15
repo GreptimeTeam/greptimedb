@@ -353,7 +353,7 @@ impl PartitionTree {
 
         partition.write_with_key(
             primary_key,
-            &self.row_codec,
+            self.row_codec.as_ref(),
             key_value,
             self.is_partitioned, // If tree is partitioned, re-encode is required to get the full primary key.
             metrics,
