@@ -230,6 +230,11 @@ impl RegionMetadata {
         &self.column_metadatas[index]
     }
 
+    /// Returns the position of the time index.
+    pub fn time_index_column_pos(&self) -> usize {
+        self.id_to_index[&self.time_index]
+    }
+
     /// Returns the arrow field of the time index column.
     pub fn time_index_field(&self) -> FieldRef {
         let index = self.id_to_index[&self.time_index];
