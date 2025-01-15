@@ -300,6 +300,9 @@ impl ScanRegion {
                 if file_in_range(file, &time_range) {
                     files.push(file.clone());
                 }
+                // There is no need to check and prune for file's sequence here as the sequence number is usually very new,
+                // unless a query run for exceptionally long time. The sequence number wouldn't be in file.
+                // and the batch will be filtered out by tree reader anyway.
             }
         }
 
