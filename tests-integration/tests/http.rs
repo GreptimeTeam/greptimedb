@@ -27,7 +27,6 @@ use loki_api::prost_types::Timestamp;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use opentelemetry_proto::tonic::metrics::v1::ResourceMetrics;
 use prost::Message;
 use serde_json::{json, Value};
 use servers::http::handler::HealthResponse;
