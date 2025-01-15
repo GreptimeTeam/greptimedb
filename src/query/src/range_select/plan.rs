@@ -560,6 +560,7 @@ impl RangeSelect {
             .range_expr
             .iter()
             .map(|range_fn| {
+                let name = range_fn.expr.display_name()?;
                 let range_expr = match &range_fn.expr {
                     Expr::Alias(expr) => expr.expr.as_ref(),
                     others => others,
@@ -629,6 +630,7 @@ impl RangeSelect {
                         AggregateExprBuilder::new(aggr.func.clone(), arg)
                             .schema(input_schema.clone())
                             .order_by(LexOrdering::new(order_by))
+                            .alias(name)
                             .build()
                     }
                     Expr::AggregateFunction(aggr) => {
@@ -659,6 +661,7 @@ impl RangeSelect {
                             .schema(input_schema.clone())
                             .order_by(LexOrdering::new(order_by))
                             .with_distinct(distinct)
+                            .alias(name)
                             .build()
                     }
                     _ => Err(DataFusionError::Plan(format!(
