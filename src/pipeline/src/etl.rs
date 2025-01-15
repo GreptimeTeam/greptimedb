@@ -204,6 +204,10 @@ where
         let processors = self.processors.iter().map(|p| p.kind()).join(",");
         writeln!(f, "processors: {processors}")?;
 
+        if let Some(dispatcher) = &self.dispatcher {
+            writeln!(f, "dispatcher: {}", dispatcher)?;
+        }
+
         writeln!(f, "transformer: {}", self.transformer)
     }
 }

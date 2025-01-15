@@ -107,3 +107,19 @@ impl TryFrom<&Yaml> for Dispatcher {
         Ok(Dispatcher { field, rules })
     }
 }
+
+impl std::fmt::Display for Dispatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        writeln!(f, "Dispatcher on field: {}", self.field)?;
+        for rule in &self.rules {
+            writeln!(
+                f,
+                "  rule for value {}, pipeline {}, table_name_partial: {}",
+                rule.value,
+                rule.pipeline.as_deref().unwrap_or("default"),
+                rule.table_part
+            )?;
+        }
+        Ok(())
+    }
+}
