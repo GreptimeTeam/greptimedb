@@ -25,7 +25,7 @@ use futures::{FutureExt, TryStreamExt};
 use moka::future::Cache;
 use moka::notification::RemovalCause;
 use object_store::util::join_path;
-use object_store::{ErrorKind, Metakey, ObjectStore, Reader};
+use object_store::{ErrorKind, ObjectStore, Reader};
 use parquet::file::metadata::ParquetMetaData;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -195,7 +195,6 @@ impl FileCache {
         let mut lister = self
             .local_store
             .lister_with(FILE_DIR)
-            .metakey(Metakey::ContentLength)
             .await
             .context(OpenDalSnafu)?;
         // Use i64 for total_size to reduce the risk of overflow.
@@ -209,6 +208,12 @@ impl FileCache {
             let Some(key) = parse_index_key(entry.name()) else {
                 continue;
             };
+
+            let meta = self
+                .local_store
+                .stat(entry.path())
+                .await
+                .context(OpenDalSnafu)?;
             let file_size = meta.content_length() as u32;
             self.memory_index
                 .insert(key, IndexValue { file_size })

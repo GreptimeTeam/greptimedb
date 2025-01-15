@@ -12,7 +12,7 @@ snafu.workspace = true
 tokio.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-pprof = { version = "0.13", features = [
+pprof = { version = "0.14", features = [
     "flamegraph",
     "prost-codec",
     "protobuf",

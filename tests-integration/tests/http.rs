@@ -874,6 +874,8 @@ purge_threshold = "4GiB"
 max_retry_times = 3
 retry_delay = "500ms"
 
+[flow]
+
 [logging]
 max_log_files = 720
 append_stdout = true

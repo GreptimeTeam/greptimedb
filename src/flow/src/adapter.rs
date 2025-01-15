@@ -47,7 +47,7 @@ use tokio::sync::{broadcast, watch, Mutex, RwLock};
 pub(crate) use crate::adapter::node_context::FlownodeContext;
 use crate::adapter::table_source::ManagedTableSource;
 use crate::adapter::util::relation_desc_to_column_schemas_with_fallback;
-use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
+pub(crate) use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
 use crate::df_optimizer::sql_to_flow_plan;
 use crate::error::{EvalSnafu, ExternalSnafu, InternalSnafu, InvalidQuerySnafu, UnexpectedSnafu};
@@ -80,6 +80,21 @@ pub const UPDATE_AT_TS_COL: &str = "update_at";
 pub type FlowId = u64;
 pub type TableName = [String; 3];
 
+/// Flow config that exists both in standalone&distributed mode
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FlowConfig {
+    pub num_workers: usize,
+}
+
+impl Default for FlowConfig {
+    fn default() -> Self {
+        Self {
+            num_workers: (common_config::utils::get_cpus() / 2).max(1),
+        }
+    }
+}
+
 /// Options for flow node
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -87,6 +102,7 @@ pub struct FlownodeOptions {
     pub mode: Mode,
     pub cluster_id: Option<u64>,
     pub node_id: Option<u64>,
+    pub flow: FlowConfig,
     pub grpc: GrpcOptions,
     pub meta_client: Option<MetaClientOptions>,
     pub logging: LoggingOptions,
@@ -100,6 +116,7 @@ impl Default for FlownodeOptions {
             mode: servers::Mode::Standalone,
             cluster_id: None,
             node_id: None,
+            flow: FlowConfig::default(),
             grpc: GrpcOptions::default().with_addr("127.0.0.1:3004"),
             meta_client: None,
             logging: LoggingOptions::default(),
@@ -109,7 +126,14 @@ impl Default for FlownodeOptions {
     }
 }
 
-impl Configurable for FlownodeOptions {}
+impl Configurable for FlownodeOptions {
+    fn validate_sanitize(&mut self) -> common_config::error::Result<()> {
+        if self.flow.num_workers == 0 {
+            self.flow.num_workers = (common_config::utils::get_cpus() / 2).max(1);
+        }
+        Ok(())
+    }
+}
 
 /// Arc-ed FlowNodeManager, cheaper to clone
 pub type FlowWorkerManagerRef = Arc<FlowWorkerManager>;
@@ -121,6 +145,8 @@ pub struct FlowWorkerManager {
     /// The handler to the worker that will run the dataflow
     /// which is `!Send` so a handle is used
     pub worker_handles: Vec<Mutex<WorkerHandle>>,
+    /// The selector to select a worker to run the dataflow
+    worker_selector: Mutex<usize>,
     /// The query engine that will be used to parse the query and convert it to a dataflow plan
     pub query_engine: Arc<dyn QueryEngine>,
     /// Getting table name and table schema from table info manager
@@ -162,6 +188,7 @@ impl FlowWorkerManager {
         let worker_handles = Vec::new();
         FlowWorkerManager {
             worker_handles,
+            worker_selector: Mutex::new(0),
             query_engine,
             table_info_source: srv_map,
             frontend_invoker: RwLock::new(None),
@@ -181,15 +208,22 @@ impl FlowWorkerManager {
     }
 
     /// Create a flownode manager with one worker
-    pub fn new_with_worker<'s>(
+    pub fn new_with_workers<'s>(
         node_id: Option<u32>,
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
-    ) -> (Self, Worker<'s>) {
+        num_workers: usize,
+    ) -> (Self, Vec<Worker<'s>>) {
         let mut zelf = Self::new(node_id, query_engine, table_meta);
-        let (handle, worker) = create_worker();
-        zelf.add_worker_handle(handle);
-        (zelf, worker)
+
+        let workers: Vec<_> = (0..num_workers)
+            .map(|_| {
+                let (handle, worker) = create_worker();
+                zelf.add_worker_handle(handle);
+                worker
+            })
+            .collect();
+        (zelf, workers)
     }
 
     /// add a worker handler to manager, meaning this corresponding worker is under it's manage
@@ -830,7 +864,8 @@ impl FlowWorkerManager {
             .write()
             .await
             .insert(flow_id, err_collector.clone());
-        let handle = &self.worker_handles[0].lock().await;
+        // TODO(discord9): load balance?
+        let handle = &self.get_worker_handle_for_create_flow().await;
         let create_request = worker::Request::Create {
             flow_id,
             plan: flow_plan,

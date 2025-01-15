@@ -25,6 +25,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements;
 use sql::statements::insert::Insert;
 use sqlparser::ast::{ObjectName, Value as SqlValue};
+use table::metadata::TableInfoRef;
 use table::TableRef;
 
 use crate::error::{
@@ -61,7 +62,7 @@ impl<'a> StatementToRegion<'a> {
         &self,
         stmt: &Insert,
         query_ctx: &QueryContextRef,
-    ) -> Result<InstantAndNormalInsertRequests> {
+    ) -> Result<(InstantAndNormalInsertRequests, TableInfoRef)> {
         let (catalog, schema, table_name) = self.get_full_name(stmt.table_name())?;
         let table = self.get_table(&catalog, &schema, &table_name).await?;
         let table_schema = table.schema();
@@ -137,15 +138,21 @@ impl<'a> StatementToRegion<'a> {
             .await?;
         let requests = RegionInsertRequests { requests };
         if table_info.is_ttl_instant_table() {
-            Ok(InstantAndNormalInsertRequests {
-                normal_requests: Default::default(),
-                instant_requests: requests,
-            })
+            Ok((
+                InstantAndNormalInsertRequests {
+                    normal_requests: Default::default(),
+                    instant_requests: requests,
+                },
+                table_info,
+            ))
         } else {
-            Ok(InstantAndNormalInsertRequests {
-                normal_requests: requests,
-                instant_requests: Default::default(),
-            })
+            Ok((
+                InstantAndNormalInsertRequests {
+                    normal_requests: requests,
+                    instant_requests: Default::default(),
+                },
+                table_info,
+            ))
         }
     }
 
