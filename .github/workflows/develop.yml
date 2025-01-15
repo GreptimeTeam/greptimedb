@@ -642,6 +642,8 @@ jobs:
       - uses: rui314/setup-mold@v1
       - name: Install toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+            cache: false
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -689,6 +691,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: llvm-tools
+          cache: false
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
