@@ -36,7 +36,7 @@ pub struct LogQuery {
     /// The columns can be either from the original log or derived from processing exprs.
     /// Default (empty) means all columns.
     ///
-    /// TODO: Do we need negative select?
+    /// TODO(ruihang): Do we need negative select?
     pub columns: Vec<String>,
 
     // Filters
@@ -46,7 +46,7 @@ pub struct LogQuery {
     pub filters: Vec<ColumnFilters>,
     /// Adjacent lines to return. Applies to all filters above.
     ///
-    /// TODO: Do we need per-filter context?
+    /// TODO(ruihang): Do we need per-filter context?
     pub context: Context,
 
     // Processors
@@ -311,7 +311,7 @@ pub enum ContentFilter {
     /// Content exists, a.k.a. not null.
     Exist,
     Between(String, String),
-    // TODO: arithmetic operations
+    // TODO(ruihang): arithmetic operations
 
     // Compound filters
     Compound(Vec<ContentFilter>, BinaryOperator),
