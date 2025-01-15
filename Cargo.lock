@@ -6488,6 +6488,7 @@ dependencies = [
  "mur3",
  "object-store",
  "prometheus",
+ "serde",
  "serde_json",
  "snafu 0.8.5",
  "store-api",

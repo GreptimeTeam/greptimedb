@@ -549,6 +549,7 @@ mod test {
     use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
 
     use super::*;
+    use crate::config::EngineConfig;
     use crate::engine::MetricEngine;
     use crate::test_util::TestEnv;
 
@@ -707,7 +708,7 @@ mod test {
 
         // set up
         let env = TestEnv::new().await;
-        let engine = MetricEngine::new(env.mito());
+        let engine = MetricEngine::new(env.mito(), EngineConfig::default());
         let engine_inner = engine.inner;
 
         // check create data region request
