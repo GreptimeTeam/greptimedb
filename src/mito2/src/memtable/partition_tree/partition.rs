@@ -39,7 +39,7 @@ use crate::memtable::partition_tree::{PartitionTreeConfig, PkId};
 use crate::memtable::stats::WriteMetrics;
 use crate::metrics::PARTITION_TREE_READ_STAGE_ELAPSED;
 use crate::read::{Batch, BatchBuilder};
-use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyFilter};
+use crate::row_converter::{PrimaryKeyCodec, PrimaryKeyFilter};
 
 /// Key of a partition.
 pub type PartitionKey = u32;
@@ -378,80 +378,6 @@ impl PartitionReader {
         self.source.next()?;
         self.context.metrics.read_source += read_source.elapsed();
         Ok(())
-    }
-}
-
-/// Dense primary key filter.
-#[derive(Clone)]
-pub struct DensePrimaryKeyFilter {
-    metadata: RegionMetadataRef,
-    filters: Arc<Vec<SimpleFilterEvaluator>>,
-    codec: DensePrimaryKeyCodec,
-    offsets_buf: Vec<usize>,
-}
-
-impl DensePrimaryKeyFilter {
-    pub(crate) fn new(
-        metadata: RegionMetadataRef,
-        filters: Arc<Vec<SimpleFilterEvaluator>>,
-        codec: DensePrimaryKeyCodec,
-    ) -> Self {
-        Self {
-            metadata,
-            filters,
-            codec,
-            offsets_buf: Vec::new(),
-        }
-    }
-}
-
-impl PrimaryKeyFilter for DensePrimaryKeyFilter {
-    fn prune_primary_key(&mut self, pk: &[u8]) -> bool {
-        if self.filters.is_empty() {
-            return true;
-        }
-
-        // no primary key, we simply return true.
-        if self.metadata.primary_key.is_empty() {
-            return true;
-        }
-
-        // evaluate filters against primary key values
-        let mut result = true;
-        self.offsets_buf.clear();
-        for filter in &*self.filters {
-            if Partition::is_partition_column(filter.column_name()) {
-                continue;
-            }
-            let Some(column) = self.metadata.column_by_name(filter.column_name()) else {
-                continue;
-            };
-            // ignore filters that are not referencing primary key columns
-            if column.semantic_type != SemanticType::Tag {
-                continue;
-            }
-            // index of the column in primary keys.
-            // Safety: A tag column is always in primary key.
-            let index = self.metadata.primary_key_index(column.column_id).unwrap();
-            let value = match self.codec.decode_value_at(pk, index, &mut self.offsets_buf) {
-                Ok(v) => v,
-                Err(e) => {
-                    common_telemetry::error!(e; "Failed to decode primary key");
-                    return true;
-                }
-            };
-
-            // TODO(yingwen): `evaluate_scalar()` creates temporary arrays to compare scalars. We
-            // can compare the bytes directly without allocation and matching types as we use
-            // comparable encoding.
-            // Safety: arrow schema and datatypes are constructed from the same source.
-            let scalar_value = value
-                .try_to_scalar_value(&column.column_schema.data_type)
-                .unwrap();
-            result &= filter.evaluate_scalar(&scalar_value).unwrap_or(true);
-        }
-
-        result
     }
 }
 

@@ -22,6 +22,7 @@ use std::sync::Arc;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::value::{Value, ValueRef};
 pub use dense::{DensePrimaryKeyCodec, SortField};
+pub use sparse::{SparsePrimaryKeyCodec, SparseValues};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 
@@ -54,8 +55,8 @@ pub trait PrimaryKeyCodecExt {
 }
 
 pub trait PrimaryKeyFilter: Send + Sync {
-    /// Returns true if need to prune the primary key.
-    fn prune_primary_key(&mut self, pk: &[u8]) -> bool;
+    /// Returns true if the primary key matches the filter.
+    fn matches(&mut self, pk: &[u8]) -> bool;
 }
 
 pub trait PrimaryKeyCodec: Send + Sync {

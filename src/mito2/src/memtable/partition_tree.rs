@@ -19,6 +19,9 @@ mod dedup;
 mod dict;
 mod merger;
 mod partition;
+// TODO(weny): remove this
+#[allow(unused)]
+mod primary_key_filter;
 mod shard;
 mod shard_builder;
 mod tree;
@@ -28,7 +31,7 @@ use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
-pub(crate) use partition::DensePrimaryKeyFilter;
+pub(crate) use primary_key_filter::DensePrimaryKeyFilter;
 use serde::{Deserialize, Serialize};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;

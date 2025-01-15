@@ -107,7 +107,7 @@ impl SparsePrimaryKeyCodec {
     }
 
     /// Encodes the given bytes into a [`SparseValue`].
-    fn encode_to_vec<'a, I>(&self, row: I, buffer: &mut Vec<u8>) -> Result<()>
+    pub(crate) fn encode_to_vec<'a, I>(&self, row: I, buffer: &mut Vec<u8>) -> Result<()>
     where
         I: Iterator<Item = (ColumnId, ValueRef<'a>)>,
     {
@@ -161,7 +161,7 @@ impl SparsePrimaryKeyCodec {
     }
 
     /// Returns the offset of the given column id in the given primary key.
-    fn has_column(
+    pub(crate) fn has_column(
         &self,
         pk: &[u8],
         offsets_map: &mut HashMap<u32, usize>,
@@ -189,7 +189,12 @@ impl SparsePrimaryKeyCodec {
     }
 
     /// Decode value at `offset` in `pk`.
-    fn decode_value_at(&self, pk: &[u8], offset: usize, column_id: ColumnId) -> Result<Value> {
+    pub(crate) fn decode_value_at(
+        &self,
+        pk: &[u8],
+        offset: usize,
+        column_id: ColumnId,
+    ) -> Result<Value> {
         let mut deserializer = Deserializer::new(pk);
         deserializer.advance(offset);
         // Safety: checked by `has_column`
@@ -208,6 +213,9 @@ mod tests {
     use datatypes::schema::ColumnSchema;
     use datatypes::value::{OrderedFloat, Value};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::metric_engine_consts::{
+        DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+    };
     use store_api::storage::{ColumnId, RegionId};
 
     use super::*;
@@ -217,7 +225,7 @@ mod tests {
         builder
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
-                    "table_id",
+                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
                     ConcreteDataType::uint32_datatype(),
                     false,
                 ),
@@ -226,7 +234,7 @@ mod tests {
             })
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
-                    "tsid",
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
                     ConcreteDataType::uint64_datatype(),
                     false,
                 ),
