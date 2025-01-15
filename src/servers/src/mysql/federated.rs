@@ -273,8 +273,11 @@ pub(crate) fn check(
 ) -> Option<Output> {
     // INSERT don't need MySQL federated check. We assume the query doesn't contain
     // federated or driver setup command if it starts with a 'INSERT' statement.
-    if query.len() > 6 && query[..6].eq_ignore_ascii_case("INSERT") {
-        return None;
+    let the_6th_index = query.char_indices().nth(6).map(|(i, _)| i);
+    if let Some(index) = the_6th_index {
+        if query[..index].eq_ignore_ascii_case("INSERT") {
+            return None;
+        }
     }
 
     // First to check the query is like "select @@variables".
@@ -294,6 +297,15 @@ mod test {
     use session::Session;
 
     use super::*;
+
+    #[test]
+    fn test_check_abnormal() {
+        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default()));
+        let query = "🫣一点不正常的东西🫣";
+        let output = check(query, QueryContext::arc(), session.clone());
+
+        assert!(output.is_none());
+    }
 
     #[test]
     fn test_check() {
