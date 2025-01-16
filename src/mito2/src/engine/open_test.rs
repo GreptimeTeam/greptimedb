@@ -464,6 +464,7 @@ async fn test_open_compaction_region() {
         region_id,
         region_dir: region_dir.clone(),
         region_options: RegionOptions::default(),
+        max_parallelism: 1,
     };
 
     let compaction_region = open_compaction_region(
