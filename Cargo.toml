@@ -124,8 +124,7 @@ etcd-client = "0.13"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-# TODO(zhongzc): wait for https://github.com/GreptimeTeam/greptime-proto/pull/210
-greptime-proto = { git = "https://github.com/zhongzc/greptime-proto.git", branch = "zhongzc/bloom-filter-meta" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "ec801a91aa22f9666063d02805f1f60f7c93458a" }
 hex = "0.4"
 http = "0.2"
 humantime = "2.1"
