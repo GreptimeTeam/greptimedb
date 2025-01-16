@@ -359,7 +359,21 @@ impl TryFrom<&Field> for ColumnSchema {
             }
             None => None,
         };
-        let is_time_index = metadata.contains_key(TIME_INDEX_KEY);
+        let mut is_time_index = metadata.contains_key(TIME_INDEX_KEY);
+        if is_time_index && !data_type.is_timestamp() {
+            // If the column is time index but the data type is not timestamp, it is invalid.
+            // We set the time index to false and remove the metadata.
+            // This is possible if we cast the time index column to another type. DataFusion will
+            // keep the metadata:
+            // https://github.com/apache/datafusion/pull/12951
+            is_time_index = false;
+            metadata.remove(TIME_INDEX_KEY);
+            common_telemetry::debug!(
+                "Column {} is not timestamp ({:?}) but has time index metadata",
+                data_type,
+                field.name(),
+            );
+        }
 
         Ok(ColumnSchema {
             name: field.name().clone(),
@@ -499,7 +513,7 @@ impl fmt::Display for FulltextAnalyzer {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::datatypes::DataType as ArrowDataType;
+    use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
 
     use super::*;
     use crate::value::Value;
@@ -720,5 +734,41 @@ mod tests {
             column_schema.metadata.get(TYPE_KEY).unwrap(),
             &ConcreteDataType::vector_datatype(3).name()
         );
+    }
+
+    #[test]
+    fn test_column_schema_fix_time_index() {
+        let field = Field::new(
+            "test",
+            ArrowDataType::Timestamp(TimeUnit::Second, None),
+            false,
+        );
+        let field = field.with_metadata(Metadata::from([(
+            TIME_INDEX_KEY.to_string(),
+            "true".to_string(),
+        )]));
+        let column_schema = ColumnSchema::try_from(&field).unwrap();
+        assert_eq!("test", column_schema.name);
+        assert_eq!(
+            ConcreteDataType::timestamp_second_datatype(),
+            column_schema.data_type
+        );
+        assert!(!column_schema.is_nullable);
+        assert!(column_schema.is_time_index);
+        assert!(column_schema.default_constraint.is_none());
+        assert_eq!(1, column_schema.metadata().len());
+
+        let field = Field::new("test", ArrowDataType::Int32, false);
+        let field = field.with_metadata(Metadata::from([(
+            TIME_INDEX_KEY.to_string(),
+            "true".to_string(),
+        )]));
+        let column_schema = ColumnSchema::try_from(&field).unwrap();
+        assert_eq!("test", column_schema.name);
+        assert_eq!(ConcreteDataType::int32_datatype(), column_schema.data_type);
+        assert!(!column_schema.is_nullable);
+        assert!(!column_schema.is_time_index);
+        assert!(column_schema.default_constraint.is_none());
+        assert!(column_schema.metadata.is_empty());
     }
 }
