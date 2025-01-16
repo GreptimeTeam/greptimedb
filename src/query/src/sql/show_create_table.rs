@@ -176,10 +176,18 @@ fn create_table_constraints(
         constraints.push(TableConstraint::PrimaryKey { columns });
     }
 
-    let inverted_index_set = schema
-        .column_schemas()
-        .iter()
-        .any(|c| c.has_inverted_index_key());
+    let inverted_index_set = if is_metric_engine {
+        schema
+            .column_schemas()
+            .iter()
+            .filter(|c| !is_metric_engine_internal_column(&c.name))
+            .any(|c| c.has_inverted_index_key())
+    } else {
+        schema
+            .column_schemas()
+            .iter()
+            .any(|c| c.has_inverted_index_key())
+    };
     if inverted_index_set {
         let inverted_index_cols = schema
             .column_schemas()
@@ -194,11 +202,10 @@ fn create_table_constraints(
                 }
             })
             .collect::<Vec<_>>();
-        if !inverted_index_cols.is_empty() {
-            constraints.push(TableConstraint::InvertedIndex {
-                columns: inverted_index_cols,
-            });
-        }
+
+        constraints.push(TableConstraint::InvertedIndex {
+            columns: inverted_index_cols,
+        });
     }
 
     constraints
