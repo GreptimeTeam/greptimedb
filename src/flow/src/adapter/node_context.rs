@@ -140,8 +140,6 @@ impl SourceSender {
                         len
                     );
                 }
-
-                self.send_buf_row_cnt.fetch_sub(len, Ordering::SeqCst);
                 row_cnt += len;
                 self.sender
                     .send(batch)
