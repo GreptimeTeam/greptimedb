@@ -571,13 +571,6 @@ impl RangeSelect {
                         if (aggr.func.name() == "last_value"
                             || aggr.func.name() == "first_value") =>
                     {
-                        let is_last_value_func = aggr.func.name() == "last_value";
-
-                        // Because we only need to find the first_value/last_value,
-                        // the complexity of sorting the entire batch is O(nlogn).
-                        // We can sort the batch with limit 1.
-                        // In this case, the algorithm degenerates into finding the Top1 problem with complexity O(n).
-                        // We need reverse the sort order of last_value to correctly apply limit 1 when sorting.
                         let order_by = if let Some(exprs) = &aggr.order_by {
                             exprs
                                 .iter()
@@ -587,20 +580,6 @@ impl RangeSelect {
                                         input_dfschema.as_ref(),
                                         session_state.execution_props(),
                                     )
-                                    .map(|expr| {
-                                        // reverse the last_value sort
-                                        if is_last_value_func {
-                                            PhysicalSortExpr {
-                                                expr: expr.expr,
-                                                options: SortOptions {
-                                                    descending: !expr.options.descending,
-                                                    nulls_first: !expr.options.nulls_first,
-                                                },
-                                            }
-                                        } else {
-                                            expr
-                                        }
-                                    })
                                 })
                                 .collect::<DfResult<Vec<_>>>()?
                         } else {
@@ -612,10 +591,7 @@ impl RangeSelect {
                             )?;
                             vec![PhysicalSortExpr {
                                 expr: time_index,
-                                options: SortOptions {
-                                    descending: is_last_value_func,
-                                    nulls_first: false,
-                                },
+                                options: SortOptions::default(),
                             }]
                         };
                         let arg = self.create_physical_expr_list(
