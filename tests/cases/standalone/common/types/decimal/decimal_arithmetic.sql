@@ -33,6 +33,7 @@ SELECT ('0.5'::DECIMAL(1,1) + 10000)::VARCHAR,
 
 -- out of range
 
+-- Wait for https://github.com/apache/datafusion/pull/14126
 SELECT ('0.54321543215432154321543215432154321'::DECIMAL(35,35) + 10000)::VARCHAR;
 
 -- different types

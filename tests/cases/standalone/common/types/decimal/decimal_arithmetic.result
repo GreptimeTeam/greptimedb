@@ -67,9 +67,10 @@ SELECT ('0.5'::DECIMAL(1,1) + 10000)::VARCHAR,
 +----------------------------+--------------------------------+-------------------------------------+------------------------------------------+-----------------------------------------------+----------------------------------------------------+
 
 -- out of range
+-- Wait for https://github.com/apache/datafusion/pull/14126
 SELECT ('0.54321543215432154321543215432154321'::DECIMAL(35,35) + 10000)::VARCHAR;
 
-Error: 3001(EngineExecuteQuery), Compute error: Overflow happened on: 10000 * 100000000000000000000000000000000000
+Error: 1002(Unexpected), Failed to join task: task 471 panicked with message "called `Result::unwrap()` on an `Err` value: NotImplemented(\"Can't create a zero scalar from data_type \\\"Decimal128(38, 35)\\\"\")"
 
 -- different types
 SELECT '0.5'::DECIMAL(1,1) + 1::TINYINT,
