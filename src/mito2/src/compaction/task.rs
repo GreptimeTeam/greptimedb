@@ -32,7 +32,7 @@ use crate::request::{
 use crate::worker::WorkerListener;
 
 /// Maximum number of compaction tasks in parallel.
-pub const MAX_PARALLEL_COMPACTION: usize = 8;
+pub const MAX_PARALLEL_COMPACTION: usize = 1;
 
 pub(crate) struct CompactionTaskImpl {
     pub compaction_region: CompactionRegion,
