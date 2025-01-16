@@ -31,18 +31,10 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to serde json"))]
-    SerdeJson {
+    #[snafu(display("Failed to decode protobuf"))]
+    DecodeProto {
         #[snafu(source)]
-        error: serde_json::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to deserialize json"))]
-    DeserializeJson {
-        #[snafu(source)]
-        error: serde_json::Error,
+        error: prost::DecodeError,
         #[snafu(implicit)]
         location: Location,
     },
@@ -90,10 +82,9 @@ impl ErrorExt for Error {
 
         match self {
             Io { .. }
-            | SerdeJson { .. }
             | FileSizeTooSmall { .. }
             | UnexpectedMetaSize { .. }
-            | DeserializeJson { .. }
+            | DecodeProto { .. }
             | InvalidIntermediateMagic { .. } => StatusCode::Unexpected,
 
             Intermediate { source, .. } => source.status_code(),

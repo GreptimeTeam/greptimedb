@@ -18,12 +18,14 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use common_base::range_read::RangeReader;
 use fastbloom::BloomFilter;
+use greptime_proto::v1::index::{BloomFilterLoc, BloomFilterMeta};
+use prost::Message;
 use snafu::{ensure, ResultExt};
 
 use crate::bloom_filter::error::{
-    DeserializeJsonSnafu, FileSizeTooSmallSnafu, IoSnafu, Result, UnexpectedMetaSizeSnafu,
+    DecodeProtoSnafu, FileSizeTooSmallSnafu, IoSnafu, Result, UnexpectedMetaSizeSnafu,
 };
-use crate::bloom_filter::{BloomFilterMeta, BloomFilterSegmentLocation, SEED};
+use crate::bloom_filter::SEED;
 
 /// Minimum size of the bloom filter, which is the size of the length of the bloom filter.
 const BLOOM_META_LEN_SIZE: u64 = 4;
@@ -52,7 +54,7 @@ pub trait BloomFilterReader: Sync {
     async fn metadata(&self) -> Result<BloomFilterMeta>;
 
     /// Reads a bloom filter with the given location.
-    async fn bloom_filter(&self, loc: &BloomFilterSegmentLocation) -> Result<BloomFilter> {
+    async fn bloom_filter(&self, loc: &BloomFilterLoc) -> Result<BloomFilter> {
         let bytes = self.range_read(loc.offset, loc.size as _).await?;
         let vec = bytes
             .chunks_exact(std::mem::size_of::<u64>())
@@ -60,14 +62,11 @@ pub trait BloomFilterReader: Sync {
             .collect();
         let bm = BloomFilter::from_vec(vec)
             .seed(&SEED)
-            .expected_items(loc.elem_count);
+            .expected_items(loc.element_count as _);
         Ok(bm)
     }
 
-    async fn bloom_filter_vec(
-        &self,
-        locs: &[BloomFilterSegmentLocation],
-    ) -> Result<Vec<BloomFilter>> {
+    async fn bloom_filter_vec(&self, locs: &[BloomFilterLoc]) -> Result<Vec<BloomFilter>> {
         let ranges = locs
             .iter()
             .map(|l| l.offset..l.offset + l.size)
@@ -82,7 +81,7 @@ pub trait BloomFilterReader: Sync {
                 .collect();
             let bm = BloomFilter::from_vec(vec)
                 .seed(&SEED)
-                .expected_items(loc.elem_count);
+                .expected_items(loc.element_count as _);
             result.push(bm);
         }
 
@@ -163,7 +162,7 @@ impl<R: RangeReader> BloomFilterMetaReader<R> {
             .await
             .context(IoSnafu)?;
         let suffix_len = suffix.len();
-        let length = u32::from_le_bytes(Self::read_tailing_four_bytes(&suffix)?) as u64;
+        let length: u64 = u32::from_le_bytes(Self::read_tailing_four_bytes(&suffix)?) as u64;
         self.validate_meta_size(length)?;
 
         if length > suffix_len as u64 - BLOOM_META_LEN_SIZE {
@@ -173,11 +172,11 @@ impl<R: RangeReader> BloomFilterMetaReader<R> {
                 .read(metadata_start..self.file_size - BLOOM_META_LEN_SIZE)
                 .await
                 .context(IoSnafu)?;
-            serde_json::from_slice(&meta).context(DeserializeJsonSnafu)
+            BloomFilterMeta::decode(meta).context(DecodeProtoSnafu)
         } else {
             let metadata_start = self.file_size - length - BLOOM_META_LEN_SIZE - meta_start;
             let meta = &suffix[metadata_start as usize..suffix_len - BLOOM_META_LEN_SIZE as usize];
-            serde_json::from_slice(meta).context(DeserializeJsonSnafu)
+            BloomFilterMeta::decode(meta).context(DecodeProtoSnafu)
         }
     }
 
@@ -257,17 +256,17 @@ mod tests {
             let meta = reader.metadata().await.unwrap();
 
             assert_eq!(meta.rows_per_segment, 2);
-            assert_eq!(meta.seg_count, 2);
+            assert_eq!(meta.segment_count, 2);
             assert_eq!(meta.row_count, 3);
-            assert_eq!(meta.bloom_filter_segments.len(), 2);
+            assert_eq!(meta.bloom_filter_locs.len(), 2);
 
-            assert_eq!(meta.bloom_filter_segments[0].offset, 0);
-            assert_eq!(meta.bloom_filter_segments[0].elem_count, 4);
+            assert_eq!(meta.bloom_filter_locs[0].offset, 0);
+            assert_eq!(meta.bloom_filter_locs[0].element_count, 4);
             assert_eq!(
-                meta.bloom_filter_segments[1].offset,
-                meta.bloom_filter_segments[0].size
+                meta.bloom_filter_locs[1].offset,
+                meta.bloom_filter_locs[0].size
             );
-            assert_eq!(meta.bloom_filter_segments[1].elem_count, 2);
+            assert_eq!(meta.bloom_filter_locs[1].element_count, 2);
         }
     }
 
@@ -278,9 +277,9 @@ mod tests {
         let reader = BloomFilterReaderImpl::new(bytes);
         let meta = reader.metadata().await.unwrap();
 
-        assert_eq!(meta.bloom_filter_segments.len(), 2);
+        assert_eq!(meta.bloom_filter_locs.len(), 2);
         let bf = reader
-            .bloom_filter(&meta.bloom_filter_segments[0])
+            .bloom_filter(&meta.bloom_filter_locs[0])
             .await
             .unwrap();
         assert!(bf.contains(&b"a"));
@@ -289,7 +288,7 @@ mod tests {
         assert!(bf.contains(&b"d"));
 
         let bf = reader
-            .bloom_filter(&meta.bloom_filter_segments[1])
+            .bloom_filter(&meta.bloom_filter_locs[1])
             .await
             .unwrap();
         assert!(bf.contains(&b"e"));

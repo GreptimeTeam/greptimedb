@@ -21,6 +21,7 @@ fastbloom = "0.8"
 fst.workspace = true
 futures.workspace = true
 greptime-proto.workspace = true
+itertools.workspace = true
 mockall.workspace = true
 pin-project.workspace = true
 prost.workspace = true
