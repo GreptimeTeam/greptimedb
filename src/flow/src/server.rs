@@ -88,6 +88,10 @@ impl flow_server::Flow for FlowService {
         self.manager
             .handle(request)
             .await
+            .map_err(|err| {
+                common_telemetry::error!(err; "Failed to handle flow request");
+                err
+            })
             .map(Response::new)
             .map_err(to_status_with_last_err)
     }
