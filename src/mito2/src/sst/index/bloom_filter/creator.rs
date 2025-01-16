@@ -30,7 +30,7 @@ use crate::error::{
     PuffinAddBlobSnafu, PushBloomFilterValueSnafu, Result,
 };
 use crate::read::Batch;
-use crate::row_converter::SortField;
+use crate::row_converter::{CompositeValues, SortField};
 use crate::sst::file::FileId;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
 use crate::sst::index::codec::{IndexValueCodec, IndexValuesCodec};
@@ -192,11 +192,26 @@ impl BloomFilterIndexer {
         let n = batch.num_rows();
         guard.inc_row_count(n);
 
+        // TODO(weny, zhenchi): lazy decode
+        let values = self.codec.decode(batch.primary_key())?;
         // Tags
-        for ((col_id, _), field, value) in self.codec.decode(batch.primary_key())? {
+        for (idx, (col_id, field)) in self.codec.fields().iter().enumerate() {
             let Some(creator) = self.creators.get_mut(col_id) else {
                 continue;
             };
+
+            let value = match &values {
+                CompositeValues::Dense(vec) => {
+                    let value = &vec[idx].1;
+                    if value.is_null() {
+                        None
+                    } else {
+                        Some(value)
+                    }
+                }
+                CompositeValues::Sparse(sparse_values) => sparse_values.get(col_id),
+            };
+
             let elems = value
                 .map(|v| {
                     let mut buf = vec![];
@@ -411,7 +426,7 @@ pub(crate) mod tests {
     }
 
     pub fn new_batch(str_tag: impl AsRef<str>, u64_field: impl IntoIterator<Item = u64>) -> Batch {
-        let fields = vec![SortField::new(ConcreteDataType::string_datatype())];
+        let fields = vec![(0, SortField::new(ConcreteDataType::string_datatype()))];
         let codec = DensePrimaryKeyCodec::with_fields(fields);
         let row: [ValueRef; 1] = [str_tag.as_ref().into()];
         let primary_key = codec.encode(row.into_iter()).unwrap();

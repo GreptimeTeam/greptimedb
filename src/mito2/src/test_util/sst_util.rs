@@ -85,7 +85,12 @@ pub fn sst_region_metadata() -> RegionMetadata {
 /// Encodes a primary key for specific tags.
 pub fn new_primary_key(tags: &[&str]) -> Vec<u8> {
     let fields = (0..tags.len())
-        .map(|_| SortField::new(ConcreteDataType::string_datatype()))
+        .map(|idx| {
+            (
+                idx as u32,
+                SortField::new(ConcreteDataType::string_datatype()),
+            )
+        })
         .collect();
     let converter = DensePrimaryKeyCodec::with_fields(fields);
     converter

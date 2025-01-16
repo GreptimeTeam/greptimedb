@@ -585,7 +585,7 @@ fn prune_primary_key(
     let pk_values = if let Some(pk_values) = series.pk_cache.as_ref() {
         pk_values
     } else {
-        let pk_values = codec.decode(pk);
+        let pk_values = codec.decode_dense_without_column_id(pk);
         if let Err(e) = pk_values {
             error!(e; "Failed to decode primary key");
             return true;
@@ -1176,7 +1176,12 @@ mod tests {
         let row_codec = Arc::new(DensePrimaryKeyCodec::with_fields(
             schema
                 .primary_key_columns()
-                .map(|c| SortField::new(c.column_schema.data_type.clone()))
+                .map(|c| {
+                    (
+                        c.column_id,
+                        SortField::new(c.column_schema.data_type.clone()),
+                    )
+                })
                 .collect(),
         ));
         let set = Arc::new(SeriesSet::new(schema.clone(), row_codec));

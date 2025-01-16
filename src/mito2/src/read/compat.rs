@@ -15,6 +15,7 @@
 //! Utilities to adapt readers with different schema.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
@@ -26,7 +27,7 @@ use store_api::storage::ColumnId;
 use crate::error::{CompatReaderSnafu, CreateDefaultSnafu, Result};
 use crate::read::projection::ProjectionMapper;
 use crate::read::{Batch, BatchColumn, BatchReader};
-use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, SortField};
+use crate::row_converter::{build_primary_key_codec_with_fields, PrimaryKeyCodec, SortField};
 
 /// Reader to adapt schema of underlying reader to expected schema.
 pub struct CompatReader<R> {
@@ -79,6 +80,7 @@ impl CompatBatch {
     /// - `mapper` is built from the metadata users expect to see.
     /// - `reader_meta` is the metadata of the input reader.
     pub(crate) fn new(mapper: &ProjectionMapper, reader_meta: RegionMetadataRef) -> Result<Self> {
+        // TODO(weny): rewrite primary key if needed.
         let compat_pk = may_compat_primary_key(mapper.metadata(), &reader_meta)?;
         let compat_fields = may_compat_fields(mapper, &reader_meta)?;
 
@@ -127,16 +129,17 @@ pub(crate) fn has_same_columns(left: &RegionMetadata, right: &RegionMetadata) ->
 #[derive(Debug)]
 struct CompatPrimaryKey {
     /// Row converter to append values to primary keys.
-    converter: DensePrimaryKeyCodec,
+    converter: Arc<dyn PrimaryKeyCodec>,
     /// Default values to append.
-    values: Vec<Value>,
+    values: Vec<(ColumnId, Value)>,
 }
 
 impl CompatPrimaryKey {
     /// Make primary key of the `batch` compatible.
     fn compat(&self, mut batch: Batch) -> Result<Batch> {
-        let mut buffer =
-            Vec::with_capacity(batch.primary_key().len() + self.converter.estimated_size());
+        let mut buffer = Vec::with_capacity(
+            batch.primary_key().len() + self.converter.estimated_size().unwrap_or_default(),
+        );
         buffer.extend_from_slice(batch.primary_key());
         self.converter.encode_values(&self.values, &mut buffer)?;
 
@@ -144,9 +147,7 @@ impl CompatPrimaryKey {
 
         // update cache
         if let Some(pk_values) = &mut batch.pk_values {
-            for value in &self.values {
-                pk_values.push(value.clone());
-            }
+            pk_values.extend(&self.values);
         }
 
         Ok(batch)
@@ -248,7 +249,10 @@ fn may_compat_primary_key(
     for column_id in to_add {
         // Safety: The id comes from expect region metadata.
         let column = expect.column_by_id(*column_id).unwrap();
-        fields.push(SortField::new(column.column_schema.data_type.clone()));
+        fields.push((
+            *column_id,
+            SortField::new(column.column_schema.data_type.clone()),
+        ));
         let default_value = column
             .column_schema
             .create_default()
@@ -263,9 +267,11 @@ fn may_compat_primary_key(
                     column.column_schema.name
                 ),
             })?;
-        values.push(default_value);
+        values.push((*column_id, default_value));
     }
-    let converter = DensePrimaryKeyCodec::with_fields(fields);
+    // Using expect primary key encoding to build the converter
+    let converter =
+        build_primary_key_codec_with_fields(expect.primary_key_encoding, fields.into_iter());
 
     Ok(Some(CompatPrimaryKey { converter, values }))
 }
@@ -363,7 +369,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::row_converter::PrimaryKeyCodecExt;
+    use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
     use crate::test_util::{check_reader_result, VecBatchReader};
 
     /// Creates a new [RegionMetadata].
@@ -396,7 +402,7 @@ mod tests {
     /// Encode primary key.
     fn encode_key(keys: &[Option<&str>]) -> Vec<u8> {
         let fields = (0..keys.len())
-            .map(|_| SortField::new(ConcreteDataType::string_datatype()))
+            .map(|_| (0, SortField::new(ConcreteDataType::string_datatype())))
             .collect();
         let converter = DensePrimaryKeyCodec::with_fields(fields);
         let row = keys.iter().map(|str_opt| match str_opt {

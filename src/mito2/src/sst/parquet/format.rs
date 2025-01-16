@@ -41,6 +41,7 @@ use datatypes::vectors::{Helper, Vector};
 use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::statistics::Statistics;
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::storage::{ColumnId, SequenceNumber};
 
@@ -48,7 +49,7 @@ use crate::error::{
     ConvertVectorSnafu, InvalidBatchSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
 };
 use crate::read::{Batch, BatchBuilder, BatchColumn};
-use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, SortField};
+use crate::row_converter::{build_primary_key_codec_with_fields, SortField};
 use crate::sst::file::{FileMeta, FileTimeRange};
 use crate::sst::to_sst_arrow_schema;
 
@@ -307,8 +308,9 @@ impl ReadFormat {
         column_id: ColumnId,
     ) -> Option<ArrayRef> {
         let column = self.metadata.column_by_id(column_id)?;
+        let primary_key_encoding = self.metadata.primary_key_encoding;
         match column.semantic_type {
-            SemanticType::Tag => self.tag_values(row_groups, column, true),
+            SemanticType::Tag => self.tag_values(row_groups, column, true, primary_key_encoding),
             SemanticType::Field => {
                 let index = self.field_id_to_index.get(&column_id)?;
                 Self::column_values(row_groups, column, *index, true)
@@ -327,8 +329,9 @@ impl ReadFormat {
         column_id: ColumnId,
     ) -> Option<ArrayRef> {
         let column = self.metadata.column_by_id(column_id)?;
+        let primary_key_encoding = self.metadata.primary_key_encoding;
         match column.semantic_type {
-            SemanticType::Tag => self.tag_values(row_groups, column, false),
+            SemanticType::Tag => self.tag_values(row_groups, column, false, primary_key_encoding),
             SemanticType::Field => {
                 let index = self.field_id_to_index.get(&column_id)?;
                 Self::column_values(row_groups, column, *index, false)
@@ -390,6 +393,7 @@ impl ReadFormat {
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column: &ColumnMetadata,
         is_min: bool,
+        primary_key_encoding: PrimaryKeyEncoding,
     ) -> Option<ArrayRef> {
         let is_first_tag = self
             .metadata
@@ -402,9 +406,15 @@ impl ReadFormat {
             return None;
         }
 
-        let converter = DensePrimaryKeyCodec::with_fields(vec![SortField::new(
-            column.column_schema.data_type.clone(),
-        )]);
+        let converter = build_primary_key_codec_with_fields(
+            primary_key_encoding,
+            [(
+                column.column_id,
+                SortField::new(column.column_schema.data_type.clone()),
+            )]
+            .into_iter(),
+        );
+
         let values = row_groups.iter().map(|meta| {
             let stats = meta
                 .borrow()

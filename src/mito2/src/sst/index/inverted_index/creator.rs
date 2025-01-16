@@ -34,7 +34,7 @@ use crate::error::{
     PushIndexValueSnafu, Result,
 };
 use crate::read::Batch;
-use crate::row_converter::SortField;
+use crate::row_converter::{CompositeValues, SortField};
 use crate::sst::file::FileId;
 use crate::sst::index::codec::{IndexValueCodec, IndexValuesCodec};
 use crate::sst::index::intermediate::{
@@ -180,10 +180,24 @@ impl InvertedIndexer {
         let n = batch.num_rows();
         guard.inc_row_count(n);
 
-        for ((col_id, col_id_str), field, value) in self.codec.decode(batch.primary_key())? {
+        // TODO(weny, zhenchi): lazy decode
+        let values = self.codec.decode(batch.primary_key())?;
+        for (idx, (col_id, field)) in self.codec.fields().iter().enumerate() {
             if !self.indexed_column_ids.contains(col_id) {
                 continue;
             }
+
+            let value = match &values {
+                CompositeValues::Dense(vec) => {
+                    let value = &vec[idx].1;
+                    if value.is_null() {
+                        None
+                    } else {
+                        Some(value)
+                    }
+                }
+                CompositeValues::Sparse(sparse_values) => sparse_values.get(col_id),
+            };
 
             if let Some(value) = value.as_ref() {
                 self.value_buf.clear();
@@ -193,6 +207,9 @@ impl InvertedIndexer {
                     &mut self.value_buf,
                 )?;
             }
+
+            // Safety: the column id is guaranteed to be in the map
+            let col_id_str = self.codec.column_ids().get(col_id).unwrap();
 
             // non-null value -> Some(encoded_bytes), null value -> None
             let value = value.is_some().then_some(self.value_buf.as_slice());
@@ -381,8 +398,8 @@ mod tests {
         u64_field: impl IntoIterator<Item = u64>,
     ) -> Batch {
         let fields = vec![
-            SortField::new(ConcreteDataType::string_datatype()),
-            SortField::new(ConcreteDataType::int32_datatype()),
+            (0, SortField::new(ConcreteDataType::string_datatype())),
+            (1, SortField::new(ConcreteDataType::int32_datatype())),
         ];
         let codec = DensePrimaryKeyCodec::with_fields(fields);
         let row: [ValueRef; 2] = [str_tag.as_ref().into(), i32_tag.into().into()];
