@@ -20,14 +20,15 @@ use snafu::{ensure, ResultExt};
 use sqlparser::ast::Ident;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
-use sqlparser::tokenizer::Token;
+use sqlparser::tokenizer::{Token, TokenWithLocation};
 
 use crate::error::{self, InvalidColumnOptionSnafu, Result, SetFulltextOptionSnafu};
 use crate::parser::ParserContext;
+use crate::parsers::create_parser::INVERTED;
 use crate::parsers::utils::validate_column_fulltext_create_option;
 use crate::statements::alter::{
     AddColumn, AlterDatabase, AlterDatabaseOperation, AlterTable, AlterTableOperation,
-    KeyValueOption,
+    KeyValueOption, SetIndexOperation, UnsetIndexOperation,
 };
 use crate::statements::statement::Statement;
 use crate::util::parse_option_string;
@@ -210,15 +211,13 @@ impl ParserContext<'_> {
         match self.parser.peek_token().token {
             Token::Word(w) => {
                 if w.value.eq_ignore_ascii_case("UNSET") {
-                    let _ = self.parser.next_token();
-
-                    self.parser
-                        .expect_keyword(Keyword::FULLTEXT)
-                        .context(error::SyntaxSnafu)?;
-
-                    Ok(AlterTableOperation::UnsetColumnFulltext { column_name })
+                    // consume the current token.
+                    self.parser.next_token();
+                    self.parse_alter_column_unset_index(column_name)
                 } else if w.keyword == Keyword::SET {
-                    self.parse_alter_column_fulltext(column_name)
+                    // consume the current token.
+                    self.parser.next_token();
+                    self.parse_alter_column_set_index(column_name)
                 } else {
                     let data_type = self.parser.parse_data_type().context(error::SyntaxSnafu)?;
                     Ok(AlterTableOperation::ModifyColumnType {
@@ -234,13 +233,62 @@ impl ParserContext<'_> {
         }
     }
 
+    fn parse_alter_column_unset_index(
+        &mut self,
+        column_name: Ident,
+    ) -> Result<AlterTableOperation> {
+        match self.parser.next_token() {
+            TokenWithLocation {
+                token: Token::Word(w),
+                ..
+            } if w.keyword == Keyword::FULLTEXT => Ok(AlterTableOperation::UnsetIndex {
+                options: UnsetIndexOperation::Fulltext { column_name },
+            }),
+
+            TokenWithLocation {
+                token: Token::Word(w),
+                ..
+            } if w.value.eq_ignore_ascii_case(INVERTED) => {
+                self.parser
+                    .expect_keyword(Keyword::INDEX)
+                    .context(error::SyntaxSnafu)?;
+                Ok(AlterTableOperation::UnsetIndex {
+                    options: UnsetIndexOperation::Inverted { column_name },
+                })
+            }
+            _ => self.expected(
+                format!("{:?} OR INVERTED INDEX", Keyword::FULLTEXT).as_str(),
+                self.parser.peek_token(),
+            ),
+        }
+    }
+
+    fn parse_alter_column_set_index(&mut self, column_name: Ident) -> Result<AlterTableOperation> {
+        match self.parser.next_token() {
+            TokenWithLocation {
+                token: Token::Word(w),
+                ..
+            } if w.keyword == Keyword::FULLTEXT => self.parse_alter_column_fulltext(column_name),
+
+            TokenWithLocation {
+                token: Token::Word(w),
+                ..
+            } if w.value.eq_ignore_ascii_case(INVERTED) => {
+                self.parser
+                    .expect_keyword(Keyword::INDEX)
+                    .context(error::SyntaxSnafu)?;
+                Ok(AlterTableOperation::SetIndex {
+                    options: SetIndexOperation::Inverted { column_name },
+                })
+            }
+            _ => self.expected(
+                format!("{:?} OR INVERTED INDEX", Keyword::FULLTEXT).as_str(),
+                self.parser.peek_token(),
+            ),
+        }
+    }
+
     fn parse_alter_column_fulltext(&mut self, column_name: Ident) -> Result<AlterTableOperation> {
-        let _ = self.parser.next_token();
-
-        self.parser
-            .expect_keyword(Keyword::FULLTEXT)
-            .context(error::SyntaxSnafu)?;
-
         let mut options = self
             .parser
             .parse_options(Keyword::WITH)
@@ -264,9 +312,11 @@ impl ParserContext<'_> {
             "true".to_string(),
         );
 
-        Ok(AlterTableOperation::SetColumnFulltext {
-            column_name,
-            options: options.try_into().context(SetFulltextOptionSnafu)?,
+        Ok(AlterTableOperation::SetIndex {
+            options: SetIndexOperation::Fulltext {
+                column_name,
+                options: options.try_into().context(SetFulltextOptionSnafu)?,
+            },
         })
     }
 }
@@ -791,14 +841,13 @@ mod tests {
                 assert_eq!("test_table", alter_table.table_name().0[0].value);
 
                 let alter_operation = alter_table.alter_operation();
-                assert_matches!(
-                    alter_operation,
-                    AlterTableOperation::SetColumnFulltext { .. }
-                );
                 match alter_operation {
-                    AlterTableOperation::SetColumnFulltext {
-                        column_name,
-                        options,
+                    AlterTableOperation::SetIndex {
+                        options:
+                            SetIndexOperation::Fulltext {
+                                column_name,
+                                options,
+                            },
                     } => {
                         assert_eq!("a", column_name.value);
                         assert_eq!(
@@ -811,7 +860,7 @@ mod tests {
                         );
                     }
                     _ => unreachable!(),
-                }
+                };
             }
             _ => unreachable!(),
         }
@@ -830,10 +879,12 @@ mod tests {
                 let alter_operation = alter_table.alter_operation();
                 assert_eq!(
                     alter_operation,
-                    &AlterTableOperation::UnsetColumnFulltext {
-                        column_name: Ident {
-                            value: "a".to_string(),
-                            quote_style: None
+                    &AlterTableOperation::UnsetIndex {
+                        options: UnsetIndexOperation::Fulltext {
+                            column_name: Ident {
+                                value: "a".to_string(),
+                                quote_style: None
+                            }
                         }
                     }
                 );
@@ -853,5 +904,66 @@ mod tests {
             err,
             "Invalid column option, column name: a, error: invalid FULLTEXT option: abcd"
         );
+    }
+
+    #[test]
+    fn test_parse_alter_column_inverted() {
+        let sql = "ALTER TABLE test_table MODIFY COLUMN a SET INVERTED INDEX";
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+
+        assert_eq!(1, result.len());
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::AlterTable { .. });
+        match statement {
+            Statement::AlterTable(alter_table) => {
+                assert_eq!("test_table", alter_table.table_name().0[0].value);
+
+                let alter_operation = alter_table.alter_operation();
+                match alter_operation {
+                    AlterTableOperation::SetIndex {
+                        options: SetIndexOperation::Inverted { column_name },
+                    } => assert_eq!("a", column_name.value),
+                    _ => unreachable!(),
+                };
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "ALTER TABLE test_table MODIFY COLUMN a UNSET INVERTED INDEX";
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::AlterTable { .. });
+        match statement {
+            Statement::AlterTable(alter_table) => {
+                assert_eq!("test_table", alter_table.table_name().0[0].value);
+
+                let alter_operation = alter_table.alter_operation();
+                assert_eq!(
+                    alter_operation,
+                    &AlterTableOperation::UnsetIndex {
+                        options: UnsetIndexOperation::Inverted {
+                            column_name: Ident {
+                                value: "a".to_string(),
+                                quote_style: None
+                            }
+                        }
+                    }
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        let invalid_sql = "ALTER TABLE test_table MODIFY COLUMN a SET INVERTED";
+        ParserContext::create_with_dialect(
+            invalid_sql,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap_err();
     }
 }

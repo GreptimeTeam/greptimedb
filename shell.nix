@@ -11,11 +11,13 @@ pkgs.mkShell rec {
     clang
     gcc
     protobuf
+    gnumake
     mold
     (fenix.fromToolchainFile {
       dir = ./.;
     })
     cargo-nextest
+    cargo-llvm-cov
     taplo
     curl
   ];

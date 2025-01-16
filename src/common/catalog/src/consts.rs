@@ -109,6 +109,7 @@ pub const INFORMATION_SCHEMA_REGION_STATISTICS_TABLE_ID: u32 = 35;
 pub const PG_CATALOG_PG_CLASS_TABLE_ID: u32 = 256;
 pub const PG_CATALOG_PG_TYPE_TABLE_ID: u32 = 257;
 pub const PG_CATALOG_PG_NAMESPACE_TABLE_ID: u32 = 258;
+pub const PG_CATALOG_PG_DATABASE_TABLE_ID: u32 = 259;
 
 // ----- End of pg_catalog tables -----
 

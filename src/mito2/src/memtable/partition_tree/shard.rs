@@ -243,7 +243,7 @@ impl ShardReader {
             // Safety: `key_filter` is some so the shard has primary keys.
             let key = self.key_dict.as_ref().unwrap().key_by_pk_index(pk_index);
             let now = Instant::now();
-            if key_filter.prune_primary_key(key) {
+            if key_filter.matches(key) {
                 self.prune_pk_cost += now.elapsed();
                 self.last_yield_pk_index = Some(pk_index);
                 self.keys_after_pruning += 1;

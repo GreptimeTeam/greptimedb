@@ -494,10 +494,10 @@ pub fn column_to_schema(
     if let Some(inverted_index_cols) = invereted_index_cols {
         if inverted_index_cols.is_empty() {
             if primary_keys.contains(&column.name().value) {
-                column_schema = column_schema.set_inverted_index(false);
+                column_schema.insert_inverted_index_placeholder();
             }
         } else if inverted_index_cols.contains(&column.name().value) {
-            column_schema = column_schema.set_inverted_index(true);
+            column_schema.with_inverted_index(true);
         }
     }
 

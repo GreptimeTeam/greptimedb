@@ -158,11 +158,22 @@ impl ColumnSchema {
         self
     }
 
-    pub fn set_inverted_index(mut self, value: bool) -> Self {
-        let _ = self
-            .metadata
-            .insert(INVERTED_INDEX_KEY.to_string(), value.to_string());
-        self
+    pub fn with_inverted_index(&mut self, value: bool) {
+        match value {
+            true => {
+                self.metadata
+                    .insert(INVERTED_INDEX_KEY.to_string(), value.to_string());
+            }
+            false => {
+                self.metadata.remove(INVERTED_INDEX_KEY);
+            }
+        }
+    }
+
+    // Put a placeholder to invalidate schemas.all(!has_inverted_index_key).
+    pub fn insert_inverted_index_placeholder(&mut self) {
+        self.metadata
+            .insert(INVERTED_INDEX_KEY.to_string(), "".to_string());
     }
 
     pub fn is_inverted_indexed(&self) -> bool {

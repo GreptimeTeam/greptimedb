@@ -85,7 +85,7 @@ fn full_scan(c: &mut Criterion) {
         }
 
         b.iter(|| {
-            let iter = memtable.iter(None, None).unwrap();
+            let iter = memtable.iter(None, None, None).unwrap();
             for batch in iter {
                 let _batch = batch.unwrap();
             }
@@ -98,7 +98,7 @@ fn full_scan(c: &mut Criterion) {
         }
 
         b.iter(|| {
-            let iter = memtable.iter(None, None).unwrap();
+            let iter = memtable.iter(None, None, None).unwrap();
             for batch in iter {
                 let _batch = batch.unwrap();
             }
@@ -124,7 +124,7 @@ fn filter_1_host(c: &mut Criterion) {
         let predicate = generator.random_host_filter();
 
         b.iter(|| {
-            let iter = memtable.iter(None, Some(predicate.clone())).unwrap();
+            let iter = memtable.iter(None, Some(predicate.clone()), None).unwrap();
             for batch in iter {
                 let _batch = batch.unwrap();
             }
@@ -138,7 +138,7 @@ fn filter_1_host(c: &mut Criterion) {
         let predicate = generator.random_host_filter();
 
         b.iter(|| {
-            let iter = memtable.iter(None, Some(predicate.clone())).unwrap();
+            let iter = memtable.iter(None, Some(predicate.clone()), None).unwrap();
             for batch in iter {
                 let _batch = batch.unwrap();
             }

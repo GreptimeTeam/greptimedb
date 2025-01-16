@@ -216,13 +216,29 @@ pub enum AlterKind {
     UnsetTableOptions {
         keys: Vec<UnsetRegionOption>,
     },
-    SetColumnFulltext {
+    SetIndex {
+        options: SetIndexOptions,
+    },
+    UnsetIndex {
+        options: UnsetIndexOptions,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SetIndexOptions {
+    Fulltext {
         column_name: String,
         options: FulltextOptions,
     },
-    UnsetColumnFulltext {
+    Inverted {
         column_name: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum UnsetIndexOptions {
+    Fulltext { column_name: String },
+    Inverted { column_name: String },
 }
 
 #[derive(Debug)]

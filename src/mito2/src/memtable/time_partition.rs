@@ -482,7 +482,7 @@ mod tests {
         partitions.list_memtables(&mut memtables);
         assert_eq!(0, memtables[0].id());
 
-        let iter = memtables[0].iter(None, None).unwrap();
+        let iter = memtables[0].iter(None, None, None).unwrap();
         let timestamps = collect_iter_timestamps(iter);
         assert_eq!(&[1000, 3000, 5000, 6000, 7000], &timestamps[..]);
     }
@@ -520,7 +520,7 @@ mod tests {
 
         let mut memtables = Vec::new();
         partitions.list_memtables(&mut memtables);
-        let iter = memtables[0].iter(None, None).unwrap();
+        let iter = memtables[0].iter(None, None, None).unwrap();
         let timestamps = collect_iter_timestamps(iter);
         assert_eq!(&[0, 2000, 3000, 4000, 5000, 7000], &timestamps[..]);
         let parts = partitions.list_partitions();
@@ -572,7 +572,7 @@ mod tests {
         let partitions = new_multi_partitions(&metadata);
 
         let parts = partitions.list_partitions();
-        let iter = parts[0].memtable.iter(None, None).unwrap();
+        let iter = parts[0].memtable.iter(None, None, None).unwrap();
         let timestamps = collect_iter_timestamps(iter);
         assert_eq!(0, parts[0].memtable.id());
         assert_eq!(
@@ -584,7 +584,7 @@ mod tests {
             parts[0].time_range.unwrap().max_timestamp
         );
         assert_eq!(&[0, 2000, 3000, 4000], &timestamps[..]);
-        let iter = parts[1].memtable.iter(None, None).unwrap();
+        let iter = parts[1].memtable.iter(None, None, None).unwrap();
         assert_eq!(1, parts[1].memtable.id());
         let timestamps = collect_iter_timestamps(iter);
         assert_eq!(&[5000, 7000], &timestamps[..]);
