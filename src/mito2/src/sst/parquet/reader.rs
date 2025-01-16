@@ -49,7 +49,7 @@ use crate::metrics::{
 };
 use crate::read::prune::{PruneReader, Source};
 use crate::read::{Batch, BatchReader};
-use crate::row_converter::{McmpRowCodec, SortField};
+use crate::row_converter::DensePrimaryKeyCodec;
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierRef;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
@@ -253,13 +253,7 @@ impl ParquetReaderBuilder {
             vec![]
         };
 
-        let codec = McmpRowCodec::new(
-            read_format
-                .metadata()
-                .primary_key_columns()
-                .map(|c| SortField::new(c.column_schema.data_type.clone()))
-                .collect(),
-        );
+        let codec = DensePrimaryKeyCodec::new(read_format.metadata());
 
         let context = FileRangeContext::new(reader_builder, filters, read_format, codec);
 

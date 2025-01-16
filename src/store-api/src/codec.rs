@@ -12,11 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// https://www.postgresql.org/docs/current/catalog-pg-database.html
-pub const PG_DATABASE: &str = "pg_database";
-// https://www.postgresql.org/docs/current/catalog-pg-namespace.html
-pub const PG_NAMESPACE: &str = "pg_namespace";
-// https://www.postgresql.org/docs/current/catalog-pg-class.html
-pub const PG_CLASS: &str = "pg_class";
-// https://www.postgresql.org/docs/current/catalog-pg-type.html
-pub const PG_TYPE: &str = "pg_type";
+use serde::{Deserialize, Serialize};
+
+/// Primary key encoding mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimaryKeyEncoding {
+    #[default]
+    /// Dense primary key encoding.
+    Dense,
+    /// Sparse primary key encoding.
+    Sparse,
+}

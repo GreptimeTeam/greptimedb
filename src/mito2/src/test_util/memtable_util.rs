@@ -36,7 +36,7 @@ use crate::memtable::{
     BoxedBatchIterator, BulkPart, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRanges,
     MemtableRef, MemtableStats,
 };
-use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
 
 /// Empty memtable for test.
 #[derive(Debug, Default)]
@@ -84,6 +84,7 @@ impl Memtable for EmptyMemtable {
         &self,
         _projection: Option<&[ColumnId]>,
         _filters: Option<Predicate>,
+        _sequence: Option<SequenceNumber>,
     ) -> Result<BoxedBatchIterator> {
         Ok(Box::new(std::iter::empty()))
     }
@@ -92,6 +93,7 @@ impl Memtable for EmptyMemtable {
         &self,
         _projection: Option<&[ColumnId]>,
         _predicate: Option<Predicate>,
+        _sequence: Option<SequenceNumber>,
     ) -> MemtableRanges {
         MemtableRanges::default()
     }
@@ -313,12 +315,7 @@ pub(crate) fn encode_keys(
     key_values: &KeyValues,
     keys: &mut Vec<Vec<u8>>,
 ) {
-    let row_codec = McmpRowCodec::new(
-        metadata
-            .primary_key_columns()
-            .map(|c| SortField::new(c.column_schema.data_type.clone()))
-            .collect(),
-    );
+    let row_codec = DensePrimaryKeyCodec::new(metadata);
     for kv in key_values.iter() {
         let key = row_codec.encode(kv.primary_keys()).unwrap();
         keys.push(key);
@@ -327,7 +324,7 @@ pub(crate) fn encode_keys(
 
 /// Encode one key.
 pub(crate) fn encode_key_by_kv(key_value: &KeyValue) -> Vec<u8> {
-    let row_codec = McmpRowCodec::new(vec![
+    let row_codec = DensePrimaryKeyCodec::with_fields(vec![
         SortField::new(ConcreteDataType::string_datatype()),
         SortField::new(ConcreteDataType::uint32_datatype()),
     ]);

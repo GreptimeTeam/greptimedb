@@ -69,13 +69,11 @@ impl LogQueryPlanner {
         // Time filter
         filters.push(self.build_time_filter(&query.time_filter, &schema)?);
 
-        // Column filters and projections
-        let mut projected_columns = Vec::new();
-        for column_filter in &query.columns {
+        // Column filters
+        for column_filter in &query.filters {
             if let Some(expr) = self.build_column_filter(column_filter)? {
                 filters.push(expr);
             }
-            projected_columns.push(col(&column_filter.column_name));
         }
 
         // Apply filters
@@ -87,9 +85,12 @@ impl LogQueryPlanner {
         }
 
         // Apply projections
-        plan_builder = plan_builder
-            .project(projected_columns)
-            .context(DataFusionPlanningSnafu)?;
+        if !query.columns.is_empty() {
+            let projected_columns = query.columns.iter().map(col).collect::<Vec<_>>();
+            plan_builder = plan_builder
+                .project(projected_columns)
+                .context(DataFusionPlanningSnafu)?;
+        }
 
         // Apply limit
         plan_builder = plan_builder
@@ -159,6 +160,17 @@ impl LogQueryPlanner {
                     }
                     .build(),
                 ),
+                log_query::ContentFilter::Exist => {
+                    Ok(col(&column_filter.column_name).is_not_null())
+                }
+                log_query::ContentFilter::Between(lower, upper) => {
+                    Ok(col(&column_filter.column_name)
+                        .gt_eq(lit(ScalarValue::Utf8(Some(escape_like_pattern(lower)))))
+                        .and(
+                            col(&column_filter.column_name)
+                                .lt_eq(lit(ScalarValue::Utf8(Some(escape_like_pattern(upper))))),
+                        ))
+                }
                 log_query::ContentFilter::Compound(..) => Err::<Expr, _>(
                     UnimplementedSnafu {
                         feature: "compound filter",
@@ -267,7 +279,7 @@ mod tests {
                 end: Some("2021-01-02T00:00:00Z".to_string()),
                 span: None,
             },
-            columns: vec![ColumnFilters {
+            filters: vec![ColumnFilters {
                 column_name: "message".to_string(),
                 filters: vec![ContentFilter::Contains("error".to_string())],
             }],
@@ -276,13 +288,14 @@ mod tests {
                 fetch: Some(100),
             },
             context: Context::None,
+            columns: vec![],
+            exprs: vec![],
         };
 
         let plan = planner.query_to_plan(log_query).await.unwrap();
-        let expected = "Limit: skip=0, fetch=100 [message:Utf8]\
-\n  Projection: greptime.public.test_table.message [message:Utf8]\
-\n    Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp <= Utf8(\"2021-01-02T00:00:00Z\") AND greptime.public.test_table.message LIKE Utf8(\"%error%\") [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]\
-\n      TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]";
+        let expected = "Limit: skip=0, fetch=100 [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]\
+\n  Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp <= Utf8(\"2021-01-02T00:00:00Z\") AND greptime.public.test_table.message LIKE Utf8(\"%error%\") [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]\
+\n    TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]";
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
     }
@@ -380,7 +393,7 @@ mod tests {
                 end: Some("2021-01-02T00:00:00Z".to_string()),
                 span: None,
             },
-            columns: vec![ColumnFilters {
+            filters: vec![ColumnFilters {
                 column_name: "message".to_string(),
                 filters: vec![ContentFilter::Contains("error".to_string())],
             }],
@@ -389,13 +402,14 @@ mod tests {
                 fetch: None,
             },
             context: Context::None,
+            columns: vec![],
+            exprs: vec![],
         };
 
         let plan = planner.query_to_plan(log_query).await.unwrap();
-        let expected = "Limit: skip=10, fetch=1000 [message:Utf8]\
-\n  Projection: greptime.public.test_table.message [message:Utf8]\
-\n    Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp <= Utf8(\"2021-01-02T00:00:00Z\") AND greptime.public.test_table.message LIKE Utf8(\"%error%\") [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]\
-\n      TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]";
+        let expected = "Limit: skip=10, fetch=1000 [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]\
+\n  Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp <= Utf8(\"2021-01-02T00:00:00Z\") AND greptime.public.test_table.message LIKE Utf8(\"%error%\") [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]\
+\n    TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]";
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
     }
@@ -413,7 +427,7 @@ mod tests {
                 end: Some("2021-01-02T00:00:00Z".to_string()),
                 span: None,
             },
-            columns: vec![ColumnFilters {
+            filters: vec![ColumnFilters {
                 column_name: "message".to_string(),
                 filters: vec![ContentFilter::Contains("error".to_string())],
             }],
@@ -422,13 +436,14 @@ mod tests {
                 fetch: None,
             },
             context: Context::None,
+            columns: vec![],
+            exprs: vec![],
         };
 
         let plan = planner.query_to_plan(log_query).await.unwrap();
-        let expected = "Limit: skip=0, fetch=1000 [message:Utf8]\
-\n  Projection: greptime.public.test_table.message [message:Utf8]\
-\n    Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp <= Utf8(\"2021-01-02T00:00:00Z\") AND greptime.public.test_table.message LIKE Utf8(\"%error%\") [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]\
-\n      TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]";
+        let expected = "Limit: skip=0, fetch=1000 [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]\
+\n  Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp <= Utf8(\"2021-01-02T00:00:00Z\") AND greptime.public.test_table.message LIKE Utf8(\"%error%\") [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]\
+\n    TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]";
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
     }

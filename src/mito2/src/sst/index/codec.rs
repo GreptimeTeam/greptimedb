@@ -20,7 +20,7 @@ use store_api::metadata::ColumnMetadata;
 use store_api::storage::ColumnId;
 
 use crate::error::{FieldTypeMismatchSnafu, IndexEncodeNullSnafu, Result};
-use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, SortField};
 
 /// Encodes index values according to their data types for sorting and storage use.
 pub struct IndexValueCodec;
@@ -66,7 +66,7 @@ pub struct IndexValuesCodec {
     /// The data types of tag columns.
     fields: Vec<SortField>,
     /// The decoder for the primary key.
-    decoder: McmpRowCodec,
+    decoder: DensePrimaryKeyCodec,
 }
 
 impl IndexValuesCodec {
@@ -81,7 +81,7 @@ impl IndexValuesCodec {
             })
             .unzip();
 
-        let decoder = McmpRowCodec::new(fields.clone());
+        let decoder = DensePrimaryKeyCodec::with_fields(fields.clone());
         Self {
             column_ids,
             fields,
@@ -94,7 +94,7 @@ impl IndexValuesCodec {
         &self,
         primary_key: &[u8],
     ) -> Result<impl Iterator<Item = (&(ColumnId, String), &SortField, Option<Value>)>> {
-        let values = self.decoder.decode(primary_key)?;
+        let values = self.decoder.decode_dense(primary_key)?;
 
         let iter = values
             .into_iter()
@@ -119,6 +119,7 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
+    use crate::row_converter::{PrimaryKeyCodecExt, SortField};
 
     #[test]
     fn test_encode_value_basic() {
@@ -165,7 +166,7 @@ mod tests {
             },
         ];
 
-        let primary_key = McmpRowCodec::new(vec![
+        let primary_key = DensePrimaryKeyCodec::with_fields(vec![
             SortField::new(ConcreteDataType::string_datatype()),
             SortField::new(ConcreteDataType::int64_datatype()),
         ])

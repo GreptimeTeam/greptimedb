@@ -19,11 +19,11 @@ use api::v1::alter_database_expr::Kind as AlterDatabaseKind;
 use api::v1::alter_table_expr::Kind as AlterTableKind;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{
-    AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer, ColumnDataType,
-    ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn,
-    DropColumns, ExpireAfter, ModifyColumnType, ModifyColumnTypes, RenameTable, SemanticType,
-    SetColumnFulltext, SetDatabaseOptions, SetTableOptions, TableName, UnsetColumnFulltext,
-    UnsetDatabaseOptions, UnsetTableOptions,
+    set_index, unset_index, AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer,
+    ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
+    DropColumn, DropColumns, ExpireAfter, ModifyColumnType, ModifyColumnTypes, RenameTable,
+    SemanticType, SetDatabaseOptions, SetFulltext, SetIndex, SetInverted, SetTableOptions,
+    TableName, UnsetDatabaseOptions, UnsetFulltext, UnsetIndex, UnsetInverted, UnsetTableOptions,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
@@ -548,23 +548,39 @@ pub(crate) fn to_alter_table_expr(
         AlterTableOperation::UnsetTableOptions { keys } => {
             AlterTableKind::UnsetTableOptions(UnsetTableOptions { keys })
         }
-        AlterTableOperation::SetColumnFulltext {
-            column_name,
-            options,
-        } => AlterTableKind::SetColumnFulltext(SetColumnFulltext {
-            column_name: column_name.value,
-            enable: options.enable,
-            analyzer: match options.analyzer {
-                FulltextAnalyzer::English => Analyzer::English.into(),
-                FulltextAnalyzer::Chinese => Analyzer::Chinese.into(),
+        AlterTableOperation::SetIndex { options } => AlterTableKind::SetIndex(match options {
+            sql::statements::alter::SetIndexOperation::Fulltext {
+                column_name,
+                options,
+            } => SetIndex {
+                options: Some(set_index::Options::Fulltext(SetFulltext {
+                    column_name: column_name.value,
+                    enable: options.enable,
+                    analyzer: match options.analyzer {
+                        FulltextAnalyzer::English => Analyzer::English.into(),
+                        FulltextAnalyzer::Chinese => Analyzer::Chinese.into(),
+                    },
+                    case_sensitive: options.case_sensitive,
+                })),
             },
-            case_sensitive: options.case_sensitive,
+            sql::statements::alter::SetIndexOperation::Inverted { column_name } => SetIndex {
+                options: Some(set_index::Options::Inverted(SetInverted {
+                    column_name: column_name.value,
+                })),
+            },
         }),
-        AlterTableOperation::UnsetColumnFulltext { column_name } => {
-            AlterTableKind::UnsetColumnFulltext(UnsetColumnFulltext {
-                column_name: column_name.value,
-            })
-        }
+        AlterTableOperation::UnsetIndex { options } => AlterTableKind::UnsetIndex(match options {
+            sql::statements::alter::UnsetIndexOperation::Fulltext { column_name } => UnsetIndex {
+                options: Some(unset_index::Options::Fulltext(UnsetFulltext {
+                    column_name: column_name.value,
+                })),
+            },
+            sql::statements::alter::UnsetIndexOperation::Inverted { column_name } => UnsetIndex {
+                options: Some(unset_index::Options::Inverted(UnsetInverted {
+                    column_name: column_name.value,
+                })),
+            },
+        }),
     };
 
     Ok(AlterTableExpr {

@@ -33,7 +33,7 @@ use store_api::storage::ColumnId;
 use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, Result};
 use crate::read::Batch;
-use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec};
 
 /// Only cache vector when its length `<=` this value.
 const MAX_VECTOR_LENGTH_TO_CACHE: usize = 16384;
@@ -47,7 +47,7 @@ pub struct ProjectionMapper {
     /// Output record batch contains tags.
     has_tags: bool,
     /// Decoder for primary key.
-    codec: McmpRowCodec,
+    codec: DensePrimaryKeyCodec,
     /// Schema for converted [RecordBatch].
     output_schema: SchemaRef,
     /// Ids of columns to project. It keeps ids in the same order as the `projection`
@@ -80,12 +80,7 @@ impl ProjectionMapper {
             // Safety: idx is valid.
             column_schemas.push(metadata.schema.column_schemas()[*idx].clone());
         }
-        let codec = McmpRowCodec::new(
-            metadata
-                .primary_key_columns()
-                .map(|c| SortField::new(c.column_schema.data_type.clone()))
-                .collect(),
-        );
+        let codec = DensePrimaryKeyCodec::new(metadata);
         // Safety: Columns come from existing schema.
         let output_schema = Arc::new(Schema::new(column_schemas));
         // Get fields in each batch.
@@ -186,7 +181,7 @@ impl ProjectionMapper {
                 Some(v) => v.to_vec(),
                 None => self
                     .codec
-                    .decode(batch.primary_key())
+                    .decode_dense(batch.primary_key())
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?,
             }
@@ -291,6 +286,7 @@ mod tests {
     use super::*;
     use crate::cache::CacheManager;
     use crate::read::BatchBuilder;
+    use crate::row_converter::{PrimaryKeyCodecExt, SortField};
     use crate::test_util::meta_util::TestRegionMetadataBuilder;
 
     fn new_batch(
@@ -299,7 +295,7 @@ mod tests {
         fields: &[(ColumnId, i64)],
         num_rows: usize,
     ) -> Batch {
-        let converter = McmpRowCodec::new(
+        let converter = DensePrimaryKeyCodec::with_fields(
             (0..tags.len())
                 .map(|_| SortField::new(ConcreteDataType::int64_datatype()))
                 .collect(),

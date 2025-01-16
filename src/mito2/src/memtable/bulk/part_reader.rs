@@ -18,6 +18,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use parquet::arrow::ProjectionMask;
 use parquet::file::metadata::ParquetMetaData;
+use store_api::storage::SequenceNumber;
 
 use crate::error;
 use crate::memtable::bulk::context::BulkIterContextRef;
@@ -31,6 +32,7 @@ pub struct BulkPartIter {
     row_groups_to_read: VecDeque<usize>,
     current_reader: Option<PruneReader>,
     builder: MemtableRowGroupReaderBuilder,
+    sequence: Option<SequenceNumber>,
 }
 
 impl BulkPartIter {
@@ -40,6 +42,7 @@ impl BulkPartIter {
         mut row_groups_to_read: VecDeque<usize>,
         parquet_meta: Arc<ParquetMetaData>,
         data: Bytes,
+        sequence: Option<SequenceNumber>,
     ) -> error::Result<Self> {
         let projection_mask = ProjectionMask::roots(
             parquet_meta.file_metadata().schema_descr(),
@@ -62,6 +65,7 @@ impl BulkPartIter {
             row_groups_to_read,
             current_reader: init_reader,
             builder,
+            sequence,
         })
     }
 
@@ -71,14 +75,16 @@ impl BulkPartIter {
             return Ok(None);
         };
 
-        if let Some(batch) = current.next_batch()? {
+        if let Some(mut batch) = current.next_batch()? {
+            batch.filter_by_sequence(self.sequence)?;
             return Ok(Some(batch));
         }
 
         // Previous row group exhausted, read next row group
         while let Some(next_row_group) = self.row_groups_to_read.pop_front() {
             current.reset(self.builder.build_row_group_reader(next_row_group, None)?);
-            if let Some(next_batch) = current.next_batch()? {
+            if let Some(mut next_batch) = current.next_batch()? {
+                next_batch.filter_by_sequence(self.sequence)?;
                 return Ok(Some(next_batch));
             }
         }

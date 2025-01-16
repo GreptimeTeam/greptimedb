@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::storage::ColumnId;
@@ -38,7 +39,7 @@ use crate::memtable::partition_tree::{PartitionTreeConfig, PkId};
 use crate::memtable::stats::WriteMetrics;
 use crate::metrics::PARTITION_TREE_READ_STAGE_ELAPSED;
 use crate::read::{Batch, BatchBuilder};
-use crate::row_converter::{McmpRowCodec, RowCodec};
+use crate::row_converter::{PrimaryKeyCodec, PrimaryKeyFilter};
 
 /// Key of a partition.
 pub type PartitionKey = u32;
@@ -65,7 +66,7 @@ impl Partition {
     pub fn write_with_key(
         &self,
         primary_key: &mut Vec<u8>,
-        row_codec: &McmpRowCodec,
+        row_codec: &dyn PrimaryKeyCodec,
         key_value: KeyValue,
         re_encode: bool,
         metrics: &mut WriteMetrics,
@@ -85,17 +86,25 @@ impl Partition {
 
         // Key does not yet exist in shard or builder, encode and insert the full primary key.
         if re_encode {
-            // `primary_key` is sparse, re-encode the full primary key.
-            let sparse_key = primary_key.clone();
-            primary_key.clear();
-            row_codec.encode_to_vec(key_value.primary_keys(), primary_key)?;
-            let pk_id = inner.shard_builder.write_with_key(
-                primary_key,
-                Some(&sparse_key),
-                &key_value,
-                metrics,
-            );
-            inner.pk_to_pk_id.insert(sparse_key, pk_id);
+            match row_codec.encoding() {
+                PrimaryKeyEncoding::Dense => {
+                    // `primary_key` is sparse, re-encode the full primary key.
+                    let sparse_key = primary_key.clone();
+                    primary_key.clear();
+                    row_codec.encode_key_value(&key_value, primary_key)?;
+                    let pk_id = inner.shard_builder.write_with_key(
+                        primary_key,
+                        Some(&sparse_key),
+                        &key_value,
+                        metrics,
+                    );
+                    inner.pk_to_pk_id.insert(sparse_key, pk_id);
+                }
+                PrimaryKeyEncoding::Sparse => {
+                    // TODO(weny): support sparse primary key.
+                    todo!()
+                }
+            }
         } else {
             // `primary_key` is already the full primary key.
             let pk_id = inner
@@ -126,18 +135,23 @@ impl Partition {
         Ok(())
     }
 
+    fn build_primary_key_filter(
+        need_prune_key: bool,
+        metadata: &RegionMetadataRef,
+        row_codec: &dyn PrimaryKeyCodec,
+        filters: &Arc<Vec<SimpleFilterEvaluator>>,
+    ) -> Option<Box<dyn PrimaryKeyFilter>> {
+        if need_prune_key {
+            let filter = row_codec.primary_key_filter(metadata, filters.clone());
+            Some(filter)
+        } else {
+            None
+        }
+    }
+
     /// Scans data in the partition.
     pub fn read(&self, mut context: ReadPartitionContext) -> Result<PartitionReader> {
         let start = Instant::now();
-        let key_filter = if context.need_prune_key {
-            Some(PrimaryKeyFilter::new(
-                context.metadata.clone(),
-                context.filters.clone(),
-                context.row_codec.clone(),
-            ))
-        } else {
-            None
-        };
         let (builder_source, shard_reader_builders) = {
             let inner = self.inner.read().unwrap();
             let mut shard_source = Vec::with_capacity(inner.shards.len() + 1);
@@ -157,20 +171,33 @@ impl Partition {
         };
 
         context.metrics.num_shards += shard_reader_builders.len();
+
         let mut nodes = shard_reader_builders
             .into_iter()
             .map(|builder| {
+                let primary_key_filter = Self::build_primary_key_filter(
+                    context.need_prune_key,
+                    &context.metadata,
+                    context.row_codec.as_ref(),
+                    &context.filters,
+                );
                 Ok(ShardNode::new(ShardSource::Shard(
-                    builder.build(key_filter.clone())?,
+                    builder.build(primary_key_filter)?,
                 )))
             })
             .collect::<Result<Vec<_>>>()?;
 
         if let Some(builder) = builder_source {
             context.metrics.num_builder += 1;
+            let primary_key_filter = Self::build_primary_key_filter(
+                context.need_prune_key,
+                &context.metadata,
+                context.row_codec.as_ref(),
+                &context.filters,
+            );
             // Move the initialization of ShardBuilderReader out of read lock.
             let shard_builder_reader =
-                builder.build(Some(&context.pk_weights), key_filter.clone())?;
+                builder.build(Some(&context.pk_weights), primary_key_filter)?;
             nodes.push(ShardNode::new(ShardSource::Builder(shard_builder_reader)));
         }
 
@@ -354,81 +381,10 @@ impl PartitionReader {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct PrimaryKeyFilter {
-    metadata: RegionMetadataRef,
-    filters: Arc<Vec<SimpleFilterEvaluator>>,
-    codec: Arc<McmpRowCodec>,
-    offsets_buf: Vec<usize>,
-}
-
-impl PrimaryKeyFilter {
-    pub(crate) fn new(
-        metadata: RegionMetadataRef,
-        filters: Arc<Vec<SimpleFilterEvaluator>>,
-        codec: Arc<McmpRowCodec>,
-    ) -> Self {
-        Self {
-            metadata,
-            filters,
-            codec,
-            offsets_buf: Vec::new(),
-        }
-    }
-
-    pub(crate) fn prune_primary_key(&mut self, pk: &[u8]) -> bool {
-        if self.filters.is_empty() {
-            return true;
-        }
-
-        // no primary key, we simply return true.
-        if self.metadata.primary_key.is_empty() {
-            return true;
-        }
-
-        // evaluate filters against primary key values
-        let mut result = true;
-        self.offsets_buf.clear();
-        for filter in &*self.filters {
-            if Partition::is_partition_column(filter.column_name()) {
-                continue;
-            }
-            let Some(column) = self.metadata.column_by_name(filter.column_name()) else {
-                continue;
-            };
-            // ignore filters that are not referencing primary key columns
-            if column.semantic_type != SemanticType::Tag {
-                continue;
-            }
-            // index of the column in primary keys.
-            // Safety: A tag column is always in primary key.
-            let index = self.metadata.primary_key_index(column.column_id).unwrap();
-            let value = match self.codec.decode_value_at(pk, index, &mut self.offsets_buf) {
-                Ok(v) => v,
-                Err(e) => {
-                    common_telemetry::error!(e; "Failed to decode primary key");
-                    return true;
-                }
-            };
-
-            // TODO(yingwen): `evaluate_scalar()` creates temporary arrays to compare scalars. We
-            // can compare the bytes directly without allocation and matching types as we use
-            // comparable encoding.
-            // Safety: arrow schema and datatypes are constructed from the same source.
-            let scalar_value = value
-                .try_to_scalar_value(&column.column_schema.data_type)
-                .unwrap();
-            result &= filter.evaluate_scalar(&scalar_value).unwrap_or(true);
-        }
-
-        result
-    }
-}
-
 /// Structs to reuse across readers to avoid allocating for each reader.
 pub(crate) struct ReadPartitionContext {
     metadata: RegionMetadataRef,
-    row_codec: Arc<McmpRowCodec>,
+    row_codec: Arc<dyn PrimaryKeyCodec>,
     projection: HashSet<ColumnId>,
     filters: Arc<Vec<SimpleFilterEvaluator>>,
     /// Buffer to store pk weights.
@@ -467,16 +423,16 @@ impl Drop for ReadPartitionContext {
 impl ReadPartitionContext {
     pub(crate) fn new(
         metadata: RegionMetadataRef,
-        row_codec: Arc<McmpRowCodec>,
+        row_codec: Arc<dyn PrimaryKeyCodec>,
         projection: HashSet<ColumnId>,
-        filters: Vec<SimpleFilterEvaluator>,
+        filters: Arc<Vec<SimpleFilterEvaluator>>,
     ) -> ReadPartitionContext {
         let need_prune_key = Self::need_prune_key(&metadata, &filters);
         ReadPartitionContext {
             metadata,
             row_codec,
             projection,
-            filters: Arc::new(filters),
+            filters,
             pk_weights: Vec::new(),
             need_prune_key,
             metrics: Default::default(),

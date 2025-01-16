@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::information_extension::DistributedInformationExtension;
@@ -142,6 +143,11 @@ struct StartCommand {
     /// The prefix of environment variables, default is `GREPTIMEDB_FLOWNODE`;
     #[clap(long, default_value = "GREPTIMEDB_FLOWNODE")]
     env_prefix: String,
+    #[clap(long)]
+    http_addr: Option<String>,
+    /// HTTP request timeout in seconds.
+    #[clap(long)]
+    http_timeout: Option<u64>,
 }
 
 impl StartCommand {
@@ -196,6 +202,14 @@ impl StartCommand {
                 .metasrv_addrs
                 .clone_from(metasrv_addrs);
             opts.mode = Mode::Distributed;
+        }
+
+        if let Some(http_addr) = &self.http_addr {
+            opts.http.addr.clone_from(http_addr);
+        }
+
+        if let Some(http_timeout) = self.http_timeout {
+            opts.http.timeout = Duration::from_secs(http_timeout);
         }
 
         if let (Mode::Distributed, None) = (&opts.mode, &opts.node_id) {

@@ -181,14 +181,14 @@ mod tests {
         let options = options_from_column_schema(&schema);
         assert!(options.is_none());
 
-        let schema = ColumnSchema::new("test", ConcreteDataType::string_datatype(), true)
+        let mut schema = ColumnSchema::new("test", ConcreteDataType::string_datatype(), true)
             .with_fulltext_options(FulltextOptions {
                 enable: true,
                 analyzer: FulltextAnalyzer::English,
                 case_sensitive: false,
             })
-            .unwrap()
-            .set_inverted_index(true);
+            .unwrap();
+        schema.with_inverted_index(true);
         let options = options_from_column_schema(&schema).unwrap();
         assert_eq!(
             options.options.get(FULLTEXT_GRPC_KEY).unwrap(),

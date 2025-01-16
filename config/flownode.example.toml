@@ -25,6 +25,16 @@ max_recv_message_size = "512MB"
 ## The maximum send message size for gRPC server.
 max_send_message_size = "512MB"
 
+## The HTTP server options.
+[http]
+## The address to bind the HTTP server.
+addr = "127.0.0.1:4000"
+## HTTP request timeout. Set to 0 to disable timeout.
+timeout = "30s"
+## HTTP request body limit.
+## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
+## Set to 0 to disable limit.
+body_limit = "64MB"
 
 ## The metasrv client options.
 [meta_client]

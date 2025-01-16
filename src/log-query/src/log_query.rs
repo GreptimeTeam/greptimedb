@@ -24,16 +24,73 @@ use crate::error::{
 /// GreptimeDB's log query request.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LogQuery {
+    // Global query parameters
     /// A fully qualified table name to query logs from.
     pub table: TableName,
     /// Specifies the time range for the log query. See [`TimeFilter`] for more details.
     pub time_filter: TimeFilter,
-    /// Columns with filters to query.
-    pub columns: Vec<ColumnFilters>,
-    /// Controls row skipping and fetch count for logs.
+    /// Controls row skipping and fetch on the result set.
     pub limit: Limit,
-    /// Adjacent lines to return.
+    /// Columns to return in the result set.
+    ///
+    /// The columns can be either from the original log or derived from processing exprs.
+    /// Default (empty) means all columns.
+    ///
+    /// TODO(ruihang): Do we need negative select?
+    pub columns: Vec<String>,
+
+    // Filters
+    /// Conjunction of filters to apply for the raw logs.
+    ///
+    /// Filters here can only refer to the columns from the original log.
+    pub filters: Vec<ColumnFilters>,
+    /// Adjacent lines to return. Applies to all filters above.
+    ///
+    /// TODO(ruihang): Do we need per-filter context?
     pub context: Context,
+
+    // Processors
+    /// Expressions to calculate after filter.
+    pub exprs: Vec<LogExpr>,
+}
+
+/// Expression to calculate on log after filtering.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum LogExpr {
+    NamedIdent(String),
+    PositionalIdent(usize),
+    Literal(String),
+    ScalarFunc {
+        name: String,
+        args: Vec<LogExpr>,
+    },
+    AggrFunc {
+        name: String,
+        args: Vec<LogExpr>,
+        /// Optional range function parameter. Stands for the time range for both step and align.
+        range: Option<String>,
+        by: Vec<LogExpr>,
+    },
+    Decompose {
+        expr: Box<LogExpr>,
+        /// JSON, CSV, etc.
+        schema: String,
+        /// Fields with type name to extract from the decomposed value.
+        fields: Vec<(String, String)>,
+    },
+    BinaryOp {
+        left: Box<LogExpr>,
+        op: String,
+        right: Box<LogExpr>,
+    },
+    Alias {
+        expr: Box<LogExpr>,
+        alias: String,
+    },
+    Filter {
+        expr: Box<LogExpr>,
+        filter: ContentFilter,
+    },
 }
 
 impl Default for LogQuery {
@@ -41,9 +98,11 @@ impl Default for LogQuery {
         Self {
             table: TableName::new("", "", ""),
             time_filter: Default::default(),
-            columns: vec![],
+            filters: vec![],
             limit: Limit::default(),
             context: Default::default(),
+            columns: vec![],
+            exprs: vec![],
         }
     }
 }
@@ -232,6 +291,7 @@ pub struct ColumnFilters {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ContentFilter {
+    // Search-based filters
     /// Only match the exact content.
     ///
     /// For example, if the content is "pale blue dot", the filter "pale" or "pale blue" will match.
@@ -246,6 +306,14 @@ pub enum ContentFilter {
     Contains(String),
     /// Match the content with a regex pattern. The pattern should be a valid Rust regex.
     Regex(String),
+
+    // Value-based filters
+    /// Content exists, a.k.a. not null.
+    Exist,
+    Between(String, String),
+    // TODO(ruihang): arithmetic operations
+
+    // Compound filters
     Compound(Vec<ContentFilter>, BinaryOperator),
 }
 

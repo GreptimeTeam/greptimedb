@@ -300,6 +300,9 @@ impl ScanRegion {
                 if file_in_range(file, &time_range) {
                     files.push(file.clone());
                 }
+                // There is no need to check and prune for file's sequence here as the sequence number is usually very new,
+                // unless the timing is too good, or the sequence number wouldn't be in file.
+                // and the batch will be filtered out by tree reader anyway.
             }
         }
 
@@ -347,7 +350,11 @@ impl ScanRegion {
         let memtables = memtables
             .into_iter()
             .map(|mem| {
-                let ranges = mem.ranges(Some(mapper.column_ids()), Some(predicate.clone()));
+                let ranges = mem.ranges(
+                    Some(mapper.column_ids()),
+                    Some(predicate.clone()),
+                    self.request.sequence,
+                );
                 MemRangeBuilder::new(ranges)
             })
             .collect();

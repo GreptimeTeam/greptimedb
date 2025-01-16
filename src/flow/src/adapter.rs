@@ -36,6 +36,7 @@ use query::QueryEngine;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
+use servers::http::HttpOptions;
 use servers::Mode;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -45,6 +46,7 @@ use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 pub(crate) use crate::adapter::node_context::FlownodeContext;
+use crate::adapter::refill::RefillTask;
 use crate::adapter::table_source::ManagedTableSource;
 use crate::adapter::util::relation_desc_to_column_schemas_with_fallback;
 pub(crate) use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
@@ -57,6 +59,7 @@ use crate::repr::{self, DiffRow, RelationDesc, Row, BATCH_SIZE};
 
 mod flownode_impl;
 mod parse_expr;
+pub(crate) mod refill;
 mod stat;
 #[cfg(test)]
 mod tests;
@@ -104,6 +107,7 @@ pub struct FlownodeOptions {
     pub node_id: Option<u64>,
     pub flow: FlowConfig,
     pub grpc: GrpcOptions,
+    pub http: HttpOptions,
     pub meta_client: Option<MetaClientOptions>,
     pub logging: LoggingOptions,
     pub tracing: TracingOptions,
@@ -118,6 +122,7 @@ impl Default for FlownodeOptions {
             node_id: None,
             flow: FlowConfig::default(),
             grpc: GrpcOptions::default().with_addr("127.0.0.1:3004"),
+            http: HttpOptions::default(),
             meta_client: None,
             logging: LoggingOptions::default(),
             tracing: TracingOptions::default(),
@@ -154,6 +159,8 @@ pub struct FlowWorkerManager {
     frontend_invoker: RwLock<Option<FrontendInvoker>>,
     /// contains mapping from table name to global id, and table schema
     node_context: RwLock<FlownodeContext>,
+    /// Contains all refill tasks
+    refill_tasks: RwLock<BTreeMap<FlowId, RefillTask>>,
     flow_err_collectors: RwLock<BTreeMap<FlowId, ErrCollector>>,
     src_send_buf_lens: RwLock<BTreeMap<TableId, watch::Receiver<usize>>>,
     tick_manager: FlowTickManager,
@@ -193,6 +200,7 @@ impl FlowWorkerManager {
             table_info_source: srv_map,
             frontend_invoker: RwLock::new(None),
             node_context: RwLock::new(node_context),
+            refill_tasks: Default::default(),
             flow_err_collectors: Default::default(),
             src_send_buf_lens: Default::default(),
             tick_manager,

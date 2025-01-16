@@ -133,10 +133,8 @@ fn create_proto_alter_kind(
         Kind::RenameTable(_) => Ok(None),
         Kind::SetTableOptions(v) => Ok(Some(alter_request::Kind::SetTableOptions(v.clone()))),
         Kind::UnsetTableOptions(v) => Ok(Some(alter_request::Kind::UnsetTableOptions(v.clone()))),
-        Kind::SetColumnFulltext(v) => Ok(Some(alter_request::Kind::SetColumnFulltext(v.clone()))),
-        Kind::UnsetColumnFulltext(v) => {
-            Ok(Some(alter_request::Kind::UnsetColumnFulltext(v.clone())))
-        }
+        Kind::SetIndex(v) => Ok(Some(alter_request::Kind::SetIndex(v.clone()))),
+        Kind::UnsetIndex(v) => Ok(Some(alter_request::Kind::UnsetIndex(v.clone()))),
     }
 }
 

@@ -22,7 +22,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
-use crate::row_converter::McmpRowCodec;
+use crate::row_converter::DensePrimaryKeyCodec;
 use crate::sst::parquet::file_range::RangeBase;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::SimpleFilterContext;
@@ -41,7 +41,7 @@ impl BulkIterContext {
         projection: &Option<&[ColumnId]>,
         predicate: Option<Predicate>,
     ) -> Self {
-        let codec = McmpRowCodec::new_with_primary_keys(&region_metadata);
+        let codec = DensePrimaryKeyCodec::new(&region_metadata);
 
         let simple_filters = predicate
             .as_ref()
