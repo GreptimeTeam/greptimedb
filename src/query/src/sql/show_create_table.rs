@@ -179,17 +179,26 @@ fn create_table_constraints(
     let inverted_index_set = schema
         .column_schemas()
         .iter()
-        .any(|c| !is_metric_engine_internal_column(&c.name) && c.has_inverted_index_key());
+        .any(|c| c.has_inverted_index_key());
     if inverted_index_set {
         let inverted_index_cols = schema
             .column_schemas()
             .iter()
-            .filter(|c| !is_metric_engine_internal_column(&c.name) && c.is_inverted_indexed())
-            .map(|c| Ident::with_quote(quote_style, &c.name))
+            .filter_map(|c| {
+                if is_metric_engine && is_metric_engine_internal_column(&c.name) {
+                    None
+                } else if c.is_inverted_indexed() {
+                    Some(Ident::with_quote(quote_style, &c.name))
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-        constraints.push(TableConstraint::InvertedIndex {
-            columns: inverted_index_cols,
-        });
+        if !inverted_index_cols.is_empty() {
+            constraints.push(TableConstraint::InvertedIndex {
+                columns: inverted_index_cols,
+            });
+        }
     }
 
     constraints
