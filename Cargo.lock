@@ -1749,6 +1749,7 @@ dependencies = [
  "lazy_static",
  "meta-client",
  "meta-srv",
+ "metric-engine",
  "mito2",
  "moka",
  "nu-ansi-term",
