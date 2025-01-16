@@ -710,12 +710,26 @@ impl RangeSelect {
     }
 }
 
+/// Range function expression.
 #[derive(Debug, Clone)]
 struct RangeFnExec {
     expr: Arc<AggregateFunctionExpr>,
     range: Millisecond,
     fill: Option<Fill>,
     need_cast: Option<DataType>,
+}
+
+impl RangeFnExec {
+    /// Returns the expressions to pass to the aggregator.
+    /// It also adds the order by expressions to the list of expressions.
+    /// Order-sensitive aggregators, such as `FIRST_VALUE(x ORDER BY y)` requires this.
+    fn expressions(&self) -> Vec<Arc<dyn PhysicalExpr>> {
+        let mut exprs = self.expr.expressions();
+        if let Some(ordering) = self.expr.order_bys() {
+            exprs.extend(ordering.iter().map(|sort| sort.expr.clone()));
+        }
+        exprs
+    }
 }
 
 impl Display for RangeFnExec {
@@ -986,7 +1000,7 @@ impl RangeSelectStream {
                 )
             })?;
         for i in 0..self.range_exec.len() {
-            let args = self.evaluate_many(&batch, &self.range_exec[i].expr.expressions())?;
+            let args = self.evaluate_many(&batch, &self.range_exec[i].expressions())?;
             // use self.modify_map record (hash, align_ts) => [row_nums]
             produce_align_time(
                 self.align_to,
@@ -1163,6 +1177,9 @@ impl Stream for RangeSelectStream {
                         // new batch to aggregate
                         Some(Ok(batch)) => {
                             if let Err(e) = self.update_range_context(batch) {
+                                common_telemetry::error!(
+                                    e; "RangeSelectStream cannot update range context, schema: {:?}", self.schema
+                                );
                                 return Poll::Ready(Some(Err(e)));
                             }
                         }
