@@ -1231,6 +1231,57 @@ mod tests {
     }
 
     #[test]
+    fn test_filter_by_sequence() {
+        // Filters put only.
+        let mut batch = new_batch(
+            &[1, 2, 3, 4],
+            &[11, 12, 13, 14],
+            &[OpType::Put, OpType::Put, OpType::Put, OpType::Put],
+            &[21, 22, 23, 24],
+        );
+        batch.filter_by_sequence(Some(13)).unwrap();
+        let expect = new_batch(
+            &[1, 2, 3],
+            &[11, 12, 13],
+            &[OpType::Put, OpType::Put, OpType::Put],
+            &[21, 22, 23],
+        );
+        assert_eq!(expect, batch);
+
+        // Filters to empty.
+        let mut batch = new_batch(
+            &[1, 2, 3, 4],
+            &[11, 12, 13, 14],
+            &[OpType::Put, OpType::Delete, OpType::Put, OpType::Put],
+            &[21, 22, 23, 24],
+        );
+
+        batch.filter_by_sequence(Some(10)).unwrap();
+        assert!(batch.is_empty());
+
+        // None filter.
+        let mut batch = new_batch(
+            &[1, 2, 3, 4],
+            &[11, 12, 13, 14],
+            &[OpType::Put, OpType::Delete, OpType::Put, OpType::Put],
+            &[21, 22, 23, 24],
+        );
+        let expect = batch.clone();
+        batch.filter_by_sequence(None).unwrap();
+        assert_eq!(expect, batch);
+
+        // Filter a empty batch
+        let mut batch = new_batch(&[], &[], &[], &[]);
+        batch.filter_by_sequence(Some(10)).unwrap();
+        assert!(batch.is_empty());
+
+        // Filter a empty batch with None
+        let mut batch = new_batch(&[], &[], &[], &[]);
+        batch.filter_by_sequence(None).unwrap();
+        assert!(batch.is_empty());
+    }
+
+    #[test]
     fn test_filter() {
         // Filters put only.
         let mut batch = new_batch(
