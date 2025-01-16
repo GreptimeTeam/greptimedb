@@ -104,3 +104,28 @@ SELECT json_path_match(parse_json('null'), '$.a == 1');
 |                                                            |
 +------------------------------------------------------------+
 
+--- json_object_keys ---
+SELECT json_object_keys(parse_json('{"a": 1, "b": [1, 2, 3]}')) AS keys;
+
++------------+
+| keys       |
++------------+
+| ["a", "b"] |
++------------+
+
+SELECT json_object_keys(parse_json('{"a": 1, "b": 2, "c": 3}')) AS keys;
+
++-----------------+
+| keys            |
++-----------------+
+| ["a", "b", "c"] |
++-----------------+
+
+SELECT json_object_keys(parse_json('[1, 2, 3]')) AS keys;
+
++------+
+| keys |
++------+
+|      |
++------+
+

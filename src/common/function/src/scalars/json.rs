@@ -15,6 +15,7 @@
 use std::sync::Arc;
 mod json_get;
 mod json_is;
+mod json_object_keys;
 mod json_path_exists;
 mod json_path_match;
 mod json_to_string;
@@ -49,6 +50,7 @@ impl JsonFunction {
         registry.register(Arc::new(JsonIsArray));
         registry.register(Arc::new(JsonIsObject));
 
+        registry.register(Arc::new(json_object_keys::JsonObjectKeysFunction));
         registry.register(Arc::new(json_path_exists::JsonPathExistsFunction));
         registry.register(Arc::new(json_path_match::JsonPathMatchFunction));
     }
