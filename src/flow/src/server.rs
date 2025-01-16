@@ -244,6 +244,11 @@ impl FlownodeInstance {
             task.shutdown();
         }
 
+        self.http_server
+            .shutdown()
+            .await
+            .context(ShutdownServerSnafu)?;
+
         Ok(())
     }
 
