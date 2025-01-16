@@ -57,6 +57,7 @@
 //!     - This key is mainly used in constructing the view in Datanode and Frontend.
 //!
 //! 12. Kafka topic key: `__topic_name/kafka/{topic_name}`
+//！    - The key is used to mark existing topics in kafka for WAL.
 //!
 //! All keys have related managers. The managers take care of the serialization and deserialization
 //! of keys and values, and the interaction with the underlying KV store backend.
