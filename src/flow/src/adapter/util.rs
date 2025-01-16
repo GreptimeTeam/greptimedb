@@ -35,19 +35,18 @@ use crate::FlowWorkerManager;
 
 impl FlowWorkerManager {
     /// Get a worker handle for creating flow, using round robin to select a worker
-    pub(crate) async fn get_worker_handle_for_create_flow(
-        &self,
-    ) -> tokio::sync::MutexGuard<WorkerHandle> {
-        let mut selector = self.worker_selector.lock().await;
-
-        *selector += 1;
-        if *selector >= self.worker_handles.len() {
-            *selector = 0
+    pub(crate) async fn get_worker_handle_for_create_flow(&self) -> &WorkerHandle {
+        let use_idx = {
+            let mut selector = self.worker_selector.lock().await;
+            if *selector >= self.worker_handles.len() {
+                *selector = 0
+            };
+            let use_idx = *selector;
+            *selector += 1;
+            use_idx
         };
-
         // Safety: selector is always in bound
-        let handle = &self.worker_handles[*selector];
-        handle.lock().await
+        &self.worker_handles[use_idx]
     }
 
     /// Create table from given schema(will adjust to add auto column if needed), return true if table is created
