@@ -47,6 +47,7 @@ use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
 use pipeline::pipeline_operator::PipelineOperator;
 use prometheus::HistogramTimer;
+use promql_parser::label::Matcher;
 use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
@@ -448,6 +449,15 @@ impl PrometheusHandler for Instance {
             .context(ExecuteQuerySnafu)?;
 
         Ok(interceptor.post_execute(output, query_ctx)?)
+    }
+
+    async fn query_metrics(
+        &self,
+        _catalog: &str,
+        _schema: &str,
+        _matchers: Vec<Matcher>,
+    ) -> server_error::Result<Vec<String>> {
+        todo!();
     }
 
     fn catalog_manager(&self) -> CatalogManagerRef {

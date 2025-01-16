@@ -4078,6 +4078,7 @@ dependencies = [
  "partition",
  "pipeline",
  "prometheus",
+ "promql-parser",
  "prost 0.12.6",
  "query",
  "raft-engine",

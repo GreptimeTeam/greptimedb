@@ -19,6 +19,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_query::Output;
+use promql_parser::label::Matcher;
 use query::parser::PromQuery;
 use session::context::QueryContextRef;
 
@@ -31,6 +32,14 @@ pub type PrometheusHandlerRef = Arc<dyn PrometheusHandler + Send + Sync>;
 #[async_trait]
 pub trait PrometheusHandler {
     async fn do_query(&self, query: &PromQuery, query_ctx: QueryContextRef) -> Result<Output>;
+
+    /// Query metric table names by the `__name__` matchers.
+    async fn query_metrics(
+        &self,
+        catalog: &str,
+        schema: &str,
+        matchers: Vec<Matcher>,
+    ) -> Result<Vec<String>>;
 
     fn catalog_manager(&self) -> CatalogManagerRef;
 }
