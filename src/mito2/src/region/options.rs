@@ -238,7 +238,7 @@ impl Default for TwcsOptions {
             max_inactive_window_runs: 1,
             max_inactive_window_files: 1,
             time_window: None,
-            max_output_file_size: None,
+            max_output_file_size: Some(ReadableSize::gb(2)),
             remote_compaction: false,
             fallback_to_local: true,
         }
