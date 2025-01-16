@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod kafka;
+mod kafka_topic_pool;
+mod kvbackend;
+mod selector;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,14 +28,14 @@ use store_api::storage::{RegionId, RegionNumber};
 use crate::error::{EncodeWalOptionsSnafu, Result};
 use crate::kv_backend::KvBackendRef;
 use crate::leadership_notifier::LeadershipChangeListener;
-use crate::wal_options_allocator::kafka::topic_manager::TopicManager as KafkaTopicManager;
+use crate::wal_options_allocator::kafka_topic_pool::KafkaTopicPool;
 
 /// Allocates wal options in region granularity.
 #[derive(Default)]
 pub enum WalOptionsAllocator {
     #[default]
     RaftEngine,
-    Kafka(KafkaTopicManager),
+    Kafka(KafkaTopicPool),
 }
 
 /// Arc wrapper of WalOptionsAllocator.
@@ -45,7 +47,7 @@ impl WalOptionsAllocator {
         match config {
             MetasrvWalConfig::RaftEngine => Self::RaftEngine,
             MetasrvWalConfig::Kafka(kafka_config) => {
-                Self::Kafka(KafkaTopicManager::new(kafka_config, kv_backend))
+                Self::Kafka(KafkaTopicPool::new(kafka_config, kv_backend))
             }
         }
     }
@@ -54,7 +56,7 @@ impl WalOptionsAllocator {
     pub async fn start(&self) -> Result<()> {
         match self {
             Self::RaftEngine => Ok(()),
-            Self::Kafka(kafka_topic_manager) => kafka_topic_manager.start().await,
+            Self::Kafka(kafka_topic_manager) => kafka_topic_manager.init().await,
         }
     }
 
@@ -146,7 +148,6 @@ mod tests {
 
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
-    use crate::wal_options_allocator::kafka::topic_selector::RoundRobinTopicSelector;
 
     // Tests that the wal options allocator could successfully allocate raft-engine wal options.
     #[tokio::test]
@@ -191,14 +192,10 @@ mod tests {
                     ..Default::default()
                 };
                 let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
-                let mut topic_manager = KafkaTopicManager::new(config.clone(), kv_backend);
-                // Replaces the default topic pool with the constructed topics.
-                topic_manager.topic_pool.topics.clone_from(&topics);
-                // Replaces the default selector with a round-robin selector without shuffled.
-                topic_manager.topic_selector = Arc::new(RoundRobinTopicSelector::default());
+                let topic_pool = KafkaTopicPool::new(config.clone(), kv_backend);
 
                 // Creates an options allocator.
-                let allocator = WalOptionsAllocator::Kafka(topic_manager);
+                let allocator = WalOptionsAllocator::Kafka(topic_pool);
                 allocator.start().await.unwrap();
 
                 let num_regions = 32;

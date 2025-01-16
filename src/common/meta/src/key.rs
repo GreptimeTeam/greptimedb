@@ -104,7 +104,7 @@ pub mod table_route;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_utils;
 mod tombstone;
-pub mod topic;
+pub mod topic_name;
 pub(crate) mod txn_helper;
 pub mod view_info;
 
