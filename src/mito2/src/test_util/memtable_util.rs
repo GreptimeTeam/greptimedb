@@ -84,6 +84,7 @@ impl Memtable for EmptyMemtable {
         &self,
         _projection: Option<&[ColumnId]>,
         _filters: Option<Predicate>,
+        _sequence: Option<SequenceNumber>,
     ) -> Result<BoxedBatchIterator> {
         Ok(Box::new(std::iter::empty()))
     }
@@ -92,6 +93,7 @@ impl Memtable for EmptyMemtable {
         &self,
         _projection: Option<&[ColumnId]>,
         _predicate: Option<Predicate>,
+        _sequence: Option<SequenceNumber>,
     ) -> MemtableRanges {
         MemtableRanges::default()
     }

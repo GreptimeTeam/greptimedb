@@ -35,7 +35,7 @@ pub(crate) use primary_key_filter::DensePrimaryKeyFilter;
 use serde::{Deserialize, Serialize};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error::{Result, UnsupportedOperationSnafu};
@@ -190,20 +190,23 @@ impl Memtable for PartitionTreeMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
+        sequence: Option<SequenceNumber>,
     ) -> Result<BoxedBatchIterator> {
-        self.tree.read(projection, predicate)
+        self.tree.read(projection, predicate, sequence)
     }
 
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
+        sequence: Option<SequenceNumber>,
     ) -> MemtableRanges {
         let projection = projection.map(|ids| ids.to_vec());
         let builder = Box::new(PartitionTreeIterBuilder {
             tree: self.tree.clone(),
             projection,
             predicate,
+            sequence,
         });
         let context = Arc::new(MemtableRangeContext::new(self.id, builder));
 
@@ -350,12 +353,16 @@ struct PartitionTreeIterBuilder {
     tree: Arc<PartitionTree>,
     projection: Option<Vec<ColumnId>>,
     predicate: Option<Predicate>,
+    sequence: Option<SequenceNumber>,
 }
 
 impl IterBuilder for PartitionTreeIterBuilder {
     fn build(&self) -> Result<BoxedBatchIterator> {
-        self.tree
-            .read(self.projection.as_deref(), self.predicate.clone())
+        self.tree.read(
+            self.projection.as_deref(),
+            self.predicate.clone(),
+            self.sequence,
+        )
     }
 }
 
@@ -410,7 +417,7 @@ mod tests {
             .map(|kv| kv.timestamp().as_timestamp().unwrap().unwrap().value())
             .collect::<Vec<_>>();
 
-        let iter = memtable.iter(None, None).unwrap();
+        let iter = memtable.iter(None, None, None).unwrap();
         let read = collect_iter_timestamps(iter);
         assert_eq!(expected_ts, read);
 
@@ -464,11 +471,11 @@ mod tests {
         );
         memtable.write(&kvs).unwrap();
 
-        let iter = memtable.iter(None, None).unwrap();
+        let iter = memtable.iter(None, None, None).unwrap();
         let read = collect_iter_timestamps(iter);
         assert_eq!(vec![0, 1, 2, 3, 4, 5, 6, 7], read);
 
-        let iter = memtable.iter(None, None).unwrap();
+        let iter = memtable.iter(None, None, None).unwrap();
         let read = iter
             .flat_map(|batch| {
                 batch
@@ -509,7 +516,7 @@ mod tests {
         let expect = (0..100).collect::<Vec<_>>();
         let kvs = memtable_util::build_key_values(&metadata, "hello".to_string(), 10, &expect, 1);
         memtable.write(&kvs).unwrap();
-        let iter = memtable.iter(Some(&[3]), None).unwrap();
+        let iter = memtable.iter(Some(&[3]), None, None).unwrap();
 
         let mut v0_all = vec![];
         for res in iter {
@@ -581,7 +588,7 @@ mod tests {
         data.sort_unstable();
 
         let expect = data.into_iter().map(|x| x.2).collect::<Vec<_>>();
-        let iter = memtable.iter(None, None).unwrap();
+        let iter = memtable.iter(None, None, None).unwrap();
         let read = collect_iter_timestamps(iter);
         assert_eq!(expect, read);
     }
@@ -617,7 +624,7 @@ mod tests {
                 right: Box::new(Expr::Literal(ScalarValue::UInt32(Some(i)))),
             });
             let iter = memtable
-                .iter(None, Some(Predicate::new(vec![expr])))
+                .iter(None, Some(Predicate::new(vec![expr])), None)
                 .unwrap();
             let read = collect_iter_timestamps(iter);
             assert_eq!(timestamps, read);
@@ -784,7 +791,7 @@ mod tests {
             ))
             .unwrap();
 
-        let mut reader = new_memtable.iter(None, None).unwrap();
+        let mut reader = new_memtable.iter(None, None, None).unwrap();
         let batch = reader.next().unwrap().unwrap();
         let pk = codec.decode(batch.primary_key()).unwrap();
         if let Value::String(s) = &pk[2] {

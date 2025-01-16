@@ -27,7 +27,7 @@ use memcomparable::Serializer;
 use serde::Serialize;
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error::{PrimaryKeyLengthMismatchSnafu, Result, SerializeFieldSnafu};
@@ -202,6 +202,7 @@ impl PartitionTree {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
+        sequence: Option<SequenceNumber>,
     ) -> Result<BoxedBatchIterator> {
         let start = Instant::now();
         // Creates the projection set.
@@ -225,6 +226,7 @@ impl PartitionTree {
         let partitions = self.prune_partitions(&filters, &mut tree_iter_metric);
 
         let mut iter = TreeIter {
+            sequence,
             partitions,
             current_reader: None,
             metrics: tree_iter_metric,
@@ -451,6 +453,8 @@ struct TreeIterMetrics {
 }
 
 struct TreeIter {
+    /// Optional Sequence number of the current reader which limit results batch to lower than this sequence number.
+    sequence: Option<SequenceNumber>,
     partitions: VecDeque<PartitionRef>,
     current_reader: Option<PartitionReader>,
     metrics: TreeIterMetrics,
@@ -519,6 +523,8 @@ impl TreeIter {
         if part_reader.is_valid() {
             self.metrics.rows_fetched += batch.num_rows();
             self.metrics.batches_fetched += 1;
+            let mut batch = batch;
+            batch.filter_by_sequence(self.sequence)?;
             return Ok(Some(batch));
         }
 
@@ -529,6 +535,8 @@ impl TreeIter {
 
         self.metrics.rows_fetched += batch.num_rows();
         self.metrics.batches_fetched += 1;
+        let mut batch = batch;
+        batch.filter_by_sequence(self.sequence)?;
         Ok(Some(batch))
     }
 }

@@ -39,7 +39,7 @@ use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterProperties;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error;
@@ -68,7 +68,11 @@ impl BulkPart {
         &self.metadata
     }
 
-    pub(crate) fn read(&self, context: BulkIterContextRef) -> Result<Option<BoxedBatchIterator>> {
+    pub(crate) fn read(
+        &self,
+        context: BulkIterContextRef,
+        sequence: Option<SequenceNumber>,
+    ) -> Result<Option<BoxedBatchIterator>> {
         // use predicate to find row groups to read.
         let row_groups_to_read = context.row_groups_to_read(&self.metadata.parquet_metadata);
 
@@ -82,6 +86,7 @@ impl BulkPart {
             row_groups_to_read,
             self.metadata.parquet_metadata.clone(),
             self.data.clone(),
+            sequence,
         )?;
         Ok(Some(Box::new(iter) as BoxedBatchIterator))
     }
@@ -786,11 +791,14 @@ mod tests {
         let projection = &[4u32];
 
         let mut reader = part
-            .read(Arc::new(BulkIterContext::new(
-                part.metadata.region_metadata.clone(),
-                &Some(projection.as_slice()),
+            .read(
+                Arc::new(BulkIterContext::new(
+                    part.metadata.region_metadata.clone(),
+                    &Some(projection.as_slice()),
+                    None,
+                )),
                 None,
-            )))
+            )
             .unwrap()
             .expect("expect at least one row group");
 
@@ -837,7 +845,7 @@ mod tests {
             predicate,
         ));
         let mut reader = part
-            .read(context)
+            .read(context, None)
             .unwrap()
             .expect("expect at least one row group");
         let mut total_rows_read = 0;
@@ -866,7 +874,7 @@ mod tests {
                 datafusion_expr::lit(ScalarValue::TimestampMillisecond(Some(300), None)),
             )])),
         ));
-        assert!(part.read(context).unwrap().is_none());
+        assert!(part.read(context, None).unwrap().is_none());
 
         check_prune_row_group(&part, None, 310);
 
