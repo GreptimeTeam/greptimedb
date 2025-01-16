@@ -308,7 +308,7 @@ mod tests {
         let (indices, mut stream) = storage.drain().await.unwrap();
         assert_eq!(indices.len(), batch);
 
-        for (i, idx) in indices.iter().enumerate().take(batch - dup_batch)  {
+        for (i, idx) in indices.iter().enumerate().take(batch - dup_batch) {
             let segment = stream.next().await.unwrap().unwrap();
             assert_eq!(segment.element_count, elem_count);
 
