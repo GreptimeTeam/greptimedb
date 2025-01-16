@@ -45,6 +45,8 @@ impl<S> RegionWorkerLoop<S> {
                 sender,
                 &region.manifest_ctx,
                 self.schema_metadata_manager.clone(),
+                // TODO(yingwen): expose this to frontend
+                1,
             )
             .await
         {
@@ -113,6 +115,7 @@ impl<S> RegionWorkerLoop<S> {
                     OptionOutputTx::none(),
                     &region.manifest_ctx,
                     self.schema_metadata_manager.clone(),
+                    1,
                 )
                 .await
             {
