@@ -40,6 +40,7 @@ use partition::manager::PartitionRuleManager;
 use query::{QueryEngine, QueryEngineFactory};
 use servers::error::{AlreadyStartedSnafu, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu};
 use servers::http::{HttpServer, HttpServerBuilder};
+use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -318,7 +319,9 @@ impl FlownodeBuilder {
         let http_addr = self.opts.http.addr.parse().context(ParseAddrSnafu {
             addr: self.opts.http.addr.clone(),
         })?;
-        let http_server = HttpServerBuilder::new(self.opts.http).build();
+        let http_server = HttpServerBuilder::new(self.opts.http)
+            .with_metrics_handler(MetricsHandler)
+            .build();
 
         let heartbeat_task = self.heartbeat_task;
 
