@@ -34,7 +34,7 @@ use crate::etl::processor::{
     FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::Value;
-use crate::etl_error::PresetPatternInvalidSnafu;
+use crate::etl_error::DigestPatternInvalidSnafu;
 
 pub(crate) const PROCESSOR_DIGEST: &str = "digest";
 
@@ -71,7 +71,7 @@ impl std::str::FromStr for PresetPattern {
             "bracketed" => Ok(PresetPattern::Bracketed),
             "uuid" => Ok(PresetPattern::Uuid),
             "ip" => Ok(PresetPattern::Ip),
-            _ => PresetPatternInvalidSnafu { pattern }.fail(),
+            _ => DigestPatternInvalidSnafu { pattern }.fail(),
         }
     }
 }
@@ -195,7 +195,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DigestProcessorBuilder {
                 PRESETS_PATTERNS_NAME => {
                     let preset_patterns: Vec<String> = v
                         .as_vec()
-                        .with_context(|| PresetPatternInvalidSnafu {
+                        .with_context(|| DigestPatternInvalidSnafu {
                             pattern: key.to_string(),
                         })?
                         .iter()
@@ -210,7 +210,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DigestProcessorBuilder {
                 REGEX_PATTERNS_NAME => {
                     let regex_patterns: Vec<String> = v
                         .as_vec()
-                        .with_context(|| PresetPatternInvalidSnafu {
+                        .with_context(|| DigestPatternInvalidSnafu {
                             pattern: key.to_string(),
                         })?
                         .iter()

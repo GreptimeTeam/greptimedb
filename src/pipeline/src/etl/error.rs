@@ -364,7 +364,7 @@ pub enum Error {
         location: Location,
     },
     #[snafu(display("Wrong digest pattern: {pattern}"))]
-    PresetPatternInvalid {
+    DigestPatternInvalid {
         pattern: String,
         #[snafu(implicit)]
         location: Location,
