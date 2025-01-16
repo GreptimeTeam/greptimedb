@@ -533,7 +533,7 @@ impl MetricEngineInner {
                 ConcreteDataType::uint32_datatype(),
                 false,
             )
-            .set_inverted_index(true),
+            .with_inverted_index(true),
         };
         let tsid_col = ColumnMetadata {
             column_id: ReservedColumnId::tsid(),
@@ -543,7 +543,7 @@ impl MetricEngineInner {
                 ConcreteDataType::uint64_datatype(),
                 false,
             )
-            .set_inverted_index(false),
+            .with_inverted_index(false),
         };
         [metric_name_col, tsid_col]
     }
