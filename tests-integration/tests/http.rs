@@ -904,13 +904,13 @@ min_compaction_interval = "0s"
 aux_path = ""
 staging_size = "2GiB"
 write_buffer_size = "8MiB"
+content_cache_page_size = "64KiB"
 
 [region_engine.mito.inverted_index]
 create_on_flush = "auto"
 create_on_compaction = "auto"
 apply_on_query = "auto"
 mem_threshold_on_create = "auto"
-content_cache_page_size = "64KiB"
 
 [region_engine.mito.fulltext_index]
 create_on_flush = "auto"
@@ -941,7 +941,7 @@ write_interval = "30s"
     .trim()
     .to_string();
     let body_text = drop_lines_with_inconsistent_results(res_get.text().await);
-    similar_asserts::assert_eq!(body_text, expected_toml_str);
+    similar_asserts::assert_eq!(expected_toml_str, body_text);
 }
 
 fn drop_lines_with_inconsistent_results(input: String) -> String {

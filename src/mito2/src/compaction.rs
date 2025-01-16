@@ -40,6 +40,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{RegionId, TableId};
 use table::predicate::Predicate;
+use task::MAX_PARALLEL_COMPACTION;
 use tokio::sync::mpsc::{self, Sender};
 
 use crate::access_layer::AccessLayerRef;
@@ -85,6 +86,7 @@ pub struct CompactionRequest {
     pub(crate) manifest_ctx: ManifestContextRef,
     pub(crate) listener: WorkerListener,
     pub(crate) schema_metadata_manager: SchemaMetadataManagerRef,
+    pub(crate) max_parallelism: usize,
 }
 
 impl CompactionRequest {
@@ -145,6 +147,7 @@ impl CompactionScheduler {
         waiter: OptionOutputTx,
         manifest_ctx: &ManifestContextRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        max_parallelism: usize,
     ) -> Result<()> {
         if let Some(status) = self.region_status.get_mut(&region_id) {
             // Region is compacting. Add the waiter to pending list.
@@ -163,6 +166,7 @@ impl CompactionScheduler {
             manifest_ctx,
             self.listener.clone(),
             schema_metadata_manager,
+            max_parallelism,
         );
         self.region_status.insert(region_id, status);
         let result = self
@@ -193,6 +197,7 @@ impl CompactionScheduler {
             manifest_ctx,
             self.listener.clone(),
             schema_metadata_manager,
+            MAX_PARALLEL_COMPACTION,
         );
         // Try to schedule next compaction task for this region.
         if let Err(e) = self
@@ -264,6 +269,7 @@ impl CompactionScheduler {
             manifest_ctx,
             listener,
             schema_metadata_manager,
+            max_parallelism,
         } = request;
 
         let ttl = find_ttl(
@@ -294,6 +300,7 @@ impl CompactionScheduler {
             manifest_ctx: manifest_ctx.clone(),
             file_purger: None,
             ttl: Some(ttl),
+            max_parallelism,
         };
 
         let picker_output = {
@@ -521,6 +528,7 @@ impl CompactionStatus {
         manifest_ctx: &ManifestContextRef,
         listener: WorkerListener,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        max_parallelism: usize,
     ) -> CompactionRequest {
         let current_version = CompactionVersion::from(self.version_control.current().version);
         let start_time = Instant::now();
@@ -535,6 +543,7 @@ impl CompactionStatus {
             manifest_ctx: manifest_ctx.clone(),
             listener,
             schema_metadata_manager,
+            max_parallelism,
         };
 
         if let Some(pending) = self.pending_compaction.take() {
@@ -722,6 +731,7 @@ mod tests {
                 waiter,
                 &manifest_ctx,
                 schema_metadata_manager.clone(),
+                1,
             )
             .await
             .unwrap();
@@ -742,6 +752,7 @@ mod tests {
                 waiter,
                 &manifest_ctx,
                 schema_metadata_manager,
+                1,
             )
             .await
             .unwrap();
@@ -795,6 +806,7 @@ mod tests {
                 OptionOutputTx::none(),
                 &manifest_ctx,
                 schema_metadata_manager.clone(),
+                1,
             )
             .await
             .unwrap();
@@ -825,6 +837,7 @@ mod tests {
                 OptionOutputTx::none(),
                 &manifest_ctx,
                 schema_metadata_manager.clone(),
+                1,
             )
             .await
             .unwrap();
@@ -860,6 +873,7 @@ mod tests {
                 OptionOutputTx::none(),
                 &manifest_ctx,
                 schema_metadata_manager,
+                1,
             )
             .await
             .unwrap();
