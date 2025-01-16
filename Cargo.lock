@@ -4449,7 +4449,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/zhongzc/greptime-proto.git?branch=zhongzc%2Fbloom-filter-meta#5e3a1f2ab922f3db0c1981dab979d3c635049902"
+source = "git+https://github.com/zhongzc/greptime-proto.git?branch=zhongzc%2Fbloom-filter-meta#666b9750515ef8238b0d834137c8d446fc999ea8"
 dependencies = [
  "prost 0.12.6",
  "serde",
