@@ -36,7 +36,7 @@ use crate::memtable::{
     BoxedBatchIterator, BulkPart, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRanges,
     MemtableRef, MemtableStats,
 };
-use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
+use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
 
 /// Empty memtable for test.
 #[derive(Debug, Default)]
@@ -84,6 +84,7 @@ impl Memtable for EmptyMemtable {
         &self,
         _projection: Option<&[ColumnId]>,
         _filters: Option<Predicate>,
+        _sequence: Option<SequenceNumber>,
     ) -> Result<BoxedBatchIterator> {
         Ok(Box::new(std::iter::empty()))
     }
@@ -92,6 +93,7 @@ impl Memtable for EmptyMemtable {
         &self,
         _projection: Option<&[ColumnId]>,
         _predicate: Option<Predicate>,
+        _sequence: Option<SequenceNumber>,
     ) -> MemtableRanges {
         MemtableRanges::default()
     }

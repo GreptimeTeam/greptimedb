@@ -62,27 +62,56 @@ pub enum AlterTableOperation {
     /// `ADD <table_constraint>`
     AddConstraint(TableConstraint),
     /// `ADD [ COLUMN ] <column_def> [location]`
-    AddColumns { add_columns: Vec<AddColumn> },
+    AddColumns {
+        add_columns: Vec<AddColumn>,
+    },
     /// `MODIFY <column_name> [target_type]`
     ModifyColumnType {
         column_name: Ident,
         target_type: DataType,
     },
     /// `SET <table attrs key> = <table attr value>`
-    SetTableOptions { options: Vec<KeyValueOption> },
+    SetTableOptions {
+        options: Vec<KeyValueOption>,
+    },
     /// `UNSET <table attrs key>`
-    UnsetTableOptions { keys: Vec<String> },
+    UnsetTableOptions {
+        keys: Vec<String>,
+    },
     /// `DROP COLUMN <name>`
-    DropColumn { name: Ident },
+    DropColumn {
+        name: Ident,
+    },
     /// `RENAME <new_table_name>`
-    RenameTable { new_table_name: String },
+    RenameTable {
+        new_table_name: String,
+    },
+    SetIndex {
+        options: SetIndexOperation,
+    },
+    UnsetIndex {
+        options: UnsetIndexOperation,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub enum SetIndexOperation {
     /// `MODIFY COLUMN <column_name> SET FULLTEXT [WITH <options>]`
-    SetColumnFulltext {
+    Fulltext {
         column_name: Ident,
         options: FulltextOptions,
     },
+    /// `MODIFY COLUMN <column_name> SET INVERTED INDEX`
+    Inverted { column_name: Ident },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub enum UnsetIndexOperation {
     /// `MODIFY COLUMN <column_name> UNSET FULLTEXT`
-    UnsetColumnFulltext { column_name: Ident },
+    Fulltext { column_name: Ident },
+
+    /// `MODIFY COLUMN <column_name> UNSET INVERTED INDEX`
+    Inverted { column_name: Ident },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
@@ -140,15 +169,25 @@ impl Display for AlterTableOperation {
                 let keys = keys.iter().map(|k| format!("'{k}'")).join(",");
                 write!(f, "UNSET {keys}")
             }
-            AlterTableOperation::SetColumnFulltext {
-                column_name,
-                options,
-            } => {
-                write!(f, "MODIFY COLUMN {column_name} SET FULLTEXT WITH(analyzer={0}, case_sensitive={1})", options.analyzer, options.case_sensitive)
-            }
-            AlterTableOperation::UnsetColumnFulltext { column_name } => {
-                write!(f, "MODIFY COLUMN {column_name} UNSET FULLTEXT")
-            }
+            AlterTableOperation::SetIndex { options } => match options {
+                SetIndexOperation::Fulltext {
+                    column_name,
+                    options,
+                } => {
+                    write!(f, "MODIFY COLUMN {column_name} SET FULLTEXT WITH(analyzer={0}, case_sensitive={1})", options.analyzer, options.case_sensitive)
+                }
+                SetIndexOperation::Inverted { column_name } => {
+                    write!(f, "MODIFY COLUMN {column_name} SET INVERTED INDEX")
+                }
+            },
+            AlterTableOperation::UnsetIndex { options } => match options {
+                UnsetIndexOperation::Fulltext { column_name } => {
+                    write!(f, "MODIFY COLUMN {column_name} UNSET FULLTEXT")
+                }
+                UnsetIndexOperation::Inverted { column_name } => {
+                    write!(f, "MODIFY COLUMN {column_name} UNSET INVERTED INDEX")
+                }
+            },
         }
     }
 }
@@ -404,6 +443,27 @@ ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT WITH(analyzer=English, case_sen
                 assert_eq!(
                     r#"
 ALTER TABLE monitor MODIFY COLUMN a UNSET FULLTEXT"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = "ALTER TABLE monitor MODIFY COLUMN a SET INVERTED INDEX";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::AlterTable { .. });
+
+        match &stmts[0] {
+            Statement::AlterTable(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+ALTER TABLE monitor MODIFY COLUMN a SET INVERTED INDEX"#,
                     &new_sql
                 );
             }

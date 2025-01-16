@@ -411,6 +411,7 @@ impl MetadataRegion {
             output_ordering: None,
             limit: None,
             series_row_selector: None,
+            sequence: None,
         };
         let record_batch_stream = self
             .mito
@@ -469,6 +470,7 @@ impl MetadataRegion {
             output_ordering: None,
             limit: None,
             series_row_selector: None,
+            sequence: None,
         }
     }
 
@@ -630,6 +632,7 @@ mod test {
             output_ordering: None,
             limit: None,
             series_row_selector: None,
+            sequence: None,
         };
         let actual_scan_request = MetadataRegion::build_read_request(key);
         assert_eq!(actual_scan_request, expected_scan_request);

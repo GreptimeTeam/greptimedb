@@ -36,6 +36,7 @@ use query::QueryEngine;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
+use servers::http::HttpOptions;
 use servers::Mode;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -106,6 +107,7 @@ pub struct FlownodeOptions {
     pub node_id: Option<u64>,
     pub flow: FlowConfig,
     pub grpc: GrpcOptions,
+    pub http: HttpOptions,
     pub meta_client: Option<MetaClientOptions>,
     pub logging: LoggingOptions,
     pub tracing: TracingOptions,
@@ -120,6 +122,7 @@ impl Default for FlownodeOptions {
             node_id: None,
             flow: FlowConfig::default(),
             grpc: GrpcOptions::default().with_addr("127.0.0.1:3004"),
+            http: HttpOptions::default(),
             meta_client: None,
             logging: LoggingOptions::default(),
             tracing: TracingOptions::default(),

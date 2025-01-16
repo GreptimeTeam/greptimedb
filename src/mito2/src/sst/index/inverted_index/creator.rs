@@ -456,7 +456,7 @@ mod tests {
                 indexed_column_ids.clone(),
                 factory.clone(),
             )
-            .with_index_cache(Some(cache))
+            .with_inverted_index_cache(Some(cache))
             .with_puffin_metadata_cache(Some(puffin_metadata_cache))
             .build(&[expr])
             .unwrap()
