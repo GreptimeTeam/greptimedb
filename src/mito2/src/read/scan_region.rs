@@ -433,7 +433,7 @@ impl ScanRegion {
             Some(file_cache)
         }();
 
-        let index_cache = self.cache_strategy.index_cache().cloned();
+        let inverted_index_cache = self.cache_strategy.inverted_index_cache().cloned();
 
         let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
 
@@ -452,7 +452,7 @@ impl ScanRegion {
             self.access_layer.puffin_manager_factory().clone(),
         )
         .with_file_cache(file_cache)
-        .with_index_cache(index_cache)
+        .with_inverted_index_cache(inverted_index_cache)
         .with_puffin_metadata_cache(puffin_metadata_cache)
         .build(&self.request.filters)
         .inspect_err(|err| warn!(err; "Failed to build invereted index applier"))
@@ -473,7 +473,7 @@ impl ScanRegion {
             Some(file_cache)
         }();
 
-        let index_cache = self.cache_strategy.bloom_filter_index_cache().cloned();
+        let bloom_filter_index_cache = self.cache_strategy.bloom_filter_index_cache().cloned();
 
         let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
 
@@ -484,7 +484,7 @@ impl ScanRegion {
             self.access_layer.puffin_manager_factory().clone(),
         )
         .with_file_cache(file_cache)
-        .with_bloom_filter_index_cache(index_cache)
+        .with_bloom_filter_index_cache(bloom_filter_index_cache)
         .with_puffin_metadata_cache(puffin_metadata_cache)
         .build(&self.request.filters)
         .inspect_err(|err| warn!(err; "Failed to build bloom filter index applier"))
