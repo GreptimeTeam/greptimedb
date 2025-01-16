@@ -162,7 +162,7 @@ impl<R: RangeReader> BloomFilterMetaReader<R> {
             .await
             .context(IoSnafu)?;
         let suffix_len = suffix.len();
-        let length: u64 = u32::from_le_bytes(Self::read_tailing_four_bytes(&suffix)?) as u64;
+        let length = u32::from_le_bytes(Self::read_tailing_four_bytes(&suffix)?) as u64;
         self.validate_meta_size(length)?;
 
         if length > suffix_len as u64 - BLOOM_META_LEN_SIZE {
