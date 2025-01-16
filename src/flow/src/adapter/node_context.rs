@@ -162,6 +162,7 @@ impl SourceSender {
         batch_datatypes: &[ConcreteDataType],
     ) -> Result<usize, Error> {
         METRIC_FLOW_INPUT_BUF_SIZE.add(rows.len() as _);
+        // important for backpressure. if send buf is full, block until it's not
         while self.send_buf_row_cnt.load(Ordering::SeqCst) >= BATCH_SIZE * 4 {
             tokio::task::yield_now().await;
         }

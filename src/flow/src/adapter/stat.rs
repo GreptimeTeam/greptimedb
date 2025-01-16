@@ -22,7 +22,6 @@ impl FlowWorkerManager {
     pub async fn gen_state_report(&self) -> FlowStat {
         let mut full_report = BTreeMap::new();
         for worker in self.worker_handles.iter() {
-            let worker = worker.lock().await;
             match worker.get_state_size().await {
                 Ok(state_size) => {
                     full_report.extend(state_size.into_iter().map(|(k, v)| (k as u32, v)))
