@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
 use std::result::Result as StdResult;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -32,7 +33,7 @@ use datatypes::value::column_data_to_json;
 use lazy_static::lazy_static;
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
-use pipeline::{GreptimeTransformer, PipelineVersion};
+use pipeline::{DispatchedTo, GreptimeTransformer, PipelineExecOutput, PipelineVersion};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Map, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -551,6 +552,134 @@ fn extract_pipeline_value_by_content_type(
     })
 }
 
+enum PipelineInputValue {
+    // multiple row values as a value object
+    Original(Vec<serde_json::Value>),
+    // 2-dimension row values by column
+    Intermediate(Vec<Vec<Value>>),
+}
+
+async fn run_pipeline(
+    state: &PipelineHandlerRef,
+    pipeline_name: &str,
+    version: PipelineVersion,
+    value: PipelineInputValue,
+    table_name: String,
+    query_ctx: &QueryContextRef,
+    db: &str,
+    is_top_level: bool,
+) -> Result<Vec<RowInsertRequest>> {
+    if pipeline_name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME {
+        let table = state
+            .get_table(&table, &query_ctx)
+            .await
+            .context(CatalogSnafu)?;
+        pipeline::identity_pipeline(request.values, table)
+            .map(|rows| {
+                vec![RowInsertRequest {
+                    rows: Some(rows),
+                    table_name: table_name,
+                }]
+            })
+            .context(PipelineTransformSnafu)
+            .context(PipelineSnafu)
+    } else {
+        let pipeline = state
+            .get_pipeline(&pipeline_name, version, query_ctx.clone())
+            .await?;
+
+        let transform_timer = std::time::Instant::now();
+        let mut intermediate_state = pipeline.init_intermediate_state();
+
+        let mut transformed = Vec::with_capacity(request.values.len());
+        let mut dispatched: BTreeMap<DispatchedTo, Vec<Value>> = BTreeMap::new();
+
+        for v in request.values {
+            pipeline
+                .prepare(v, &mut intermediate_state)
+                .inspect_err(|_| {
+                    if is_top_level {
+                        METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                            .with_label_values(&[db, METRIC_FAILURE_VALUE])
+                            .observe(transform_timer.elapsed().as_secs_f64());
+                    }
+                })
+                .context(PipelineTransformSnafu)
+                .context(PipelineSnafu)?;
+            let r = pipeline
+                .exec_mut(&mut intermediate_state)
+                .inspect_err(|_| {
+                    if is_top_level {
+                        METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                            .with_label_values(&[db, METRIC_FAILURE_VALUE])
+                            .observe(transform_timer.elapsed().as_secs_f64());
+                    }
+                })
+                .context(PipelineTransformSnafu)
+                .context(PipelineSnafu)?;
+
+            match r {
+                PipelineExecOutput::Transformed(row) => {
+                    transformed.push(row);
+                }
+                PipelineExecOutput::DispatchedTo(dispatched_to) => {
+                    if let Some(values) = dispatched.get_mut(&dispatched_to) {
+                        // FIXME: can only push intermediate state
+                        values.push(v.clone());
+                    } else {
+                        dispatched.insert(dispatched_to, vec![v]);
+                    }
+                }
+            }
+
+            pipeline.reset_intermediate_state(&mut intermediate_state);
+        }
+
+        let mut results = Vec::new();
+        if !transformed.is_empty() {
+            results.push(RowInsertRequest {
+                rows: Some(Rows {
+                    rows: transformed,
+                    schema: pipeline.schemas().clone(),
+                }),
+                table_name,
+            })
+        }
+
+        for (dispatched_to, values) in dispatched {
+            let request = LogIngestRequest {
+                values,
+                table: format!("{}_{}", table_name, dispatched_to.table_part),
+            };
+            let next_pipeline_name = dispatched_to
+                .pipeline
+                .as_deref()
+                .unwrap_or(GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME);
+
+            let requests = Box::pin(run_pipeline(
+                state,
+                next_pipeline_name,
+                None,
+                request,
+                query_ctx,
+                db,
+                false,
+            ))
+            .await?;
+
+            results.extend(requests);
+        }
+
+        if is_top_level {
+            METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                .with_label_values(&[db, METRIC_SUCCESS_VALUE])
+                .observe(transform_timer.elapsed().as_secs_f64());
+        }
+
+        Ok(results)
+    }
+}
+
 pub(crate) async fn ingest_logs_inner(
     state: PipelineHandlerRef,
     pipeline_name: String,
@@ -564,59 +693,18 @@ pub(crate) async fn ingest_logs_inner(
     let mut insert_requests = Vec::with_capacity(log_ingest_requests.len());
 
     for request in log_ingest_requests {
-        let transformed_data: Rows = if pipeline_name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME {
-            let table = state
-                .get_table(&request.table, &query_ctx)
-                .await
-                .context(CatalogSnafu)?;
-            pipeline::identity_pipeline(request.values, table)
-                .context(PipelineTransformSnafu)
-                .context(PipelineSnafu)?
-        } else {
-            let pipeline = state
-                .get_pipeline(&pipeline_name, version, query_ctx.clone())
-                .await?;
+        let requests = run_pipeline(
+            &state,
+            &pipeline_name,
+            version,
+            request,
+            &query_ctx,
+            db.as_str(),
+            true,
+        )
+        .await?;
 
-            let transform_timer = std::time::Instant::now();
-            let mut intermediate_state = pipeline.init_intermediate_state();
-            let mut results = Vec::with_capacity(request.values.len());
-            for v in request.values {
-                pipeline
-                    .prepare(v, &mut intermediate_state)
-                    .inspect_err(|_| {
-                        METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                            .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
-                            .observe(transform_timer.elapsed().as_secs_f64());
-                    })
-                    .context(PipelineTransformSnafu)
-                    .context(PipelineSnafu)?;
-                let r = pipeline
-                    .exec_mut(&mut intermediate_state)
-                    .inspect_err(|_| {
-                        METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                            .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
-                            .observe(transform_timer.elapsed().as_secs_f64());
-                    })
-                    .context(PipelineTransformSnafu)
-                    .context(PipelineSnafu)?;
-                results.push(r);
-                pipeline.reset_intermediate_state(&mut intermediate_state);
-            }
-
-            METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
-                .observe(transform_timer.elapsed().as_secs_f64());
-
-            Rows {
-                rows: results,
-                schema: pipeline.schemas().clone(),
-            }
-        };
-
-        insert_requests.push(RowInsertRequest {
-            rows: Some(transformed_data),
-            table_name: request.table.clone(),
-        });
+        insert_requests.extend(requests);
     }
 
     let output = state

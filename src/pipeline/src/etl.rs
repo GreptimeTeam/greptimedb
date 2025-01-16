@@ -30,7 +30,7 @@ use transform::{TransformBuilders, Transformer, Transforms};
 use value::Value;
 use yaml_rust::YamlLoader;
 
-use crate::dispatcher::Dispatcher;
+use crate::dispatcher::{Dispatcher, Rule};
 use crate::etl::error::Result;
 
 const DESCRIPTION: &str = "description";
@@ -192,16 +192,60 @@ where
     // pub on_failure: processor::Processors,
 }
 
+/// Where the pipeline executed is dispatched to, with context information
+#[derive(Debug, Hash, PartialEq, Eq, Clone, PartialOrd, Ord)]
+pub struct DispatchedTo {
+    pub table_part: String,
+    pub pipeline: Option<String>,
+}
+
+impl From<&Rule> for DispatchedTo {
+    fn from(value: &Rule) -> Self {
+        DispatchedTo {
+            table_part: value.table_part.clone(),
+            pipeline: value.pipeline.clone(),
+        }
+    }
+}
+
+/// The result of pipeline execution
+#[derive(Debug)]
+pub enum PipelineExecOutput<O> {
+    Transformed(O),
+    DispatchedTo(DispatchedTo),
+}
+
+impl<O> PipelineExecOutput<O> {
+    pub(crate) fn into_transformed(self) -> Option<O> {
+        if let Self::Transformed(o) = self {
+            Some(o)
+        } else {
+            None
+        }
+    }
+}
+
 impl<T> Pipeline<T>
 where
     T: Transformer,
 {
-    pub fn exec_mut(&self, val: &mut Vec<Value>) -> Result<T::VecOutput> {
+    pub fn exec_mut(&self, val: &mut Vec<Value>) -> Result<PipelineExecOutput<T::VecOutput>> {
         for processor in self.processors.iter() {
             processor.exec_mut(val)?;
         }
 
-        self.transformer.transform_mut(val)
+        let matched_rule = self
+            .dispatcher
+            .as_ref()
+            .and_then(|dispatcher| dispatcher.exec(&self.intermediate_keys, val));
+
+        match matched_rule {
+            None => self
+                .transformer
+                .transform_mut(val)
+                .map(PipelineExecOutput::Transformed),
+            Some(rule) => Ok(PipelineExecOutput::DispatchedTo(rule.into())),
+        }
     }
 
     pub fn prepare_pipeline_value(&self, val: Value, result: &mut [Value]) -> Result<()> {
@@ -379,7 +423,11 @@ transform:
             payload,
             vec![Value::String("1,2".to_string()), Value::Null, Value::Null]
         );
-        let result = pipeline.exec_mut(&mut payload).unwrap();
+        let result = pipeline
+            .exec_mut(&mut payload)
+            .unwrap()
+            .into_transformed()
+            .unwrap();
 
         assert_eq!(result.values[0].value_data, Some(ValueData::U32Value(1)));
         assert_eq!(result.values[1].value_data, Some(ValueData::U32Value(2)));
@@ -428,7 +476,11 @@ transform:
         pipeline
             .prepare(serde_json::Value::String(message), &mut payload)
             .unwrap();
-        let result = pipeline.exec_mut(&mut payload).unwrap();
+        let result = pipeline
+            .exec_mut(&mut payload)
+            .unwrap()
+            .into_transformed()
+            .unwrap();
         let sechema = pipeline.schemas();
 
         assert_eq!(sechema.len(), result.values.len());
@@ -507,7 +559,11 @@ transform:
             payload,
             vec![Value::String("1,2".to_string()), Value::Null, Value::Null]
         );
-        let result = pipeline.exec_mut(&mut payload).unwrap();
+        let result = pipeline
+            .exec_mut(&mut payload)
+            .unwrap()
+            .into_transformed()
+            .unwrap();
         assert_eq!(result.values[0].value_data, Some(ValueData::U32Value(1)));
         assert_eq!(result.values[1].value_data, Some(ValueData::U32Value(2)));
         match &result.values[2].value_data {
@@ -547,7 +603,11 @@ transform:
         let schema = pipeline.schemas().clone();
         let mut result = pipeline.init_intermediate_state();
         pipeline.prepare(input_value, &mut result).unwrap();
-        let row = pipeline.exec_mut(&mut result).unwrap();
+        let row = pipeline
+            .exec_mut(&mut result)
+            .unwrap()
+            .into_transformed()
+            .unwrap();
         let output = Rows {
             schema,
             rows: vec![row],

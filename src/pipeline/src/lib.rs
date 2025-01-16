@@ -23,7 +23,10 @@ pub use etl::transform::transformer::greptime::SchemaInfo;
 pub use etl::transform::transformer::identity_pipeline;
 pub use etl::transform::{GreptimeTransformer, Transformer};
 pub use etl::value::{Array, Map, Value};
-pub use etl::{error as etl_error, parse, Content, Pipeline, PipelineWay, SelectInfo};
+pub use etl::{
+    error as etl_error, parse, Content, DispatchedTo, Pipeline, PipelineExecOutput, PipelineWay,
+    SelectInfo,
+};
 pub use manager::{
     error, pipeline_operator, table, util, PipelineInfo, PipelineRef, PipelineTableRef,
     PipelineVersion,
