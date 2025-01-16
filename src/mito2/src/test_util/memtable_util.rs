@@ -36,7 +36,7 @@ use crate::memtable::{
     BoxedBatchIterator, BulkPart, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRanges,
     MemtableRef, MemtableStats,
 };
-use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
+use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
 
 /// Empty memtable for test.
 #[derive(Debug, Default)]

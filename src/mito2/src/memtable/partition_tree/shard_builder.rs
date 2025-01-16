@@ -281,7 +281,7 @@ impl ShardBuilderReader {
             self.keys_before_pruning += 1;
             let key = self.dict_reader.key_by_pk_index(pk_index);
             let now = Instant::now();
-            if key_filter.prune_primary_key(key) {
+            if key_filter.matches(key) {
                 self.prune_pk_cost += now.elapsed();
                 self.last_yield_pk_index = Some(pk_index);
                 self.keys_after_pruning += 1;
