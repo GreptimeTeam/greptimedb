@@ -129,7 +129,8 @@ show create table phy;
 |       |   "val" DOUBLE NULL,               |
 |       |   "host" STRING NULL,              |
 |       |   TIME INDEX ("ts"),               |
-|       |   PRIMARY KEY ("host")             |
+|       |   PRIMARY KEY ("host"),            |
+|       |   INVERTED INDEX ("host")          |
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=metric                      |
@@ -217,6 +218,47 @@ show create table phy;
 |       |   physical_metric_table = ''                          |
 |       | )                                                     |
 +-------+-------------------------------------------------------+
+
+drop table phy;
+
+Affected Rows: 0
+
+CREATE TABLE IF NOT EXISTS "phy" (
+  "ts" TIMESTAMP(3) NOT NULL,
+  "val" DOUBLE NULL,
+  "host" STRING NULL SKIPPING INDEX WITH(granularity = '8192', type = 'BLOOM'),
+  TIME INDEX ("ts"),
+  PRIMARY KEY ("host"),
+)
+ENGINE=metric
+WITH(
+  'index.granularity' = '8192',
+  'index.type' = 'skipping',
+  physical_metric_table = ''
+);
+
+Affected Rows: 0
+
+show create table phy;
+
++-------+---------------------------------------------------------------------------------+
+| Table | Create Table                                                                    |
++-------+---------------------------------------------------------------------------------+
+| phy   | CREATE TABLE IF NOT EXISTS "phy" (                                              |
+|       |   "ts" TIMESTAMP(3) NOT NULL,                                                   |
+|       |   "val" DOUBLE NULL,                                                            |
+|       |   "host" STRING NULL SKIPPING INDEX WITH(granularity = '8192', type = 'BLOOM'), |
+|       |   TIME INDEX ("ts"),                                                            |
+|       |   PRIMARY KEY ("host")                                                          |
+|       | )                                                                               |
+|       |                                                                                 |
+|       | ENGINE=metric                                                                   |
+|       | WITH(                                                                           |
+|       |   'index.granularity' = '8192',                                                 |
+|       |   'index.type' = 'skipping',                                                    |
+|       |   physical_metric_table = ''                                                    |
+|       | )                                                                               |
++-------+---------------------------------------------------------------------------------+
 
 drop table phy;
 
