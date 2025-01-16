@@ -248,6 +248,8 @@ mod tests {
 
     #[test]
     fn test_show_create_table_sql() {
+        let mut host_schema = ColumnSchema::new("host", ConcreteDataType::string_datatype(), true);
+        host_schema.with_inverted_index(true);
         let schema = vec![
             ColumnSchema::new("id", ConcreteDataType::uint32_datatype(), true)
                 .with_skipping_options(SkippingIndexOptions {
@@ -255,8 +257,7 @@ mod tests {
                     ..Default::default()
                 })
                 .unwrap(),
-            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true)
-                .set_inverted_index(true),
+            host_schema,
             ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
             ColumnSchema::new("disk", ConcreteDataType::float32_datatype(), true),
             ColumnSchema::new("msg", ConcreteDataType::string_datatype(), true)
