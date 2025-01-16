@@ -39,6 +39,8 @@ use operator::statement::StatementExecutor;
 use partition::manager::PartitionRuleManager;
 use query::{QueryEngine, QueryEngineFactory};
 use servers::error::{AlreadyStartedSnafu, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu};
+use servers::http::{HttpServer, HttpServerBuilder};
+use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -210,6 +212,9 @@ impl servers::server::Server for FlownodeServer {
 pub struct FlownodeInstance {
     server: FlownodeServer,
     addr: SocketAddr,
+    /// only used for health check
+    http_server: HttpServer,
+    http_addr: SocketAddr,
     heartbeat_task: Option<HeartbeatTask>,
 }
 
@@ -224,6 +229,12 @@ impl FlownodeInstance {
             .start(self.addr)
             .await
             .context(StartServerSnafu)?;
+
+        self.http_server
+            .start(self.http_addr)
+            .await
+            .context(StartServerSnafu)?;
+
         Ok(())
     }
     pub async fn shutdown(&self) -> Result<(), crate::Error> {
@@ -232,6 +243,11 @@ impl FlownodeInstance {
         if let Some(task) = &self.heartbeat_task {
             task.shutdown();
         }
+
+        self.http_server
+            .shutdown()
+            .await
+            .context(ShutdownServerSnafu)?;
 
         Ok(())
     }
@@ -305,12 +321,21 @@ impl FlownodeBuilder {
 
         let server = FlownodeServer::new(FlowService::new(manager.clone()));
 
+        let http_addr = self.opts.http.addr.parse().context(ParseAddrSnafu {
+            addr: self.opts.http.addr.clone(),
+        })?;
+        let http_server = HttpServerBuilder::new(self.opts.http)
+            .with_metrics_handler(MetricsHandler)
+            .build();
+
         let heartbeat_task = self.heartbeat_task;
 
         let addr = self.opts.grpc.addr;
         let instance = FlownodeInstance {
             server,
             addr: addr.parse().context(ParseAddrSnafu { addr })?,
+            http_server,
+            http_addr,
             heartbeat_task,
         };
         Ok(instance)
