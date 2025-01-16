@@ -65,7 +65,7 @@ pub(crate) struct InvertedIndexApplierBuilder<'a> {
     puffin_manager_factory: PuffinManagerFactory,
 
     /// Cache for inverted index.
-    index_cache: Option<InvertedIndexCacheRef>,
+    inverted_index_cache: Option<InvertedIndexCacheRef>,
 
     /// Cache for puffin metadata.
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
@@ -88,7 +88,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
             output: HashMap::default(),
             puffin_manager_factory,
             file_cache: None,
-            index_cache: None,
+            inverted_index_cache: None,
             puffin_metadata_cache: None,
         }
     }
@@ -108,9 +108,12 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
         self
     }
 
-    /// Sets the index cache.
-    pub fn with_index_cache(mut self, index_cache: Option<InvertedIndexCacheRef>) -> Self {
-        self.index_cache = index_cache;
+    /// Sets the inverted index cache.
+    pub fn with_inverted_index_cache(
+        mut self,
+        inverted_index_cache: Option<InvertedIndexCacheRef>,
+    ) -> Self {
+        self.inverted_index_cache = inverted_index_cache;
         self
     }
 
@@ -142,7 +145,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
             )
             .with_file_cache(self.file_cache)
             .with_puffin_metadata_cache(self.puffin_metadata_cache)
-            .with_index_cache(self.index_cache),
+            .with_index_cache(self.inverted_index_cache),
         ))
     }
 

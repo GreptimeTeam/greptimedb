@@ -35,8 +35,6 @@ pub(crate) const DEFAULT_SCAN_CHANNEL_SIZE: usize = 32;
 const GLOBAL_WRITE_BUFFER_SIZE_FACTOR: u64 = 8;
 /// Use `1/SST_META_CACHE_SIZE_FACTOR` of OS memory size as SST meta cache size in default mode
 const SST_META_CACHE_SIZE_FACTOR: u64 = 32;
-/// Use `1/INDEX_CONTENT_CACHE_SIZE_FACTOR` of OS memory size for inverted index file content cache by default.
-const INDEX_CONTENT_CACHE_SIZE_FACTOR: u64 = 32;
 /// Use `1/MEM_CACHE_SIZE_FACTOR` of OS memory size as mem cache size in default mode
 const MEM_CACHE_SIZE_FACTOR: u64 = 16;
 /// Use `1/PAGE_CACHE_SIZE_FACTOR` of OS memory size as page cache size in default mode
@@ -307,6 +305,10 @@ pub struct IndexConfig {
 
     /// Cache size for metadata of puffin files. Setting it to 0 to disable the cache.
     pub metadata_cache_size: ReadableSize,
+    /// Cache size for inverted index content. Setting it to 0 to disable the cache.
+    pub content_cache_size: ReadableSize,
+    /// Page size for inverted index content.
+    pub content_cache_page_size: ReadableSize,
 }
 
 impl Default for IndexConfig {
@@ -316,6 +318,8 @@ impl Default for IndexConfig {
             staging_size: ReadableSize::gb(2),
             write_buffer_size: ReadableSize::mb(8),
             metadata_cache_size: ReadableSize::mb(64),
+            content_cache_size: ReadableSize::mb(128),
+            content_cache_page_size: ReadableSize::kb(64),
         }
     }
 }
@@ -411,45 +415,19 @@ pub struct InvertedIndexConfig {
     #[deprecated = "use [IndexConfig::write_buffer_size] instead"]
     #[serde(skip_serializing)]
     pub write_buffer_size: ReadableSize,
-
-    /// Cache size for metadata of inverted index. Setting it to 0 to disable the cache.
-    pub metadata_cache_size: ReadableSize,
-    /// Cache size for inverted index content. Setting it to 0 to disable the cache.
-    pub content_cache_size: ReadableSize,
-    /// Page size for inverted index content.
-    pub content_cache_page_size: ReadableSize,
-}
-
-impl InvertedIndexConfig {
-    /// Adjusts the cache size of [InvertedIndexConfig] according to system memory size.
-    fn adjust_cache_size(&mut self, sys_memory: ReadableSize) {
-        let content_cache_size = cmp::min(
-            sys_memory / INDEX_CONTENT_CACHE_SIZE_FACTOR,
-            ReadableSize::mb(128),
-        );
-        self.content_cache_size = content_cache_size;
-    }
 }
 
 impl Default for InvertedIndexConfig {
     #[allow(deprecated)]
     fn default() -> Self {
-        let mut index_config = Self {
+        Self {
             create_on_flush: Mode::Auto,
             create_on_compaction: Mode::Auto,
             apply_on_query: Mode::Auto,
             mem_threshold_on_create: MemoryThreshold::Auto,
             write_buffer_size: ReadableSize::mb(8),
             intermediate_path: String::new(),
-            metadata_cache_size: ReadableSize::mb(64),
-            content_cache_size: ReadableSize::mb(128),
-            content_cache_page_size: ReadableSize::kb(64),
-        };
-
-        if let Some(sys_memory) = common_config::utils::get_sys_total_memory() {
-            index_config.adjust_cache_size(sys_memory);
         }
-        index_config
     }
 }
 
