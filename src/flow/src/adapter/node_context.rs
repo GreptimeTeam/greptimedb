@@ -130,6 +130,17 @@ impl SourceSender {
             // TODO(discord9): send rows instead so it's just moving a point
             if let Some(batch) = send_buf.recv().await {
                 let len = batch.row_count();
+                if let Err(prev_row_cnt) =
+                    self.send_buf_row_cnt
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| x.checked_sub(len))
+                {
+                    common_telemetry::error!(
+                        "send buf row count underflow, prev = {}, len = {}",
+                        prev_row_cnt,
+                        len
+                    );
+                }
+
                 self.send_buf_row_cnt.fetch_sub(len, Ordering::SeqCst);
                 row_cnt += len;
                 self.sender
@@ -166,15 +177,17 @@ impl SourceSender {
         while self.send_buf_row_cnt.load(Ordering::SeqCst) >= BATCH_SIZE * 4 {
             tokio::task::yield_now().await;
         }
+
         // row count metrics is approx so relaxed order is ok
-        self.send_buf_row_cnt
-            .fetch_add(rows.len(), Ordering::SeqCst);
         let batch = Batch::try_from_rows_with_types(
             rows.into_iter().map(|(row, _, _)| row).collect(),
             batch_datatypes,
         )
         .context(EvalSnafu)?;
         common_telemetry::trace!("Send one batch to worker with {} rows", batch.row_count());
+
+        self.send_buf_row_cnt
+            .fetch_add(batch.row_count(), Ordering::SeqCst);
         self.send_buf_tx.send(batch).await.map_err(|e| {
             crate::error::InternalSnafu {
                 reason: format!("Failed to send row, error = {:?}", e),
