@@ -999,9 +999,11 @@ pub async fn test_dashboard_path(store_type: StorageType) {
     let (app, _guard) = setup_test_http_app_with_frontend(store_type, "dashboard_path").await;
     let client = TestClient::new(app);
 
-    let res_post = client.post("/dashboard").send().await;
-    assert_eq!(res_post.status(), StatusCode::OK);
     let res_get = client.get("/dashboard").send().await;
+    assert_eq!(res_get.status(), StatusCode::PERMANENT_REDIRECT);
+    let res_post = client.post("/dashboard/").send().await;
+    assert_eq!(res_post.status(), StatusCode::OK);
+    let res_get = client.get("/dashboard/").send().await;
     assert_eq!(res_get.status(), StatusCode::OK);
 
     // both `GET` and `POST` method return same result
