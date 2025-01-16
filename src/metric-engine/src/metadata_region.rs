@@ -29,7 +29,7 @@ use store_api::metric_engine_consts::{
     METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME, METADATA_SCHEMA_VALUE_COLUMN_INDEX,
     METADATA_SCHEMA_VALUE_COLUMN_NAME,
 };
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, WriteHint};
 use store_api::region_request::{RegionDeleteRequest, RegionPutRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
@@ -512,7 +512,10 @@ impl MetadataRegion {
             }],
         };
 
-        RegionPutRequest { rows }
+        RegionPutRequest {
+            rows,
+            hint: WriteHint::empty(),
+        }
     }
 
     fn build_delete_request(keys: &[String]) -> RegionDeleteRequest {

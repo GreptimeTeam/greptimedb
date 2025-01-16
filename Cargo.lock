@@ -10961,6 +10961,7 @@ dependencies = [
  "aquamarine",
  "async-stream",
  "async-trait",
+ "bitflags 2.6.0",
  "common-base",
  "common-error",
  "common-macro",

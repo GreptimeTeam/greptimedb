@@ -19,7 +19,7 @@ use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
-use store_api::region_engine::{RegionEngine, RegionRole};
+use store_api::region_engine::{RegionEngine, RegionRole, WriteHint};
 use store_api::region_request::{
     RegionCloseRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
@@ -129,7 +129,10 @@ async fn test_engine_open_readonly() {
     let err = engine
         .handle_request(
             region_id,
-            RegionRequest::Put(RegionPutRequest { rows: rows.clone() }),
+            RegionRequest::Put(RegionPutRequest {
+                rows: rows.clone(),
+                hint: WriteHint::empty(),
+            }),
         )
         .await
         .unwrap_err();

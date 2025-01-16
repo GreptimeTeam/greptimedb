@@ -16,6 +16,7 @@ use api::v1::Rows;
 use common_telemetry::{error, info};
 use snafu::{ensure, OptionExt};
 use store_api::codec::PrimaryKeyEncoding;
+use store_api::region_engine::WriteHint;
 use store_api::region_request::{AffectedRows, RegionPutRequest};
 use store_api::storage::{RegionId, TableId};
 
@@ -85,6 +86,9 @@ impl MetricEngineInner {
             &mut request.rows,
             encoding,
         )?;
+        if encoding == PrimaryKeyEncoding::Sparse {
+            request.hint = WriteHint::PRIMARY_KEY_ENCODED | WriteHint::SPARSE_KEY_ENCODING;
+        }
         self.data_region.write_data(data_region_id, request).await
     }
 
@@ -162,7 +166,7 @@ impl MetricEngineInner {
 #[cfg(test)]
 mod tests {
     use common_recordbatch::RecordBatches;
-    use store_api::region_engine::RegionEngine;
+    use store_api::region_engine::{RegionEngine, WriteHint};
     use store_api::region_request::RegionRequest;
     use store_api::storage::ScanRequest;
 
@@ -179,6 +183,7 @@ mod tests {
         let rows = test_util::build_rows(1, 5);
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
+            hint: WriteHint::empty(),
         });
 
         // write data
@@ -252,6 +257,7 @@ mod tests {
         let rows = test_util::build_rows(3, 100);
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
+            hint: WriteHint::empty(),
         });
 
         // write data
@@ -273,6 +279,7 @@ mod tests {
         let rows = test_util::build_rows(1, 100);
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
+            hint: WriteHint::empty(),
         });
 
         engine
@@ -292,6 +299,7 @@ mod tests {
         let rows = test_util::build_rows(1, 100);
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
+            hint: WriteHint::empty(),
         });
 
         engine

@@ -28,6 +28,7 @@ use datatypes::schema::ColumnSchema;
 use rstest::rstest;
 use rstest_reuse::{self, apply};
 use store_api::metadata::ColumnMetadata;
+use store_api::region_engine::WriteHint;
 use store_api::region_request::{RegionCreateRequest, RegionOpenRequest, RegionPutRequest};
 use store_api::storage::RegionId;
 
@@ -530,7 +531,13 @@ async fn test_absent_and_invalid_columns() {
         rows,
     };
     let err = engine
-        .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows,
+                hint: WriteHint::empty(),
+            }),
+        )
         .await
         .unwrap_err();
     assert_eq!(StatusCode::InvalidArguments, err.status_code());

@@ -45,6 +45,7 @@ use crate::mito_engine_options::{
     TWCS_TIME_WINDOW,
 };
 use crate::path_utils::region_dir;
+use crate::region_engine::WriteHint;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
 
 #[derive(Debug, IntoStaticStr)]
@@ -95,8 +96,15 @@ fn make_region_puts(inserts: InsertRequests) -> Result<Vec<(RegionId, RegionRequ
         .into_iter()
         .filter_map(|r| {
             let region_id = r.region_id.into();
-            r.rows
-                .map(|rows| (region_id, RegionRequest::Put(RegionPutRequest { rows })))
+            r.rows.map(|rows| {
+                (
+                    region_id,
+                    RegionRequest::Put(RegionPutRequest {
+                        rows,
+                        hint: WriteHint::empty(),
+                    }),
+                )
+            })
         })
         .collect();
     Ok(requests)
@@ -232,6 +240,8 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
 pub struct RegionPutRequest {
     /// Rows to put.
     pub rows: Rows,
+    /// Write hint.
+    pub hint: WriteHint,
 }
 
 #[derive(Debug)]

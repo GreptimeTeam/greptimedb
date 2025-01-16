@@ -57,7 +57,7 @@ use rskafka::client::{Client, ClientBuilder};
 use rskafka::record::Record;
 use rstest_reuse::template;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
-use store_api::region_engine::{RegionEngine, RegionRole};
+use store_api::region_engine::{RegionEngine, RegionRole, WriteHint};
 use store_api::region_request::{
     RegionCloseRequest, RegionCreateRequest, RegionDeleteRequest, RegionFlushRequest,
     RegionOpenRequest, RegionPutRequest, RegionRequest,
@@ -1049,7 +1049,13 @@ pub fn delete_rows_schema(request: &RegionCreateRequest) -> Vec<api::v1::ColumnS
 pub async fn put_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
     let num_rows = rows.rows.len();
     let result = engine
-        .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows,
+                hint: WriteHint::empty(),
+            }),
+        )
         .await
         .unwrap();
     assert_eq!(num_rows, result.affected_rows);

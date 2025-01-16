@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole as PbRegionRole};
 use api::region::RegionResponse;
 use async_trait::async_trait;
+use bitflags::bitflags;
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_recordbatch::SendableRecordBatchStream;
@@ -35,6 +36,14 @@ use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
 use crate::region_request::{RegionOpenRequest, RegionRequest};
 use crate::storage::{RegionId, ScanRequest};
+
+bitflags! {
+    #[derive(Debug, Clone, Copy)]
+    pub struct WriteHint: u8 {
+        const PRIMARY_KEY_ENCODED = 1;
+        const SPARSE_KEY_ENCODING = 1 << 1;
+    }
+}
 
 /// The settable region role state.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]

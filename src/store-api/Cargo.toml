@@ -11,6 +11,7 @@ workspace = true
 api.workspace = true
 aquamarine.workspace = true
 async-trait.workspace = true
+bitflags.workspace = true
 common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true

@@ -16,7 +16,7 @@ use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use store_api::region_engine::{
-    RegionEngine, RegionRole, SetRegionRoleStateResponse, SettableRegionRoleState,
+    RegionEngine, RegionRole, SetRegionRoleStateResponse, SettableRegionRoleState, WriteHint,
 };
 use store_api::region_request::{RegionPutRequest, RegionRequest};
 use store_api::storage::RegionId;
@@ -74,7 +74,10 @@ async fn test_set_role_state_gracefully() {
         let error = engine
             .handle_request(
                 region_id,
-                RegionRequest::Put(RegionPutRequest { rows: rows.clone() }),
+                RegionRequest::Put(RegionPutRequest {
+                    rows: rows.clone(),
+                    hint: WriteHint::empty(),
+                }),
             )
             .await
             .unwrap_err();
@@ -152,7 +155,13 @@ async fn test_write_downgrading_region() {
         rows: build_rows(0, 42),
     };
     let err = engine
-        .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: rows.clone(),
+                hint: WriteHint::empty(),
+            }),
+        )
         .await
         .unwrap_err();
     assert_eq!(err.status_code(), StatusCode::RegionNotReady)
