@@ -119,29 +119,30 @@ pub fn build_create_table_expr(
     }
 
     let mut column_defs = Vec::with_capacity(column_exprs.len());
-    let mut primary_keys = Vec::default();
+    let mut primary_keys = Vec::with_capacity(column_exprs.len());
     let mut time_index = None;
 
-    for ColumnExpr {
-        column_name,
-        datatype,
-        semantic_type,
-        datatype_extension,
-        options,
-    } in column_exprs
-    {
+    for expr in column_exprs {
+        let ColumnExpr {
+            column_name,
+            datatype,
+            semantic_type,
+            datatype_extension,
+            options,
+        } = expr;
+
         let mut is_nullable = true;
         match semantic_type {
-            v if v == SemanticType::Tag as i32 => primary_keys.push(column_name.to_string()),
+            v if v == SemanticType::Tag as i32 => primary_keys.push(column_name.to_owned()),
             v if v == SemanticType::Timestamp as i32 => {
                 ensure!(
                     time_index.is_none(),
                     DuplicatedTimestampColumnSnafu {
-                        exists: time_index.unwrap(),
+                        exists: time_index.as_ref().unwrap(),
                         duplicated: column_name,
                     }
                 );
-                time_index = Some(column_name.to_string());
+                time_index = Some(column_name.to_owned());
                 // Timestamp column must not be null.
                 is_nullable = false;
             }
@@ -158,8 +159,8 @@ pub fn build_create_table_expr(
             }
         );
 
-        let column_def = ColumnDef {
-            name: column_name.to_string(),
+        column_defs.push(ColumnDef {
+            name: column_name.to_owned(),
             data_type: datatype,
             is_nullable,
             default_constraint: vec![],
@@ -167,15 +168,14 @@ pub fn build_create_table_expr(
             comment: String::new(),
             datatype_extension: datatype_extension.clone(),
             options: options.clone(),
-        };
-        column_defs.push(column_def);
+        });
     }
 
     let time_index = time_index.context(MissingTimestampColumnSnafu {
         msg: format!("table is {}", table_name.table),
     })?;
 
-    let expr = CreateTableExpr {
+    Ok(CreateTableExpr {
         catalog_name: table_name.catalog.to_string(),
         schema_name: table_name.schema.to_string(),
         table_name: table_name.table.to_string(),
@@ -187,9 +187,7 @@ pub fn build_create_table_expr(
         table_options: Default::default(),
         table_id: table_id.map(|id| api::v1::TableId { id }),
         engine: engine.to_string(),
-    };
-
-    Ok(expr)
+    })
 }
 
 /// Find columns that are not present in the schema and return them as `AddColumns`

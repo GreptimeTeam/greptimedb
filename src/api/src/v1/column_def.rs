@@ -57,13 +57,13 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
     }
     if let Some(options) = column_def.options.as_ref() {
         if let Some(fulltext) = options.options.get(FULLTEXT_GRPC_KEY) {
-            metadata.insert(FULLTEXT_KEY.to_string(), fulltext.clone());
+            metadata.insert(FULLTEXT_KEY.to_string(), fulltext.to_owned());
         }
         if let Some(inverted_index) = options.options.get(INVERTED_INDEX_GRPC_KEY) {
-            metadata.insert(INVERTED_INDEX_KEY.to_string(), inverted_index.clone());
+            metadata.insert(INVERTED_INDEX_KEY.to_string(), inverted_index.to_owned());
         }
         if let Some(skipping_index) = options.options.get(SKIPPING_INDEX_GRPC_KEY) {
-            metadata.insert(SKIPPING_INDEX_KEY.to_string(), skipping_index.clone());
+            metadata.insert(SKIPPING_INDEX_KEY.to_string(), skipping_index.to_owned());
         }
     }
 
@@ -82,7 +82,7 @@ pub fn options_from_column_schema(column_schema: &ColumnSchema) -> Option<Column
     if let Some(fulltext) = column_schema.metadata().get(FULLTEXT_KEY) {
         options
             .options
-            .insert(FULLTEXT_GRPC_KEY.to_string(), fulltext.clone());
+            .insert(FULLTEXT_GRPC_KEY.to_string(), fulltext.to_owned());
     }
     if let Some(inverted_index) = column_schema.metadata().get(INVERTED_INDEX_KEY) {
         options
