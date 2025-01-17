@@ -12,20 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod kafka_topic_creator;
-
 use std::sync::Arc;
 
 use common_wal::config::kafka::MetasrvKafkaConfig;
 use common_wal::TopicSelectorType;
-pub use kafka_topic_creator::build_kafka_topic_creator;
 use snafu::ensure;
 
 use crate::error::{InvalidNumTopicsSnafu, Result};
 use crate::kv_backend::KvBackendRef;
-use crate::wal_options_allocator::kafka_topic_pool::kafka_topic_creator::KafkaTopicCreator;
-use crate::wal_options_allocator::kvbackend::KvBackendTopicManager;
 use crate::wal_options_allocator::selector::{RoundRobinTopicSelector, TopicSelectorRef};
+use crate::wal_options_allocator::topic_creator::KafkaTopicCreator;
+use crate::wal_options_allocator::topic_manager::KafkaTopicManager;
 
 /// Topic pool for kafka remote wal.
 /// Responsible for:
@@ -34,7 +31,9 @@ use crate::wal_options_allocator::selector::{RoundRobinTopicSelector, TopicSelec
 /// 3. Selects topics for regions.
 pub struct KafkaTopicPool {
     pub(crate) topics: Vec<String>,
-    kvbackend_manager: KvBackendTopicManager,
+    // Manages topics in kvbackend.
+    kvbackend_manager: KafkaTopicManager,
+    // Creates topics in kafka.
     kafka_topic_creator: KafkaTopicCreator,
     pub(crate) selector: TopicSelectorRef,
     auto_create_topics: bool,
@@ -42,7 +41,7 @@ pub struct KafkaTopicPool {
 
 impl KafkaTopicPool {
     pub fn new(
-        config: MetasrvKafkaConfig,
+        config: &MetasrvKafkaConfig,
         kvbackend: KvBackendRef,
         kafka_topic_creator: KafkaTopicCreator,
     ) -> Self {
@@ -56,7 +55,7 @@ impl KafkaTopicPool {
             TopicSelectorType::RoundRobin => RoundRobinTopicSelector::with_shuffle(),
         };
 
-        let kvbackend_manager = KvBackendTopicManager::new(kvbackend);
+        let kvbackend_manager = KafkaTopicManager::new(kvbackend);
 
         Self {
             topics,
@@ -78,13 +77,16 @@ impl KafkaTopicPool {
         let num_topics = self.topics.len();
         ensure!(num_topics > 0, InvalidNumTopicsSnafu { num_topics });
 
-        let topics_to_be_created = self.kvbackend_manager.to_be_created(&self.topics).await?;
+        let topics_to_be_created = self
+            .kvbackend_manager
+            .get_topics_to_create(&self.topics)
+            .await?;
 
         if !topics_to_be_created.is_empty() {
             self.kafka_topic_creator
-                .create_topics(&topics_to_be_created)
+                .prepare_topics(&topics_to_be_created)
                 .await?;
-            self.kvbackend_manager.persist(&self.topics).await?;
+            self.kvbackend_manager.persist_topics(&self.topics).await?;
         }
         Ok(())
     }
@@ -106,10 +108,10 @@ impl KafkaTopicPool {
 mod tests {
     use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
     use common_wal::test_util::run_test_with_kafka_wal;
-    use kafka_topic_creator::build_kafka_topic_creator;
 
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::wal_options_allocator::topic_creator::build_kafka_topic_creator;
 
     /// Tests that the topic manager could allocate topics correctly.
     #[tokio::test]
@@ -135,9 +137,8 @@ mod tests {
                     ..Default::default()
                 };
                 let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
-                let kafka_topic_creator = build_kafka_topic_creator(config.clone()).await.unwrap();
-                let mut topic_pool =
-                    KafkaTopicPool::new(config.clone(), kv_backend, kafka_topic_creator);
+                let kafka_topic_creator = build_kafka_topic_creator(&config).await.unwrap();
+                let mut topic_pool = KafkaTopicPool::new(&config, kv_backend, kafka_topic_creator);
                 // Replaces the default topic pool with the constructed topics.
                 topic_pool.topics.clone_from(&topics);
                 // Replaces the default selector with a round-robin selector without shuffled.

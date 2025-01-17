@@ -95,7 +95,10 @@ impl KafkaTopicCreator {
         Ok(())
     }
 
-    pub async fn create_topics(&self, topics: &[&String]) -> Result<()> {
+    /// Prepares topics in Kafka.
+    /// 1. Creates missing topics.
+    /// 2. Appends a noop record to each topic.
+    pub async fn prepare_topics(&self, topics: &[&String]) -> Result<()> {
         // Try to create missing topics.
         let tasks = topics
             .iter()
@@ -119,7 +122,7 @@ impl KafkaTopicCreator {
     }
 }
 
-pub async fn build_kafka_topic_creator(config: MetasrvKafkaConfig) -> Result<KafkaTopicCreator> {
+pub async fn build_kafka_topic_creator(config: &MetasrvKafkaConfig) -> Result<KafkaTopicCreator> {
     // Builds an kafka controller client for creating topics.
     let backoff_config = BackoffConfig {
         init_backoff: config.backoff.init,

@@ -22,39 +22,42 @@ use crate::kv_backend::KvBackendRef;
 /// Responsible for:
 /// 1. Restores and persisting topics in kvbackend.
 /// 2. Clears topics in legacy format and restores them in the new format.
-pub struct KvBackendTopicManager {
-    manager: TopicNameKeyManager,
+pub struct KafkaTopicManager {
+    key_manager: TopicNameKeyManager,
 }
 
-impl KvBackendTopicManager {
+impl KafkaTopicManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self {
-            manager: TopicNameKeyManager::new(kv_backend),
+            key_manager: TopicNameKeyManager::new(kv_backend),
         }
     }
 
-    async fn restore(&self) -> Result<Vec<String>> {
-        self.manager.update_legacy_topics().await?;
-        let topics = self.manager.range().await?;
+    async fn restore_topics(&self) -> Result<Vec<String>> {
+        self.key_manager.update_legacy_topics().await?;
+        let topics = self.key_manager.range().await?;
         Ok(topics)
     }
 
-    /// Restores topics from kvbackend and return the topics that are not stored in kvbackend.
-    pub async fn to_be_created<'a>(&self, all_topics: &'a [String]) -> Result<Vec<&'a String>> {
-        let topics = self.restore().await?;
-        let topic_set = topics.iter().collect::<HashSet<_>>();
-        let mut to_be_created = Vec::with_capacity(all_topics.len());
+    /// Restores topics from the key-value backend. and returns the topics that are not stored in kvbackend.
+    pub async fn get_topics_to_create<'a>(
+        &self,
+        all_topics: &'a [String],
+    ) -> Result<Vec<&'a String>> {
+        let existing_topics = self.restore_topics().await?;
+        let existing_topic_set = existing_topics.iter().collect::<HashSet<_>>();
+        let mut topics_to_create = Vec::with_capacity(all_topics.len());
         for topic in all_topics {
-            if !topic_set.contains(topic) {
-                to_be_created.push(topic);
+            if !existing_topic_set.contains(topic) {
+                topics_to_create.push(topic);
             }
         }
-        Ok(to_be_created)
+        Ok(topics_to_create)
     }
 
-    /// Persists topics into kvbackend.
-    pub async fn persist(&self, topics: &[String]) -> Result<()> {
-        self.manager
+    /// Persists topics into the key-value backend.
+    pub async fn persist_topics(&self, topics: &[String]) -> Result<()> {
+        self.key_manager
             .batch_put(
                 topics
                     .iter()
@@ -78,7 +81,7 @@ mod tests {
     #[tokio::test]
     async fn test_restore_legacy_persisted_topics() {
         let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
-        let topic_kvbackend_manager = KvBackendTopicManager::new(kv_backend.clone());
+        let topic_kvbackend_manager = KafkaTopicManager::new(kv_backend.clone());
 
         let all_topics = (0..16)
             .map(|i| format!("greptimedb_wal_topic_{}", i))
@@ -86,7 +89,7 @@ mod tests {
 
         // No legacy topics.
         let mut topics_to_be_created = topic_kvbackend_manager
-            .to_be_created(&all_topics)
+            .get_topics_to_create(&all_topics)
             .await
             .unwrap();
         topics_to_be_created.sort();
@@ -105,7 +108,7 @@ mod tests {
         assert!(res.prev_kv.is_none());
 
         let topics_to_be_created = topic_kvbackend_manager
-            .to_be_created(&all_topics)
+            .get_topics_to_create(&all_topics)
             .await
             .unwrap();
         assert!(topics_to_be_created.is_empty());
@@ -118,7 +121,7 @@ mod tests {
         assert!(legacy_topics.is_none());
 
         // Then we can restore it from the new format.
-        let mut restored_topics = topic_kvbackend_manager.restore().await.unwrap();
+        let mut restored_topics = topic_kvbackend_manager.restore_topics().await.unwrap();
         restored_topics.sort();
         let mut expected = all_topics.clone();
         expected.sort();
@@ -137,10 +140,10 @@ mod tests {
             .collect::<Vec<_>>();
 
         // Constructs mock topics.
-        let topic_kvbackend_manager = KvBackendTopicManager::new(kv_backend);
+        let topic_kvbackend_manager = KafkaTopicManager::new(kv_backend);
 
         let mut topics_to_be_created = topic_kvbackend_manager
-            .to_be_created(&all_topics)
+            .get_topics_to_create(&all_topics)
             .await
             .unwrap();
         topics_to_be_created.sort();
@@ -149,9 +152,12 @@ mod tests {
         assert_eq!(expected, topics_to_be_created);
 
         // Persists topics to kv backend.
-        topic_kvbackend_manager.persist(&all_topics).await.unwrap();
+        topic_kvbackend_manager
+            .persist_topics(&all_topics)
+            .await
+            .unwrap();
         let topics_to_be_created = topic_kvbackend_manager
-            .to_be_created(&all_topics)
+            .get_topics_to_create(&all_topics)
             .await
             .unwrap();
         assert!(topics_to_be_created.is_empty());

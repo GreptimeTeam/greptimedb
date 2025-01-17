@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod kafka_topic_pool;
-mod kvbackend;
 mod selector;
+mod topic_creator;
+mod topic_manager;
+mod topic_pool;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,7 +29,8 @@ use store_api::storage::{RegionId, RegionNumber};
 use crate::error::{EncodeWalOptionsSnafu, Result};
 use crate::kv_backend::KvBackendRef;
 use crate::leadership_notifier::LeadershipChangeListener;
-use crate::wal_options_allocator::kafka_topic_pool::{build_kafka_topic_creator, KafkaTopicPool};
+use crate::wal_options_allocator::topic_creator::build_kafka_topic_creator;
+use crate::wal_options_allocator::topic_pool::KafkaTopicPool;
 
 /// Allocates wal options in region granularity.
 #[derive(Default)]
@@ -105,13 +107,13 @@ impl LeadershipChangeListener for WalOptionsAllocator {
 
 /// Builds a wal options allocator based on the given configuration.
 pub async fn build_wal_options_allocator(
-    config: MetasrvWalConfig,
+    config: &MetasrvWalConfig,
     kv_backend: KvBackendRef,
 ) -> Result<WalOptionsAllocator> {
     match config {
         MetasrvWalConfig::RaftEngine => Ok(WalOptionsAllocator::RaftEngine),
         MetasrvWalConfig::Kafka(kafka_config) => {
-            let kafka_topic_creator = build_kafka_topic_creator(kafka_config.clone()).await?;
+            let kafka_topic_creator = build_kafka_topic_creator(kafka_config).await?;
             let topic_pool = KafkaTopicPool::new(kafka_config, kv_backend, kafka_topic_creator);
             Ok(WalOptionsAllocator::Kafka(topic_pool))
         }
@@ -159,7 +161,7 @@ mod tests {
     async fn test_allocator_with_raft_engine() {
         let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
         let wal_config = MetasrvWalConfig::RaftEngine;
-        let allocator = build_wal_options_allocator(wal_config, kv_backend)
+        let allocator = build_wal_options_allocator(&wal_config, kv_backend)
             .await
             .unwrap();
         allocator.start().await.unwrap();
@@ -199,9 +201,8 @@ mod tests {
                     ..Default::default()
                 };
                 let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
-                let kafka_topic_creator = build_kafka_topic_creator(config.clone()).await.unwrap();
-                let mut topic_pool =
-                    KafkaTopicPool::new(config.clone(), kv_backend, kafka_topic_creator);
+                let kafka_topic_creator = build_kafka_topic_creator(&config).await.unwrap();
+                let mut topic_pool = KafkaTopicPool::new(&config, kv_backend, kafka_topic_creator);
                 topic_pool.topics.clone_from(&topics);
                 topic_pool.selector = Arc::new(selector::RoundRobinTopicSelector::default());
 

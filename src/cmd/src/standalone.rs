@@ -563,10 +563,10 @@ impl StartCommand {
                 .step(10)
                 .build(),
         );
-        let wal_options_allocator =
-            build_wal_options_allocator(opts.wal.clone().into(), kv_backend.clone())
-                .await
-                .context(BuildWalOptionsAllocatorSnafu)?;
+        let kafka_options = opts.wal.clone().into();
+        let wal_options_allocator = build_wal_options_allocator(&kafka_options, kv_backend.clone())
+            .await
+            .context(BuildWalOptionsAllocatorSnafu)?;
         let wal_options_allocator = Arc::new(wal_options_allocator);
         let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_sequence,

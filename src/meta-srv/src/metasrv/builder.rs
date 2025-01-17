@@ -208,10 +208,9 @@ impl MetasrvBuilder {
             table_id: None,
         };
 
-        let wal_options_allocator =
-            build_wal_options_allocator(options.wal.clone(), kv_backend.clone())
-                .await
-                .context(BuildWalOptionsAllocatorSnafu)?;
+        let wal_options_allocator = build_wal_options_allocator(&options.wal, kv_backend.clone())
+            .await
+            .context(BuildWalOptionsAllocatorSnafu)?;
         let wal_options_allocator = Arc::new(wal_options_allocator);
         let is_remote_wal = wal_options_allocator.is_remote_wal();
         let table_metadata_allocator = table_metadata_allocator.unwrap_or_else(|| {
