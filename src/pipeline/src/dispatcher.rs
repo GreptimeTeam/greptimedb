@@ -43,8 +43,6 @@ const RULES: &str = "rules";
 ///     - value: db
 ///       pipeline: db_pipeline
 ///       table_part: db_log
-///
-///
 /// ```
 ///
 /// If none of the rules match the value, this pipeline will continue to process
