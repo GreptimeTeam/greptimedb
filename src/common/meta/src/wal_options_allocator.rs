@@ -192,7 +192,8 @@ mod tests {
                     ..Default::default()
                 };
                 let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
-                let topic_pool = KafkaTopicPool::new(config.clone(), kv_backend);
+                let mut topic_pool = KafkaTopicPool::new(config.clone(), kv_backend);
+                topic_pool.topics.clone_from(&topics);
 
                 // Creates an options allocator.
                 let allocator = WalOptionsAllocator::Kafka(topic_pool);

@@ -18,6 +18,10 @@ use crate::error::Result;
 use crate::key::topic_name::{TopicNameKey, TopicNameKeyManager};
 use crate::kv_backend::KvBackendRef;
 
+/// Manages topics in kvbackend.
+/// Responsible for:
+/// 1. Restores and persisting topics in kvbackend.
+/// 2. Clears topics in legacy format and restores them in the new format.
 pub struct TopicKvBackendManager {
     manager: TopicNameKeyManager,
 }

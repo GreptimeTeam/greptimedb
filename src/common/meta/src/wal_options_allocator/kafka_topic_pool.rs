@@ -32,7 +32,7 @@ use crate::wal_options_allocator::selector::{RoundRobinTopicSelector, TopicSelec
 /// 2. Creates topics in kafka.
 /// 3. Selects topic
 pub struct KafkaTopicPool {
-    topics: Vec<String>,
+    pub(crate) topics: Vec<String>,
     topic_kvbackend_manager: TopicKvBackendManager,
     topic_kafka_manager: TopicKafkaManager,
     selector: TopicSelectorRef,

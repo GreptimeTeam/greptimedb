@@ -33,7 +33,7 @@ use crate::error::{
 // The `DEFAULT_PARTITION` refers to the index of the partition.
 const DEFAULT_PARTITION: i32 = 0;
 
-/// Manages topics in kafka.
+/// Creates topics in kafka.
 pub struct TopicKafkaManager {
     pub(super) config: MetasrvKafkaConfig,
 }
