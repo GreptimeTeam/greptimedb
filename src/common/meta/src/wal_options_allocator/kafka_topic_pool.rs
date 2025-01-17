@@ -35,7 +35,7 @@ pub struct KafkaTopicPool {
     pub(crate) topics: Vec<String>,
     topic_kvbackend_manager: TopicKvBackendManager,
     topic_kafka_manager: TopicKafkaManager,
-    selector: TopicSelectorRef,
+    pub(crate) selector: TopicSelectorRef,
 }
 
 impl KafkaTopicPool {
