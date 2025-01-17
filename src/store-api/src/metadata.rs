@@ -628,10 +628,34 @@ impl RegionMetadataBuilder {
             .map(|col| col.column_schema.name.clone())
             .collect();
 
+        let pk_as_inverted_index = !self
+            .column_metadatas
+            .iter()
+            .any(|c| c.column_schema.has_inverted_index_key());
+        let mut set_inverted_index_for_primary_keys = false;
+
         for add_column in columns {
             if names.contains(&add_column.column_metadata.column_schema.name) {
                 // Column already exists.
                 continue;
+            }
+
+            // Handles using primary key as inverted index.
+            let has_inverted_index_key = add_column
+                .column_metadata
+                .column_schema
+                .has_inverted_index_key();
+
+            if pk_as_inverted_index
+                && has_inverted_index_key
+                && !set_inverted_index_for_primary_keys
+            {
+                self.column_metadatas.iter_mut().for_each(|col| {
+                    if col.semantic_type == SemanticType::Tag {
+                        col.column_schema.set_inverted_index(true);
+                    }
+                });
+                set_inverted_index_for_primary_keys = true;
             }
 
             let column_id = add_column.column_metadata.column_id;
@@ -1493,6 +1517,43 @@ mod test {
             .unwrap();
         let metadata = builder.build().unwrap();
         check_columns(&metadata, &["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn test_add_column_with_inverted_index() {
+        // a (tag), b (field), c (ts)
+        let metadata = build_test_region_metadata();
+        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        // tag d, e
+        let mut col = new_column_metadata("d", true, 4);
+        col.column_schema.set_inverted_index(true);
+        builder
+            .alter(AlterKind::AddColumns {
+                columns: vec![
+                    AddColumn {
+                        column_metadata: col,
+                        location: None,
+                    },
+                    AddColumn {
+                        column_metadata: new_column_metadata("e", true, 5),
+                        location: None,
+                    },
+                ],
+            })
+            .unwrap();
+        let metadata = builder.build().unwrap();
+        check_columns(&metadata, &["a", "b", "c", "d", "e"]);
+        assert_eq!([1, 4, 5], &metadata.primary_key[..]);
+        let column_metadata = metadata.column_by_name("a").unwrap();
+        assert!(column_metadata.column_schema.is_inverted_indexed());
+        let column_metadata = metadata.column_by_name("b").unwrap();
+        assert!(!column_metadata.column_schema.is_inverted_indexed());
+        let column_metadata = metadata.column_by_name("c").unwrap();
+        assert!(!column_metadata.column_schema.is_inverted_indexed());
+        let column_metadata = metadata.column_by_name("d").unwrap();
+        assert!(column_metadata.column_schema.is_inverted_indexed());
+        let column_metadata = metadata.column_by_name("e").unwrap();
+        assert!(!column_metadata.column_schema.is_inverted_indexed());
     }
 
     #[test]
