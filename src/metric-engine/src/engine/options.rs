@@ -16,20 +16,13 @@
 
 use std::collections::HashMap;
 
-use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{
     METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION,
     METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION_DEFAULT, METRIC_ENGINE_INDEX_TYPE_OPTION,
 };
-use store_api::storage::consts::ReservedColumnId;
-use store_api::storage::ColumnId;
 
 use crate::error::{Error, ParseRegionOptionsSnafu, Result};
-
-/// Ignore building index on the column `tsid` which is unfriendly to the inverted index and
-/// will occupy excessive space if indexed.
-const IGNORE_COLUMN_IDS_FOR_DATA_REGION: [ColumnId; 1] = [ReservedColumnId::tsid()];
 
 /// The empirical value for the seg row count of the metric data region.
 /// Compared to the mito engine, the pattern of the metric engine constructs smaller indices.
@@ -63,11 +56,6 @@ pub enum IndexOptions {
 pub fn set_data_region_options(options: &mut HashMap<String, String>) {
     options.remove(METRIC_ENGINE_INDEX_TYPE_OPTION);
     options.remove(METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION);
-    // Set the index options for the data region.
-    options.insert(
-        "index.inverted_index.ignore_column_ids".to_string(),
-        IGNORE_COLUMN_IDS_FOR_DATA_REGION.iter().join(","),
-    );
     options.insert(
         "index.inverted_index.segment_row_count".to_string(),
         SEG_ROW_COUNT_FOR_DATA_REGION.to_string(),
