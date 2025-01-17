@@ -50,9 +50,9 @@ use crate::dataframe::DataFrame;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::error::{
-    CatalogSnafu, ConvertSchemaSnafu, CreateRecordBatchSnafu, DataFusionSnafu,
-    MissingTableMutationHandlerSnafu, MissingTimestampColumnSnafu, QueryExecutionSnafu, Result,
-    TableMutationSnafu, TableNotFoundSnafu, TableReadOnlySnafu, UnsupportedExprSnafu,
+    CatalogSnafu, ConvertSchemaSnafu, CreateRecordBatchSnafu, MissingTableMutationHandlerSnafu,
+    MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, TableMutationSnafu,
+    TableNotFoundSnafu, TableReadOnlySnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
 use crate::metrics::{OnDone, QUERY_STAGE_ELAPSED};
@@ -284,6 +284,7 @@ impl DatafusionQueryEngine {
             .context(error::DatafusionSnafu)
             .map_err(BoxedError::new)
             .context(QueryExecutionSnafu)?;
+
         // skip optimize for MergeScan
         let optimized_plan = if let DfLogicalPlan::Extension(ext) = &analyzed_plan
             && ext.node.name() == MergeScanLogicalPlan::name()
@@ -345,26 +346,31 @@ impl DatafusionQueryEngine {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let _timer = metrics::OPTIMIZE_PHYSICAL_ELAPSED.start_timer();
 
-        let state = ctx.state();
-        let config = state.config_options();
+        // TODO(ruihang): `self.create_physical_plan()` already optimize the plan, check
+        // if we need to optimize it again here.
+        // let state = ctx.state();
+        // let config = state.config_options();
+
         // skip optimize AnalyzeExec plan
         let optimized_plan = if let Some(analyze_plan) = plan.as_any().downcast_ref::<AnalyzeExec>()
         {
-            let mut new_plan = analyze_plan.input().clone();
-            for optimizer in state.physical_optimizers() {
-                new_plan = optimizer
-                    .optimize(new_plan, config)
-                    .context(DataFusionSnafu)?;
-            }
-            Arc::new(DistAnalyzeExec::new(new_plan))
+            Arc::new(DistAnalyzeExec::new(analyze_plan.input().clone()))
+            // let mut new_plan = analyze_plan.input().clone();
+            // for optimizer in state.physical_optimizers() {
+            //     new_plan = optimizer
+            //         .optimize(new_plan, config)
+            //         .context(DataFusionSnafu)?;
+            // }
+            // Arc::new(DistAnalyzeExec::new(new_plan))
         } else {
-            let mut new_plan = plan;
-            for optimizer in state.physical_optimizers() {
-                new_plan = optimizer
-                    .optimize(new_plan, config)
-                    .context(DataFusionSnafu)?;
-            }
-            new_plan
+            plan
+            // let mut new_plan = plan;
+            // for optimizer in state.physical_optimizers() {
+            //     new_plan = optimizer
+            //         .optimize(new_plan, config)
+            //         .context(DataFusionSnafu)?;
+            // }
+            // new_plan
         };
 
         Ok(optimized_plan)
