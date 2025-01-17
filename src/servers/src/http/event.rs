@@ -18,7 +18,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
+use api::v1::{Row, RowInsertRequest, RowInsertRequests, Rows};
 use axum::body::HttpBody;
 use axum::extract::{FromRequest, Multipart, Path, Query, State};
 use axum::headers::ContentType;
@@ -33,7 +33,10 @@ use datatypes::value::column_data_to_json;
 use lazy_static::lazy_static;
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
-use pipeline::{DispatchedTo, GreptimeTransformer, PipelineExecOutput, PipelineVersion};
+use pipeline::{
+    DispatchedTo, GreptimeTransformer, Pipeline, PipelineExecInput, PipelineExecOutput,
+    PipelineVersion,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Map, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -552,18 +555,49 @@ fn extract_pipeline_value_by_content_type(
     })
 }
 
-enum PipelineInputValue {
-    // multiple row values as a value object
-    Original(Vec<serde_json::Value>),
-    // 2-dimension row values by column
-    Intermediate(Vec<Vec<Value>>),
+#[inline]
+fn pipline_exec_with_intermediate_state(
+    pipeline: &Arc<Pipeline<GreptimeTransformer>>,
+    intermediate_state: &mut Vec<pipeline::Value>,
+    transformed: &mut Vec<Row>,
+    dispatched: &mut BTreeMap<DispatchedTo, Vec<Vec<pipeline::Value>>>,
+    db: &str,
+    transform_timer: &Instant,
+    is_top_level: bool,
+) -> Result<()> {
+    let r = pipeline
+        .exec_mut(intermediate_state)
+        .inspect_err(|_| {
+            if is_top_level {
+                METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                    .with_label_values(&[db, METRIC_FAILURE_VALUE])
+                    .observe(transform_timer.elapsed().as_secs_f64());
+            }
+        })
+        .context(PipelineTransformSnafu)
+        .context(PipelineSnafu)?;
+
+    match r {
+        PipelineExecOutput::Transformed(row) => {
+            transformed.push(row);
+        }
+        PipelineExecOutput::DispatchedTo(dispatched_to) => {
+            if let Some(values) = dispatched.get_mut(&dispatched_to) {
+                values.push(intermediate_state.clone());
+            } else {
+                dispatched.insert(dispatched_to, vec![intermediate_state.clone()]);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn run_pipeline(
     state: &PipelineHandlerRef,
     pipeline_name: &str,
     version: PipelineVersion,
-    value: PipelineInputValue,
+    values: PipelineExecInput,
     table_name: String,
     query_ctx: &QueryContextRef,
     db: &str,
@@ -571,10 +605,10 @@ async fn run_pipeline(
 ) -> Result<Vec<RowInsertRequest>> {
     if pipeline_name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME {
         let table = state
-            .get_table(&table, &query_ctx)
+            .get_table(&table_name, &query_ctx)
             .await
             .context(CatalogSnafu)?;
-        pipeline::identity_pipeline(request.values, table)
+        pipeline::identity_pipeline(values, table)
             .map(|rows| {
                 vec![RowInsertRequest {
                     rows: Some(rows),
@@ -591,76 +625,89 @@ async fn run_pipeline(
         let transform_timer = std::time::Instant::now();
         let mut intermediate_state = pipeline.init_intermediate_state();
 
-        let mut transformed = Vec::with_capacity(request.values.len());
-        let mut dispatched: BTreeMap<DispatchedTo, Vec<Value>> = BTreeMap::new();
+        let mut transformed = Vec::with_capacity(values.len());
+        let mut dispatched: BTreeMap<DispatchedTo, Vec<Vec<pipeline::Value>>> = BTreeMap::new();
 
-        for v in request.values {
-            pipeline
-                .prepare(v, &mut intermediate_state)
-                .inspect_err(|_| {
-                    if is_top_level {
-                        METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                            .with_label_values(&[db, METRIC_FAILURE_VALUE])
-                            .observe(transform_timer.elapsed().as_secs_f64());
-                    }
-                })
-                .context(PipelineTransformSnafu)
-                .context(PipelineSnafu)?;
-            let r = pipeline
-                .exec_mut(&mut intermediate_state)
-                .inspect_err(|_| {
-                    if is_top_level {
-                        METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                            .with_label_values(&[db, METRIC_FAILURE_VALUE])
-                            .observe(transform_timer.elapsed().as_secs_f64());
-                    }
-                })
-                .context(PipelineTransformSnafu)
-                .context(PipelineSnafu)?;
+        match values {
+            PipelineExecInput::Original(array) => {
+                for v in array {
+                    pipeline
+                        .prepare(v, &mut intermediate_state)
+                        .inspect_err(|_| {
+                            if is_top_level {
+                                METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                                    .with_label_values(&[db, METRIC_FAILURE_VALUE])
+                                    .observe(transform_timer.elapsed().as_secs_f64());
+                            }
+                        })
+                        .context(PipelineTransformSnafu)
+                        .context(PipelineSnafu)?;
 
-            match r {
-                PipelineExecOutput::Transformed(row) => {
-                    transformed.push(row);
-                }
-                PipelineExecOutput::DispatchedTo(dispatched_to) => {
-                    if let Some(values) = dispatched.get_mut(&dispatched_to) {
-                        // FIXME: can only push intermediate state
-                        values.push(v.clone());
-                    } else {
-                        dispatched.insert(dispatched_to, vec![v]);
-                    }
+                    pipline_exec_with_intermediate_state(
+                        &pipeline,
+                        &mut intermediate_state,
+                        &mut transformed,
+                        &mut dispatched,
+                        db,
+                        &transform_timer,
+                        is_top_level,
+                    )?;
+
+                    pipeline.reset_intermediate_state(&mut intermediate_state);
                 }
             }
-
-            pipeline.reset_intermediate_state(&mut intermediate_state);
+            PipelineExecInput::Intermediate { array, .. } => {
+                for mut intermediate_state in array {
+                    pipline_exec_with_intermediate_state(
+                        &pipeline,
+                        &mut intermediate_state,
+                        &mut transformed,
+                        &mut dispatched,
+                        db,
+                        &transform_timer,
+                        is_top_level,
+                    )?;
+                }
+            }
         }
 
         let mut results = Vec::new();
+        // if current pipeline generates some transformed results, build it as
+        // `RowInsertRequest` and append to results. If the pipeline doesn't
+        // have dispatch, this will be only output of the pipeline.
         if !transformed.is_empty() {
             results.push(RowInsertRequest {
                 rows: Some(Rows {
                     rows: transformed,
                     schema: pipeline.schemas().clone(),
                 }),
-                table_name,
+                table_name: table_name.clone(),
             })
         }
 
+        // if current pipeline contains dispatcher and has several rules, we may
+        // already accumulated several dispatched rules and rows.
         for (dispatched_to, values) in dispatched {
-            let request = LogIngestRequest {
-                values,
-                table: format!("{}_{}", table_name, dispatched_to.table_part),
-            };
+            // we generate the new table name according to `table_part` and
+            // current custom table name.
+            let table_name = format!("{}_{}", &table_name, dispatched_to.table_part);
             let next_pipeline_name = dispatched_to
                 .pipeline
                 .as_deref()
                 .unwrap_or(GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME);
 
+            // run pipeline recursively. Note that the values we are going to
+            // process is now intermediate version. It's in form of
+            // `Vec<Vec<pipeline::Value>>`.
             let requests = Box::pin(run_pipeline(
                 state,
                 next_pipeline_name,
                 None,
-                request,
+                PipelineExecInput::Intermediate {
+                    array: values,
+                    keys: pipeline.intermediate_keys().clone(),
+                },
+                table_name,
                 query_ctx,
                 db,
                 false,
@@ -697,7 +744,8 @@ pub(crate) async fn ingest_logs_inner(
             &state,
             &pipeline_name,
             version,
-            request,
+            PipelineExecInput::Original(request.values),
+            request.table,
             &query_ctx,
             db.as_str(),
             true,

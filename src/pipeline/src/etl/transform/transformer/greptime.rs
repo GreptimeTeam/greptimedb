@@ -363,17 +363,28 @@ fn json_value_to_row(
 }
 
 fn identity_pipeline_inner<'a>(
-    array: Vec<serde_json::Value>,
+    array: PipelineExecInput,
     tag_column_names: Option<impl Iterator<Item = &'a String>>,
 ) -> Result<Rows> {
     let mut rows = Vec::with_capacity(array.len());
     let mut schema_info = SchemaInfo::default();
-    for value in array {
-        if let serde_json::Value::Object(map) = value {
-            let row = json_value_to_row(&mut schema_info, map)?;
-            rows.push(row);
+
+    match array {
+        PipelineExecInput::Original(array) => {
+            for value in array {
+                if let serde_json::Value::Object(map) = value {
+                    let row = json_value_to_row(&mut schema_info, map)?;
+                    rows.push(row);
+                }
+            }
+        }
+        PipelineExecInput::Intermediate { keys, array } => {
+            for values in array {
+                todo!()
+            }
         }
     }
+
     let greptime_timestamp_schema = ColumnSchema {
         column_name: DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(),
         datatype: ColumnDataType::TimestampNanosecond as i32,
@@ -409,6 +420,29 @@ fn identity_pipeline_inner<'a>(
     })
 }
 
+/// The input data format for pipeline
+///
+/// It can either be raw input as in `serde_json::Value` or intermediate `Vec<Value>`
+pub enum PipelineExecInput {
+    // multiple row values as a value object
+    Original(Vec<serde_json::Value>),
+    // 2-dimension row values by column
+    Intermediate {
+        array: Vec<Vec<Value>>,
+        keys: Vec<String>,
+    },
+}
+
+impl PipelineExecInput {
+    /// return the length of internal array
+    pub fn len(&self) -> usize {
+        match self {
+            PipelineExecInput::Original(array) => array.len(),
+            PipelineExecInput::Intermediate { array, .. } => array.len(),
+        }
+    }
+}
+
 /// Identity pipeline for Greptime
 /// This pipeline will convert the input JSON array to Greptime Rows
 /// params table is used to set the semantic type of the row key column to Tag
@@ -418,7 +452,7 @@ fn identity_pipeline_inner<'a>(
 /// 4. The pipeline will return an error if the same column datatype is mismatched
 /// 5. The pipeline will analyze the schema of each json record and merge them to get the final schema.
 pub fn identity_pipeline(
-    array: Vec<serde_json::Value>,
+    array: PipelineExecInput,
     table: Option<Arc<table::Table>>,
 ) -> Result<Rows> {
     match table {
