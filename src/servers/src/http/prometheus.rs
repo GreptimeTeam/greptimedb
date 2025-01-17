@@ -44,6 +44,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::{Location, OptionExt, ResultExt};
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+};
 
 pub use super::result::prometheus_resp::PrometheusJsonResponse;
 use crate::error::{
@@ -583,7 +586,11 @@ async fn get_all_column_names(
             continue;
         };
         for column in table.primary_key_columns() {
-            labels.insert(column.name);
+            if column.name != DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+                && column.name != DATA_SCHEMA_TSID_COLUMN_NAME
+            {
+                labels.insert(column.name);
+            }
         }
     }
 
