@@ -32,7 +32,7 @@ use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{Float64Vector, StringVector};
 use futures::future::join_all;
 use futures::StreamExt;
-use promql_parser::label::{MatchOp, Matcher, METRIC_NAME};
+use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, MatrixSelector, ParenExpr, SubqueryExpr,
@@ -254,12 +254,8 @@ pub async fn instant_query(
         .with_label_values(&[query_ctx.get_db_string().as_str(), "instant_query"])
         .start_timer();
 
-    if let Some(name_matchers) = find_metric_name_matchers(&promql_expr).map(|matchers| {
-        matchers
-            .into_iter()
-            .filter(|m| !matches!(m.op, MatchOp::Equal))
-            .collect::<Vec<_>>()
-    }) && !name_matchers.is_empty()
+    if let Some(name_matchers) = find_metric_name_not_equal_matchers(&promql_expr)
+        && !name_matchers.is_empty()
     {
         debug!("Find metric name matchers: {:?}", name_matchers);
 
@@ -368,12 +364,8 @@ pub async fn range_query(
         .with_label_values(&[query_ctx.get_db_string().as_str(), "range_query"])
         .start_timer();
 
-    if let Some(name_matchers) = find_metric_name_matchers(&promql_expr).map(|matchers| {
-        matchers
-            .into_iter()
-            .filter(|m| !matches!(m.op, MatchOp::Equal))
-            .collect::<Vec<_>>()
-    }) && !name_matchers.is_empty()
+    if let Some(name_matchers) = find_metric_name_not_equal_matchers(&promql_expr)
+        && !name_matchers.is_empty()
     {
         debug!("Find metric name matchers: {:?}", name_matchers);
 
@@ -806,41 +798,60 @@ pub(crate) fn try_update_catalog_schema(ctx: &mut QueryContext, catalog: &str, s
 }
 
 fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
-    find_metric_name_matchers(expr).map(|matchers| matchers.into_iter().next().map(|m| m.value))?
+    find_metric_name_and_matchers(expr, |name, matchers| {
+        name.clone().or(matchers
+            .find_matchers(METRIC_NAME)
+            .into_iter()
+            .next()
+            .map(|m| m.value))
+    })
 }
 
-/// Try to find the `__name__` matchers in promql expression.
-fn find_metric_name_matchers(expr: &PromqlExpr) -> Option<Vec<Matcher>> {
+fn find_metric_name_and_matchers<E, F>(expr: &PromqlExpr, f: F) -> Option<E>
+where
+    F: Fn(&Option<String>, &Matchers) -> Option<E> + Clone,
+{
     match expr {
-        PromqlExpr::Aggregate(AggregateExpr { expr, .. }) => find_metric_name_matchers(expr),
-        PromqlExpr::Unary(UnaryExpr { expr }) => find_metric_name_matchers(expr),
+        PromqlExpr::Aggregate(AggregateExpr { expr, .. }) => find_metric_name_and_matchers(expr, f),
+        PromqlExpr::Unary(UnaryExpr { expr }) => find_metric_name_and_matchers(expr, f),
         PromqlExpr::Binary(BinaryExpr { lhs, rhs, .. }) => {
-            find_metric_name_matchers(lhs).or(find_metric_name_matchers(rhs))
+            find_metric_name_and_matchers(lhs, f.clone()).or(find_metric_name_and_matchers(rhs, f))
         }
-        PromqlExpr::Paren(ParenExpr { expr }) => find_metric_name_matchers(expr),
-        PromqlExpr::Subquery(SubqueryExpr { expr, .. }) => find_metric_name_matchers(expr),
+        PromqlExpr::Paren(ParenExpr { expr }) => find_metric_name_and_matchers(expr, f),
+        PromqlExpr::Subquery(SubqueryExpr { expr, .. }) => find_metric_name_and_matchers(expr, f),
         PromqlExpr::NumberLiteral(_) => None,
         PromqlExpr::StringLiteral(_) => None,
         PromqlExpr::Extension(_) => None,
-        PromqlExpr::VectorSelector(VectorSelector { name, matchers, .. }) => {
-            if name.is_some() {
-                return None;
-            }
-
-            Some(matchers.find_matchers(METRIC_NAME))
-        }
+        PromqlExpr::VectorSelector(VectorSelector { name, matchers, .. }) => f(name, matchers),
         PromqlExpr::MatrixSelector(MatrixSelector { vs, .. }) => {
             let VectorSelector { name, matchers, .. } = vs;
-            if name.is_some() {
-                return None;
-            }
 
-            Some(matchers.find_matchers(METRIC_NAME))
+            f(name, matchers)
         }
-        PromqlExpr::Call(Call { args, .. }) => {
-            args.args.iter().find_map(|e| find_metric_name_matchers(e))
-        }
+        PromqlExpr::Call(Call { args, .. }) => args
+            .args
+            .iter()
+            .find_map(|e| find_metric_name_and_matchers(e, f.clone())),
     }
+}
+
+/// Try to find the `__name__` matchers which op is not `MatchOp::Equal`.
+fn find_metric_name_not_equal_matchers(expr: &PromqlExpr) -> Option<Vec<Matcher>> {
+    find_metric_name_and_matchers(expr, |name, matchers| {
+        // Has name, ignore the matchers
+        if name.is_some() {
+            return None;
+        }
+
+        // FIXME(dennis): we don't consider the nested and `or` matchers yet.
+        Some(matchers.find_matchers(METRIC_NAME))
+    })
+    .map(|matchers| {
+        matchers
+            .into_iter()
+            .filter(|m| !matches!(m.op, MatchOp::Equal))
+            .collect::<Vec<_>>()
+    })
 }
 
 /// Update the `__name__` matchers in expression into special value
