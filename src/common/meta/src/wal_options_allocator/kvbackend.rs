@@ -22,11 +22,11 @@ use crate::kv_backend::KvBackendRef;
 /// Responsible for:
 /// 1. Restores and persisting topics in kvbackend.
 /// 2. Clears topics in legacy format and restores them in the new format.
-pub struct TopicKvBackendManager {
+pub struct KvBackendTopicManager {
     manager: TopicNameKeyManager,
 }
 
-impl TopicKvBackendManager {
+impl KvBackendTopicManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self {
             manager: TopicNameKeyManager::new(kv_backend),
@@ -78,7 +78,7 @@ mod tests {
     #[tokio::test]
     async fn test_restore_legacy_persisted_topics() {
         let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
-        let topic_kvbackend_manager = TopicKvBackendManager::new(kv_backend.clone());
+        let topic_kvbackend_manager = KvBackendTopicManager::new(kv_backend.clone());
 
         let all_topics = (0..16)
             .map(|i| format!("greptimedb_wal_topic_{}", i))
@@ -137,7 +137,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         // Constructs mock topics.
-        let topic_kvbackend_manager = TopicKvBackendManager::new(kv_backend);
+        let topic_kvbackend_manager = KvBackendTopicManager::new(kv_backend);
 
         let mut topics_to_be_created = topic_kvbackend_manager
             .to_be_created(&all_topics)

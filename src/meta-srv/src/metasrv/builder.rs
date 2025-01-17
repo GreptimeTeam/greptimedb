@@ -36,7 +36,7 @@ use common_meta::node_manager::NodeManagerRef;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
-use common_meta::wal_options_allocator::WalOptionsAllocator;
+use common_meta::wal_options_allocator::build_wal_options_allocator;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
 use snafu::ResultExt;
@@ -44,7 +44,7 @@ use snafu::ResultExt;
 use super::{SelectTarget, FLOW_ID_SEQ};
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
-use crate::error::{self, Result};
+use crate::error::{self, BuildWalOptionsAllocatorSnafu, Result};
 use crate::flow_meta_alloc::FlowPeerAllocator;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
@@ -208,10 +208,11 @@ impl MetasrvBuilder {
             table_id: None,
         };
 
-        let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
-            options.wal.clone(),
-            kv_backend.clone(),
-        ));
+        let wal_options_allocator =
+            build_wal_options_allocator(options.wal.clone(), kv_backend.clone())
+                .await
+                .context(BuildWalOptionsAllocatorSnafu)?;
+        let wal_options_allocator = Arc::new(wal_options_allocator);
         let is_remote_wal = wal_options_allocator.is_remote_wal();
         let table_metadata_allocator = table_metadata_allocator.unwrap_or_else(|| {
             let sequence = Arc::new(

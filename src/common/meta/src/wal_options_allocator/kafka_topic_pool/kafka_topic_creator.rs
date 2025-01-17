@@ -14,7 +14,6 @@
 
 use common_telemetry::{error, info};
 use common_wal::config::kafka::MetasrvKafkaConfig;
-use rskafka::client::controller::ControllerClient;
 use rskafka::client::error::Error as RsKafkaError;
 use rskafka::client::error::ProtocolError::TopicAlreadyExists;
 use rskafka::client::partition::{Compression, UnknownTopicHandling};
@@ -34,22 +33,24 @@ use crate::error::{
 const DEFAULT_PARTITION: i32 = 0;
 
 /// Creates topics in kafka.
-pub struct TopicKafkaManager {
-    pub(super) config: MetasrvKafkaConfig,
+pub struct KafkaTopicCreator {
+    client: Client,
+    num_partitions: i32,
+    replication_factor: i16,
+    create_topic_timeout: i32,
 }
 
-impl TopicKafkaManager {
-    pub fn new(config: MetasrvKafkaConfig) -> Self {
-        Self { config }
-    }
-
-    async fn try_create_topic(&self, topic: &String, client: &ControllerClient) -> Result<()> {
-        match client
+impl KafkaTopicCreator {
+    async fn create_topic(&self, topic: &String, client: &Client) -> Result<()> {
+        let controller = client
+            .controller_client()
+            .context(BuildKafkaCtrlClientSnafu)?;
+        match controller
             .create_topic(
                 topic.clone(),
-                self.config.kafka_topic.num_partitions,
-                self.config.kafka_topic.replication_factor,
-                self.config.kafka_topic.create_topic_timeout.as_millis() as i32,
+                self.num_partitions,
+                self.replication_factor,
+                self.create_topic_timeout,
             )
             .await
         {
@@ -69,7 +70,7 @@ impl TopicKafkaManager {
         }
     }
 
-    async fn try_append_noop_record(&self, topic: &String, client: &Client) -> Result<()> {
+    async fn append_noop_record(&self, topic: &String, client: &Client) -> Result<()> {
         let partition_client = client
             .partition_client(topic, DEFAULT_PARTITION, UnknownTopicHandling::Retry)
             .await
@@ -94,42 +95,13 @@ impl TopicKafkaManager {
         Ok(())
     }
 
-    pub async fn try_create_topics(&self, topics: &[&String]) -> Result<()> {
-        // Builds an kafka controller client for creating topics.
-        let backoff_config = BackoffConfig {
-            init_backoff: self.config.backoff.init,
-            max_backoff: self.config.backoff.max,
-            base: self.config.backoff.base as f64,
-            deadline: self.config.backoff.deadline,
-        };
-        let broker_endpoints =
-            common_wal::resolve_to_ipv4(&self.config.connection.broker_endpoints)
-                .await
-                .context(ResolveKafkaEndpointSnafu)?;
-        let mut builder = ClientBuilder::new(broker_endpoints).backoff_config(backoff_config);
-        if let Some(sasl) = &self.config.connection.sasl {
-            builder = builder.sasl_config(sasl.config.clone().into_sasl_config());
-        };
-        if let Some(tls) = &self.config.connection.tls {
-            builder = builder.tls_config(tls.to_tls_config().await.context(TlsConfigSnafu)?)
-        };
-        let client = builder
-            .build()
-            .await
-            .with_context(|_| BuildKafkaClientSnafu {
-                broker_endpoints: self.config.connection.broker_endpoints.clone(),
-            })?;
-
-        let control_client = client
-            .controller_client()
-            .context(BuildKafkaCtrlClientSnafu)?;
-
+    pub async fn create_topics(&self, topics: &[&String]) -> Result<()> {
         // Try to create missing topics.
         let tasks = topics
             .iter()
             .map(|topic| async {
-                self.try_create_topic(topic, &control_client).await?;
-                self.try_append_noop_record(topic, &client).await?;
+                self.create_topic(topic, &self.client).await?;
+                self.append_noop_record(topic, &self.client).await?;
                 Ok(())
             })
             .collect::<Vec<_>>();
@@ -145,4 +117,37 @@ impl TopicKafkaManager {
             }
         )
     }
+}
+
+pub async fn build_kafka_topic_creator(config: MetasrvKafkaConfig) -> Result<KafkaTopicCreator> {
+    // Builds an kafka controller client for creating topics.
+    let backoff_config = BackoffConfig {
+        init_backoff: config.backoff.init,
+        max_backoff: config.backoff.max,
+        base: config.backoff.base as f64,
+        deadline: config.backoff.deadline,
+    };
+    let broker_endpoints = common_wal::resolve_to_ipv4(&config.connection.broker_endpoints)
+        .await
+        .context(ResolveKafkaEndpointSnafu)?;
+    let mut builder = ClientBuilder::new(broker_endpoints).backoff_config(backoff_config);
+    if let Some(sasl) = &config.connection.sasl {
+        builder = builder.sasl_config(sasl.config.clone().into_sasl_config());
+    };
+    if let Some(tls) = &config.connection.tls {
+        builder = builder.tls_config(tls.to_tls_config().await.context(TlsConfigSnafu)?)
+    };
+    let client = builder
+        .build()
+        .await
+        .with_context(|_| BuildKafkaClientSnafu {
+            broker_endpoints: config.connection.broker_endpoints.clone(),
+        })?;
+
+    Ok(KafkaTopicCreator {
+        client,
+        num_partitions: config.kafka_topic.num_partitions,
+        replication_factor: config.kafka_topic.replication_factor,
+        create_topic_timeout: config.kafka_topic.create_topic_timeout.as_millis() as i32,
+    })
 }

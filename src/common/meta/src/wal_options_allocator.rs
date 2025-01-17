@@ -28,7 +28,7 @@ use store_api::storage::{RegionId, RegionNumber};
 use crate::error::{EncodeWalOptionsSnafu, Result};
 use crate::kv_backend::KvBackendRef;
 use crate::leadership_notifier::LeadershipChangeListener;
-use crate::wal_options_allocator::kafka_topic_pool::KafkaTopicPool;
+use crate::wal_options_allocator::kafka_topic_pool::{build_kafka_topic_creator, KafkaTopicPool};
 
 /// Allocates wal options in region granularity.
 #[derive(Default)]
@@ -42,21 +42,11 @@ pub enum WalOptionsAllocator {
 pub type WalOptionsAllocatorRef = Arc<WalOptionsAllocator>;
 
 impl WalOptionsAllocator {
-    /// Creates a WalOptionsAllocator.
-    pub fn new(config: MetasrvWalConfig, kv_backend: KvBackendRef) -> Self {
-        match config {
-            MetasrvWalConfig::RaftEngine => Self::RaftEngine,
-            MetasrvWalConfig::Kafka(kafka_config) => {
-                Self::Kafka(KafkaTopicPool::new(kafka_config, kv_backend))
-            }
-        }
-    }
-
     /// Tries to start the allocator.
     pub async fn start(&self) -> Result<()> {
         match self {
             Self::RaftEngine => Ok(()),
-            Self::Kafka(kafka_topic_manager) => kafka_topic_manager.init().await,
+            Self::Kafka(kafka_topic_manager) => kafka_topic_manager.activate().await,
         }
     }
 
@@ -113,6 +103,21 @@ impl LeadershipChangeListener for WalOptionsAllocator {
     }
 }
 
+/// Builds a wal options allocator based on the given configuration.
+pub async fn build_wal_options_allocator(
+    config: MetasrvWalConfig,
+    kv_backend: KvBackendRef,
+) -> Result<WalOptionsAllocator> {
+    match config {
+        MetasrvWalConfig::RaftEngine => Ok(WalOptionsAllocator::RaftEngine),
+        MetasrvWalConfig::Kafka(kafka_config) => {
+            let kafka_topic_creator = build_kafka_topic_creator(kafka_config.clone()).await?;
+            let topic_pool = KafkaTopicPool::new(kafka_config, kv_backend, kafka_topic_creator);
+            Ok(WalOptionsAllocator::Kafka(topic_pool))
+        }
+    }
+}
+
 /// Allocates a wal options for each region. The allocated wal options is encoded immediately.
 pub fn allocate_region_wal_options(
     regions: Vec<RegionNumber>,
@@ -154,7 +159,9 @@ mod tests {
     async fn test_allocator_with_raft_engine() {
         let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
         let wal_config = MetasrvWalConfig::RaftEngine;
-        let allocator = WalOptionsAllocator::new(wal_config, kv_backend);
+        let allocator = build_wal_options_allocator(wal_config, kv_backend)
+            .await
+            .unwrap();
         allocator.start().await.unwrap();
 
         let num_regions = 32;
@@ -192,7 +199,9 @@ mod tests {
                     ..Default::default()
                 };
                 let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
-                let mut topic_pool = KafkaTopicPool::new(config.clone(), kv_backend);
+                let kafka_topic_creator = build_kafka_topic_creator(config.clone()).await.unwrap();
+                let mut topic_pool =
+                    KafkaTopicPool::new(config.clone(), kv_backend, kafka_topic_creator);
                 topic_pool.topics.clone_from(&topics);
                 topic_pool.selector = Arc::new(selector::RoundRobinTopicSelector::default());
 
