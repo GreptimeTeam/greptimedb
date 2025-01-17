@@ -20,6 +20,7 @@ mod logs;
 mod opentsdb;
 mod otlp;
 mod prom_store;
+mod promql;
 mod region_query;
 pub mod standalone;
 
@@ -451,13 +452,15 @@ impl PrometheusHandler for Instance {
         Ok(interceptor.post_execute(output, query_ctx)?)
     }
 
-    async fn query_metrics(
+    async fn query_metric_names(
         &self,
-        _catalog: &str,
-        _schema: &str,
-        _matchers: Vec<Matcher>,
+        matchers: Vec<Matcher>,
+        ctx: &QueryContextRef,
     ) -> server_error::Result<Vec<String>> {
-        todo!();
+        self.handle_query_metric_names(matchers, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)
     }
 
     fn catalog_manager(&self) -> CatalogManagerRef {

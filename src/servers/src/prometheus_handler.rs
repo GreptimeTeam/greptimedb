@@ -34,11 +34,10 @@ pub trait PrometheusHandler {
     async fn do_query(&self, query: &PromQuery, query_ctx: QueryContextRef) -> Result<Output>;
 
     /// Query metric table names by the `__name__` matchers.
-    async fn query_metrics(
+    async fn query_metric_names(
         &self,
-        catalog: &str,
-        schema: &str,
         matchers: Vec<Matcher>,
+        ctx: &QueryContextRef,
     ) -> Result<Vec<String>>;
 
     fn catalog_manager(&self) -> CatalogManagerRef;

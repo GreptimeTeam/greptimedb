@@ -40,6 +40,7 @@ pub mod otlp;
 pub mod postgres;
 mod prom_row_builder;
 pub mod prom_store;
+pub mod prometheus;
 pub mod prometheus_handler;
 pub mod proto;
 pub mod query_handler;

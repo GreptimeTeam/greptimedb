@@ -200,6 +200,20 @@ pub struct InstantQuery {
     db: Option<String>,
 }
 
+/// Helper macro which try to evaluate the expression and return its results.
+/// If the evaluation fails, return a `PrometheusJsonResponse` early.
+macro_rules! try_call_return_response {
+    ($handle: expr) => {
+        match $handle {
+            Ok(res) => res,
+            Err(err) => {
+                let msg = err.to_string();
+                return PrometheusJsonResponse::error(StatusCode::InvalidArguments, msg);
+            }
+        }
+    };
+}
+
 #[axum_macros::debug_handler]
 #[tracing::instrument(
     skip_all,
@@ -227,13 +241,7 @@ pub async fn instant_query(
             .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
     };
 
-    let promql_expr = match promql_parser::parser::parse(&prom_query.query) {
-        Ok(expr) => expr,
-        Err(err) => {
-            let msg = err.to_string();
-            return PrometheusJsonResponse::error(StatusCode::InvalidArguments, msg);
-        }
-    };
+    let promql_expr = try_call_return_response!(promql_parser::parser::parse(&prom_query.query));
 
     // update catalog and schema in query context if necessary
     if let Some(db) = &params.db {
@@ -255,14 +263,20 @@ pub async fn instant_query(
     {
         debug!("Find metric name matchers: {:?}", name_matchers);
 
-        let metric_names = handler
-            .query_metrics(
-                query_ctx.current_catalog(),
-                &query_ctx.current_schema(),
-                name_matchers,
-            )
-            .await
-            .unwrap();
+        let metric_names =
+            try_call_return_response!(handler.query_metric_names(name_matchers, &query_ctx).await);
+
+        debug!("Find metric names: {:?}", metric_names);
+
+        if metric_names.is_empty() {
+            let result_type = promql_expr.value_type();
+
+            return PrometheusJsonResponse::success(PrometheusResponse::PromData(PromData {
+                result_type: result_type.to_string(),
+                ..Default::default()
+            }));
+        }
+
         let responses = join_all(metric_names.into_iter().map(|metric| {
             let mut prom_query = prom_query.clone();
             let mut promql_expr = promql_expr.clone();
@@ -342,13 +356,7 @@ pub async fn range_query(
             .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
     };
 
-    let promql_expr = match promql_parser::parser::parse(&prom_query.query) {
-        Ok(expr) => expr,
-        Err(err) => {
-            let msg = err.to_string();
-            return PrometheusJsonResponse::error(StatusCode::InvalidArguments, msg);
-        }
-    };
+    let promql_expr = try_call_return_response!(promql_parser::parser::parse(&prom_query.query));
 
     // update catalog and schema in query context if necessary
     if let Some(db) = &params.db {
@@ -369,14 +377,18 @@ pub async fn range_query(
     {
         debug!("Find metric name matchers: {:?}", name_matchers);
 
-        let metric_names = handler
-            .query_metrics(
-                query_ctx.current_catalog(),
-                &query_ctx.current_schema(),
-                name_matchers,
-            )
-            .await
-            .unwrap();
+        let metric_names =
+            try_call_return_response!(handler.query_metric_names(name_matchers, &query_ctx).await);
+
+        debug!("Find metric names: {:?}", metric_names);
+
+        if metric_names.is_empty() {
+            return PrometheusJsonResponse::success(PrometheusResponse::PromData(PromData {
+                result_type: ValueType::Matrix.to_string(),
+                ..Default::default()
+            }));
+        }
+
         let responses = join_all(metric_names.into_iter().map(|metric| {
             let mut prom_query = prom_query.clone();
             let mut promql_expr = promql_expr.clone();
@@ -397,6 +409,7 @@ pub async fn range_query(
         }))
         .await;
 
+        // Safety: at least one responses, checked above
         responses
             .into_iter()
             .reduce(|mut acc, resp| {
