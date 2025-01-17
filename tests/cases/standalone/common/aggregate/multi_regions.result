@@ -31,7 +31,6 @@ select sum(val) from t group by host;
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[host@0 as host], aggr=[sum(t.val)] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[host@1 as host], aggr=[sum(t.val)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=0 (0 memtable ranges, 0 file 0 ranges) REDACTED
@@ -40,7 +39,6 @@ select sum(val) from t group by host;
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[host@0 as host], aggr=[sum(t.val)] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[host@1 as host], aggr=[sum(t.val)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=0 (0 memtable ranges, 0 file 0 ranges) REDACTED
@@ -90,7 +88,6 @@ select sum(val) from t group by idc;
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[idc@0 as idc], aggr=[sum(t.val)] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[idc@1 as idc], aggr=[sum(t.val)] REDACTED
 |_|_|_ProjectionExec: expr=[val@1 as val, idc@3 as idc] REDACTED
 |_|_|_MergeScanExec: REDACTED
