@@ -591,7 +591,10 @@ impl RangeSelect {
                             )?;
                             vec![PhysicalSortExpr {
                                 expr: time_index,
-                                options: SortOptions::default(),
+                                options: SortOptions {
+                                    descending: false,
+                                    nulls_first: false,
+                                },
                             }]
                         };
                         let arg = self.create_physical_expr_list(
