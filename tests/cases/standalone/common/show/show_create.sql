@@ -100,6 +100,18 @@ WITH(
 
 show create table phy;
 
+CREATE TABLE t1 (
+    ts TIMESTAMP TIME INDEX, 
+    val DOUBLE, 
+    job STRING PRIMARY KEY
+) ENGINE=metric WITH (
+    "on_physical_table" = "phy"
+);
+
+show index from phy;
+
+drop table t1;
+
 drop table phy;
 
 show create table numbers;

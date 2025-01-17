@@ -260,6 +260,32 @@ show create table phy;
 |       | )                                                                               |
 +-------+---------------------------------------------------------------------------------+
 
+CREATE TABLE t1 (
+    ts TIMESTAMP TIME INDEX, 
+    val DOUBLE, 
+    job STRING PRIMARY KEY
+) ENGINE=metric WITH (
+    "on_physical_table" = "phy"
+);
+
+Affected Rows: 0
+
+show index from phy;
+
++-------+------------+-------------------------+--------------+-------------+-----------+-------------+----------+--------+------+-----------------------------------------------------+---------+---------------+---------+------------+
+| Table | Non_unique | Key_name                | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                                          | Comment | Index_comment | Visible | Expression |
++-------+------------+-------------------------+--------------+-------------+-----------+-------------+----------+--------+------+-----------------------------------------------------+---------+---------------+---------+------------+
+| phy   | 1          | PRIMARY, INVERTED INDEX | 4            | __table_id  | A         |             |          |        | YES  | greptime-primary-key-v1, greptime-inverted-index-v1 |         |               | YES     |            |
+| phy   | 1          | PRIMARY                 | 5            | __tsid      | A         |             |          |        | YES  | greptime-primary-key-v1                             |         |               | YES     |            |
+| phy   | 1          | PRIMARY, SKIPPING INDEX | 3            | host        | A         |             |          |        | YES  | greptime-primary-key-v1, greptime-bloom-filter-v1   |         |               | YES     |            |
+| phy   | 1          | PRIMARY, SKIPPING INDEX | 6            | job         | A         |             |          |        | YES  | greptime-primary-key-v1, greptime-bloom-filter-v1   |         |               | YES     |            |
+| phy   | 1          | TIME INDEX              | 1            | ts          | A         |             |          |        | NO   |                                                     |         |               | YES     |            |
++-------+------------+-------------------------+--------------+-------------+-----------+-------------+----------+--------+------+-----------------------------------------------------+---------+---------------+---------+------------+
+
+drop table t1;
+
+Affected Rows: 0
+
 drop table phy;
 
 Affected Rows: 0

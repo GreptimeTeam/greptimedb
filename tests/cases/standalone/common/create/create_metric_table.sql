@@ -97,6 +97,8 @@ CREATE TABLE t1 (ts timestamp time index, val double, host string primary key) e
 
 SHOW CREATE TABLE phy;
 
+SHOW INDEX FROM phy;
+
 DROP TABLE t1;
 
 DROP TABLE phy;
