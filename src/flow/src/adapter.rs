@@ -149,7 +149,7 @@ pub type FlowWorkerManagerRef = Arc<FlowWorkerManager>;
 pub struct FlowWorkerManager {
     /// The handler to the worker that will run the dataflow
     /// which is `!Send` so a handle is used
-    pub worker_handles: Vec<Mutex<WorkerHandle>>,
+    pub worker_handles: Vec<WorkerHandle>,
     /// The selector to select a worker to run the dataflow
     worker_selector: Mutex<usize>,
     /// The query engine that will be used to parse the query and convert it to a dataflow plan
@@ -236,7 +236,7 @@ impl FlowWorkerManager {
 
     /// add a worker handler to manager, meaning this corresponding worker is under it's manage
     pub fn add_worker_handle(&mut self, handle: WorkerHandle) {
-        self.worker_handles.push(Mutex::new(handle));
+        self.worker_handles.push(handle);
     }
 }
 
@@ -577,13 +577,16 @@ impl FlowWorkerManager {
     pub async fn run(&self, mut shutdown: Option<broadcast::Receiver<()>>) {
         debug!("Starting to run");
         let default_interval = Duration::from_secs(1);
+        let mut tick_interval = tokio::time::interval(default_interval);
+        // burst mode, so that if we miss a tick, we will run immediately to fully utilize the cpu
+        tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
         let mut avg_spd = 0; // rows/sec
         let mut since_last_run = tokio::time::Instant::now();
         let run_per_trace = 10;
         let mut run_cnt = 0;
         loop {
             // TODO(discord9): only run when new inputs arrive or scheduled to
-            let row_cnt = self.run_available(true).await.unwrap_or_else(|err| {
+            let row_cnt = self.run_available(false).await.unwrap_or_else(|err| {
                 common_telemetry::error!(err;"Run available errors");
                 0
             });
@@ -613,9 +616,9 @@ impl FlowWorkerManager {
 
             // for now we want to batch rows until there is around `BATCH_SIZE` rows in send buf
             // before trigger a run of flow's worker
-            // (plus one for prevent div by zero)
             let wait_for = since_last_run.elapsed();
 
+            // last runs insert speed
             let cur_spd = row_cnt * 1000 / wait_for.as_millis().max(1) as usize;
             // rapid increase, slow decay
             avg_spd = if cur_spd > avg_spd {
@@ -638,7 +641,10 @@ impl FlowWorkerManager {
 
             METRIC_FLOW_RUN_INTERVAL_MS.set(new_wait.as_millis() as i64);
             since_last_run = tokio::time::Instant::now();
-            tokio::time::sleep(new_wait).await;
+            tokio::select! {
+                _ = tick_interval.tick() => (),
+                _ = tokio::time::sleep(new_wait) => ()
+            }
         }
         // flow is now shutdown, drop frontend_invoker early so a ref cycle(in standalone mode) can be prevent:
         // FlowWorkerManager.frontend_invoker -> FrontendInvoker.inserter
@@ -649,9 +655,9 @@ impl FlowWorkerManager {
     /// Run all available subgraph in the flow node
     /// This will try to run all dataflow in this node
     ///
-    /// set `blocking` to true to wait until lock is acquired
-    /// and false to return immediately if lock is not acquired
-    /// return numbers of rows send to worker
+    /// set `blocking` to true to wait until worker finish running
+    /// false to just trigger run and return immediately
+    /// return numbers of rows send to worker(Inaccuary)
     /// TODO(discord9): add flag for subgraph that have input since last run
     pub async fn run_available(&self, blocking: bool) -> Result<usize, Error> {
         let mut row_cnt = 0;
@@ -659,13 +665,7 @@ impl FlowWorkerManager {
         let now = self.tick_manager.tick();
         for worker in self.worker_handles.iter() {
             // TODO(discord9): consider how to handle error in individual worker
-            if blocking {
-                worker.lock().await.run_available(now, blocking).await?;
-            } else if let Ok(worker) = worker.try_lock() {
-                worker.run_available(now, blocking).await?;
-            } else {
-                return Ok(row_cnt);
-            }
+            worker.run_available(now, blocking).await?;
         }
         // check row send and rows remain in send buf
         let flush_res = if blocking {
@@ -736,7 +736,6 @@ impl FlowWorkerManager {
     /// remove a flow by it's id
     pub async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
         for handle in self.worker_handles.iter() {
-            let handle = handle.lock().await;
             if handle.contains_flow(flow_id).await? {
                 handle.remove_flow(flow_id).await?;
                 break;
@@ -873,7 +872,7 @@ impl FlowWorkerManager {
             .await
             .insert(flow_id, err_collector.clone());
         // TODO(discord9): load balance?
-        let handle = &self.get_worker_handle_for_create_flow().await;
+        let handle = self.get_worker_handle_for_create_flow().await;
         let create_request = worker::Request::Create {
             flow_id,
             plan: flow_plan,

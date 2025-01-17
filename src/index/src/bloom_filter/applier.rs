@@ -15,9 +15,12 @@
 use std::collections::HashSet;
 use std::ops::Range;
 
+use greptime_proto::v1::index::BloomFilterMeta;
+use itertools::Itertools;
+
 use crate::bloom_filter::error::Result;
 use crate::bloom_filter::reader::BloomFilterReader;
-use crate::bloom_filter::{BloomFilterMeta, Bytes};
+use crate::bloom_filter::Bytes;
 
 pub struct BloomFilterApplier {
     reader: Box<dyn BloomFilterReader + Send>,
@@ -37,27 +40,42 @@ impl BloomFilterApplier {
         probes: &HashSet<Bytes>,
         search_range: Range<usize>,
     ) -> Result<Vec<Range<usize>>> {
-        let rows_per_segment = self.meta.rows_per_segment;
+        let rows_per_segment = self.meta.rows_per_segment as usize;
         let start_seg = search_range.start / rows_per_segment;
         let end_seg = search_range.end.div_ceil(rows_per_segment);
 
-        let locs = &self.meta.bloom_filter_segments[start_seg..end_seg];
-        let bfs = self.reader.bloom_filter_vec(locs).await?;
+        let locs = &self.meta.segment_loc_indices[start_seg..end_seg];
 
-        let mut ranges: Vec<Range<usize>> = Vec::with_capacity(end_seg - start_seg);
-        for (seg_id, bloom) in (start_seg..end_seg).zip(bfs) {
-            let start = seg_id * rows_per_segment;
+        // dedup locs
+        let deduped_locs = locs
+            .iter()
+            .dedup()
+            .map(|i| self.meta.bloom_filter_locs[*i as usize].clone())
+            .collect::<Vec<_>>();
+        let bfs = self.reader.bloom_filter_vec(&deduped_locs).await?;
+
+        let mut ranges: Vec<Range<usize>> = Vec::with_capacity(bfs.len());
+        for ((_, mut group), bloom) in locs
+            .iter()
+            .zip(start_seg..end_seg)
+            .group_by(|(x, _)| **x)
+            .into_iter()
+            .zip(bfs.iter())
+        {
+            let start = group.next().unwrap().1 * rows_per_segment; // SAFETY: group is not empty
+            let end = group.last().map_or(start + rows_per_segment, |(_, end)| {
+                (end + 1) * rows_per_segment
+            });
+            let actual_start = start.max(search_range.start);
+            let actual_end = end.min(search_range.end);
             for probe in probes {
                 if bloom.contains(probe) {
-                    let end = (start + rows_per_segment).min(search_range.end);
-                    let start = start.max(search_range.start);
-
                     match ranges.last_mut() {
-                        Some(last) if last.end == start => {
-                            last.end = end;
+                        Some(last) if last.end == actual_start => {
+                            last.end = actual_end;
                         }
                         _ => {
-                            ranges.push(start..end);
+                            ranges.push(actual_start..actual_end);
                         }
                     }
                     break;
@@ -93,46 +111,73 @@ mod tests {
         );
 
         let rows = vec![
+            // seg 0
             vec![b"row00".to_vec(), b"seg00".to_vec(), b"overl".to_vec()],
             vec![b"row01".to_vec(), b"seg00".to_vec(), b"overl".to_vec()],
             vec![b"row02".to_vec(), b"seg00".to_vec(), b"overl".to_vec()],
             vec![b"row03".to_vec(), b"seg00".to_vec(), b"overl".to_vec()],
+            // seg 1
             vec![b"row04".to_vec(), b"seg01".to_vec(), b"overl".to_vec()],
             vec![b"row05".to_vec(), b"seg01".to_vec(), b"overl".to_vec()],
             vec![b"row06".to_vec(), b"seg01".to_vec(), b"overp".to_vec()],
             vec![b"row07".to_vec(), b"seg01".to_vec(), b"overp".to_vec()],
+            // seg 2
             vec![b"row08".to_vec(), b"seg02".to_vec(), b"overp".to_vec()],
             vec![b"row09".to_vec(), b"seg02".to_vec(), b"overp".to_vec()],
             vec![b"row10".to_vec(), b"seg02".to_vec(), b"overp".to_vec()],
             vec![b"row11".to_vec(), b"seg02".to_vec(), b"overp".to_vec()],
+            // duplicate rows
+            // seg 3
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            // seg 4
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            // seg 5
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            // seg 6
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
         ];
 
         let cases = vec![
-            (vec![b"row00".to_vec()], 0..12, vec![0..4]), // search one row in full range
+            (vec![b"row00".to_vec()], 0..28, vec![0..4]), // search one row in full range
             (vec![b"row05".to_vec()], 4..8, vec![4..8]),  // search one row in partial range
             (vec![b"row03".to_vec()], 4..8, vec![]), // search for a row that doesn't exist in the partial range
             (
                 vec![b"row01".to_vec(), b"row06".to_vec()],
-                0..12,
+                0..28,
                 vec![0..8],
             ), // search multiple rows in multiple ranges
             (
                 vec![b"row01".to_vec(), b"row11".to_vec()],
-                0..12,
+                0..28,
                 vec![0..4, 8..12],
             ), // search multiple rows in multiple ranges
-            (vec![b"row99".to_vec()], 0..12, vec![]), // search for a row that doesn't exist in the full range
+            (vec![b"row99".to_vec()], 0..28, vec![]), // search for a row that doesn't exist in the full range
             (vec![b"row00".to_vec()], 12..12, vec![]), // search in an empty range
             (
                 vec![b"row04".to_vec(), b"row05".to_vec()],
                 0..12,
                 vec![4..8],
             ), // search multiple rows in same segment
-            (vec![b"seg01".to_vec()], 0..12, vec![4..8]), // search rows in a segment
-            (vec![b"seg01".to_vec()], 6..12, vec![6..8]), // search rows in a segment in partial range
-            (vec![b"overl".to_vec()], 0..12, vec![0..8]), // search rows in multiple segments
-            (vec![b"overl".to_vec()], 2..12, vec![2..8]), // search range starts from the middle of a segment
+            (vec![b"seg01".to_vec()], 0..28, vec![4..8]), // search rows in a segment
+            (vec![b"seg01".to_vec()], 6..28, vec![6..8]), // search rows in a segment in partial range
+            (vec![b"overl".to_vec()], 0..28, vec![0..8]), // search rows in multiple segments
+            (vec![b"overl".to_vec()], 2..28, vec![2..8]), // search range starts from the middle of a segment
             (vec![b"overp".to_vec()], 0..10, vec![4..10]), // search range ends at the middle of a segment
+            (vec![b"dup".to_vec()], 0..12, vec![]), // search for a duplicate row not in the range
+            (vec![b"dup".to_vec()], 0..16, vec![12..16]), // search for a duplicate row in the range
+            (vec![b"dup".to_vec()], 0..28, vec![12..28]), // search for a duplicate row in the full range
         ];
 
         for row in rows {

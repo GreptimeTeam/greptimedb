@@ -4449,7 +4449,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=4a173785b3376267c4d62b6e0b0a54ca040822aa#4a173785b3376267c4d62b6e0b0a54ca040822aa"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=ec801a91aa22f9666063d02805f1f60f7c93458a#ec801a91aa22f9666063d02805f1f60f7c93458a"
 dependencies = [
  "prost 0.12.6",
  "serde",
@@ -5299,6 +5299,7 @@ dependencies = [
  "fst",
  "futures",
  "greptime-proto",
+ "itertools 0.10.5",
  "mockall",
  "pin-project",
  "prost 0.12.6",
