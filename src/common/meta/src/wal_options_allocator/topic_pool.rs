@@ -32,9 +32,9 @@ use crate::wal_options_allocator::topic_manager::KafkaTopicManager;
 pub struct KafkaTopicPool {
     pub(crate) topics: Vec<String>,
     // Manages topics in kvbackend.
-    kvbackend_manager: KafkaTopicManager,
+    topic_manager: KafkaTopicManager,
     // Creates topics in kafka.
-    kafka_topic_creator: KafkaTopicCreator,
+    topic_creator: KafkaTopicCreator,
     pub(crate) selector: TopicSelectorRef,
     auto_create_topics: bool,
 }
@@ -43,7 +43,7 @@ impl KafkaTopicPool {
     pub fn new(
         config: &MetasrvKafkaConfig,
         kvbackend: KvBackendRef,
-        kafka_topic_creator: KafkaTopicCreator,
+        topic_creator: KafkaTopicCreator,
     ) -> Self {
         let num_topics = config.kafka_topic.num_topics;
         let prefix = config.kafka_topic.topic_name_prefix.clone();
@@ -55,12 +55,12 @@ impl KafkaTopicPool {
             TopicSelectorType::RoundRobin => RoundRobinTopicSelector::with_shuffle(),
         };
 
-        let kvbackend_manager = KafkaTopicManager::new(kvbackend);
+        let topic_manager = KafkaTopicManager::new(kvbackend);
 
         Self {
             topics,
-            kvbackend_manager,
-            kafka_topic_creator,
+            topic_manager,
+            topic_creator,
             selector: Arc::new(selector),
             auto_create_topics: config.auto_create_topics,
         }
@@ -78,15 +78,15 @@ impl KafkaTopicPool {
         ensure!(num_topics > 0, InvalidNumTopicsSnafu { num_topics });
 
         let topics_to_be_created = self
-            .kvbackend_manager
+            .topic_manager
             .get_topics_to_create(&self.topics)
             .await?;
 
         if !topics_to_be_created.is_empty() {
-            self.kafka_topic_creator
+            self.topic_creator
                 .prepare_topics(&topics_to_be_created)
                 .await?;
-            self.kvbackend_manager.persist_topics(&self.topics).await?;
+            self.topic_manager.persist_topics(&self.topics).await?;
         }
         Ok(())
     }
@@ -137,8 +137,8 @@ mod tests {
                     ..Default::default()
                 };
                 let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
-                let kafka_topic_creator = build_kafka_topic_creator(&config).await.unwrap();
-                let mut topic_pool = KafkaTopicPool::new(&config, kv_backend, kafka_topic_creator);
+                let topic_creator = build_kafka_topic_creator(&config).await.unwrap();
+                let mut topic_pool = KafkaTopicPool::new(&config, kv_backend, topic_creator);
                 // Replaces the default topic pool with the constructed topics.
                 topic_pool.topics.clone_from(&topics);
                 // Replaces the default selector with a round-robin selector without shuffled.

@@ -113,8 +113,8 @@ pub async fn build_wal_options_allocator(
     match config {
         MetasrvWalConfig::RaftEngine => Ok(WalOptionsAllocator::RaftEngine),
         MetasrvWalConfig::Kafka(kafka_config) => {
-            let kafka_topic_creator = build_kafka_topic_creator(kafka_config).await?;
-            let topic_pool = KafkaTopicPool::new(kafka_config, kv_backend, kafka_topic_creator);
+            let topic_creator = build_kafka_topic_creator(kafka_config).await?;
+            let topic_pool = KafkaTopicPool::new(kafka_config, kv_backend, topic_creator);
             Ok(WalOptionsAllocator::Kafka(topic_pool))
         }
     }
@@ -201,8 +201,8 @@ mod tests {
                     ..Default::default()
                 };
                 let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
-                let kafka_topic_creator = build_kafka_topic_creator(&config).await.unwrap();
-                let mut topic_pool = KafkaTopicPool::new(&config, kv_backend, kafka_topic_creator);
+                let topic_creator = build_kafka_topic_creator(&config).await.unwrap();
+                let mut topic_pool = KafkaTopicPool::new(&config, kv_backend, topic_creator);
                 topic_pool.topics.clone_from(&topics);
                 topic_pool.selector = Arc::new(selector::RoundRobinTopicSelector::default());
 

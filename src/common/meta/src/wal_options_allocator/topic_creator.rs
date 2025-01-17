@@ -35,8 +35,11 @@ const DEFAULT_PARTITION: i32 = 0;
 /// Creates topics in kafka.
 pub struct KafkaTopicCreator {
     client: Client,
+    /// The number of partitions per topic.
     num_partitions: i32,
+    /// The replication factor of each topic.
     replication_factor: i16,
+    /// The timeout of topic creation in milliseconds.
     create_topic_timeout: i32,
 }
 
@@ -47,7 +50,7 @@ impl KafkaTopicCreator {
             .context(BuildKafkaCtrlClientSnafu)?;
         match controller
             .create_topic(
-                topic.clone(),
+                topic,
                 self.num_partitions,
                 self.replication_factor,
                 self.create_topic_timeout,

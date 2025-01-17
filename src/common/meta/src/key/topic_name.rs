@@ -98,17 +98,17 @@ fn topic_decoder(kv: &KeyValue) -> Result<String> {
     Ok(key.topic.to_string())
 }
 
-pub struct TopicNameKeyManager {
+pub struct TopicNameManager {
     kv_backend: KvBackendRef,
 }
 
-impl Default for TopicNameKeyManager {
+impl Default for TopicNameManager {
     fn default() -> Self {
         Self::new(Arc::new(MemoryKvBackend::default()))
     }
 }
 
-impl TopicNameKeyManager {
+impl TopicNameManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
     }
@@ -179,7 +179,7 @@ mod tests {
     #[tokio::test]
     async fn test_topic_name_key_manager() {
         let kv_backend = Arc::new(MemoryKvBackend::default());
-        let manager = TopicNameKeyManager::new(kv_backend.clone());
+        let manager = TopicNameManager::new(kv_backend.clone());
 
         let mut all_topics = (0..16)
             .map(|i| format!("{}/{}", KAFKA_TOPIC_KEY_PREFIX, i))

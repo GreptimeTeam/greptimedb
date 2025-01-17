@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 
 use crate::error::Result;
-use crate::key::topic_name::{TopicNameKey, TopicNameKeyManager};
+use crate::key::topic_name::{TopicNameKey, TopicNameManager};
 use crate::kv_backend::KvBackendRef;
 
 /// Manages topics in kvbackend.
@@ -23,13 +23,13 @@ use crate::kv_backend::KvBackendRef;
 /// 1. Restores and persisting topics in kvbackend.
 /// 2. Clears topics in legacy format and restores them in the new format.
 pub struct KafkaTopicManager {
-    key_manager: TopicNameKeyManager,
+    key_manager: TopicNameManager,
 }
 
 impl KafkaTopicManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self {
-            key_manager: TopicNameKeyManager::new(kv_backend),
+            key_manager: TopicNameManager::new(kv_backend),
         }
     }
 
