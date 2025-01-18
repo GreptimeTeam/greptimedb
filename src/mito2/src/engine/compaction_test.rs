@@ -545,7 +545,7 @@ async fn test_change_region_compaction_window() {
     });
     engine.handle_request(region_id, request).await.unwrap();
 
-    // Compaction again. It should compacts widnow 3600 and 7200
+    // Compaction again. It should compacts window 3600 and 7200
     // into 7200.
     engine
         .handle_request(
