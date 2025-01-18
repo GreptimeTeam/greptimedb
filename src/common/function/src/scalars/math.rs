@@ -44,6 +44,7 @@ impl MathFunction {
         registry.register(Arc::new(RateFunction));
         registry.register(Arc::new(RangeFunction));
         registry.register(Arc::new(ClampFunction));
+        registry.register(Arc::new(WithinFilterFunction));
     }
 }
 
@@ -85,5 +86,36 @@ impl Function for RangeFunction {
             "range_fn just a empty function used in range select, It should not be eval!".into(),
         ))
         .context(GeneralDataFusionSnafu)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct WithinFilterFunction;
+
+impl fmt::Display for WithinFilterFunction {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "WithinFilterFunction")
+    }
+}
+
+impl Function for WithinFilterFunction {
+    fn name(&self) -> &str {
+        "within_filter"
+    }
+
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::boolean_datatype())
+    }
+
+    fn signature(&self) -> Signature {
+        Signature::uniform(
+            2,
+            vec![ConcreteDataType::string_datatype()],
+            Volatility::Immutable,
+        )
+    }
+
+    fn eval(&self, _func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+        Err(DataFusionError::Internal("todo".into())).context(GeneralDataFusionSnafu)
     }
 }

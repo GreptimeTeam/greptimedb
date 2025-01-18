@@ -17,6 +17,8 @@ VALUES
 
 SELECT * FROM system_metrics;
 
+SELECT * FROM system_metrics where ts within '2022-11-03';
+
 SELECT count(*) FROM system_metrics;
 
 SELECT avg(cpu_util) FROM system_metrics;
