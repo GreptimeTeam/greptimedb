@@ -26,6 +26,7 @@
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use common_telemetry::info;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::SequenceNumber;
 
@@ -399,6 +400,16 @@ impl VersionBuilder {
             .compaction
             .time_window()
             .or(self.compaction_time_window);
+        if self.compaction_time_window.is_some()
+            && compaction_time_window != self.compaction_time_window
+        {
+            info!(
+                "VersionBuilder overwrite region compaction time window from {:?} to {:?}, region: {}",
+                self.compaction_time_window,
+                compaction_time_window,
+                self.metadata.region_id
+            );
+        }
 
         Version {
             metadata: self.metadata,
