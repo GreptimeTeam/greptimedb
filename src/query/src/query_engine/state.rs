@@ -58,6 +58,7 @@ use crate::query_engine::options::QueryOptions;
 use crate::query_engine::DefaultSerializer;
 use crate::range_select::planner::RangeSelectPlanner;
 use crate::region_query::RegionQueryHandlerRef;
+use crate::within_filter::WithinFilterRule;
 use crate::QueryEngineContext;
 
 /// Query engine global state
@@ -93,10 +94,14 @@ impl QueryEngineState {
         let runtime_env = Arc::new(RuntimeEnv::default());
         let session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
         // Apply extension rules
-        let mut extension_rules = Vec::new();
+        // TODO: remove Vec<Arc<(dyn ExtensionAnalyzerRule + std::marker::Send + Sync + 'static)>>
+        let mut extension_rules: Vec<
+            Arc<(dyn ExtensionAnalyzerRule + std::marker::Send + Sync + 'static)>,
+        > = Vec::new();
 
         // The [`TypeConversionRule`] must be at first
         extension_rules.insert(0, Arc::new(TypeConversionRule) as _);
+        extension_rules.push(Arc::new(WithinFilterRule));
 
         // Apply the datafusion rules
         let mut analyzer = Analyzer::new();

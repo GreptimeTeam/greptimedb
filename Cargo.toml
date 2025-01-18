@@ -188,7 +188,7 @@ smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
 sysinfo = "0.30"
 # on branch v0.52.x
-sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "71dd86058d2af97b9925093d40c4e03360403170", features = [
+sqlparser = { git = "https://github.com/NiwakaDev/sqlparser-rs", rev = "daf8c33234f1b4568824b32efcc5d611091c4834", features = [
     "visitor",
     "serde",
 ] } # on branch v0.44.x

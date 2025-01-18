@@ -110,6 +110,7 @@ impl DfLogicalPlanner {
             .statement_to_plan(df_stmt)
             .context(PlanSqlSnafu)?;
         common_telemetry::debug!("Logical planner, statement to plan result: {result}");
+
         let plan = RangePlanRewriter::new(table_provider, query_ctx.clone())
             .rewrite(result)
             .await?;
