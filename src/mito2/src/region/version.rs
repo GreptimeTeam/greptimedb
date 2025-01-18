@@ -404,7 +404,7 @@ impl VersionBuilder {
             && compaction_time_window != self.compaction_time_window
         {
             info!(
-                "VersionBuilder overwrite region compaction time window from {:?} to {:?}, region: {}",
+                "VersionBuilder overwrites region compaction time window from {:?} to {:?}, region: {}",
                 self.compaction_time_window,
                 compaction_time_window,
                 self.metadata.region_id
