@@ -26,6 +26,7 @@
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use common_telemetry::info;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::SequenceNumber;
 
@@ -253,7 +254,10 @@ pub(crate) struct Version {
     ///
     /// Used to check if it is a flush task during the truncating table.
     pub(crate) truncated_entry_id: Option<EntryId>,
-    /// Inferred compaction time window.
+    /// Inferred compaction time window from flush.
+    ///
+    /// If compaction options contain a time window, it will overwrite this value
+    /// when creating a new version from the [VersionBuilder].
     pub(crate) compaction_time_window: Option<Duration>,
     /// Options of the region.
     pub(crate) options: RegionOptions,
@@ -389,7 +393,24 @@ impl VersionBuilder {
     }
 
     /// Builds a new [Version] from the builder.
+    /// It overwrites the window size by compaction option.
     pub(crate) fn build(self) -> Version {
+        let compaction_time_window = self
+            .options
+            .compaction
+            .time_window()
+            .or(self.compaction_time_window);
+        if self.compaction_time_window.is_some()
+            && compaction_time_window != self.compaction_time_window
+        {
+            info!(
+                "VersionBuilder overwrites region compaction time window from {:?} to {:?}, region: {}",
+                self.compaction_time_window,
+                compaction_time_window,
+                self.metadata.region_id
+            );
+        }
+
         Version {
             metadata: self.metadata,
             memtables: self.memtables,
@@ -397,7 +418,7 @@ impl VersionBuilder {
             flushed_entry_id: self.flushed_entry_id,
             flushed_sequence: self.flushed_sequence,
             truncated_entry_id: self.truncated_entry_id,
-            compaction_time_window: self.compaction_time_window,
+            compaction_time_window,
             options: self.options,
         }
     }
