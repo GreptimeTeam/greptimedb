@@ -1138,7 +1138,7 @@ fn unset_column_fulltext_options(
 ) -> Result<()> {
     ensure!(
         current_options
-            .clone()
+            .as_ref()
             .is_some_and(|options| options.enable),
         error::InvalidColumnOptionSnafu {
             column_name,
