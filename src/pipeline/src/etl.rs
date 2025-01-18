@@ -30,12 +30,14 @@ use transform::{TransformBuilders, Transformer, Transforms};
 use value::Value;
 use yaml_rust::YamlLoader;
 
+use crate::dispatcher::Dispatcher;
 use crate::etl::error::Result;
 
 const DESCRIPTION: &str = "description";
 const PROCESSORS: &str = "processors";
 const TRANSFORM: &str = "transform";
 const TRANSFORMS: &str = "transforms";
+const DISPATCHER: &str = "dispatcher";
 
 pub enum Content<'a> {
     Json(&'a str),
@@ -151,10 +153,17 @@ where
 
             let transformer = T::new(transformers)?;
 
+            let dispatcher = if !doc[DISPATCHER].is_badvalue() {
+                Some(Dispatcher::try_from(&doc[DISPATCHER])?)
+            } else {
+                None
+            };
+
             Ok(Pipeline {
                 description,
                 processors,
                 transformer,
+                dispatcher,
                 required_keys,
                 output_keys,
                 intermediate_keys: final_intermediate_keys,
@@ -171,6 +180,7 @@ where
 {
     description: Option<String>,
     processors: processor::Processors,
+    dispatcher: Option<Dispatcher>,
     transformer: T,
     /// required keys for the preprocessing from map data from user
     /// include all processor required and transformer required keys
@@ -180,22 +190,6 @@ where
     /// intermediate keys from the processors
     intermediate_keys: Vec<String>,
     // pub on_failure: processor::Processors,
-}
-
-impl<T> std::fmt::Display for Pipeline<T>
-where
-    T: Transformer,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        if let Some(description) = &self.description {
-            writeln!(f, "description: {description}")?;
-        }
-
-        let processors = self.processors.iter().map(|p| p.kind()).join(",");
-        writeln!(f, "processors: {processors}")?;
-
-        writeln!(f, "transformer: {}", self.transformer)
-    }
 }
 
 impl<T> Pipeline<T>
@@ -349,14 +343,12 @@ pub enum PipelineWay {
 
 #[cfg(test)]
 mod tests {
-
     use api::v1::Rows;
     use greptime_proto::v1::value::ValueData;
     use greptime_proto::v1::{self, ColumnDataType, SemanticType};
 
+    use super::*;
     use crate::etl::transform::GreptimeTransformer;
-    use crate::etl::{parse, Content, Pipeline};
-    use crate::Value;
 
     #[test]
     fn test_pipeline_prepare() {
@@ -577,5 +569,120 @@ transform:
             )),
             value_data
         );
+    }
+
+    #[test]
+    fn test_dispatcher() {
+        let pipeline_yaml = r#"
+---
+description: Pipeline for Apache Tomcat
+
+processors:
+
+dispatcher:
+  field: typename
+  rules:
+    - value: http
+      table_part: http_events
+    - value: database
+      table_part: db_events
+      pipeline: database_pipeline
+
+transform:
+  - field: typename
+    type: string
+
+"#;
+        let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let dispatcher = pipeline.dispatcher.expect("expect dispatcher");
+        assert_eq!(dispatcher.field, "typename");
+
+        assert_eq!(dispatcher.rules.len(), 2);
+
+        assert_eq!(
+            dispatcher.rules[0],
+            crate::dispatcher::Rule {
+                value: Value::String("http".to_string()),
+                table_part: "http_events".to_string(),
+                pipeline: None
+            }
+        );
+
+        assert_eq!(
+            dispatcher.rules[1],
+            crate::dispatcher::Rule {
+                value: Value::String("database".to_string()),
+                table_part: "db_events".to_string(),
+                pipeline: Some("database_pipeline".to_string()),
+            }
+        );
+
+        let bad_yaml1 = r#"
+---
+description: Pipeline for Apache Tomcat
+
+processors:
+
+dispatcher:
+  _field: typename
+  rules:
+    - value: http
+      table_part: http_events
+    - value: database
+      table_part: db_events
+      pipeline: database_pipeline
+
+transform:
+  - field: typename
+    type: string
+
+"#;
+        let bad_yaml2 = r#"
+---
+description: Pipeline for Apache Tomcat
+
+processors:
+
+dispatcher:
+  field: typename
+  rules:
+    - value: http
+      _table_part: http_events
+    - value: database
+      _table_part: db_events
+      pipeline: database_pipeline
+
+transform:
+  - field: typename
+    type: string
+
+"#;
+        let bad_yaml3 = r#"
+---
+description: Pipeline for Apache Tomcat
+
+processors:
+
+dispatcher:
+  field: typename
+  rules:
+    - _value: http
+      table_part: http_events
+    - _value: database
+      table_part: db_events
+      pipeline: database_pipeline
+
+transform:
+  - field: typename
+    type: string
+
+"#;
+
+        let r: Result<Pipeline<GreptimeTransformer>> = parse(&Content::Yaml(bad_yaml1));
+        assert!(r.is_err());
+        let r: Result<Pipeline<GreptimeTransformer>> = parse(&Content::Yaml(bad_yaml2));
+        assert!(r.is_err());
+        let r: Result<Pipeline<GreptimeTransformer>> = parse(&Content::Yaml(bad_yaml3));
+        assert!(r.is_err());
     }
 }
