@@ -92,12 +92,6 @@ impl GreptimeTransformer {
     }
 }
 
-impl std::fmt::Display for GreptimeTransformer {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        writeln!(f, "GreptimeTransformer.\nColumns: {}", self.transforms)
-    }
-}
-
 impl Transformer for GreptimeTransformer {
     type Output = Rows;
     type VecOutput = Row;
