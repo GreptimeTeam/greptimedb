@@ -151,7 +151,11 @@ impl CompactionScheduler {
                 }
                 options @ Options::StrictWindow(_) => {
                     // Incoming compaction request is manually triggered.
-                    status.set_pending_request(PendingCompaction { options, waiter });
+                    status.set_pending_request(PendingCompaction {
+                        options,
+                        waiter,
+                        max_parallelism,
+                    });
                     info!(
                         "Region {} is compacting, manually compaction will be re-scheduled.",
                         region_id
@@ -195,7 +199,11 @@ impl CompactionScheduler {
         };
 
         if let Some(pending_request) = std::mem::take(&mut status.pending_request) {
-            let PendingCompaction { options, waiter } = pending_request;
+            let PendingCompaction {
+                options,
+                waiter,
+                max_parallelism,
+            } = pending_request;
 
             let request = status.new_compaction_request(
                 self.request_sender.clone(),
@@ -205,6 +213,7 @@ impl CompactionScheduler {
                 manifest_ctx,
                 self.listener.clone(),
                 schema_metadata_manager,
+                max_parallelism,
             );
 
             if let Err(e) = self.schedule_compaction_request(request, options).await {
@@ -715,6 +724,8 @@ struct PendingCompaction {
     pub(crate) options: compact_request::Options,
     /// Waiters of pending requests.
     pub(crate) waiter: OptionOutputTx,
+    /// Max parallelism for pending compaction.
+    pub(crate) max_parallelism: usize,
 }
 
 #[cfg(test)]
@@ -980,6 +991,7 @@ mod tests {
                 OptionOutputTx::none(),
                 &manifest_ctx,
                 schema_metadata_manager.clone(),
+                1,
             )
             .await
             .unwrap();
@@ -1004,6 +1016,7 @@ mod tests {
                 OptionOutputTx::new(Some(OutputTx::new(tx))),
                 &manifest_ctx,
                 schema_metadata_manager.clone(),
+                1,
             )
             .await
             .unwrap();
