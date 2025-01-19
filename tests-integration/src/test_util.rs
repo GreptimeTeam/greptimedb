@@ -454,7 +454,7 @@ pub async fn setup_test_prom_app_with_frontend(
     // build physical table
     let sql = "CREATE TABLE phy (ts timestamp time index, val double, host string primary key) engine=metric with ('physical_metric_table' = '')";
     run_sql(sql, &instance).await;
-    // builld metric tables
+    // build metric tables
     let sql = "CREATE TABLE demo (ts timestamp time index, val double, host string primary key) engine=metric with ('on_physical_table' = 'phy')";
     run_sql(sql, &instance).await;
     let sql = "CREATE TABLE demo_metrics (ts timestamp time index, val double, host string primary key) engine=metric with ('on_physical_table' = 'phy')";
