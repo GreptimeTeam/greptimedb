@@ -2014,9 +2014,12 @@ impl PromPlanner {
                 .collect::<Vec<_>>()
         };
 
-        // push time index column if it exist
+        // push time index column if it exists
         if let Some(time_index_column) = &self.ctx.time_index_column {
-            tag_columns.push(Column::from_name(time_index_column));
+            // issue #5392 if only_join_time_index is true, we don't need to push time_index_column to tag_columns
+            if !only_join_time_index {
+                tag_columns.push(Column::from_name(time_index_column));
+            }
         }
 
         let right = LogicalPlanBuilder::from(right)
