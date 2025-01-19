@@ -457,13 +457,13 @@ pub async fn setup_test_prom_app_with_frontend(
     // build metric tables
     let sql = "CREATE TABLE demo (ts timestamp time index, val double, host string primary key) engine=metric with ('on_physical_table' = 'phy')";
     run_sql(sql, &instance).await;
-    let sql = "CREATE TABLE demo_metrics (ts timestamp time index, val double, host string primary key) engine=metric with ('on_physical_table' = 'phy')";
+    let sql = "CREATE TABLE demo_metrics (ts timestamp time index, val double, idc string primary key) engine=metric with ('on_physical_table' = 'phy')";
     run_sql(sql, &instance).await;
     // insert rows
     let sql = "INSERT INTO demo(host, val, ts) VALUES ('host1', 1.1, 0), ('host2', 2.1, 600000)";
     run_sql(sql, &instance).await;
     let sql =
-        "INSERT INTO demo_metrics(host, val, ts) VALUES ('host1', 1.1, 0), ('host2', 2.1, 600000)";
+        "INSERT INTO demo_metrics(idc, val, ts) VALUES ('idc1', 1.1, 0), ('idc2', 2.1, 600000)";
     run_sql(sql, &instance).await;
 
     let http_opts = HttpOptions {
