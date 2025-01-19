@@ -1283,13 +1283,8 @@ pub async fn parse_query(
     Form(form_params): Form<ParseQuery>,
 ) -> PrometheusJsonResponse {
     if let Some(query) = params.query.or(form_params.query) {
-        match promql_parser::parser::parse(&query) {
-            Ok(ast) => PrometheusJsonResponse::success(PrometheusResponse::ParseResult(ast)),
-            Err(err) => {
-                let msg = err.to_string();
-                PrometheusJsonResponse::error(StatusCode::InvalidArguments, msg)
-            }
-        }
+        let ast = try_call_return_response!(promql_parser::parser::parse(&query));
+        PrometheusJsonResponse::success(PrometheusResponse::ParseResult(ast))
     } else {
         PrometheusJsonResponse::error(StatusCode::InvalidArguments, "query is required")
     }
