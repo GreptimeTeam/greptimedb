@@ -300,7 +300,7 @@ impl FlowWorkerManager {
                     {
                         // deal with both flow&sink table no longer exists
                         // but some output is still in output buf
-                        common_telemetry::warn!(e; "Table no longer exists, skip writeback");
+                        common_telemetry::warn!(e; "Table `{}` no longer exists, skip writeback", table_name);
                         continue;
                     } else {
                         return Err(e);
