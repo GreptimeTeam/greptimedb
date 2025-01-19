@@ -93,13 +93,6 @@ impl CompactionRequest {
     pub(crate) fn region_id(&self) -> RegionId {
         self.current_version.metadata.region_id
     }
-
-    /// Push waiter to the request.
-    pub(crate) fn push_waiter(&mut self, mut waiter: OptionOutputTx) {
-        if let Some(waiter) = waiter.take_inner() {
-            self.waiters.push(waiter);
-        }
-    }
 }
 
 /// Compaction scheduler tracks and manages compaction tasks.
@@ -424,27 +417,6 @@ impl Drop for CompactionScheduler {
     }
 }
 
-/// Pending compaction tasks.
-struct PendingCompaction {
-    waiters: Vec<OutputTx>,
-}
-
-impl PendingCompaction {
-    /// Push waiter to the request.
-    fn push_waiter(&mut self, mut waiter: OptionOutputTx) {
-        if let Some(waiter) = waiter.take_inner() {
-            self.waiters.push(waiter);
-        }
-    }
-
-    /// Send compaction error to waiter.
-    fn on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
-        for waiter in self.waiters.drain(..) {
-            waiter.send(Err(err.clone()).context(CompactRegionSnafu { region_id }));
-        }
-    }
-}
-
 /// Finds TTL of table by first examine table options then database options.
 async fn find_ttl(
     table_id: TableId,
@@ -478,10 +450,8 @@ struct CompactionStatus {
     version_control: VersionControlRef,
     /// Access layer of the region.
     access_layer: AccessLayerRef,
-    /// Compaction pending to schedule.
-    ///
-    /// For simplicity, we merge all pending compaction requests into one.
-    pending_compaction: Option<PendingCompaction>,
+    /// Pending waiters for compaction.
+    waiters: Vec<OutputTx>,
 }
 
 impl CompactionStatus {
@@ -495,23 +465,20 @@ impl CompactionStatus {
             region_id,
             version_control,
             access_layer,
-            pending_compaction: None,
+            waiters: Vec::new(),
         }
     }
 
-    /// Merge the watier to the pending compaction.
-    fn merge_waiter(&mut self, waiter: OptionOutputTx) {
-        let pending = self
-            .pending_compaction
-            .get_or_insert_with(|| PendingCompaction {
-                waiters: Vec::new(),
-            });
-        pending.push_waiter(waiter);
+    /// Merge the waiter to the pending compaction.
+    fn merge_waiter(&mut self, mut waiter: OptionOutputTx) {
+        if let Some(waiter) = waiter.take_inner() {
+            self.waiters.push(waiter);
+        }
     }
 
-    fn on_failure(self, err: Arc<Error>) {
-        if let Some(mut pending) = self.pending_compaction {
-            pending.on_failure(self.region_id, err.clone());
+    fn on_failure(mut self, err: Arc<Error>) {
+        for waiter in self.waiters.drain(..) {
+            waiter.send(Err(err.clone()).context(CompactRegionSnafu { region_id:self.region_id }));
         }
     }
 
@@ -522,7 +489,7 @@ impl CompactionStatus {
     fn new_compaction_request(
         &mut self,
         request_sender: Sender<WorkerRequest>,
-        waiter: OptionOutputTx,
+        mut waiter: OptionOutputTx,
         engine_config: Arc<MitoConfig>,
         cache_manager: CacheManagerRef,
         manifest_ctx: &ManifestContextRef,
@@ -532,26 +499,26 @@ impl CompactionStatus {
     ) -> CompactionRequest {
         let current_version = CompactionVersion::from(self.version_control.current().version);
         let start_time = Instant::now();
-        let mut req = CompactionRequest {
+        let mut waiters = Vec::with_capacity(self.waiters.len() + 1);
+        waiters.extend(std::mem::take(&mut self.waiters));
+
+        if let Some(waiter) = waiter.take_inner() {
+            waiters.push(waiter);
+        }
+
+        CompactionRequest {
             engine_config,
             current_version,
             access_layer: self.access_layer.clone(),
             request_sender: request_sender.clone(),
-            waiters: Vec::new(),
+            waiters,
             start_time,
             cache_manager,
             manifest_ctx: manifest_ctx.clone(),
             listener,
             schema_metadata_manager,
             max_parallelism,
-        };
-
-        if let Some(pending) = self.pending_compaction.take() {
-            req.waiters = pending.waiters;
         }
-        req.push_waiter(waiter);
-
-        req
     }
 }
 
@@ -692,7 +659,6 @@ fn get_expired_ssts(
 #[cfg(test)]
 mod tests {
     use tokio::sync::oneshot;
-
     use super::*;
     use crate::test_util::mock_schema_metadata_manager;
     use crate::test_util::scheduler_util::{SchedulerEnv, VecScheduler};
@@ -763,6 +729,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_schedule_on_finished() {
+        common_telemetry::init_default_ut_logging();
         let job_scheduler = Arc::new(VecScheduler::default());
         let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
         let (tx, _rx) = mpsc::channel(4);
@@ -828,13 +795,14 @@ mod tests {
             purger.clone(),
         );
         // The task is pending.
+        let (tx, _rx) = oneshot::channel();
         scheduler
             .schedule_compaction(
                 region_id,
                 compact_request::Options::Regular(Default::default()),
                 &version_control,
                 &env.access_layer,
-                OptionOutputTx::none(),
+                OptionOutputTx::new(Some(OutputTx::new(tx))),
                 &manifest_ctx,
                 schema_metadata_manager.clone(),
                 1,
@@ -843,12 +811,11 @@ mod tests {
             .unwrap();
         assert_eq!(1, scheduler.region_status.len());
         assert_eq!(1, job_scheduler.num_jobs());
-        assert!(scheduler
+        assert!(!scheduler
             .region_status
             .get(&builder.region_id())
             .unwrap()
-            .pending_compaction
-            .is_some());
+            .waiters.is_empty());
 
         // On compaction finished and schedule next compaction.
         scheduler
@@ -856,6 +823,8 @@ mod tests {
             .await;
         assert_eq!(1, scheduler.region_status.len());
         assert_eq!(2, job_scheduler.num_jobs());
+
+
         // 5 files for next compaction.
         apply_edit(
             &version_control,
@@ -863,6 +832,7 @@ mod tests {
             &[],
             purger.clone(),
         );
+        let (tx, _rx) = oneshot::channel();
         // The task is pending.
         scheduler
             .schedule_compaction(
@@ -870,7 +840,7 @@ mod tests {
                 compact_request::Options::Regular(Default::default()),
                 &version_control,
                 &env.access_layer,
-                OptionOutputTx::none(),
+                OptionOutputTx::new(Some(OutputTx::new(tx))),
                 &manifest_ctx,
                 schema_metadata_manager,
                 1,
@@ -878,11 +848,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(2, job_scheduler.num_jobs());
-        assert!(scheduler
+        assert!(!scheduler
             .region_status
             .get(&builder.region_id())
-            .unwrap()
-            .pending_compaction
-            .is_some());
+            .unwrap().waiters.is_empty());
     }
 }
