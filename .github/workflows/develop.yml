@@ -677,7 +677,7 @@ jobs:
 
   coverage:
     if: github.event_name == 'merge_group'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-20.04-8-cores
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
