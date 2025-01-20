@@ -590,10 +590,17 @@ pub enum Error {
     },
     #[snafu(display("Field is required for dispatcher"))]
     FieldRequiredForDispatcher,
-    #[snafu(display("table_part is required for dispatcher rule"))]
+    #[snafu(display("Table_part is required for dispatcher rule"))]
     TablePartRequiredForDispatcherRule,
-    #[snafu(display("value is required for dispatcher rule"))]
+    #[snafu(display("Value is required for dispatcher rule"))]
     ValueRequiredForDispatcherRule,
+    #[snafu(display("Keys and values length mismatch, values: {values}, keys: {keys}"))]
+    KeyValueLengthMismatch {
+        #[snafu(implicit)]
+        location: Location,
+        keys: usize,
+        values: usize,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

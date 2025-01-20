@@ -16,8 +16,8 @@ use common_telemetry::debug;
 use snafu::OptionExt;
 use yaml_rust::Yaml;
 
-use crate::etl_error::{
-    FieldRequiredForDispatcherSnafu, TablePartRequiredForDispatcherRuleSnafu,
+use crate::etl::error::{
+    Error, FieldRequiredForDispatcherSnafu, Result, TablePartRequiredForDispatcherRuleSnafu,
     ValueRequiredForDispatcherRuleSnafu,
 };
 use crate::Value;

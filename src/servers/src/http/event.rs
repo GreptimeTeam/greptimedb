@@ -612,7 +612,7 @@ async fn run_pipeline(
             .map(|rows| {
                 vec![RowInsertRequest {
                     rows: Some(rows),
-                    table_name: table_name,
+                    table_name,
                 }]
             })
             .context(PipelineTransformSnafu)
@@ -705,6 +705,8 @@ async fn run_pipeline(
                 None,
                 PipelineExecInput::Intermediate {
                     array: values,
+                    // FIXME(sunng87): this intermediate_keys is incorrect. what
+                    // we will need is the keys that generated after processors
                     keys: pipeline.intermediate_keys().clone(),
                 },
                 table_name,
