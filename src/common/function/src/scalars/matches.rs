@@ -22,6 +22,7 @@ use common_query::error::{
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeIterator, TreeNodeRecursion};
 use datafusion::common::{DFSchema, Result as DfResult};
 use datafusion::execution::context::SessionState;
+use datafusion::execution::SessionStateBuilder;
 use datafusion::logical_expr::{self, Expr, Volatility};
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 use datafusion::prelude::SessionConfig;
@@ -104,8 +105,7 @@ impl MatchesFunction {
         let like_expr = ast.into_like_expr(col_name);
 
         let input_schema = Self::input_schema();
-        let session_state =
-            SessionState::new_with_config_rt(SessionConfig::default(), Arc::default());
+        let session_state = SessionStateBuilder::new().with_default_features().build();
         let planner = DefaultPhysicalPlanner::default();
         let physical_expr = planner
             .create_physical_expr(&like_expr, &input_schema, &session_state)
@@ -131,7 +131,7 @@ impl MatchesFunction {
     }
 
     fn input_schema() -> DFSchema {
-        DFSchema::from_unqualifed_fields(
+        DFSchema::from_unqualified_fields(
             [Arc::new(Field::new("data", DataType::Utf8, true))].into(),
             HashMap::new(),
         )
