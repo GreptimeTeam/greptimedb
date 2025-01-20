@@ -12,11 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod bloom_filter;
 mod tantivy;
 
 use async_trait::async_trait;
-pub use tantivy::{TantivyFulltextIndexCreator, ROWID_FIELD_NAME, TEXT_FIELD_NAME};
+use puffin::puffin_manager::{PuffinWriter, PutOptions};
 
+pub use crate::fulltext_index::create::bloom_filter::BloomFilterFulltextIndexCreator;
+pub use crate::fulltext_index::create::tantivy::{
+    TantivyFulltextIndexCreator, ROWID_FIELD_NAME, TEXT_FIELD_NAME,
+};
 use crate::fulltext_index::error::Result;
 
 /// `FulltextIndexCreator` is for creating a fulltext index.
@@ -26,7 +31,14 @@ pub trait FulltextIndexCreator: Send {
     async fn push_text(&mut self, text: &str) -> Result<()>;
 
     /// Finalizes the creation of the index.
-    async fn finish(&mut self) -> Result<()>;
+    async fn finish(
+        &mut self,
+        puffin_writer: &mut (impl PuffinWriter + Send),
+        blob_key: &str,
+        put_options: PutOptions,
+    ) -> Result<u64>;
+
+    async fn abort(&mut self) -> Result<()>;
 
     /// Returns the memory usage in bytes during the creation of the index.
     fn memory_usage(&self) -> usize;

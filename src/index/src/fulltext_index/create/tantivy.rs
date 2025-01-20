@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use common_error::ext::BoxedError;
+use puffin::puffin_manager::{PuffinWriter, PutOptions};
 use snafu::{OptionExt, ResultExt};
 use tantivy::indexer::NoMergePolicy;
 use tantivy::schema::{Schema, STORED, TEXT};
@@ -24,7 +26,9 @@ use tantivy::{doc, Index, IndexWriter};
 use tantivy_jieba::JiebaTokenizer;
 
 use crate::fulltext_index::create::FulltextIndexCreator;
-use crate::fulltext_index::error::{FinishedSnafu, IoSnafu, JoinSnafu, Result, TantivySnafu};
+use crate::fulltext_index::error::{
+    ExternalSnafu, FinishedSnafu, IoSnafu, JoinSnafu, Result, TantivySnafu,
+};
 use crate::fulltext_index::{Analyzer, Config};
 
 pub const TEXT_FIELD_NAME: &str = "greptime_fulltext_text";
@@ -43,6 +47,9 @@ pub struct TantivyFulltextIndexCreator {
 
     /// The current max row id.
     max_rowid: u64,
+
+    /// The directory path in filesystem to store the index.
+    path: PathBuf,
 }
 
 impl TantivyFulltextIndexCreator {
@@ -59,7 +66,7 @@ impl TantivyFulltextIndexCreator {
         let rowid_field = schema_builder.add_u64_field(ROWID_FIELD_NAME, STORED);
         let schema = schema_builder.build();
 
-        let mut index = Index::create_in_dir(path, schema).context(TantivySnafu)?;
+        let mut index = Index::create_in_dir(&path, schema).context(TantivySnafu)?;
         index.settings_mut().docstore_compression = Compressor::Zstd(ZstdCompressor::default());
         index.set_tokenizers(Self::build_tokenizer(&config));
 
@@ -76,6 +83,7 @@ impl TantivyFulltextIndexCreator {
             text_field,
             rowid_field,
             max_rowid: 0,
+            path: path.as_ref().to_path_buf(),
         })
     }
 
@@ -115,14 +123,37 @@ impl FulltextIndexCreator for TantivyFulltextIndexCreator {
         Ok(())
     }
 
-    async fn finish(&mut self) -> Result<()> {
+    async fn finish(
+        &mut self,
+        puffin_writer: &mut (impl PuffinWriter + Send),
+        blob_key: &str,
+        put_options: PutOptions,
+    ) -> Result<u64> {
         let mut writer = self.writer.take().context(FinishedSnafu)?;
         common_runtime::spawn_blocking_global(move || {
             writer.commit().context(TantivySnafu)?;
             writer.wait_merging_threads().context(TantivySnafu)
         })
         .await
-        .context(JoinSnafu)?
+        .context(JoinSnafu)??;
+
+        puffin_writer
+            .put_dir(blob_key, self.path.clone(), put_options)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)
+    }
+
+    async fn abort(&mut self) -> Result<()> {
+        let mut writer = self.writer.take().context(FinishedSnafu)?;
+        common_runtime::spawn_blocking_global(move || {
+            writer.commit().context(TantivySnafu)?;
+            writer.wait_merging_threads().context(TantivySnafu)
+        })
+        .await
+        .context(JoinSnafu)??;
+
+        tokio::fs::remove_dir_all(&self.path).await.context(IoSnafu)
     }
 
     fn memory_usage(&self) -> usize {
@@ -134,12 +165,46 @@ impl FulltextIndexCreator for TantivyFulltextIndexCreator {
 #[cfg(test)]
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
+    use futures::AsyncRead;
     use tantivy::collector::DocSetCollector;
     use tantivy::query::QueryParser;
     use tantivy::schema::Value;
     use tantivy::TantivyDocument;
 
     use super::*;
+
+    struct MockPuffinWriter;
+
+    #[async_trait]
+    impl PuffinWriter for MockPuffinWriter {
+        async fn put_blob<R>(
+            &mut self,
+            _key: &str,
+            _raw_data: R,
+            _options: PutOptions,
+        ) -> puffin::error::Result<u64>
+        where
+            R: AsyncRead + Send,
+        {
+            unreachable!()
+        }
+
+        async fn put_dir(
+            &mut self,
+            _key: &str,
+            _dir: PathBuf,
+            _options: PutOptions,
+        ) -> puffin::error::Result<u64> {
+            Ok(0)
+        }
+        fn set_footer_lz4_compressed(&mut self, _lz4_compressed: bool) {
+            unreachable!()
+        }
+
+        async fn finish(self) -> puffin::error::Result<u64> {
+            Ok(0)
+        }
+    }
 
     #[tokio::test]
     async fn test_creator_basic() {
@@ -241,7 +306,10 @@ mod tests {
         for text in texts {
             creator.push_text(text).await.unwrap();
         }
-        creator.finish().await.unwrap();
+        creator
+            .finish(&mut MockPuffinWriter, "", PutOptions::default())
+            .await
+            .unwrap();
     }
 
     async fn query_and_check(path: &Path, cases: &[(&str, Vec<u32>)]) {

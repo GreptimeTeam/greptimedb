@@ -15,4 +15,5 @@
 pub(crate) mod applier;
 pub(crate) mod creator;
 
-const INDEX_BLOB_TYPE: &str = "greptime-fulltext-index-v1";
+const INDEX_BLOB_TYPE_V1: &str = "greptime-fulltext-index-v1";
+const INDEX_BLOB_TYPE_V2: &str = "greptime-fulltext-index-v2";
