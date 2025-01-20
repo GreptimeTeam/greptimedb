@@ -43,6 +43,8 @@ const CURSOR_COUNT_WARNING_LIMIT: usize = 10;
 #[builder(build_fn(skip))]
 pub struct QueryContext {
     current_catalog: String,
+    #[builder(default = "false")]
+    is_snapshot_read: bool,
     // we use Arc<RwLock>> for modifiable fields
     #[builder(default)]
     mutable_session_data: Arc<RwLock<MutableInner>>,
@@ -333,6 +335,8 @@ impl QueryContextBuilder {
             current_catalog: self
                 .current_catalog
                 .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string()),
+            // default to be false
+            is_snapshot_read: self.is_snapshot_read.unwrap_or_default(),
             mutable_session_data: self.mutable_session_data.unwrap_or_default(),
             mutable_query_context_data: self.mutable_query_context_data.unwrap_or_default(),
             sql_dialect: self
