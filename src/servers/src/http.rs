@@ -688,7 +688,7 @@ impl HttpServer {
                 );
 
                 // "/dashboard" and "/dashboard/" are two different paths in Axum.
-                // We cannot nest "/dashboard/", because we already mapping "/dashboard/*x" while nesting "/dashboard".
+                // We cannot nest "/dashboard/", because we already mapping "/dashboard/{*x}" while nesting "/dashboard".
                 // So we explicitly route "/dashboard/" here.
                 router = router
                     .route(
@@ -696,7 +696,7 @@ impl HttpServer {
                         routing::get(dashboard::static_handler).post(dashboard::static_handler),
                     )
                     .route(
-                        "/dashboard/*x",
+                        "/dashboard/{*x}",
                         routing::get(dashboard::static_handler).post(dashboard::static_handler),
                     );
             }
@@ -787,12 +787,12 @@ impl HttpServer {
             .route("/_license", routing::get(elasticsearch::handle_get_license))
             .route("/_bulk", routing::post(elasticsearch::handle_bulk_api))
             .route(
-                "/:index/_bulk",
+                "/{index}/_bulk",
                 routing::post(elasticsearch::handle_bulk_api_with_index),
             )
             // Return fake response for Elasticsearch ilm request.
             .route(
-                "/_ilm/policy/*path",
+                "/_ilm/policy/{*path}",
                 routing::any((
                     HttpStatusCode::OK,
                     elasticsearch::elasticsearch_headers(),
@@ -801,7 +801,7 @@ impl HttpServer {
             )
             // Return fake response for Elasticsearch index template request.
             .route(
-                "/_index_template/*path",
+                "/_index_template/{*path}",
                 routing::any((
                     HttpStatusCode::OK,
                     elasticsearch::elasticsearch_headers(),
@@ -811,7 +811,7 @@ impl HttpServer {
             // Return fake response for Elasticsearch ingest pipeline request.
             // See: https://www.elastic.co/guide/en/elasticsearch/reference/8.8/put-pipeline-api.html.
             .route(
-                "/_ingest/*path",
+                "/_ingest/{*path}",
                 routing::any((
                     HttpStatusCode::OK,
                     elasticsearch::elasticsearch_headers(),
@@ -821,7 +821,7 @@ impl HttpServer {
             // Return fake response for Elasticsearch nodes discovery request.
             // See: https://www.elastic.co/guide/en/elasticsearch/reference/8.8/cluster.html.
             .route(
-                "/_nodes/*path",
+                "/_nodes/{*path}",
                 routing::any((
                     HttpStatusCode::OK,
                     elasticsearch::elasticsearch_headers(),
@@ -831,7 +831,7 @@ impl HttpServer {
             // Return fake response for Logstash APIs requests.
             // See: https://www.elastic.co/guide/en/elasticsearch/reference/8.8/logstash-apis.html
             .route(
-                "/logstash/*path",
+                "/logstash/{*path}",
                 routing::any((
                     HttpStatusCode::OK,
                     elasticsearch::elasticsearch_headers(),
@@ -839,7 +839,7 @@ impl HttpServer {
                 )),
             )
             .route(
-                "/_logstash/*path",
+                "/_logstash/{*path}",
                 routing::any((
                     HttpStatusCode::OK,
                     elasticsearch::elasticsearch_headers(),
