@@ -51,9 +51,9 @@ use crate::compaction::picker::{new_picker, CompactionTask};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::config::MitoConfig;
 use crate::error::{
-    CompactRegionSnafu, Error, GetSchemaMetadataSnafu, RegionClosedSnafu, RegionDroppedSnafu,
-    RegionTruncatedSnafu, RemoteCompactionSnafu, Result, TimeRangePredicateOverflowSnafu,
-    TimeoutSnafu,
+    CompactRegionSnafu, Error, GetSchemaMetadataSnafu, ManualCompactionOverrideSnafu,
+    RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, RemoteCompactionSnafu, Result,
+    TimeRangePredicateOverflowSnafu, TimeoutSnafu,
 };
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT};
 use crate::read::projection::ProjectionMapper;
@@ -533,7 +533,7 @@ impl CompactionStatus {
                 prev.options, self.region_id
             );
             if let Some(waiter) = prev.waiter.take_inner() {
-                waiter.send(Err(Error::ManualCompactionOverride {}));
+                waiter.send(ManualCompactionOverrideSnafu.fail());
             }
         }
     }
