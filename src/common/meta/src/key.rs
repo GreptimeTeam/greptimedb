@@ -59,7 +59,7 @@
 //! 12. Kafka topic key: `__topic_name/kafka/{topic_name}`
 //！    - The key is used to mark existing topics in kafka for WAL.
 //!
-//! 13. Topic name to region map key `__topic_region_map/{topic_name}_{region_id}`
+//! 13. Topic name to region map key `__topic_region_map/{topic_name}/{region_id}`
 //!     - The key is used to map a pair of topic name and region id.
 //!
 //! All keys have related managers. The managers take care of the serialization and deserialization
@@ -243,7 +243,7 @@ lazy_static! {
 
 lazy_static! {
     pub static ref TOPIC_REGION_MAP_PATTERN: Regex =
-        Regex::new(&format!("^{TOPIC_REGION_MAP_PREFIX}/(.*)_([0-9]+)$")).unwrap();
+        Regex::new(&format!("^{TOPIC_REGION_MAP_PREFIX}/({NAME_PATTERN})/([0-9]+)$")).unwrap();
 }
 
 /// The key of metadata.
