@@ -527,11 +527,14 @@ impl CompactionStatus {
 
     /// Set pending compaction request or replace current value if already exist.
     fn set_pending_request(&mut self, pending: PendingCompaction) {
-        if let Some(prev) = self.pending_request.replace(pending) {
+        if let Some(mut prev) = self.pending_request.replace(pending) {
             debug!(
                 "Replace pending compaction options with new request {:?} for region: {}",
                 prev.options, self.region_id
             );
+            if let Some(waiter) = prev.waiter.take_inner() {
+                waiter.send(Err(Error::ManualCompactionOverride {}));
+            }
         }
     }
 
