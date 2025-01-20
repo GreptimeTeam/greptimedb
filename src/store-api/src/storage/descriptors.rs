@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use std::fmt;
+use std::num::ParseIntError;
+use std::str::FromStr;
 
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
@@ -127,6 +129,15 @@ impl From<u64> for RegionId {
 impl From<RegionId> for u64 {
     fn from(region_id: RegionId) -> u64 {
         region_id.as_u64()
+    }
+}
+
+impl FromStr for RegionId {
+    type Err = ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let id = s.parse::<u64>()?;
+        Ok(RegionId::from_u64(id))
     }
 }
 

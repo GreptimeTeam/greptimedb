@@ -138,7 +138,7 @@ impl TopicNameManager {
     }
 
     /// Range query for topics.
-    /// Caution: this method returns keys as String instead of values of range query since the topics are stoired in keys.
+    /// Caution: this method returns keys as String instead of values of range query since the topics are stored in keys.
     pub async fn range(&self) -> Result<Vec<String>> {
         let prefix = TopicNameKey::range_start_key();
         let raw_prefix = prefix.as_bytes();

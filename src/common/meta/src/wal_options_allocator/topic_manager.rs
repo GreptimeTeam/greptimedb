@@ -14,28 +14,34 @@
 
 use std::collections::HashSet;
 
+use store_api::storage::RegionId;
+
 use crate::error::Result;
 use crate::key::topic_name::{TopicNameKey, TopicNameManager};
+use crate::key::topic_region_map::{TopicRegionMapKey, TopicRegionMapManager};
 use crate::kv_backend::KvBackendRef;
 
 /// Manages topics in kvbackend.
 /// Responsible for:
 /// 1. Restores and persisting topics in kvbackend.
 /// 2. Clears topics in legacy format and restores them in the new format.
+/// 3. Stores and fetches topic-region mapping in kvbackend.
 pub struct KafkaTopicManager {
-    key_manager: TopicNameManager,
+    topic_name_manager: TopicNameManager,
+    _topic_region_map_manager: TopicRegionMapManager,
 }
 
 impl KafkaTopicManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self {
-            key_manager: TopicNameManager::new(kv_backend),
+            topic_name_manager: TopicNameManager::new(kv_backend.clone()),
+            _topic_region_map_manager: TopicRegionMapManager::new(kv_backend),
         }
     }
 
     async fn restore_topics(&self) -> Result<Vec<String>> {
-        self.key_manager.update_legacy_topics().await?;
-        let topics = self.key_manager.range().await?;
+        self.topic_name_manager.update_legacy_topics().await?;
+        let topics = self.topic_name_manager.range().await?;
         Ok(topics)
     }
 
@@ -57,7 +63,7 @@ impl KafkaTopicManager {
 
     /// Persists topics into the key-value backend.
     pub async fn persist_topics(&self, topics: &[String]) -> Result<()> {
-        self.key_manager
+        self.topic_name_manager
             .batch_put(
                 topics
                     .iter()
@@ -65,6 +71,27 @@ impl KafkaTopicManager {
                     .collect(),
             )
             .await?;
+        Ok(())
+    }
+
+    /// Stores a topic-region mapping in the key-value backend.
+    pub async fn _put_topic_region_map(&self, topic: &str, region_id: RegionId) -> Result<()> {
+        let key = TopicRegionMapKey::new(region_id, topic);
+        self._topic_region_map_manager.put(key).await?;
+        Ok(())
+    }
+
+    /// Stores multiple topic-region mappings in the key-value backend.
+    pub async fn _batch_put_topic_region_map(
+        &self,
+        topic: &str,
+        region_ids: &[RegionId],
+    ) -> Result<()> {
+        let keys = region_ids
+            .iter()
+            .map(|region_id| TopicRegionMapKey::new(*region_id, topic))
+            .collect();
+        self._topic_region_map_manager.batch_put(keys).await?;
         Ok(())
     }
 }
