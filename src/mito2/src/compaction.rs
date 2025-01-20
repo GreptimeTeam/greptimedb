@@ -544,6 +544,14 @@ impl CompactionStatus {
                 region_id: self.region_id,
             }));
         }
+
+        if let Some(mut pending_compaction) = self.pending_request
+            && let Some(waiter) = pending_compaction.waiter.take_inner()
+        {
+            waiter.send(Err(err.clone()).context(CompactRegionSnafu {
+                region_id: self.region_id,
+            }));
+        }
     }
 
     /// Creates a new compaction request for compaction picker.
