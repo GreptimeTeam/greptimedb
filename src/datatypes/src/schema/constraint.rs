@@ -178,11 +178,62 @@ impl ColumnDefaultConstraint {
         }
     }
 
+    /// Only create default vector if it's impure, i.e., it's a function.
+    ///
+    /// This helps to delay creating constant default values to mito engine while also keeps impure default have consistent values
+    pub fn create_impure_default_vector(
+        &self,
+        data_type: &ConcreteDataType,
+        num_rows: usize,
+    ) -> Result<Option<VectorRef>> {
+        assert!(num_rows > 0);
+
+        match self {
+            ColumnDefaultConstraint::Function(expr) => {
+                // Functions should also ensure its return value is not null when
+                // is_nullable is true.
+                match &expr[..] {
+                    // TODO(dennis): we only supports current_timestamp right now,
+                    //   it's better to use a expression framework in future.
+                    CURRENT_TIMESTAMP | CURRENT_TIMESTAMP_FN | NOW_FN => {
+                        create_current_timestamp_vector(data_type, num_rows).map(Some)
+                    }
+                    _ => error::UnsupportedDefaultExprSnafu { expr }.fail(),
+                }
+            }
+            ColumnDefaultConstraint::Value(_) => Ok(None),
+        }
+    }
+
+    /// Only create default value if it's impure, i.e., it's a function.
+    ///
+    /// This helps to delay creating constant default values to mito engine while also keeps impure default have consistent values
+    pub fn create_impure_default(&self, data_type: &ConcreteDataType) -> Result<Option<Value>> {
+        match self {
+            ColumnDefaultConstraint::Function(expr) => {
+                // Functions should also ensure its return value is not null when
+                // is_nullable is true.
+                match &expr[..] {
+                    CURRENT_TIMESTAMP | CURRENT_TIMESTAMP_FN | NOW_FN => {
+                        create_current_timestamp(data_type).map(Some)
+                    }
+                    _ => error::UnsupportedDefaultExprSnafu { expr }.fail(),
+                }
+            }
+            ColumnDefaultConstraint::Value(_) => Ok(None),
+        }
+    }
+
     /// Returns true if this constraint might creates NULL.
     fn maybe_null(&self) -> bool {
         // Once we support more functions, we may return true if given function
         // could return null.
         matches!(self, ColumnDefaultConstraint::Value(Value::Null))
+    }
+
+    /// Returns true if this constraint is a function.
+    pub fn is_function(&self) -> bool {
+        matches!(self, ColumnDefaultConstraint::Function(_))
     }
 }
 

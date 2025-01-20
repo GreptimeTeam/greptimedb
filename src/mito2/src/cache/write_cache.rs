@@ -20,7 +20,6 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, info};
 use futures::AsyncWriteExt;
-use object_store::manager::ObjectStoreManagerRef;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
@@ -44,10 +43,6 @@ use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 pub struct WriteCache {
     /// Local file cache.
     file_cache: FileCacheRef,
-    /// Object store manager.
-    #[allow(unused)]
-    /// TODO: Remove unused after implementing async write cache
-    object_store_manager: ObjectStoreManagerRef,
     /// Puffin manager factory for index.
     puffin_manager_factory: PuffinManagerFactory,
     /// Intermediate manager for index.
@@ -61,7 +56,6 @@ impl WriteCache {
     /// `object_store_manager` for all object stores.
     pub async fn new(
         local_store: ObjectStore,
-        object_store_manager: ObjectStoreManagerRef,
         cache_capacity: ReadableSize,
         ttl: Option<Duration>,
         puffin_manager_factory: PuffinManagerFactory,
@@ -72,7 +66,6 @@ impl WriteCache {
 
         Ok(Self {
             file_cache,
-            object_store_manager,
             puffin_manager_factory,
             intermediate_manager,
         })
@@ -81,7 +74,6 @@ impl WriteCache {
     /// Creates a write cache based on local fs.
     pub async fn new_fs(
         cache_dir: &str,
-        object_store_manager: ObjectStoreManagerRef,
         cache_capacity: ReadableSize,
         ttl: Option<Duration>,
         puffin_manager_factory: PuffinManagerFactory,
@@ -92,7 +84,6 @@ impl WriteCache {
         let local_store = new_fs_cache_store(cache_dir).await?;
         Self::new(
             local_store,
-            object_store_manager,
             cache_capacity,
             ttl,
             puffin_manager_factory,
@@ -134,6 +125,7 @@ impl WriteCache {
             index_options: write_request.index_options,
             inverted_index_config: write_request.inverted_index_config,
             fulltext_index_config: write_request.fulltext_index_config,
+            bloom_filter_index_config: write_request.bloom_filter_index_config,
         }
         .build()
         .await;
@@ -146,7 +138,9 @@ impl WriteCache {
             indexer,
         );
 
-        let sst_info = writer.write_all(write_request.source, write_opts).await?;
+        let sst_info = writer
+            .write_all(write_request.source, write_request.max_sequence, write_opts)
+            .await?;
 
         timer.stop_and_record();
 
@@ -340,7 +334,7 @@ mod tests {
     use super::*;
     use crate::access_layer::OperationType;
     use crate::cache::test_util::new_fs_store;
-    use crate::cache::CacheManager;
+    use crate::cache::{CacheManager, CacheStrategy};
     use crate::region::options::IndexOptions;
     use crate::sst::file::FileId;
     use crate::sst::location::{index_file_path, sst_file_path};
@@ -383,10 +377,12 @@ mod tests {
             metadata,
             source,
             storage: None,
+            max_sequence: None,
             cache_manager: Default::default(),
             index_options: IndexOptions::default(),
             inverted_index_config: Default::default(),
             fulltext_index_config: Default::default(),
+            bloom_filter_index_config: Default::default(),
         };
 
         let upload_request = SstUploadRequest {
@@ -475,10 +471,12 @@ mod tests {
             metadata,
             source,
             storage: None,
+            max_sequence: None,
             cache_manager: cache_manager.clone(),
             index_options: IndexOptions::default(),
             inverted_index_config: Default::default(),
             fulltext_index_config: Default::default(),
+            bloom_filter_index_config: Default::default(),
         };
         let write_opts = WriteOptions {
             row_group_size: 512,
@@ -501,7 +499,7 @@ mod tests {
 
         // Read metadata from write cache
         let builder = ParquetReaderBuilder::new(data_home, handle.clone(), mock_store.clone())
-            .cache(cache_manager.clone());
+            .cache(CacheStrategy::EnableAll(cache_manager.clone()));
         let reader = builder.build().await.unwrap();
 
         // Check parquet metadata

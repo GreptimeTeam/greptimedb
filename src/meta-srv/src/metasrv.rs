@@ -71,8 +71,14 @@ pub const TABLE_ID_SEQ: &str = "table_id";
 pub const FLOW_ID_SEQ: &str = "flow_id";
 pub const METASRV_HOME: &str = "/tmp/metasrv";
 
+#[cfg(feature = "pg_kvbackend")]
+pub const DEFAULT_META_TABLE_NAME: &str = "greptime_metakv";
+#[cfg(feature = "pg_kvbackend")]
+pub const DEFAULT_META_ELECTION_LOCK_ID: u64 = 1;
+
 // The datastores that implements metadata kvbackend.
 #[derive(Clone, Debug, PartialEq, Serialize, Default, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
 pub enum BackendImpl {
     // Etcd as metadata storage.
     #[default]
@@ -139,13 +145,22 @@ pub struct MetasrvOptions {
     pub tracing: TracingOptions,
     /// The datastore for kv metadata.
     pub backend: BackendImpl,
+    #[cfg(feature = "pg_kvbackend")]
+    /// Table name of rds kv backend.
+    pub meta_table_name: String,
+    #[cfg(feature = "pg_kvbackend")]
+    /// Lock id for meta kv election. Only effect when using pg_kvbackend.
+    pub meta_election_lock_id: u64,
 }
+
+const DEFAULT_METASRV_ADDR_PORT: &str = "3002";
 
 impl Default for MetasrvOptions {
     fn default() -> Self {
         Self {
-            bind_addr: "127.0.0.1:3002".to_string(),
-            server_addr: "127.0.0.1:3002".to_string(),
+            bind_addr: format!("127.0.0.1:{}", DEFAULT_METASRV_ADDR_PORT),
+            // If server_addr is not set, the server will use the local ip address as the server address.
+            server_addr: String::new(),
             store_addrs: vec!["127.0.0.1:2379".to_string()],
             selector: SelectorType::default(),
             use_memory_store: false,
@@ -173,6 +188,10 @@ impl Default for MetasrvOptions {
             flush_stats_factor: 3,
             tracing: TracingOptions::default(),
             backend: BackendImpl::EtcdStore,
+            #[cfg(feature = "pg_kvbackend")]
+            meta_table_name: DEFAULT_META_TABLE_NAME.to_string(),
+            #[cfg(feature = "pg_kvbackend")]
+            meta_election_lock_id: DEFAULT_META_ELECTION_LOCK_ID,
         }
     }
 }
@@ -180,6 +199,39 @@ impl Default for MetasrvOptions {
 impl Configurable for MetasrvOptions {
     fn env_list_keys() -> Option<&'static [&'static str]> {
         Some(&["wal.broker_endpoints", "store_addrs"])
+    }
+}
+
+impl MetasrvOptions {
+    /// Detect server address if `auto_server_addr` is true.
+    #[cfg(not(target_os = "android"))]
+    pub fn detect_server_addr(&mut self) {
+        if self.server_addr.is_empty() {
+            match local_ip_address::local_ip() {
+                Ok(ip) => {
+                    let detected_addr = format!(
+                        "{}:{}",
+                        ip,
+                        self.bind_addr
+                            .split(':')
+                            .nth(1)
+                            .unwrap_or(DEFAULT_METASRV_ADDR_PORT)
+                    );
+                    info!("Using detected: {} as server address", detected_addr);
+                    self.server_addr = detected_addr;
+                }
+                Err(e) => {
+                    error!("Failed to detect local ip address: {}", e);
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn detect_server_addr(&mut self) {
+        if self.server_addr.is_empty() {
+            common_telemetry::debug!("detect local IP is not supported on Android");
+        }
     }
 }
 
@@ -203,10 +255,6 @@ pub struct Context {
 impl Context {
     pub fn reset_in_memory(&self) {
         self.in_memory.reset();
-    }
-
-    pub fn reset_leader_cached_kv_backend(&self) {
-        self.leader_cached_kv_backend.reset();
     }
 }
 
@@ -470,6 +518,10 @@ impl Metasrv {
                 });
             }
         } else {
+            warn!(
+                "Ensure only one instance of Metasrv is running, as there is no election service."
+            );
+
             if let Err(e) = self.wal_options_allocator.start().await {
                 error!(e; "Failed to start wal options allocator");
             }

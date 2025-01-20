@@ -15,6 +15,7 @@
 //! Structures to describe metadata of files.
 
 use std::fmt;
+use std::num::NonZeroU64;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -134,6 +135,11 @@ pub struct FileMeta {
     /// the default value `0` doesn't means the file doesn't contains any rows,
     /// but instead means the number of rows is unknown.
     pub num_row_groups: u64,
+    /// Sequence in this file.
+    ///
+    /// This sequence is the only sequence in this file. And it's retrieved from the max
+    /// sequence of the rows on generating this file.
+    pub sequence: Option<NonZeroU64>,
 }
 
 /// Type of index.
@@ -143,14 +149,52 @@ pub enum IndexType {
     InvertedIndex,
     /// Full-text index.
     FulltextIndex,
+    /// Bloom Filter index
+    BloomFilterIndex,
 }
 
 impl FileMeta {
+    /// Returns true if the file has an inverted index
     pub fn inverted_index_available(&self) -> bool {
         self.available_indexes.contains(&IndexType::InvertedIndex)
     }
+
+    /// Returns true if the file has a fulltext index
     pub fn fulltext_index_available(&self) -> bool {
         self.available_indexes.contains(&IndexType::FulltextIndex)
+    }
+
+    /// Returns true if the file has a bloom filter index.
+    pub fn bloom_filter_index_available(&self) -> bool {
+        self.available_indexes
+            .contains(&IndexType::BloomFilterIndex)
+    }
+
+    /// Returns the size of the inverted index file
+    pub fn inverted_index_size(&self) -> Option<u64> {
+        if self.available_indexes.len() == 1 && self.inverted_index_available() {
+            Some(self.index_file_size)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the size of the fulltext index file
+    pub fn fulltext_index_size(&self) -> Option<u64> {
+        if self.available_indexes.len() == 1 && self.fulltext_index_available() {
+            Some(self.index_file_size)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the size of the bloom filter index file
+    pub fn bloom_filter_index_size(&self) -> Option<u64> {
+        if self.available_indexes.len() == 1 && self.bloom_filter_index_available() {
+            Some(self.index_file_size)
+        } else {
+            None
+        }
     }
 }
 
@@ -305,6 +349,7 @@ mod tests {
             index_file_size: 0,
             num_rows: 0,
             num_row_groups: 0,
+            sequence: None,
         }
     }
 

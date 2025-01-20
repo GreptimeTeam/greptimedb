@@ -23,11 +23,8 @@ use api::v1::SemanticType;
 use async_trait::async_trait;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::{debug, warn};
-use common_time::range::TimestampRange;
-use common_time::timestamp::TimeUnit;
-use common_time::Timestamp;
-use datafusion_common::ScalarValue;
-use datafusion_expr::{Expr, Operator};
+use datafusion_expr::Expr;
+use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
@@ -41,10 +38,10 @@ use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
-use crate::cache::CacheManagerRef;
-use crate::error;
+use crate::cache::CacheStrategy;
 use crate::error::{
-    ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadParquetSnafu, Result,
+    ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadDataPartSnafu,
+    ReadParquetSnafu, Result,
 };
 use crate::metrics::{
     PRECISE_FILTER_ROWS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL, READ_ROWS_TOTAL,
@@ -52,8 +49,9 @@ use crate::metrics::{
 };
 use crate::read::prune::{PruneReader, Source};
 use crate::read::{Batch, BatchReader};
-use crate::row_converter::{McmpRowCodec, SortField};
+use crate::row_converter::DensePrimaryKeyCodec;
 use crate::sst::file::FileHandle;
+use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierRef;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::parquet::file_range::{FileRangeContext, FileRangeContextRef};
@@ -74,17 +72,16 @@ pub struct ParquetReaderBuilder {
     object_store: ObjectStore,
     /// Predicate to push down.
     predicate: Option<Predicate>,
-    /// Time range to filter.
-    time_range: Option<TimestampRange>,
     /// Metadata of columns to read.
     ///
     /// `None` reads all columns. Due to schema change, the projection
     /// can contain columns not in the parquet file.
     projection: Option<Vec<ColumnId>>,
-    /// Manager that caches SST data.
-    cache_manager: CacheManagerRef,
+    /// Strategy to cache SST data.
+    cache_strategy: CacheStrategy,
     /// Index appliers.
     inverted_index_applier: Option<InvertedIndexApplierRef>,
+    bloom_filter_index_applier: Option<BloomFilterIndexApplierRef>,
     fulltext_index_applier: Option<FulltextIndexApplierRef>,
     /// Expected metadata of the region while reading the SST.
     /// This is usually the latest metadata of the region. The reader use
@@ -104,10 +101,10 @@ impl ParquetReaderBuilder {
             file_handle,
             object_store,
             predicate: None,
-            time_range: None,
             projection: None,
-            cache_manager: CacheManagerRef::default(),
+            cache_strategy: CacheStrategy::Disabled,
             inverted_index_applier: None,
+            bloom_filter_index_applier: None,
             fulltext_index_applier: None,
             expected_metadata: None,
         }
@@ -117,13 +114,6 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub fn predicate(mut self, predicate: Option<Predicate>) -> ParquetReaderBuilder {
         self.predicate = predicate;
-        self
-    }
-
-    /// Attaches the time range to the builder.
-    #[must_use]
-    pub fn time_range(mut self, time_range: Option<TimestampRange>) -> ParquetReaderBuilder {
-        self.time_range = time_range;
         self
     }
 
@@ -138,8 +128,8 @@ impl ParquetReaderBuilder {
 
     /// Attaches the cache to the builder.
     #[must_use]
-    pub fn cache(mut self, cache: CacheManagerRef) -> ParquetReaderBuilder {
-        self.cache_manager = cache;
+    pub fn cache(mut self, cache: CacheStrategy) -> ParquetReaderBuilder {
+        self.cache_strategy = cache;
         self
     }
 
@@ -150,6 +140,16 @@ impl ParquetReaderBuilder {
         index_applier: Option<InvertedIndexApplierRef>,
     ) -> Self {
         self.inverted_index_applier = index_applier;
+        self
+    }
+
+    /// Attaches the bloom filter index applier to the builder.
+    #[must_use]
+    pub(crate) fn bloom_filter_index_applier(
+        mut self,
+        index_applier: Option<BloomFilterIndexApplierRef>,
+    ) -> Self {
+        self.bloom_filter_index_applier = index_applier;
         self
     }
 
@@ -222,8 +222,7 @@ impl ParquetReaderBuilder {
         let hint = Some(read_format.arrow_schema().fields());
         let field_levels =
             parquet_to_arrow_field_levels(parquet_schema_desc, projection_mask.clone(), hint)
-                .context(ReadParquetSnafu { path: &file_path })?;
-
+                .context(ReadDataPartSnafu)?;
         let row_groups = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
             .await;
@@ -235,10 +234,10 @@ impl ParquetReaderBuilder {
             object_store: self.object_store.clone(),
             projection: projection_mask,
             field_levels,
-            cache_manager: self.cache_manager.clone(),
+            cache_strategy: self.cache_strategy.clone(),
         };
 
-        let mut filters = if let Some(predicate) = &self.predicate {
+        let filters = if let Some(predicate) = &self.predicate {
             predicate
                 .exprs()
                 .iter()
@@ -254,17 +253,7 @@ impl ParquetReaderBuilder {
             vec![]
         };
 
-        if let Some(time_range) = &self.time_range {
-            filters.extend(time_range_to_predicate(*time_range, &region_meta)?);
-        }
-
-        let codec = McmpRowCodec::new(
-            read_format
-                .metadata()
-                .primary_key_columns()
-                .map(|c| SortField::new(c.column_schema.data_type.clone()))
-                .collect(),
-        );
+        let codec = DensePrimaryKeyCodec::new(read_format.metadata());
 
         let context = FileRangeContext::new(reader_builder, filters, read_format, codec);
 
@@ -314,7 +303,7 @@ impl ParquetReaderBuilder {
         let file_id = self.file_handle.file_id();
         // Tries to get from global cache.
         if let Some(metadata) = self
-            .cache_manager
+            .cache_strategy
             .get_parquet_meta_data(region_id, file_id)
             .await
         {
@@ -326,7 +315,7 @@ impl ParquetReaderBuilder {
         let metadata = metadata_loader.load().await?;
         let metadata = Arc::new(metadata);
         // Cache the metadata.
-        self.cache_manager.put_parquet_meta_data(
+        self.cache_strategy.put_parquet_meta_data(
             self.file_handle.region_id(),
             self.file_handle.file_id(),
             metadata.clone(),
@@ -355,8 +344,8 @@ impl ParquetReaderBuilder {
             return BTreeMap::default();
         }
 
-        metrics.num_row_groups_before_filtering += num_row_groups;
-        metrics.num_rows_in_row_group_before_filtering += num_rows as usize;
+        metrics.rg_total += num_row_groups;
+        metrics.rows_total += num_rows as usize;
 
         let mut output = (0..num_row_groups).map(|i| (i, None)).collect();
 
@@ -376,6 +365,9 @@ impl ParquetReaderBuilder {
         if !inverted_filtered {
             self.prune_row_groups_by_minmax(read_format, parquet_meta, &mut output, metrics);
         }
+
+        self.prune_row_groups_by_bloom_filter(parquet_meta, &mut output, metrics)
+            .await;
 
         output
     }
@@ -400,7 +392,7 @@ impl ParquetReaderBuilder {
             Err(err) => {
                 if cfg!(any(test, feature = "test")) {
                     panic!(
-                        "Failed to apply full-text index, region_id: {}, file_id: {}, err: {}",
+                        "Failed to apply full-text index, region_id: {}, file_id: {}, err: {:?}",
                         self.file_handle.region_id(),
                         self.file_handle.file_id(),
                         err
@@ -422,8 +414,8 @@ impl ParquetReaderBuilder {
             parquet_meta,
             row_group_to_row_ids,
             output,
-            &mut metrics.num_row_groups_fulltext_index_filtered,
-            &mut metrics.num_rows_in_row_group_fulltext_index_filtered,
+            &mut metrics.rg_fulltext_filtered,
+            &mut metrics.rows_fulltext_filtered,
         );
 
         true
@@ -475,13 +467,16 @@ impl ParquetReaderBuilder {
         if !self.file_handle.meta_ref().inverted_index_available() {
             return false;
         }
-
-        let apply_output = match index_applier.apply(self.file_handle.file_id()).await {
+        let file_size_hint = self.file_handle.meta_ref().inverted_index_size();
+        let apply_output = match index_applier
+            .apply(self.file_handle.file_id(), file_size_hint)
+            .await
+        {
             Ok(output) => output,
             Err(err) => {
                 if cfg!(any(test, feature = "test")) {
                     panic!(
-                        "Failed to apply inverted index, region_id: {}, file_id: {}, err: {}",
+                        "Failed to apply inverted index, region_id: {}, file_id: {}, err: {:?}",
                         self.file_handle.region_id(),
                         self.file_handle.file_id(),
                         err
@@ -520,8 +515,8 @@ impl ParquetReaderBuilder {
             parquet_meta,
             ranges_in_row_groups,
             output,
-            &mut metrics.num_row_groups_inverted_index_filtered,
-            &mut metrics.num_rows_in_row_group_inverted_index_filtered,
+            &mut metrics.rg_inverted_filtered,
+            &mut metrics.rows_inverted_filtered,
         );
 
         true
@@ -563,9 +558,69 @@ impl ParquetReaderBuilder {
             .collect::<BTreeMap<_, _>>();
 
         let row_groups_after = res.len();
-        metrics.num_row_groups_min_max_filtered += row_groups_before - row_groups_after;
+        metrics.rg_minmax_filtered += row_groups_before - row_groups_after;
 
         *output = res;
+        true
+    }
+
+    async fn prune_row_groups_by_bloom_filter(
+        &self,
+        parquet_meta: &ParquetMetaData,
+        output: &mut BTreeMap<usize, Option<RowSelection>>,
+        metrics: &mut ReaderFilterMetrics,
+    ) -> bool {
+        let Some(index_applier) = &self.bloom_filter_index_applier else {
+            return false;
+        };
+
+        if !self.file_handle.meta_ref().bloom_filter_index_available() {
+            return false;
+        }
+
+        let file_size_hint = self.file_handle.meta_ref().bloom_filter_index_size();
+        let apply_output = match index_applier
+            .apply(
+                self.file_handle.file_id(),
+                file_size_hint,
+                parquet_meta
+                    .row_groups()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, rg)| (rg.num_rows() as usize, output.contains_key(&i))),
+            )
+            .await
+        {
+            Ok(apply_output) => apply_output,
+            Err(err) => {
+                if cfg!(any(test, feature = "test")) {
+                    panic!(
+                        "Failed to apply bloom filter index, region_id: {}, file_id: {}, err: {:?}",
+                        self.file_handle.region_id(),
+                        self.file_handle.file_id(),
+                        err
+                    );
+                } else {
+                    warn!(
+                        err; "Failed to apply bloom filter index, region_id: {}, file_id: {}",
+                        self.file_handle.region_id(), self.file_handle.file_id()
+                    );
+                }
+
+                return false;
+            }
+        };
+
+        Self::prune_row_groups_by_ranges(
+            parquet_meta,
+            apply_output
+                .into_iter()
+                .map(|(rg, ranges)| (rg, ranges.into_iter())),
+            output,
+            &mut metrics.rg_bloom_filtered,
+            &mut metrics.rows_bloom_filtered,
+        );
+
         true
     }
 
@@ -675,121 +730,81 @@ impl ParquetReaderBuilder {
     }
 }
 
-/// Transforms time range into [SimpleFilterEvaluator].
-fn time_range_to_predicate(
-    time_range: TimestampRange,
-    metadata: &RegionMetadataRef,
-) -> Result<Vec<SimpleFilterContext>> {
-    let ts_col = metadata.time_index_column();
-    let ts_col_id = ts_col.column_id;
-
-    let ts_to_filter = |op: Operator, timestamp: &Timestamp| {
-        let value = match timestamp.unit() {
-            TimeUnit::Second => ScalarValue::TimestampSecond(Some(timestamp.value()), None),
-            TimeUnit::Millisecond => {
-                ScalarValue::TimestampMillisecond(Some(timestamp.value()), None)
-            }
-            TimeUnit::Microsecond => {
-                ScalarValue::TimestampMicrosecond(Some(timestamp.value()), None)
-            }
-            TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(timestamp.value()), None),
-        };
-        let evaluator = SimpleFilterEvaluator::new(ts_col.column_schema.name.clone(), value, op)
-            .context(error::BuildTimeRangeFilterSnafu {
-                timestamp: *timestamp,
-            })?;
-        Ok(SimpleFilterContext::new(
-            evaluator,
-            ts_col_id,
-            SemanticType::Timestamp,
-            ts_col.column_schema.data_type.clone(),
-        ))
-    };
-
-    let predicates = match (time_range.start(), time_range.end()) {
-        (Some(start), Some(end)) => {
-            vec![
-                ts_to_filter(Operator::GtEq, start)?,
-                ts_to_filter(Operator::Lt, end)?,
-            ]
-        }
-
-        (Some(start), None) => {
-            vec![ts_to_filter(Operator::GtEq, start)?]
-        }
-
-        (None, Some(end)) => {
-            vec![ts_to_filter(Operator::Lt, end)?]
-        }
-        (None, None) => {
-            vec![]
-        }
-    };
-    Ok(predicates)
-}
-
 /// Metrics of filtering rows groups and rows.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct ReaderFilterMetrics {
     /// Number of row groups before filtering.
-    pub(crate) num_row_groups_before_filtering: usize,
+    pub(crate) rg_total: usize,
     /// Number of row groups filtered by fulltext index.
-    pub(crate) num_row_groups_fulltext_index_filtered: usize,
+    pub(crate) rg_fulltext_filtered: usize,
     /// Number of row groups filtered by inverted index.
-    pub(crate) num_row_groups_inverted_index_filtered: usize,
+    pub(crate) rg_inverted_filtered: usize,
     /// Number of row groups filtered by min-max index.
-    pub(crate) num_row_groups_min_max_filtered: usize,
-    /// Number of rows filtered by precise filter.
-    pub(crate) num_rows_precise_filtered: usize,
+    pub(crate) rg_minmax_filtered: usize,
+    /// Number of row groups filtered by bloom filter index.
+    pub(crate) rg_bloom_filtered: usize,
+
     /// Number of rows in row group before filtering.
-    pub(crate) num_rows_in_row_group_before_filtering: usize,
+    pub(crate) rows_total: usize,
     /// Number of rows in row group filtered by fulltext index.
-    pub(crate) num_rows_in_row_group_fulltext_index_filtered: usize,
+    pub(crate) rows_fulltext_filtered: usize,
     /// Number of rows in row group filtered by inverted index.
-    pub(crate) num_rows_in_row_group_inverted_index_filtered: usize,
+    pub(crate) rows_inverted_filtered: usize,
+    /// Number of rows in row group filtered by bloom filter index.
+    pub(crate) rows_bloom_filtered: usize,
+    /// Number of rows filtered by precise filter.
+    pub(crate) rows_precise_filtered: usize,
 }
 
 impl ReaderFilterMetrics {
     /// Adds `other` metrics to this metrics.
     pub(crate) fn merge_from(&mut self, other: &ReaderFilterMetrics) {
-        self.num_row_groups_before_filtering += other.num_row_groups_before_filtering;
-        self.num_row_groups_fulltext_index_filtered += other.num_row_groups_fulltext_index_filtered;
-        self.num_row_groups_inverted_index_filtered += other.num_row_groups_inverted_index_filtered;
-        self.num_row_groups_min_max_filtered += other.num_row_groups_min_max_filtered;
-        self.num_rows_precise_filtered += other.num_rows_precise_filtered;
-        self.num_rows_in_row_group_before_filtering += other.num_rows_in_row_group_before_filtering;
-        self.num_rows_in_row_group_fulltext_index_filtered +=
-            other.num_rows_in_row_group_fulltext_index_filtered;
-        self.num_rows_in_row_group_inverted_index_filtered +=
-            other.num_rows_in_row_group_inverted_index_filtered;
+        self.rg_total += other.rg_total;
+        self.rg_fulltext_filtered += other.rg_fulltext_filtered;
+        self.rg_inverted_filtered += other.rg_inverted_filtered;
+        self.rg_minmax_filtered += other.rg_minmax_filtered;
+        self.rg_bloom_filtered += other.rg_bloom_filtered;
+
+        self.rows_total += other.rows_total;
+        self.rows_fulltext_filtered += other.rows_fulltext_filtered;
+        self.rows_inverted_filtered += other.rows_inverted_filtered;
+        self.rows_bloom_filtered += other.rows_bloom_filtered;
+        self.rows_precise_filtered += other.rows_precise_filtered;
     }
 
     /// Reports metrics.
     pub(crate) fn observe(&self) {
         READ_ROW_GROUPS_TOTAL
             .with_label_values(&["before_filtering"])
-            .inc_by(self.num_row_groups_before_filtering as u64);
+            .inc_by(self.rg_total as u64);
         READ_ROW_GROUPS_TOTAL
             .with_label_values(&["fulltext_index_filtered"])
-            .inc_by(self.num_row_groups_fulltext_index_filtered as u64);
+            .inc_by(self.rg_fulltext_filtered as u64);
         READ_ROW_GROUPS_TOTAL
             .with_label_values(&["inverted_index_filtered"])
-            .inc_by(self.num_row_groups_inverted_index_filtered as u64);
+            .inc_by(self.rg_inverted_filtered as u64);
         READ_ROW_GROUPS_TOTAL
             .with_label_values(&["minmax_index_filtered"])
-            .inc_by(self.num_row_groups_min_max_filtered as u64);
+            .inc_by(self.rg_minmax_filtered as u64);
+        READ_ROW_GROUPS_TOTAL
+            .with_label_values(&["bloom_filter_index_filtered"])
+            .inc_by(self.rg_bloom_filtered as u64);
+
         PRECISE_FILTER_ROWS_TOTAL
             .with_label_values(&["parquet"])
-            .inc_by(self.num_rows_precise_filtered as u64);
+            .inc_by(self.rows_precise_filtered as u64);
         READ_ROWS_IN_ROW_GROUP_TOTAL
             .with_label_values(&["before_filtering"])
-            .inc_by(self.num_rows_in_row_group_before_filtering as u64);
+            .inc_by(self.rows_total as u64);
         READ_ROWS_IN_ROW_GROUP_TOTAL
             .with_label_values(&["fulltext_index_filtered"])
-            .inc_by(self.num_rows_in_row_group_fulltext_index_filtered as u64);
+            .inc_by(self.rows_fulltext_filtered as u64);
         READ_ROWS_IN_ROW_GROUP_TOTAL
             .with_label_values(&["inverted_index_filtered"])
-            .inc_by(self.num_rows_in_row_group_inverted_index_filtered as u64);
+            .inc_by(self.rows_inverted_filtered as u64);
+        READ_ROWS_IN_ROW_GROUP_TOTAL
+            .with_label_values(&["bloom_filter_index_filtered"])
+            .inc_by(self.rows_bloom_filtered as u64);
     }
 }
 
@@ -846,7 +861,7 @@ pub(crate) struct RowGroupReaderBuilder {
     /// Field levels to read.
     field_levels: FieldLevels,
     /// Cache.
-    cache_manager: CacheManagerRef,
+    cache_strategy: CacheStrategy,
 }
 
 impl RowGroupReaderBuilder {
@@ -864,8 +879,8 @@ impl RowGroupReaderBuilder {
         &self.parquet_meta
     }
 
-    pub(crate) fn cache_manager(&self) -> &CacheManagerRef {
-        &self.cache_manager
+    pub(crate) fn cache_strategy(&self) -> &CacheStrategy {
+        &self.cache_strategy
     }
 
     /// Builds a [ParquetRecordBatchReader] to read the row group at `row_group_idx`.
@@ -879,7 +894,7 @@ impl RowGroupReaderBuilder {
             self.file_handle.file_id(),
             &self.parquet_meta,
             row_group_idx,
-            self.cache_manager.clone(),
+            self.cache_strategy.clone(),
             &self.file_path,
             self.object_store.clone(),
         );
@@ -915,10 +930,10 @@ enum ReaderState {
 
 impl ReaderState {
     /// Returns the metrics of the reader.
-    fn metrics(&mut self) -> &ReaderMetrics {
+    fn metrics(&self) -> ReaderMetrics {
         match self {
             ReaderState::Readable(reader) => reader.metrics(),
-            ReaderState::Exhausted(m) => m,
+            ReaderState::Exhausted(m) => m.clone(),
         }
     }
 }
@@ -936,25 +951,11 @@ pub(crate) struct SimpleFilterContext {
 }
 
 impl SimpleFilterContext {
-    fn new(
-        filter: SimpleFilterEvaluator,
-        column_id: ColumnId,
-        semantic_type: SemanticType,
-        data_type: ConcreteDataType,
-    ) -> Self {
-        Self {
-            filter,
-            column_id,
-            semantic_type,
-            data_type,
-        }
-    }
-
     /// Creates a context for the `expr`.
     ///
     /// Returns None if the column to filter doesn't exist in the SST metadata or the
     /// expected metadata.
-    fn new_opt(
+    pub(crate) fn new_opt(
         sst_meta: &RegionMetadataRef,
         expected_meta: Option<&RegionMetadata>,
         expr: &Expr,
@@ -1059,12 +1060,12 @@ impl Drop for ParquetReader {
             self.context.reader_builder().file_handle.region_id(),
             self.context.reader_builder().file_handle.file_id(),
             self.context.reader_builder().file_handle.time_range(),
-            metrics.filter_metrics.num_row_groups_before_filtering
-                - metrics
-                    .filter_metrics
-                    .num_row_groups_inverted_index_filtered
-                - metrics.filter_metrics.num_row_groups_min_max_filtered,
-            metrics.filter_metrics.num_row_groups_before_filtering,
+            metrics.filter_metrics.rg_total
+                - metrics.filter_metrics.rg_inverted_filtered
+                - metrics.filter_metrics.rg_minmax_filtered
+                - metrics.filter_metrics.rg_fulltext_filtered
+                - metrics.filter_metrics.rg_bloom_filtered,
+            metrics.filter_metrics.rg_total,
             metrics
         );
 
@@ -1118,10 +1119,51 @@ impl ParquetReader {
     }
 }
 
+/// RowGroupReaderContext represents the fields that cannot be shared
+/// between different `RowGroupReader`s.
+pub(crate) trait RowGroupReaderContext: Send {
+    fn map_result(
+        &self,
+        result: std::result::Result<Option<RecordBatch>, ArrowError>,
+    ) -> Result<Option<RecordBatch>>;
+
+    fn read_format(&self) -> &ReadFormat;
+}
+
+impl RowGroupReaderContext for FileRangeContextRef {
+    fn map_result(
+        &self,
+        result: std::result::Result<Option<RecordBatch>, ArrowError>,
+    ) -> Result<Option<RecordBatch>> {
+        result.context(ArrowReaderSnafu {
+            path: self.file_path(),
+        })
+    }
+
+    fn read_format(&self) -> &ReadFormat {
+        self.as_ref().read_format()
+    }
+}
+
+/// [RowGroupReader] that reads from [FileRange].
+pub(crate) type RowGroupReader = RowGroupReaderBase<FileRangeContextRef>;
+
+impl RowGroupReader {
+    /// Creates a new reader from file range.
+    pub(crate) fn new(context: FileRangeContextRef, reader: ParquetRecordBatchReader) -> Self {
+        Self {
+            context,
+            reader,
+            batches: VecDeque::new(),
+            metrics: ReaderMetrics::default(),
+        }
+    }
+}
+
 /// Reader to read a row group of a parquet file.
-pub struct RowGroupReader {
-    /// Context for file ranges.
-    context: FileRangeContextRef,
+pub(crate) struct RowGroupReaderBase<T> {
+    /// Context of [RowGroupReader] so adapts to different underlying implementation.
+    context: T,
     /// Inner parquet reader.
     reader: ParquetRecordBatchReader,
     /// Buffered batches to return.
@@ -1130,9 +1172,12 @@ pub struct RowGroupReader {
     metrics: ReaderMetrics,
 }
 
-impl RowGroupReader {
+impl<T> RowGroupReaderBase<T>
+where
+    T: RowGroupReaderContext,
+{
     /// Creates a new reader.
-    pub(crate) fn new(context: FileRangeContextRef, reader: ParquetRecordBatchReader) -> Self {
+    pub(crate) fn create(context: T, reader: ParquetRecordBatchReader) -> Self {
         Self {
             context,
             reader,
@@ -1145,21 +1190,19 @@ impl RowGroupReader {
     pub(crate) fn metrics(&self) -> &ReaderMetrics {
         &self.metrics
     }
-    pub(crate) fn context(&self) -> &FileRangeContextRef {
-        &self.context
+
+    /// Gets [ReadFormat] of underlying reader.
+    pub(crate) fn read_format(&self) -> &ReadFormat {
+        self.context.read_format()
     }
 
     /// Tries to fetch next [RecordBatch] from the reader.
     fn fetch_next_record_batch(&mut self) -> Result<Option<RecordBatch>> {
-        self.reader.next().transpose().context(ArrowReaderSnafu {
-            path: self.context.file_path(),
-        })
+        self.context.map_result(self.reader.next().transpose())
     }
-}
 
-#[async_trait::async_trait]
-impl BatchReader for RowGroupReader {
-    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+    /// Returns the next [Batch].
+    pub(crate) fn next_inner(&mut self) -> Result<Option<Batch>> {
         let scan_start = Instant::now();
         if let Some(batch) = self.batches.pop_front() {
             self.metrics.num_rows += batch.num_rows();
@@ -1184,6 +1227,16 @@ impl BatchReader for RowGroupReader {
         self.metrics.num_rows += batch.as_ref().map(|b| b.num_rows()).unwrap_or(0);
         self.metrics.scan_cost += scan_start.elapsed();
         Ok(batch)
+    }
+}
+
+#[async_trait::async_trait]
+impl<T> BatchReader for RowGroupReaderBase<T>
+where
+    T: RowGroupReaderContext,
+{
+    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        self.next_inner()
     }
 }
 

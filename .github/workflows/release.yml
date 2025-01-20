@@ -31,7 +31,7 @@ on:
       linux_arm64_runner:
         type: choice
         description: The runner uses to build linux-arm64 artifacts
-        default: ec2-c6g.4xlarge-arm64
+        default: ec2-c6g.8xlarge-arm64
         options:
           - ubuntu-2204-32-cores-arm
           - ec2-c6g.xlarge-arm64 # 4C8G
@@ -91,7 +91,7 @@ env:
   # The scheduled version is '${{ env.NEXT_RELEASE_VERSION }}-nightly-YYYYMMDD', like v0.2.0-nigthly-20230313;
   NIGHTLY_RELEASE_PREFIX: nightly
   # Note: The NEXT_RELEASE_VERSION should be modified manually by every formal release.
-  NEXT_RELEASE_VERSION: v0.11.0
+  NEXT_RELEASE_VERSION: v0.12.0
 
 # Permission reference: https://docs.github.com/en/actions/using-jobs/assigning-permissions-to-jobs
 permissions:
@@ -223,17 +223,9 @@ jobs:
             features: servers/dashboard
             artifacts-dir-prefix: greptime-darwin-arm64
           - os: ${{ needs.allocate-runners.outputs.macos-runner }}
-            arch: aarch64-apple-darwin
-            features: pyo3_backend,servers/dashboard
-            artifacts-dir-prefix: greptime-darwin-arm64-pyo3
-          - os: ${{ needs.allocate-runners.outputs.macos-runner }}
             features: servers/dashboard
             arch: x86_64-apple-darwin
             artifacts-dir-prefix: greptime-darwin-amd64
-          - os: ${{ needs.allocate-runners.outputs.macos-runner }}
-            features: pyo3_backend,servers/dashboard
-            arch: x86_64-apple-darwin
-            artifacts-dir-prefix: greptime-darwin-amd64-pyo3
     runs-on: ${{ matrix.os }}
     outputs:
       build-macos-result: ${{ steps.set-build-macos-result.outputs.build-macos-result }}
@@ -271,10 +263,6 @@ jobs:
             arch: x86_64-pc-windows-msvc
             features: servers/dashboard
             artifacts-dir-prefix: greptime-windows-amd64
-          - os: ${{ needs.allocate-runners.outputs.windows-runner }}
-            arch: x86_64-pc-windows-msvc
-            features: pyo3_backend,servers/dashboard
-            artifacts-dir-prefix: greptime-windows-amd64-pyo3
     runs-on: ${{ matrix.os }}
     outputs:
       build-windows-result: ${{ steps.set-build-windows-result.outputs.build-windows-result }}
@@ -447,6 +435,22 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.EC2_RUNNER_REGION }}
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+
+  bump-doc-version:
+    name: Bump doc version
+    if: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
+    needs: [allocate-runners]
+    runs-on: ubuntu-20.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-cyborg
+      - name: Bump doc version
+        working-directory: cyborg
+        run: pnpm tsx bin/bump-doc-version.ts
+        env:
+          VERSION: ${{ needs.allocate-runners.outputs.version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOCS_REPO_TOKEN: ${{ secrets.DOCS_REPO_TOKEN }}
 
   notification:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'push' || github.event_name == 'schedule') && always() }}

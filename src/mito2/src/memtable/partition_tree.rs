@@ -19,19 +19,23 @@ mod dedup;
 mod dict;
 mod merger;
 mod partition;
+// TODO(weny): remove this
+#[allow(unused)]
+mod primary_key_filter;
 mod shard;
 mod shard_builder;
 mod tree;
 
-use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
+pub(crate) use primary_key_filter::DensePrimaryKeyFilter;
 use serde::{Deserialize, Serialize};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error::{Result, UnsupportedOperationSnafu};
@@ -41,9 +45,10 @@ use crate::memtable::partition_tree::tree::PartitionTree;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, BulkPart, IterBuilder, KeyValues, Memtable, MemtableBuilder,
-    MemtableId, MemtableRange, MemtableRangeContext, MemtableRef, MemtableStats,
+    MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
 };
 use crate::region::options::MergeMode;
+use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec};
 
 /// Use `1/DICTIONARY_SIZE_FACTOR` of OS memory as dictionary size.
 pub(crate) const DICTIONARY_SIZE_FACTOR: u64 = 8;
@@ -114,6 +119,7 @@ pub struct PartitionTreeMemtable {
     alloc_tracker: AllocTracker,
     max_timestamp: AtomicI64,
     min_timestamp: AtomicI64,
+    max_sequence: AtomicU64,
     /// Total written rows in memtable. This also includes deleted and duplicated rows.
     num_rows: AtomicUsize,
 }
@@ -132,6 +138,10 @@ impl Memtable for PartitionTreeMemtable {
     }
 
     fn write(&self, kvs: &KeyValues) -> Result<()> {
+        if kvs.is_empty() {
+            return Ok(());
+        }
+
         // TODO(yingwen): Validate schema while inserting rows.
 
         let mut metrics = WriteMetrics::default();
@@ -140,6 +150,12 @@ impl Memtable for PartitionTreeMemtable {
         let res = self.tree.write(kvs, &mut pk_buffer, &mut metrics);
 
         self.update_stats(&metrics);
+
+        // update max_sequence
+        if res.is_ok() {
+            let sequence = kvs.max_sequence();
+            self.max_sequence.fetch_max(sequence, Ordering::Relaxed);
+        }
 
         self.num_rows.fetch_add(kvs.num_rows(), Ordering::Relaxed);
         res
@@ -152,6 +168,12 @@ impl Memtable for PartitionTreeMemtable {
         let res = self.tree.write_one(key_value, &mut pk_buffer, &mut metrics);
 
         self.update_stats(&metrics);
+
+        // update max_sequence
+        if res.is_ok() {
+            self.max_sequence
+                .fetch_max(key_value.sequence(), Ordering::Relaxed);
+        }
 
         self.num_rows.fetch_add(1, Ordering::Relaxed);
         res
@@ -168,24 +190,30 @@ impl Memtable for PartitionTreeMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
+        sequence: Option<SequenceNumber>,
     ) -> Result<BoxedBatchIterator> {
-        self.tree.read(projection, predicate)
+        self.tree.read(projection, predicate, sequence)
     }
 
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-    ) -> BTreeMap<usize, MemtableRange> {
+        sequence: Option<SequenceNumber>,
+    ) -> MemtableRanges {
         let projection = projection.map(|ids| ids.to_vec());
         let builder = Box::new(PartitionTreeIterBuilder {
             tree: self.tree.clone(),
             projection,
             predicate,
+            sequence,
         });
         let context = Arc::new(MemtableRangeContext::new(self.id, builder));
 
-        [(0, MemtableRange::new(context))].into()
+        MemtableRanges {
+            ranges: [(0, MemtableRange::new(context))].into(),
+            stats: self.stats(),
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -208,6 +236,7 @@ impl Memtable for PartitionTreeMemtable {
                 time_range: None,
                 num_rows: 0,
                 num_ranges: 0,
+                max_sequence: 0,
             };
         }
 
@@ -227,6 +256,7 @@ impl Memtable for PartitionTreeMemtable {
             time_range: Some((min_timestamp, max_timestamp)),
             num_rows: self.num_rows.load(Ordering::Relaxed),
             num_ranges: 1,
+            max_sequence: self.max_sequence.load(Ordering::Relaxed),
         }
     }
 
@@ -242,13 +272,14 @@ impl PartitionTreeMemtable {
     /// Returns a new memtable.
     pub fn new(
         id: MemtableId,
+        row_codec: Arc<dyn PrimaryKeyCodec>,
         metadata: RegionMetadataRef,
         write_buffer_manager: Option<WriteBufferManagerRef>,
         config: &PartitionTreeConfig,
     ) -> Self {
         Self::with_tree(
             id,
-            PartitionTree::new(metadata, config, write_buffer_manager.clone()),
+            PartitionTree::new(row_codec, metadata, config, write_buffer_manager.clone()),
         )
     }
 
@@ -265,6 +296,7 @@ impl PartitionTreeMemtable {
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
             num_rows: AtomicUsize::new(0),
+            max_sequence: AtomicU64::new(0),
         }
     }
 
@@ -298,12 +330,22 @@ impl PartitionTreeMemtableBuilder {
 
 impl MemtableBuilder for PartitionTreeMemtableBuilder {
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
-        Arc::new(PartitionTreeMemtable::new(
-            id,
-            metadata.clone(),
-            self.write_buffer_manager.clone(),
-            &self.config,
-        ))
+        match metadata.primary_key_encoding {
+            PrimaryKeyEncoding::Dense => {
+                let codec = Arc::new(DensePrimaryKeyCodec::new(metadata));
+                Arc::new(PartitionTreeMemtable::new(
+                    id,
+                    codec,
+                    metadata.clone(),
+                    self.write_buffer_manager.clone(),
+                    &self.config,
+                ))
+            }
+            PrimaryKeyEncoding::Sparse => {
+                //TODO(weny): Implement sparse primary key encoding.
+                todo!()
+            }
+        }
     }
 }
 
@@ -311,12 +353,16 @@ struct PartitionTreeIterBuilder {
     tree: Arc<PartitionTree>,
     projection: Option<Vec<ColumnId>>,
     predicate: Option<Predicate>,
+    sequence: Option<SequenceNumber>,
 }
 
 impl IterBuilder for PartitionTreeIterBuilder {
     fn build(&self) -> Result<BoxedBatchIterator> {
-        self.tree
-            .read(self.projection.as_deref(), self.predicate.clone())
+        self.tree.read(
+            self.projection.as_deref(),
+            self.predicate.clone(),
+            self.sequence,
+        )
     }
 }
 
@@ -336,7 +382,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+    use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
     use crate::test_util::memtable_util::{
         self, collect_iter_timestamps, region_metadata_to_row_schema,
     };
@@ -356,8 +402,14 @@ mod tests {
         let timestamps = (0..100).collect::<Vec<_>>();
         let kvs =
             memtable_util::build_key_values(&metadata, "hello".to_string(), 42, &timestamps, 1);
-        let memtable =
-            PartitionTreeMemtable::new(1, metadata, None, &PartitionTreeConfig::default());
+        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+        let memtable = PartitionTreeMemtable::new(
+            1,
+            codec,
+            metadata.clone(),
+            None,
+            &PartitionTreeConfig::default(),
+        );
         memtable.write(&kvs).unwrap();
 
         let expected_ts = kvs
@@ -365,7 +417,7 @@ mod tests {
             .map(|kv| kv.timestamp().as_timestamp().unwrap().unwrap().value())
             .collect::<Vec<_>>();
 
-        let iter = memtable.iter(None, None).unwrap();
+        let iter = memtable.iter(None, None, None).unwrap();
         let read = collect_iter_timestamps(iter);
         assert_eq!(expected_ts, read);
 
@@ -392,8 +444,14 @@ mod tests {
         } else {
             memtable_util::metadata_with_primary_key(vec![], false)
         };
-        let memtable =
-            PartitionTreeMemtable::new(1, metadata.clone(), None, &PartitionTreeConfig::default());
+        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+        let memtable = PartitionTreeMemtable::new(
+            1,
+            codec,
+            metadata.clone(),
+            None,
+            &PartitionTreeConfig::default(),
+        );
 
         let kvs = memtable_util::build_key_values(
             &metadata,
@@ -413,11 +471,11 @@ mod tests {
         );
         memtable.write(&kvs).unwrap();
 
-        let iter = memtable.iter(None, None).unwrap();
+        let iter = memtable.iter(None, None, None).unwrap();
         let read = collect_iter_timestamps(iter);
         assert_eq!(vec![0, 1, 2, 3, 4, 5, 6, 7], read);
 
-        let iter = memtable.iter(None, None).unwrap();
+        let iter = memtable.iter(None, None, None).unwrap();
         let read = iter
             .flat_map(|batch| {
                 batch
@@ -458,7 +516,7 @@ mod tests {
         let expect = (0..100).collect::<Vec<_>>();
         let kvs = memtable_util::build_key_values(&metadata, "hello".to_string(), 10, &expect, 1);
         memtable.write(&kvs).unwrap();
-        let iter = memtable.iter(Some(&[3]), None).unwrap();
+        let iter = memtable.iter(Some(&[3]), None, None).unwrap();
 
         let mut v0_all = vec![];
         for res in iter {
@@ -488,8 +546,10 @@ mod tests {
 
     fn write_iter_multi_keys(max_keys: usize, freeze_threshold: usize) {
         let metadata = memtable_util::metadata_with_primary_key(vec![1, 0], true);
+        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
         let memtable = PartitionTreeMemtable::new(
             1,
+            codec,
             metadata.clone(),
             None,
             &PartitionTreeConfig {
@@ -528,7 +588,7 @@ mod tests {
         data.sort_unstable();
 
         let expect = data.into_iter().map(|x| x.2).collect::<Vec<_>>();
-        let iter = memtable.iter(None, None).unwrap();
+        let iter = memtable.iter(None, None, None).unwrap();
         let read = collect_iter_timestamps(iter);
         assert_eq!(expect, read);
     }
@@ -564,7 +624,7 @@ mod tests {
                 right: Box::new(Expr::Literal(ScalarValue::UInt32(Some(i)))),
             });
             let iter = memtable
-                .iter(None, Some(Predicate::new(vec![expr])))
+                .iter(None, Some(Predicate::new(vec![expr])), None)
                 .unwrap();
             let read = collect_iter_timestamps(iter);
             assert_eq!(timestamps, read);
@@ -697,12 +757,7 @@ mod tests {
         )
         .build(1, &metadata);
 
-        let codec = McmpRowCodec::new(
-            metadata
-                .primary_key_columns()
-                .map(|c| SortField::new(c.column_schema.data_type.clone()))
-                .collect(),
-        );
+        let codec = DensePrimaryKeyCodec::new(&metadata);
 
         memtable
             .write(&build_key_values(
@@ -736,7 +791,7 @@ mod tests {
             ))
             .unwrap();
 
-        let mut reader = new_memtable.iter(None, None).unwrap();
+        let mut reader = new_memtable.iter(None, None, None).unwrap();
         let batch = reader.next().unwrap().unwrap();
         let pk = codec.decode(batch.primary_key()).unwrap();
         if let Value::String(s) = &pk[2] {

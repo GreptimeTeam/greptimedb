@@ -27,7 +27,10 @@ use datafusion_expr::{AggregateUDF, ScalarUDF, TableSource, WindowUDF};
 use datafusion_sql::planner::{ContextProvider, SqlToRel};
 use datafusion_sql::TableReference;
 use datatypes::arrow::datatypes::DataType;
-use datatypes::schema::{COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE};
+use datatypes::schema::{
+    COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,
+    COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE,
+};
 use snafu::ResultExt;
 
 use crate::error::{
@@ -121,6 +124,14 @@ pub fn validate_column_fulltext_create_option(key: &str) -> bool {
     [
         COLUMN_FULLTEXT_OPT_KEY_ANALYZER,
         COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,
+    ]
+    .contains(&key)
+}
+
+pub fn validate_column_skipping_index_create_option(key: &str) -> bool {
+    [
+        COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY,
+        COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE,
     ]
     .contains(&key)
 }

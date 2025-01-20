@@ -186,6 +186,7 @@ impl GreptimeDbClusterBuilder {
                 max_metadata_value_size: None,
             },
             wal: self.metasrv_wal_config.clone(),
+            server_addr: "127.0.0.1:3002".to_string(),
             ..Default::default()
         };
 

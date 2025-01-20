@@ -26,8 +26,8 @@ use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextOptions};
 use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
-    AddColumn, AddColumnLocation, AlterKind, RegionAlterRequest, RegionOpenRequest, RegionRequest,
-    SetRegionOption,
+    AddColumn, AddColumnLocation, AlterKind, ApiSetIndexOptions, RegionAlterRequest,
+    RegionOpenRequest, RegionRequest, SetRegionOption,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -69,15 +69,28 @@ fn add_tag1() -> RegionAlterRequest {
     }
 }
 
+fn alter_column_inverted_index() -> RegionAlterRequest {
+    RegionAlterRequest {
+        schema_version: 0,
+        kind: AlterKind::SetIndex {
+            options: ApiSetIndexOptions::Inverted {
+                column_name: "tag_0".to_string(),
+            },
+        },
+    }
+}
+
 fn alter_column_fulltext_options() -> RegionAlterRequest {
     RegionAlterRequest {
         schema_version: 0,
-        kind: AlterKind::SetColumnFulltext {
-            column_name: "tag_0".to_string(),
-            options: FulltextOptions {
-                enable: true,
-                analyzer: FulltextAnalyzer::English,
-                case_sensitive: false,
+        kind: AlterKind::SetIndex {
+            options: ApiSetIndexOptions::Fulltext {
+                column_name: "tag_0".to_string(),
+                options: FulltextOptions {
+                    enable: true,
+                    analyzer: FulltextAnalyzer::English,
+                    case_sensitive: false,
+                },
             },
         },
     }
@@ -116,6 +129,7 @@ async fn test_alter_region() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -210,6 +224,7 @@ async fn test_put_after_alter() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -315,6 +330,7 @@ async fn test_alter_region_retry() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -374,6 +390,7 @@ async fn test_alter_on_flushing() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -477,6 +494,7 @@ async fn test_alter_column_fulltext_options() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -575,6 +593,116 @@ async fn test_alter_column_fulltext_options() {
 }
 
 #[tokio::test]
+async fn test_alter_column_set_inverted_index() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new();
+    let listener = Arc::new(AlterFlushListener::default());
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()))
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let column_schemas = rows_schema(&request);
+    let region_dir = request.region_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    // Spawns a task to flush the engine.
+    let engine_cloned = engine.clone();
+    let flush_job = tokio::spawn(async move {
+        flush_region(&engine_cloned, region_id, None).await;
+    });
+    // Waits for flush begin.
+    listener.wait_flush_begin().await;
+
+    // Consumes the notify permit in the listener.
+    listener.wait_request_begin().await;
+
+    // Submits an alter request to the region. The region should add the request
+    // to the pending ddl request list.
+    let request = alter_column_inverted_index();
+    let engine_cloned = engine.clone();
+    let alter_job = tokio::spawn(async move {
+        engine_cloned
+            .handle_request(region_id, RegionRequest::Alter(request))
+            .await
+            .unwrap();
+    });
+    // Waits until the worker handles the alter request.
+    listener.wait_request_begin().await;
+
+    // Spawns two task to flush the engine. The flush scheduler should put them to the
+    // pending task list.
+    let engine_cloned = engine.clone();
+    let pending_flush_job = tokio::spawn(async move {
+        flush_region(&engine_cloned, region_id, None).await;
+    });
+    // Waits until the worker handles the flush request.
+    listener.wait_request_begin().await;
+
+    // Wake up flush.
+    listener.wake_flush();
+    // Wait for the flush job.
+    flush_job.await.unwrap();
+    // Wait for pending flush job.
+    pending_flush_job.await.unwrap();
+    // Wait for the write job.
+    alter_job.await.unwrap();
+
+    let check_inverted_index_set = |engine: &MitoEngine| {
+        assert!(engine
+            .get_region(region_id)
+            .unwrap()
+            .metadata()
+            .column_by_name("tag_0")
+            .unwrap()
+            .column_schema
+            .is_inverted_indexed())
+    };
+    check_inverted_index_set(&engine);
+    check_region_version(&engine, region_id, 1, 3, 1, 3);
+
+    // Reopen region.
+    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                region_dir,
+                options: HashMap::default(),
+                skip_wal_replay: false,
+            }),
+        )
+        .await
+        .unwrap();
+    check_inverted_index_set(&engine);
+    check_region_version(&engine, region_id, 1, 3, 1, 3);
+}
+
+#[tokio::test]
 async fn test_alter_region_ttl_options() {
     common_telemetry::init_default_ut_logging();
 
@@ -594,6 +722,7 @@ async fn test_alter_region_ttl_options() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
     engine
@@ -604,7 +733,7 @@ async fn test_alter_region_ttl_options() {
     let alter_ttl_request = RegionAlterRequest {
         schema_version: 0,
         kind: AlterKind::SetRegionOptions {
-            options: vec![SetRegionOption::TTL(Duration::from_secs(500))],
+            options: vec![SetRegionOption::Ttl(Some(Duration::from_secs(500).into()))],
         },
     };
     let alter_job = tokio::spawn(async move {
@@ -617,14 +746,8 @@ async fn test_alter_region_ttl_options() {
     alter_job.await.unwrap();
 
     let check_ttl = |engine: &MitoEngine, expected: &Duration| {
-        let current_ttl = engine
-            .get_region(region_id)
-            .unwrap()
-            .version()
-            .options
-            .ttl
-            .unwrap();
-        assert_eq!(*expected, current_ttl);
+        let current_ttl = engine.get_region(region_id).unwrap().version().options.ttl;
+        assert_eq!(current_ttl, Some((*expected).into()));
     };
     // Verify the ttl.
     check_ttl(&engine, &Duration::from_secs(500));
@@ -650,6 +773,7 @@ async fn test_write_stall_on_altering() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 

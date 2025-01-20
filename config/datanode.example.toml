@@ -13,9 +13,6 @@ require_lease_before_startup = false
 ## By default, it provides services after all regions have been initialized.
 init_regions_in_background = false
 
-## Enable telemetry to collect anonymous usage data.
-enable_telemetry = true
-
 ## Parallelism of initializing regions.
 init_regions_parallelism = 16
 
@@ -42,6 +39,8 @@ rpc_max_recv_message_size = "512MB"
 ## @toml2docs:none-default
 rpc_max_send_message_size = "512MB"
 
+## Enable telemetry to collect anonymous usage data. Enabled by default.
+#+ enable_telemetry = true
 
 ## The HTTP server options.
 [http]
@@ -60,7 +59,7 @@ body_limit = "64MB"
 addr = "127.0.0.1:3001"
 ## The hostname advertised to the metasrv,
 ## and used for connections from outside the host
-hostname = "127.0.0.1"
+hostname = "127.0.0.1:3001"
 ## The number of server worker threads.
 runtime_size = 8
 ## The maximum receive message size for gRPC server.
@@ -143,15 +142,15 @@ dir = "/tmp/greptimedb/wal"
 
 ## The size of the WAL segment file.
 ## **It's only used when the provider is `raft_engine`**.
-file_size = "256MB"
+file_size = "128MB"
 
 ## The threshold of the WAL size to trigger a flush.
 ## **It's only used when the provider is `raft_engine`**.
-purge_threshold = "4GB"
+purge_threshold = "1GB"
 
 ## The interval to trigger a flush.
 ## **It's only used when the provider is `raft_engine`**.
-purge_interval = "10m"
+purge_interval = "1m"
 
 ## The read batch size.
 ## **It's only used when the provider is `raft_engine`**.
@@ -294,14 +293,14 @@ data_home = "/tmp/greptimedb/"
 ## - `Oss`: the data is stored in the Aliyun OSS.
 type = "File"
 
-## Cache configuration for object storage such as 'S3' etc. It is recommended to configure it when using object storage for better performance.
-## The local file cache directory.
+## Read cache configuration for object storage such as 'S3' etc, it's configured by default when using object storage. It is recommended to configure it when using object storage for better performance.
+## A local file directory, defaults to `{data_home}`. An empty string means disabling.
 ## @toml2docs:none-default
-cache_path = "/path/local_cache"
+#+ cache_path = ""
 
 ## The local file cache capacity in bytes. If your disk space is sufficient, it is recommended to set it larger.
 ## @toml2docs:none-default
-cache_capacity = "1GiB"
+cache_capacity = "5GiB"
 
 ## The S3 bucket name.
 ## **It's only used when the storage type is `S3`, `Oss` and `Gcs`**.
@@ -476,27 +475,21 @@ auto_flush_interval = "1h"
 ## @toml2docs:none-default="Auto"
 #+ selector_result_cache_size = "512MB"
 
-## Whether to enable the experimental write cache. It is recommended to enable it when using object storage for better performance.
-enable_experimental_write_cache = false
+## Whether to enable the write cache, it's enabled by default when using object storage. It is recommended to enable it when using object storage for better performance.
+enable_write_cache = false
 
-## File system path for write cache, defaults to `{data_home}/write_cache`.
-experimental_write_cache_path = ""
+## File system path for write cache, defaults to `{data_home}`.
+write_cache_path = ""
 
 ## Capacity for write cache. If your disk space is sufficient, it is recommended to set it larger.
-experimental_write_cache_size = "1GiB"
+write_cache_size = "5GiB"
 
 ## TTL for write cache.
 ## @toml2docs:none-default
-experimental_write_cache_ttl = "8h"
+write_cache_ttl = "8h"
 
 ## Buffer size for SST writing.
 sst_write_buffer_size = "8MB"
-
-## Parallelism to scan a region (default: 1/4 of cpu cores).
-## - `0`: using the default value (1/4 of cpu cores).
-## - `1`: scan in current thread.
-## - `n`: scan in parallelism n.
-scan_parallelism = 0
 
 ## Capacity of the channel to send data from parallel scan tasks to the main task.
 parallel_scan_channel_size = 32
@@ -522,6 +515,15 @@ aux_path = ""
 
 ## The max capacity of the staging directory.
 staging_size = "2GB"
+
+## Cache size for inverted index metadata.
+metadata_cache_size = "64MiB"
+
+## Cache size for inverted index content.
+content_cache_size = "128MiB"
+
+## Page size for inverted index content cache.
+content_cache_page_size = "64KiB"
 
 ## The options for inverted index in Mito engine.
 [region_engine.mito.inverted_index]
@@ -574,6 +576,30 @@ apply_on_query = "auto"
 ## - `[size]` e.g. `64MB`: fixed memory threshold
 mem_threshold_on_create = "auto"
 
+## The options for bloom filter index in Mito engine.
+[region_engine.mito.bloom_filter_index]
+
+## Whether to create the index on flush.
+## - `auto`: automatically (default)
+## - `disable`: never
+create_on_flush = "auto"
+
+## Whether to create the index on compaction.
+## - `auto`: automatically (default)
+## - `disable`: never
+create_on_compaction = "auto"
+
+## Whether to apply the index on query
+## - `auto`: automatically (default)
+## - `disable`: never
+apply_on_query = "auto"
+
+## Memory threshold for the index creation.
+## - `auto`: automatically determine the threshold based on the system memory size (default)
+## - `unlimited`: no memory limit
+## - `[size]` e.g. `64MB`: fixed memory threshold
+mem_threshold_on_create = "auto"
+
 [region_engine.mito.memtable]
 ## Memtable type.
 ## - `time_series`: time-series memtable
@@ -595,6 +621,12 @@ fork_dictionary_bytes = "1GiB"
 [[region_engine]]
 ## Enable the file engine.
 [region_engine.file]
+
+[[region_engine]]
+## Metric engine options.
+[region_engine.metric]
+## Whether to enable the experimental sparse primary key encoding.
+experimental_sparse_primary_key_encoding = false
 
 ## The logging options.
 [logging]

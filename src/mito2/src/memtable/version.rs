@@ -15,6 +15,7 @@
 //! Memtable version.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use smallvec::SmallVec;
 use store_api::metadata::RegionMetadataRef;
@@ -65,27 +66,53 @@ impl MemtableVersion {
     /// Returns a new [MemtableVersion] which switches the old mutable memtable to immutable
     /// memtable.
     ///
+    /// It will switch to use the `time_window` provided.
+    ///
     /// Returns `None` if the mutable memtable is empty.
     pub(crate) fn freeze_mutable(
         &self,
         metadata: &RegionMetadataRef,
+        time_window: Option<Duration>,
     ) -> Result<Option<MemtableVersion>> {
         if self.mutable.is_empty() {
-            // No need to freeze the mutable memtable.
-            return Ok(None);
+            // No need to freeze the mutable memtable, but we need to check the time window.
+            if self.mutable.part_duration() == time_window {
+                // If the time window is the same, we don't need to update it.
+                return Ok(None);
+            }
+
+            // Update the time window.
+            let mutable = self.mutable.new_with_part_duration(time_window);
+            common_telemetry::debug!(
+                "Freeze empty memtable, update partition duration from {:?} to {:?}",
+                self.mutable.part_duration(),
+                time_window
+            );
+            return Ok(Some(MemtableVersion {
+                mutable: Arc::new(mutable),
+                immutables: self.immutables.clone(),
+            }));
         }
 
         // Marks the mutable memtable as immutable so it can free the memory usage from our
         // soft limit.
         self.mutable.freeze()?;
         // Fork the memtable.
-        let mutable = Arc::new(self.mutable.fork(metadata));
+        if self.mutable.part_duration() != time_window {
+            common_telemetry::debug!(
+                "Fork memtable, update partition duration from {:?}, to {:?}",
+                self.mutable.part_duration(),
+                time_window
+            );
+        }
+        let mutable = Arc::new(self.mutable.fork(metadata, time_window));
 
-        // Pushes the mutable memtable to immutable list.
         let mut immutables =
             SmallVec::with_capacity(self.immutables.len() + self.mutable.num_partitions());
-        self.mutable.list_memtables_to_small_vec(&mut immutables);
         immutables.extend(self.immutables.iter().cloned());
+        // Pushes the mutable memtable to immutable list.
+        self.mutable.list_memtables_to_small_vec(&mut immutables);
+
         Ok(Some(MemtableVersion {
             mutable,
             immutables,

@@ -25,6 +25,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements;
 use sql::statements::insert::Insert;
 use sqlparser::ast::{ObjectName, Value as SqlValue};
+use table::metadata::TableInfoRef;
 use table::TableRef;
 
 use crate::error::{
@@ -32,6 +33,7 @@ use crate::error::{
     ColumnNotFoundSnafu, InvalidSqlSnafu, MissingInsertBodySnafu, ParseSqlSnafu, Result,
     SchemaReadOnlySnafu, TableNotFoundSnafu,
 };
+use crate::insert::InstantAndNormalInsertRequests;
 use crate::req_convert::common::partitioner::Partitioner;
 use crate::req_convert::insert::semantic_type;
 
@@ -60,7 +62,7 @@ impl<'a> StatementToRegion<'a> {
         &self,
         stmt: &Insert,
         query_ctx: &QueryContextRef,
-    ) -> Result<RegionInsertRequests> {
+    ) -> Result<(InstantAndNormalInsertRequests, TableInfoRef)> {
         let (catalog, schema, table_name) = self.get_full_name(stmt.table_name())?;
         let table = self.get_table(&catalog, &schema, &table_name).await?;
         let table_schema = table.schema();
@@ -134,7 +136,24 @@ impl<'a> StatementToRegion<'a> {
         let requests = Partitioner::new(self.partition_manager)
             .partition_insert_requests(table_info.table_id(), Rows { schema, rows })
             .await?;
-        Ok(RegionInsertRequests { requests })
+        let requests = RegionInsertRequests { requests };
+        if table_info.is_ttl_instant_table() {
+            Ok((
+                InstantAndNormalInsertRequests {
+                    normal_requests: Default::default(),
+                    instant_requests: requests,
+                },
+                table_info,
+            ))
+        } else {
+            Ok((
+                InstantAndNormalInsertRequests {
+                    normal_requests: requests,
+                    instant_requests: Default::default(),
+                },
+                table_info,
+            ))
+        }
     }
 
     async fn get_table(&self, catalog: &str, schema: &str, table: &str) -> Result<TableRef> {

@@ -24,6 +24,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
 use datafusion_expr::utils::expr_to_columns;
+use smallvec::SmallVec;
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{ScanRequest, TimeSeriesRowSelector};
 use table::predicate::{build_time_range_predicate, Predicate};
@@ -32,9 +33,10 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::file_cache::FileCacheRef;
-use crate::cache::CacheManagerRef;
+use crate::cache::CacheStrategy;
+use crate::config::DEFAULT_SCAN_CHANNEL_SIZE;
 use crate::error::Result;
-use crate::memtable::MemtableRef;
+use crate::memtable::MemtableRange;
 use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::{self, CompatBatch};
 use crate::read::projection::ProjectionMapper;
@@ -45,6 +47,9 @@ use crate::read::{Batch, Source};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionRef;
 use crate::sst::file::FileHandle;
+use crate::sst::index::bloom_filter::applier::{
+    BloomFilterIndexApplierBuilder, BloomFilterIndexApplierRef,
+};
 use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
@@ -66,15 +71,6 @@ impl Scanner {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.build_stream(),
             Scanner::Unordered(unordered_scan) => unordered_scan.build_stream().await,
-        }
-    }
-
-    /// Returns a [RegionScanner] to scan the region.
-    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
-    pub(crate) fn region_scanner(self) -> Result<RegionScannerRef> {
-        match self {
-            Scanner::Seq(seq_scan) => Ok(Box::new(seq_scan)),
-            Scanner::Unordered(unordered_scan) => Ok(Box::new(unordered_scan)),
         }
     }
 }
@@ -102,6 +98,17 @@ impl Scanner {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.input().file_ids(),
             Scanner::Unordered(unordered_scan) => unordered_scan.input().file_ids(),
+        }
+    }
+
+    /// Sets the target partitions for the scanner. It can controls the parallelism of the scanner.
+    pub(crate) fn set_target_partitions(&mut self, target_partitions: usize) {
+        use store_api::region_engine::{PrepareRequest, RegionScanner};
+
+        let request = PrepareRequest::default().with_target_partitions(target_partitions);
+        match self {
+            Scanner::Seq(seq_scan) => seq_scan.prepare(request).unwrap(),
+            Scanner::Unordered(unordered_scan) => unordered_scan.prepare(request).unwrap(),
         }
     }
 }
@@ -164,13 +171,15 @@ pub(crate) struct ScanRegion {
     /// Scan request.
     request: ScanRequest,
     /// Cache.
-    cache_manager: CacheManagerRef,
-    /// Parallelism to scan.
-    parallelism: ScanParallelism,
+    cache_strategy: CacheStrategy,
+    /// Capacity of the channel to send data from parallel scan tasks to the main task.
+    parallel_scan_channel_size: usize,
     /// Whether to ignore inverted index.
     ignore_inverted_index: bool,
     /// Whether to ignore fulltext index.
     ignore_fulltext_index: bool,
+    /// Whether to ignore bloom filter.
+    ignore_bloom_filter: bool,
     /// Start time of the scan task.
     start_time: Option<Instant>,
 }
@@ -181,24 +190,28 @@ impl ScanRegion {
         version: VersionRef,
         access_layer: AccessLayerRef,
         request: ScanRequest,
-        cache_manager: CacheManagerRef,
+        cache_strategy: CacheStrategy,
     ) -> ScanRegion {
         ScanRegion {
             version,
             access_layer,
             request,
-            cache_manager,
-            parallelism: ScanParallelism::default(),
+            cache_strategy,
+            parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             ignore_inverted_index: false,
             ignore_fulltext_index: false,
+            ignore_bloom_filter: false,
             start_time: None,
         }
     }
 
-    /// Sets parallelism.
+    /// Sets parallel scan task channel size.
     #[must_use]
-    pub(crate) fn with_parallelism(mut self, parallelism: ScanParallelism) -> Self {
-        self.parallelism = parallelism;
+    pub(crate) fn with_parallel_scan_channel_size(
+        mut self,
+        parallel_scan_channel_size: usize,
+    ) -> Self {
+        self.parallel_scan_channel_size = parallel_scan_channel_size;
         self
     }
 
@@ -216,6 +229,13 @@ impl ScanRegion {
         self
     }
 
+    /// Sets whether to ignore bloom filter.
+    #[must_use]
+    pub(crate) fn with_ignore_bloom_filter(mut self, ignore: bool) -> Self {
+        self.ignore_bloom_filter = ignore;
+        self
+    }
+
     #[must_use]
     pub(crate) fn with_start_time(mut self, now: Instant) -> Self {
         self.start_time = Some(now);
@@ -224,7 +244,7 @@ impl ScanRegion {
 
     /// Returns a [Scanner] to scan the region.
     pub(crate) fn scanner(self) -> Result<Scanner> {
-        if self.version.options.append_mode && self.request.series_row_selector.is_none() {
+        if self.use_unordered_scan() {
             // If table is append only and there is no series row selector, we use unordered scan in query.
             // We still use seq scan in compaction.
             self.unordered_scan().map(Scanner::Unordered)
@@ -233,10 +253,20 @@ impl ScanRegion {
         }
     }
 
+    /// Returns a [RegionScanner] to scan the region.
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
+    pub(crate) fn region_scanner(self) -> Result<RegionScannerRef> {
+        if self.use_unordered_scan() {
+            self.unordered_scan().map(|scanner| Box::new(scanner) as _)
+        } else {
+            self.seq_scan().map(|scanner| Box::new(scanner) as _)
+        }
+    }
+
     /// Scan sequentially.
     pub(crate) fn seq_scan(self) -> Result<SeqScan> {
         let input = self.scan_input(true)?;
-        Ok(SeqScan::new(input))
+        Ok(SeqScan::new(input, false))
     }
 
     /// Unordered scan.
@@ -248,7 +278,14 @@ impl ScanRegion {
     #[cfg(test)]
     pub(crate) fn scan_without_filter_deleted(self) -> Result<SeqScan> {
         let input = self.scan_input(false)?;
-        Ok(SeqScan::new(input))
+        Ok(SeqScan::new(input, false))
+    }
+
+    /// Returns true if the region can use unordered scan for current request.
+    fn use_unordered_scan(&self) -> bool {
+        // If table is append only and there is no series row selector, we use unordered scan in query.
+        // We still use seq scan in compaction.
+        self.version.options.append_mode && self.request.series_row_selector.is_none()
     }
 
     /// Creates a scan input.
@@ -263,6 +300,9 @@ impl ScanRegion {
                 if file_in_range(file, &time_range) {
                     files.push(file.clone());
                 }
+                // There is no need to check and prune for file's sequence here as the sequence number is usually very new,
+                // unless the timing is too good, or the sequence number wouldn't be in file.
+                // and the batch will be filtered out by tree reader anyway.
             }
         }
 
@@ -298,6 +338,7 @@ impl ScanRegion {
         self.maybe_remove_field_filters();
 
         let inverted_index_applier = self.build_invereted_index_applier();
+        let bloom_filter_applier = self.build_bloom_filter_applier();
         let fulltext_index_applier = self.build_fulltext_index_applier();
         let predicate = Predicate::new(self.request.filters.clone());
         // The mapper always computes projected column ids as the schema of SSTs may change.
@@ -305,16 +346,29 @@ impl ScanRegion {
             Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied())?,
             None => ProjectionMapper::all(&self.version.metadata)?,
         };
+        // Get memtable ranges to scan.
+        let memtables = memtables
+            .into_iter()
+            .map(|mem| {
+                let ranges = mem.ranges(
+                    Some(mapper.column_ids()),
+                    Some(predicate.clone()),
+                    self.request.sequence,
+                );
+                MemRangeBuilder::new(ranges)
+            })
+            .collect();
 
         let input = ScanInput::new(self.access_layer, mapper)
             .with_time_range(Some(time_range))
             .with_predicate(Some(predicate))
             .with_memtables(memtables)
             .with_files(files)
-            .with_cache(self.cache_manager)
+            .with_cache(self.cache_strategy)
             .with_inverted_index_applier(inverted_index_applier)
+            .with_bloom_filter_index_applier(bloom_filter_applier)
             .with_fulltext_index_applier(fulltext_index_applier)
-            .with_parallelism(self.parallelism)
+            .with_parallel_scan_channel_size(self.parallel_scan_channel_size)
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)
             .with_filter_deleted(filter_deleted)
@@ -323,8 +377,8 @@ impl ScanRegion {
         Ok(input)
     }
 
-    /// Build time range predicate from filters, also remove time filters from request.
-    fn build_time_range_predicate(&mut self) -> TimestampRange {
+    /// Build time range predicate from filters.
+    fn build_time_range_predicate(&self) -> TimestampRange {
         let time_index = self.version.metadata.time_index_column();
         let unit = time_index
             .column_schema
@@ -332,11 +386,7 @@ impl ScanRegion {
             .as_timestamp()
             .expect("Time index must have timestamp-compatible type")
             .unit();
-        build_time_range_predicate(
-            &time_index.column_schema.name,
-            unit,
-            &mut self.request.filters,
-        )
+        build_time_range_predicate(&time_index.column_schema.name, unit, &self.request.filters)
     }
 
     /// Remove field filters if the merge mode is [MergeMode::LastNonNull].
@@ -371,25 +421,25 @@ impl ScanRegion {
         });
     }
 
-    /// Use the latest schema to build the inveretd index applier.
+    /// Use the latest schema to build the inverted index applier.
     fn build_invereted_index_applier(&self) -> Option<InvertedIndexApplierRef> {
         if self.ignore_inverted_index {
             return None;
         }
 
         let file_cache = || -> Option<FileCacheRef> {
-            let write_cache = self.cache_manager.write_cache()?;
+            let write_cache = self.cache_strategy.write_cache()?;
             let file_cache = write_cache.file_cache();
             Some(file_cache)
         }();
 
-        let index_cache = self.cache_manager.index_cache().cloned();
+        let inverted_index_cache = self.cache_strategy.inverted_index_cache().cloned();
+
+        let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
 
         InvertedIndexApplierBuilder::new(
             self.access_layer.region_dir().to_string(),
             self.access_layer.object_store().clone(),
-            file_cache,
-            index_cache,
             self.version.metadata.as_ref(),
             self.version.metadata.inverted_indexed_column_ids(
                 self.version
@@ -401,8 +451,43 @@ impl ScanRegion {
             ),
             self.access_layer.puffin_manager_factory().clone(),
         )
+        .with_file_cache(file_cache)
+        .with_inverted_index_cache(inverted_index_cache)
+        .with_puffin_metadata_cache(puffin_metadata_cache)
         .build(&self.request.filters)
         .inspect_err(|err| warn!(err; "Failed to build invereted index applier"))
+        .ok()
+        .flatten()
+        .map(Arc::new)
+    }
+
+    /// Use the latest schema to build the bloom filter index applier.
+    fn build_bloom_filter_applier(&self) -> Option<BloomFilterIndexApplierRef> {
+        if self.ignore_bloom_filter {
+            return None;
+        }
+
+        let file_cache = || -> Option<FileCacheRef> {
+            let write_cache = self.cache_strategy.write_cache()?;
+            let file_cache = write_cache.file_cache();
+            Some(file_cache)
+        }();
+
+        let bloom_filter_index_cache = self.cache_strategy.bloom_filter_index_cache().cloned();
+
+        let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
+
+        BloomFilterIndexApplierBuilder::new(
+            self.access_layer.region_dir().to_string(),
+            self.access_layer.object_store().clone(),
+            self.version.metadata.as_ref(),
+            self.access_layer.puffin_manager_factory().clone(),
+        )
+        .with_file_cache(file_cache)
+        .with_bloom_filter_index_cache(bloom_filter_index_cache)
+        .with_puffin_metadata_cache(puffin_metadata_cache)
+        .build(&self.request.filters)
+        .inspect_err(|err| warn!(err; "Failed to build bloom filter index applier"))
         .ok()
         .flatten()
         .map(Arc::new)
@@ -428,15 +513,6 @@ impl ScanRegion {
     }
 }
 
-/// Config for parallel scan.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct ScanParallelism {
-    /// Number of tasks expect to spawn to read data.
-    pub(crate) parallelism: usize,
-    /// Channel size to send batches. Only takes effect when the parallelism > 1.
-    pub(crate) channel_size: usize,
-}
-
 /// Returns true if the time range of a SST `file` matches the `predicate`.
 fn file_in_range(file: &FileHandle, predicate: &TimestampRange) -> bool {
     if predicate == &TimestampRange::min_to_max() {
@@ -458,18 +534,19 @@ pub(crate) struct ScanInput {
     time_range: Option<TimestampRange>,
     /// Predicate to push down.
     pub(crate) predicate: Option<Predicate>,
-    /// Memtables to scan.
-    pub(crate) memtables: Vec<MemtableRef>,
+    /// Memtable range builders for memtables in the time range..
+    pub(crate) memtables: Vec<MemRangeBuilder>,
     /// Handles to SST files to scan.
     pub(crate) files: Vec<FileHandle>,
     /// Cache.
-    pub(crate) cache_manager: CacheManagerRef,
+    pub(crate) cache_strategy: CacheStrategy,
     /// Ignores file not found error.
     ignore_file_not_found: bool,
-    /// Parallelism to scan data.
-    pub(crate) parallelism: ScanParallelism,
+    /// Capacity of the channel to send data from parallel scan tasks to the main task.
+    pub(crate) parallel_scan_channel_size: usize,
     /// Index appliers.
     inverted_index_applier: Option<InvertedIndexApplierRef>,
+    bloom_filter_index_applier: Option<BloomFilterIndexApplierRef>,
     fulltext_index_applier: Option<FulltextIndexApplierRef>,
     /// Start time of the query.
     pub(crate) query_start: Option<Instant>,
@@ -494,10 +571,11 @@ impl ScanInput {
             predicate: None,
             memtables: Vec::new(),
             files: Vec::new(),
-            cache_manager: CacheManagerRef::default(),
+            cache_strategy: CacheStrategy::Disabled,
             ignore_file_not_found: false,
-            parallelism: ScanParallelism::default(),
+            parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             inverted_index_applier: None,
+            bloom_filter_index_applier: None,
             fulltext_index_applier: None,
             query_start: None,
             append_mode: false,
@@ -521,9 +599,9 @@ impl ScanInput {
         self
     }
 
-    /// Sets memtables to read.
+    /// Sets memtable range builders.
     #[must_use]
-    pub(crate) fn with_memtables(mut self, memtables: Vec<MemtableRef>) -> Self {
+    pub(crate) fn with_memtables(mut self, memtables: Vec<MemRangeBuilder>) -> Self {
         self.memtables = memtables;
         self
     }
@@ -537,8 +615,8 @@ impl ScanInput {
 
     /// Sets cache for this query.
     #[must_use]
-    pub(crate) fn with_cache(mut self, cache: CacheManagerRef) -> Self {
-        self.cache_manager = cache;
+    pub(crate) fn with_cache(mut self, cache: CacheStrategy) -> Self {
+        self.cache_strategy = cache;
         self
     }
 
@@ -549,10 +627,13 @@ impl ScanInput {
         self
     }
 
-    /// Sets scan parallelism.
+    /// Sets scan task channel size.
     #[must_use]
-    pub(crate) fn with_parallelism(mut self, parallelism: ScanParallelism) -> Self {
-        self.parallelism = parallelism;
+    pub(crate) fn with_parallel_scan_channel_size(
+        mut self,
+        parallel_scan_channel_size: usize,
+    ) -> Self {
+        self.parallel_scan_channel_size = parallel_scan_channel_size;
         self
     }
 
@@ -563,6 +644,16 @@ impl ScanInput {
         applier: Option<InvertedIndexApplierRef>,
     ) -> Self {
         self.inverted_index_applier = applier;
+        self
+    }
+
+    /// Sets bloom filter applier.
+    #[must_use]
+    pub(crate) fn with_bloom_filter_index_applier(
+        mut self,
+        applier: Option<BloomFilterIndexApplierRef>,
+    ) -> Self {
+        self.bloom_filter_index_applier = applier;
         self
     }
 
@@ -621,12 +712,15 @@ impl ScanInput {
         sources: Vec<Source>,
         semaphore: Arc<Semaphore>,
     ) -> Result<Vec<Source>> {
-        debug_assert!(self.parallelism.parallelism > 1);
+        if sources.len() <= 1 {
+            return Ok(sources);
+        }
+
         // Spawn a task for each source.
         let sources = sources
             .into_iter()
             .map(|source| {
-                let (sender, receiver) = mpsc::channel(self.parallelism.channel_size);
+                let (sender, receiver) = mpsc::channel(self.parallel_scan_channel_size);
                 self.spawn_scan_task(source, semaphore.clone(), sender);
                 let stream = Box::pin(ReceiverStream::new(receiver));
                 Source::Stream(stream)
@@ -635,11 +729,12 @@ impl ScanInput {
         Ok(sources)
     }
 
-    /// Prunes a memtable to scan and returns the builder to build readers.
-    pub(crate) fn prune_memtable(&self, mem_index: usize) -> MemRangeBuilder {
-        let memtable = &self.memtables[mem_index];
-        let row_groups = memtable.ranges(Some(self.mapper.column_ids()), self.predicate.clone());
-        MemRangeBuilder::new(row_groups)
+    /// Builds memtable ranges to scan by `index`.
+    pub(crate) fn build_mem_ranges(&self, index: RowGroupIndex) -> SmallVec<[MemtableRange; 2]> {
+        let memtable = &self.memtables[index.index];
+        let mut ranges = SmallVec::new();
+        memtable.build_ranges(index.row_group_index, &mut ranges);
+        ranges
     }
 
     /// Prunes a file to scan and returns the builder to build readers.
@@ -653,10 +748,10 @@ impl ScanInput {
             .access_layer
             .read_sst(file.clone())
             .predicate(self.predicate.clone())
-            .time_range(self.time_range)
             .projection(Some(self.mapper.column_ids().to_vec()))
-            .cache(self.cache_manager.clone())
+            .cache(self.cache_strategy.clone())
             .inverted_index_applier(self.inverted_index_applier.clone())
+            .bloom_filter_index_applier(self.bloom_filter_index_applier.clone())
             .fulltext_index_applier(self.fulltext_index_applier.clone())
             .expected_metadata(Some(self.mapper.metadata().clone()))
             .build_reader_input(reader_metrics)
@@ -761,9 +856,9 @@ pub(crate) struct StreamContext {
 
 impl StreamContext {
     /// Creates a new [StreamContext] for [SeqScan].
-    pub(crate) fn seq_scan_ctx(input: ScanInput) -> Self {
+    pub(crate) fn seq_scan_ctx(input: ScanInput, compaction: bool) -> Self {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
-        let ranges = RangeMeta::seq_scan_ranges(&input);
+        let ranges = RangeMeta::seq_scan_ranges(&input, compaction);
         READ_SST_COUNT.observe(input.num_files() as f64);
 
         Self {

@@ -46,11 +46,7 @@ fn build_new_schema_value(
             for option in options.0.iter() {
                 match option {
                     SetDatabaseOption::Ttl(ttl) => {
-                        if ttl.is_zero() {
-                            value.ttl = None;
-                        } else {
-                            value.ttl = Some(*ttl);
-                        }
+                        value.ttl = Some(*ttl);
                     }
                 }
             }
@@ -230,12 +226,12 @@ mod tests {
     #[test]
     fn test_build_new_schema_value() {
         let set_ttl = AlterDatabaseKind::SetDatabaseOptions(SetDatabaseOptions(vec![
-            SetDatabaseOption::Ttl(Duration::from_secs(10)),
+            SetDatabaseOption::Ttl(Duration::from_secs(10).into()),
         ]));
         let current_schema_value = SchemaNameValue::default();
         let new_schema_value =
             build_new_schema_value(current_schema_value.clone(), &set_ttl).unwrap();
-        assert_eq!(new_schema_value.ttl, Some(Duration::from_secs(10)));
+        assert_eq!(new_schema_value.ttl, Some(Duration::from_secs(10).into()));
 
         let unset_ttl_alter_kind =
             AlterDatabaseKind::UnsetDatabaseOptions(UnsetDatabaseOptions(vec![

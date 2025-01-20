@@ -84,13 +84,14 @@ use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::{oneshot, Semaphore};
 
+use crate::cache::CacheStrategy;
 use crate::config::MitoConfig;
 use crate::error::{
     InvalidRequestSnafu, JoinSnafu, RecvSnafu, RegionNotFoundSnafu, Result, SerdeJsonSnafu,
 };
 use crate::manifest::action::RegionEdit;
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
-use crate::read::scan_region::{ScanParallelism, ScanRegion, Scanner};
+use crate::read::scan_region::{ScanRegion, Scanner};
 use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::wal::entry_distributor::{
     build_wal_entry_distributor_and_receivers, DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
@@ -171,19 +172,9 @@ impl MitoEngine {
         self.scan_region(region_id, request)?.scanner()
     }
 
-    /// Returns a region scanner to scan the region for `request`.
-    fn region_scanner(
-        &self,
-        region_id: RegionId,
-        request: ScanRequest,
-    ) -> Result<RegionScannerRef> {
-        let scanner = self.scanner(region_id, request)?;
-        scanner.region_scanner()
-    }
-
     /// Scans a region.
     fn scan_region(&self, region_id: RegionId, request: ScanRequest) -> Result<ScanRegion> {
-        self.inner.handle_query(region_id, request)
+        self.inner.scan_region(region_id, request)
     }
 
     /// Edit region's metadata by [RegionEdit] directly. Use with care.
@@ -423,7 +414,7 @@ impl EngineInner {
     }
 
     /// Handles the scan `request` and returns a [ScanRegion].
-    fn handle_query(&self, region_id: RegionId, request: ScanRequest) -> Result<ScanRegion> {
+    fn scan_region(&self, region_id: RegionId, request: ScanRequest) -> Result<ScanRegion> {
         let query_start = Instant::now();
         // Reading a region doesn't need to go through the region worker thread.
         let region = self
@@ -433,17 +424,18 @@ impl EngineInner {
         let version = region.version();
         // Get cache.
         let cache_manager = self.workers.cache_manager();
-        let scan_parallelism = ScanParallelism {
-            parallelism: self.config.scan_parallelism,
-            channel_size: self.config.parallel_scan_channel_size,
-        };
 
-        let scan_region =
-            ScanRegion::new(version, region.access_layer.clone(), request, cache_manager)
-                .with_parallelism(scan_parallelism)
-                .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
-                .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
-                .with_start_time(query_start);
+        let scan_region = ScanRegion::new(
+            version,
+            region.access_layer.clone(),
+            request,
+            CacheStrategy::EnableAll(cache_manager),
+        )
+        .with_parallel_scan_channel_size(self.config.parallel_scan_channel_size)
+        .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
+        .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
+        .with_ignore_bloom_filter(self.config.bloom_filter_index.apply_on_query.disabled())
+        .with_start_time(query_start);
 
         Ok(scan_region)
     }
@@ -538,7 +530,9 @@ impl RegionEngine for MitoEngine {
         region_id: RegionId,
         request: ScanRequest,
     ) -> Result<RegionScannerRef, BoxedError> {
-        self.region_scanner(region_id, request)
+        self.scan_region(region_id, request)
+            .map_err(BoxedError::new)?
+            .region_scanner()
             .map_err(BoxedError::new)
     }
 

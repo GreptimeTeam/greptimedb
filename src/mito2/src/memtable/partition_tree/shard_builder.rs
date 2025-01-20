@@ -26,11 +26,11 @@ use crate::memtable::partition_tree::data::{
     DataBatch, DataBuffer, DataBufferReader, DataBufferReaderBuilder, DataParts, DATA_INIT_CAP,
 };
 use crate::memtable::partition_tree::dict::{DictBuilderReader, KeyDictBuilder};
-use crate::memtable::partition_tree::partition::PrimaryKeyFilter;
 use crate::memtable::partition_tree::shard::Shard;
 use crate::memtable::partition_tree::{PartitionTreeConfig, PkId, PkIndex, ShardId};
 use crate::memtable::stats::WriteMetrics;
 use crate::metrics::PARTITION_TREE_READ_STAGE_ELAPSED;
+use crate::row_converter::PrimaryKeyFilter;
 
 /// Builder to write keys and data to a shard that the key dictionary
 /// is still active.
@@ -189,7 +189,7 @@ impl ShardBuilderReaderBuilder {
     pub(crate) fn build(
         self,
         pk_weights: Option<&[u16]>,
-        key_filter: Option<PrimaryKeyFilter>,
+        key_filter: Option<Box<dyn PrimaryKeyFilter>>,
     ) -> Result<ShardBuilderReader> {
         let now = Instant::now();
         let data_reader = self.data_reader.build(pk_weights)?;
@@ -208,7 +208,7 @@ pub struct ShardBuilderReader {
     shard_id: ShardId,
     dict_reader: DictBuilderReader,
     data_reader: DataBufferReader,
-    key_filter: Option<PrimaryKeyFilter>,
+    key_filter: Option<Box<dyn PrimaryKeyFilter>>,
     last_yield_pk_index: Option<PkIndex>,
     keys_before_pruning: usize,
     keys_after_pruning: usize,
@@ -221,7 +221,7 @@ impl ShardBuilderReader {
         shard_id: ShardId,
         dict_reader: DictBuilderReader,
         data_reader: DataBufferReader,
-        key_filter: Option<PrimaryKeyFilter>,
+        key_filter: Option<Box<dyn PrimaryKeyFilter>>,
         data_build_cost: Duration,
     ) -> Result<Self> {
         let mut reader = ShardBuilderReader {
@@ -281,7 +281,7 @@ impl ShardBuilderReader {
             self.keys_before_pruning += 1;
             let key = self.dict_reader.key_by_pk_index(pk_index);
             let now = Instant::now();
-            if key_filter.prune_primary_key(key) {
+            if key_filter.matches(key) {
                 self.prune_pk_cost += now.elapsed();
                 self.last_yield_pk_index = Some(pk_index);
                 self.keys_after_pruning += 1;

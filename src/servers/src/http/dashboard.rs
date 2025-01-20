@@ -15,8 +15,6 @@
 use axum::body::Body;
 use axum::http::{header, StatusCode, Uri};
 use axum::response::Response;
-use axum::routing;
-use axum::routing::Router;
 use common_telemetry::debug;
 use rust_embed::RustEmbed;
 use snafu::ResultExt;
@@ -27,17 +25,11 @@ use crate::error::{BuildHttpResponseSnafu, Result};
 #[folder = "dashboard/dist/"]
 pub struct Assets;
 
-pub(crate) fn dashboard() -> Router {
-    Router::new()
-        .route("/", routing::get(static_handler).post(static_handler))
-        .route("/*x", routing::get(static_handler).post(static_handler))
-}
-
 #[axum_macros::debug_handler]
 pub async fn static_handler(uri: Uri) -> Result<Response> {
     debug!("[dashboard] requesting: {}", uri.path());
 
-    let mut path = uri.path().trim_start_matches('/');
+    let mut path = uri.path().trim_start_matches("/dashboard/");
     if path.is_empty() {
         path = "index.html";
     }

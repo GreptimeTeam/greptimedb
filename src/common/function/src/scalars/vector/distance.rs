@@ -18,18 +18,17 @@ mod l2sq;
 
 use std::borrow::Cow;
 use std::fmt::Display;
-use std::sync::Arc;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
 use common_query::prelude::Signature;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::value::ValueRef;
-use datatypes::vectors::{Float32VectorBuilder, MutableVector, Vector, VectorRef};
+use datatypes::vectors::{Float32VectorBuilder, MutableVector, VectorRef};
 use snafu::ensure;
 
 use crate::function::{Function, FunctionContext};
 use crate::helper;
+use crate::scalars::vector::impl_conv::{as_veclit, as_veclit_if_const};
 
 macro_rules! define_distance_function {
     ($StructName:ident, $display_name:expr, $similarity_method:path) => {
@@ -80,17 +79,17 @@ macro_rules! define_distance_function {
                     return Ok(result.to_vector());
                 }
 
-                let arg0_const = parse_if_constant_string(arg0)?;
-                let arg1_const = parse_if_constant_string(arg1)?;
+                let arg0_const = as_veclit_if_const(arg0)?;
+                let arg1_const = as_veclit_if_const(arg1)?;
 
                 for i in 0..size {
                     let vec0 = match arg0_const.as_ref() {
-                        Some(a) => Some(Cow::Borrowed(a.as_slice())),
-                        None => as_vector(arg0.get_ref(i))?,
+                        Some(a) => Some(Cow::Borrowed(a.as_ref())),
+                        None => as_veclit(arg0.get_ref(i))?,
                     };
                     let vec1 = match arg1_const.as_ref() {
-                        Some(b) => Some(Cow::Borrowed(b.as_slice())),
-                        None => as_vector(arg1.get_ref(i))?,
+                        Some(b) => Some(Cow::Borrowed(b.as_ref())),
+                        None => as_veclit(arg1.get_ref(i))?,
                     };
 
                     if let (Some(vec0), Some(vec1)) = (vec0, vec1) {
@@ -128,98 +127,6 @@ macro_rules! define_distance_function {
 define_distance_function!(CosDistanceFunction, "vec_cos_distance", cos::cos);
 define_distance_function!(L2SqDistanceFunction, "vec_l2sq_distance", l2sq::l2sq);
 define_distance_function!(DotProductFunction, "vec_dot_product", dot::dot);
-
-/// Parse a vector value if the value is a constant string.
-fn parse_if_constant_string(arg: &Arc<dyn Vector>) -> Result<Option<Vec<f32>>> {
-    if !arg.is_const() {
-        return Ok(None);
-    }
-    if arg.data_type() != ConcreteDataType::string_datatype() {
-        return Ok(None);
-    }
-    arg.get_ref(0)
-        .as_string()
-        .unwrap() // Safe: checked if it is a string
-        .map(parse_f32_vector_from_string)
-        .transpose()
-}
-
-/// Convert a value to a vector value.
-/// Supported data types are binary and string.
-fn as_vector(arg: ValueRef<'_>) -> Result<Option<Cow<'_, [f32]>>> {
-    match arg.data_type() {
-        ConcreteDataType::Binary(_) => arg
-            .as_binary()
-            .unwrap() // Safe: checked if it is a binary
-            .map(binary_as_vector)
-            .transpose(),
-        ConcreteDataType::String(_) => arg
-            .as_string()
-            .unwrap() // Safe: checked if it is a string
-            .map(|s| Ok(Cow::Owned(parse_f32_vector_from_string(s)?)))
-            .transpose(),
-        ConcreteDataType::Null(_) => Ok(None),
-        _ => InvalidFuncArgsSnafu {
-            err_msg: format!("Unsupported data type: {:?}", arg.data_type()),
-        }
-        .fail(),
-    }
-}
-
-/// Convert a u8 slice to a vector value.
-fn binary_as_vector(bytes: &[u8]) -> Result<Cow<'_, [f32]>> {
-    if bytes.len() % std::mem::size_of::<f32>() != 0 {
-        return InvalidFuncArgsSnafu {
-            err_msg: format!("Invalid binary length of vector: {}", bytes.len()),
-        }
-        .fail();
-    }
-
-    if cfg!(target_endian = "little") {
-        Ok(unsafe {
-            let vec = std::slice::from_raw_parts(
-                bytes.as_ptr() as *const f32,
-                bytes.len() / std::mem::size_of::<f32>(),
-            );
-            Cow::Borrowed(vec)
-        })
-    } else {
-        let v = bytes
-            .chunks_exact(std::mem::size_of::<f32>())
-            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
-            .collect::<Vec<f32>>();
-        Ok(Cow::Owned(v))
-    }
-}
-
-/// Parse a string to a vector value.
-/// Valid inputs are strings like "[1.0, 2.0, 3.0]".
-fn parse_f32_vector_from_string(s: &str) -> Result<Vec<f32>> {
-    let trimmed = s.trim();
-    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
-        return InvalidFuncArgsSnafu {
-            err_msg: format!(
-                "Failed to parse {s} to Vector value: not properly enclosed in brackets"
-            ),
-        }
-        .fail();
-    }
-    let content = trimmed[1..trimmed.len() - 1].trim();
-    if content.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    content
-        .split(',')
-        .map(|s| s.trim().parse::<f32>())
-        .collect::<std::result::Result<_, _>>()
-        .map_err(|e| {
-            InvalidFuncArgsSnafu {
-                err_msg: format!("Failed to parse {s} to Vector value: {e}"),
-            }
-            .build()
-        })
-}
 
 #[cfg(test)]
 mod tests {
@@ -455,28 +362,5 @@ mod tests {
             let result = func.eval(FunctionContext::default(), &[vec1, vec2]);
             assert!(result.is_err());
         }
-    }
-
-    #[test]
-    fn test_parse_vector_from_string() {
-        let result = parse_f32_vector_from_string("[1.0, 2.0, 3.0]").unwrap();
-        assert_eq!(result, vec![1.0, 2.0, 3.0]);
-
-        let result = parse_f32_vector_from_string("[]").unwrap();
-        assert_eq!(result, Vec::<f32>::new());
-
-        let result = parse_f32_vector_from_string("[1.0, a, 3.0]");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_binary_as_vector() {
-        let bytes = [0, 0, 128, 63];
-        let result = binary_as_vector(&bytes).unwrap();
-        assert_eq!(result.as_ref(), &[1.0]);
-
-        let invalid_bytes = [0, 0, 128];
-        let result = binary_as_vector(&invalid_bytes);
-        assert!(result.is_err());
     }
 }

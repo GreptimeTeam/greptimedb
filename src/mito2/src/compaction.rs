@@ -24,7 +24,7 @@ mod window;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use api::v1::region::compact_request;
 use common_base::Plugins;
@@ -32,7 +32,7 @@ use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{debug, error, info, warn};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
-use common_time::Timestamp;
+use common_time::{TimeToLive, Timestamp};
 use datafusion_common::ScalarValue;
 use datafusion_expr::Expr;
 use serde::{Deserialize, Serialize};
@@ -40,25 +40,27 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{RegionId, TableId};
 use table::predicate::Predicate;
+use task::MAX_PARALLEL_COMPACTION;
 use tokio::sync::mpsc::{self, Sender};
 
 use crate::access_layer::AccessLayerRef;
-use crate::cache::CacheManagerRef;
-use crate::compaction::compactor::{CompactionRegion, DefaultCompactor};
+use crate::cache::{CacheManagerRef, CacheStrategy};
+use crate::compaction::compactor::{CompactionRegion, CompactionVersion, DefaultCompactor};
 use crate::compaction::picker::{new_picker, CompactionTask};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::config::MitoConfig;
 use crate::error::{
     CompactRegionSnafu, Error, GetSchemaMetadataSnafu, RegionClosedSnafu, RegionDroppedSnafu,
     RegionTruncatedSnafu, RemoteCompactionSnafu, Result, TimeRangePredicateOverflowSnafu,
+    TimeoutSnafu,
 };
-use crate::metrics::COMPACTION_STAGE_ELAPSED;
+use crate::metrics::{COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT};
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::ScanInput;
 use crate::read::seq_scan::SeqScan;
 use crate::read::BoxedBatchReader;
 use crate::region::options::MergeMode;
-use crate::region::version::{VersionControlRef, VersionRef};
+use crate::region::version::VersionControlRef;
 use crate::region::ManifestContextRef;
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
 use crate::schedule::remote_job_scheduler::{
@@ -72,7 +74,7 @@ use crate::worker::WorkerListener;
 /// Region compaction request.
 pub struct CompactionRequest {
     pub(crate) engine_config: Arc<MitoConfig>,
-    pub(crate) current_version: VersionRef,
+    pub(crate) current_version: CompactionVersion,
     pub(crate) access_layer: AccessLayerRef,
     /// Sender to send notification to the region worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
@@ -84,6 +86,7 @@ pub struct CompactionRequest {
     pub(crate) manifest_ctx: ManifestContextRef,
     pub(crate) listener: WorkerListener,
     pub(crate) schema_metadata_manager: SchemaMetadataManagerRef,
+    pub(crate) max_parallelism: usize,
 }
 
 impl CompactionRequest {
@@ -144,6 +147,7 @@ impl CompactionScheduler {
         waiter: OptionOutputTx,
         manifest_ctx: &ManifestContextRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        max_parallelism: usize,
     ) -> Result<()> {
         if let Some(status) = self.region_status.get_mut(&region_id) {
             // Region is compacting. Add the waiter to pending list.
@@ -162,6 +166,7 @@ impl CompactionScheduler {
             manifest_ctx,
             self.listener.clone(),
             schema_metadata_manager,
+            max_parallelism,
         );
         self.region_status.insert(region_id, status);
         let result = self
@@ -192,6 +197,7 @@ impl CompactionScheduler {
             manifest_ctx,
             self.listener.clone(),
             schema_metadata_manager,
+            MAX_PARALLEL_COMPACTION,
         );
         // Try to schedule next compaction task for this region.
         if let Err(e) = self
@@ -263,6 +269,7 @@ impl CompactionScheduler {
             manifest_ctx,
             listener,
             schema_metadata_manager,
+            max_parallelism,
         } = request;
 
         let ttl = find_ttl(
@@ -273,7 +280,7 @@ impl CompactionScheduler {
         .await
         .unwrap_or_else(|e| {
             warn!(e; "Failed to get ttl for region: {}", region_id);
-            None
+            TimeToLive::default()
         });
 
         debug!(
@@ -292,7 +299,8 @@ impl CompactionScheduler {
             access_layer: access_layer.clone(),
             manifest_ctx: manifest_ctx.clone(),
             file_purger: None,
-            ttl,
+            ttl: Some(ttl),
+            max_parallelism,
         };
 
         let picker_output = {
@@ -339,6 +347,7 @@ impl CompactionScheduler {
                             "Scheduled remote compaction job {} for region {}",
                             job_id, region_id
                         );
+                        INFLIGHT_COMPACTION_COUNT.inc();
                         return Ok(());
                     }
                     Err(e) => {
@@ -383,7 +392,9 @@ impl CompactionScheduler {
         // Submit the compaction task.
         self.scheduler
             .schedule(Box::pin(async move {
+                INFLIGHT_COMPACTION_COUNT.inc();
                 local_compaction_task.run().await;
+                INFLIGHT_COMPACTION_COUNT.dec();
             }))
             .map_err(|e| {
                 error!(e; "Failed to submit compaction request for region {}", region_id);
@@ -437,18 +448,25 @@ impl PendingCompaction {
 /// Finds TTL of table by first examine table options then database options.
 async fn find_ttl(
     table_id: TableId,
-    table_ttl: Option<Duration>,
+    table_ttl: Option<TimeToLive>,
     schema_metadata_manager: &SchemaMetadataManagerRef,
-) -> Result<Option<Duration>> {
+) -> Result<TimeToLive> {
+    // If table TTL is set, we use it.
     if let Some(table_ttl) = table_ttl {
-        return Ok(Some(table_ttl));
+        return Ok(table_ttl);
     }
 
-    let ttl = schema_metadata_manager
-        .get_schema_options_by_table_id(table_id)
-        .await
-        .context(GetSchemaMetadataSnafu)?
-        .and_then(|options| options.ttl);
+    let ttl = tokio::time::timeout(
+        crate::config::FETCH_OPTION_TIMEOUT,
+        schema_metadata_manager.get_schema_options_by_table_id(table_id),
+    )
+    .await
+    .context(TimeoutSnafu)?
+    .context(GetSchemaMetadataSnafu)?
+    .and_then(|options| options.ttl)
+    .unwrap_or_default()
+    .into();
+
     Ok(ttl)
 }
 
@@ -510,8 +528,9 @@ impl CompactionStatus {
         manifest_ctx: &ManifestContextRef,
         listener: WorkerListener,
         schema_metadata_manager: SchemaMetadataManagerRef,
+        max_parallelism: usize,
     ) -> CompactionRequest {
-        let current_version = self.version_control.current().version;
+        let current_version = CompactionVersion::from(self.version_control.current().version);
         let start_time = Instant::now();
         let mut req = CompactionRequest {
             engine_config,
@@ -524,6 +543,7 @@ impl CompactionStatus {
             manifest_ctx: manifest_ctx.clone(),
             listener,
             schema_metadata_manager,
+            max_parallelism,
         };
 
         if let Some(pending) = self.pending_compaction.take() {
@@ -576,7 +596,8 @@ impl<'a> CompactionSstReaderBuilder<'a> {
         let mut scan_input = ScanInput::new(self.sst_layer, ProjectionMapper::all(&self.metadata)?)
             .with_files(self.inputs.to_vec())
             .with_append_mode(self.append_mode)
-            .with_cache(self.cache)
+            // We use special cache strategy for compaction.
+            .with_cache(CacheStrategy::Compaction(self.cache))
             .with_filter_deleted(self.filter_deleted)
             // We ignore file not found error during compaction.
             .with_ignore_file_not_found(true)
@@ -589,9 +610,8 @@ impl<'a> CompactionSstReaderBuilder<'a> {
                 scan_input.with_predicate(time_range_to_predicate(time_range, &self.metadata)?);
         }
 
-        SeqScan::new(scan_input)
-            .with_compaction()
-            .build_reader()
+        SeqScan::new(scan_input, true)
+            .build_reader_for_compaction()
             .await
     }
 }
@@ -656,24 +676,16 @@ fn ts_to_lit(ts: Timestamp, ts_col_unit: TimeUnit) -> Result<Expr> {
 /// Finds all expired SSTs across levels.
 fn get_expired_ssts(
     levels: &[LevelMeta],
-    ttl: Option<Duration>,
+    ttl: Option<TimeToLive>,
     now: Timestamp,
 ) -> Vec<FileHandle> {
     let Some(ttl) = ttl else {
         return vec![];
     };
 
-    let expire_time = match now.sub_duration(ttl) {
-        Ok(expire_time) => expire_time,
-        Err(e) => {
-            error!(e; "Failed to calculate region TTL expire time");
-            return vec![];
-        }
-    };
-
     levels
         .iter()
-        .flat_map(|l| l.get_expired_files(&expire_time).into_iter())
+        .flat_map(|l| l.get_expired_files(&now, &ttl).into_iter())
         .collect()
 }
 
@@ -692,7 +704,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let mut scheduler = env.mock_compaction_scheduler(tx);
         let mut builder = VersionControlBuilder::new();
-        let schema_metadata_manager = mock_schema_metadata_manager();
+        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
         schema_metadata_manager
             .register_region_table_info(
                 builder.region_id().table_id(),
@@ -700,6 +712,7 @@ mod tests {
                 "test_catalog",
                 "test_schema",
                 None,
+                kv_backend,
             )
             .await;
         // Nothing to compact.
@@ -718,6 +731,7 @@ mod tests {
                 waiter,
                 &manifest_ctx,
                 schema_metadata_manager.clone(),
+                1,
             )
             .await
             .unwrap();
@@ -738,6 +752,7 @@ mod tests {
                 waiter,
                 &manifest_ctx,
                 schema_metadata_manager,
+                1,
             )
             .await
             .unwrap();
@@ -756,7 +771,7 @@ mod tests {
         let purger = builder.file_purger();
         let region_id = builder.region_id();
 
-        let schema_metadata_manager = mock_schema_metadata_manager();
+        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
         schema_metadata_manager
             .register_region_table_info(
                 builder.region_id().table_id(),
@@ -764,6 +779,7 @@ mod tests {
                 "test_catalog",
                 "test_schema",
                 None,
+                kv_backend,
             )
             .await;
 
@@ -790,6 +806,7 @@ mod tests {
                 OptionOutputTx::none(),
                 &manifest_ctx,
                 schema_metadata_manager.clone(),
+                1,
             )
             .await
             .unwrap();
@@ -820,6 +837,7 @@ mod tests {
                 OptionOutputTx::none(),
                 &manifest_ctx,
                 schema_metadata_manager.clone(),
+                1,
             )
             .await
             .unwrap();
@@ -855,6 +873,7 @@ mod tests {
                 OptionOutputTx::none(),
                 &manifest_ctx,
                 schema_metadata_manager,
+                1,
             )
             .await
             .unwrap();

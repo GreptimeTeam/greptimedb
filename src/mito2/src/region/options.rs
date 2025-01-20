@@ -20,12 +20,14 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
+use common_time::TimeToLive;
 use common_wal::options::{WalOptions, WAL_OPTIONS_KEY};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use serde_with::{serde_as, with_prefix, DisplayFromStr, NoneAsEmptyString};
 use snafu::{ensure, ResultExt};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::storage::ColumnId;
 use strum::EnumString;
 
@@ -55,8 +57,7 @@ pub enum MergeMode {
 #[serde(default)]
 pub struct RegionOptions {
     /// Region SST files TTL.
-    #[serde(with = "humantime_serde")]
-    pub ttl: Option<Duration>,
+    pub ttl: Option<TimeToLive>,
     /// Compaction options.
     pub compaction: CompactionOptions,
     /// Custom storage. Uses default storage if it is `None`.
@@ -93,9 +94,18 @@ impl RegionOptions {
         !self.append_mode
     }
 
-    /// Returns the `merge_mode` if it is set, otherwise returns the default `MergeMode`.
+    /// Returns the `merge_mode` if it is set, otherwise returns the default [`MergeMode`].
     pub fn merge_mode(&self) -> MergeMode {
         self.merge_mode.unwrap_or_default()
+    }
+
+    /// Returns the `primary_key_encoding` if it is set, otherwise returns the default [`PrimaryKeyEncoding`].
+    pub fn primary_key_encoding(&self) -> PrimaryKeyEncoding {
+        self.memtable
+            .as_ref()
+            .map_or(PrimaryKeyEncoding::default(), |memtable| {
+                memtable.primary_key_encoding()
+            })
     }
 }
 
@@ -238,7 +248,7 @@ impl Default for TwcsOptions {
             max_inactive_window_runs: 1,
             max_inactive_window_files: 1,
             time_window: None,
-            max_output_file_size: None,
+            max_output_file_size: Some(ReadableSize::gb(2)),
             remote_compaction: false,
             fallback_to_local: true,
         }
@@ -252,8 +262,7 @@ impl Default for TwcsOptions {
 #[serde(default)]
 struct RegionOptionsWithoutEnum {
     /// Region SST files TTL.
-    #[serde(with = "humantime_serde")]
-    ttl: Option<Duration>,
+    ttl: Option<TimeToLive>,
     storage: Option<String>,
     #[serde_as(as = "DisplayFromStr")]
     append_mode: bool,
@@ -320,6 +329,16 @@ pub enum MemtableOptions {
 
 with_prefix!(prefix_partition_tree "memtable.partition_tree.");
 
+impl MemtableOptions {
+    /// Returns the primary key encoding mode.
+    pub fn primary_key_encoding(&self) -> PrimaryKeyEncoding {
+        match self {
+            MemtableOptions::PartitionTree(opts) => opts.primary_key_encoding,
+            _ => PrimaryKeyEncoding::Dense,
+        }
+    }
+}
+
 /// Partition tree memtable options.
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,6 +352,8 @@ pub struct PartitionTreeOptions {
     pub data_freeze_threshold: usize,
     /// Total bytes of dictionary to keep in fork.
     pub fork_dictionary_bytes: ReadableSize,
+    /// Primary key encoding mode.
+    pub primary_key_encoding: PrimaryKeyEncoding,
 }
 
 impl Default for PartitionTreeOptions {
@@ -351,6 +372,7 @@ impl Default for PartitionTreeOptions {
             index_max_keys_per_shard: DEFAULT_MAX_KEYS_PER_SHARD,
             data_freeze_threshold: DEFAULT_FREEZE_THRESHOLD,
             fork_dictionary_bytes,
+            primary_key_encoding: PrimaryKeyEncoding::Dense,
         }
     }
 }
@@ -458,7 +480,7 @@ mod tests {
         let map = make_map(&[("ttl", "7d")]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
-            ttl: Some(Duration::from_secs(3600 * 24 * 7)),
+            ttl: Some(Duration::from_secs(3600 * 24 * 7).into()),
             ..Default::default()
         };
         assert_eq!(expect, options);
@@ -621,7 +643,7 @@ mod tests {
         ]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
-            ttl: Some(Duration::from_secs(3600 * 24 * 7)),
+            ttl: Some(Duration::from_secs(3600 * 24 * 7).into()),
             compaction: CompactionOptions::Twcs(TwcsOptions {
                 max_active_window_runs: 8,
                 max_active_window_files: 11,
@@ -645,6 +667,7 @@ mod tests {
                 index_max_keys_per_shard: 2048,
                 data_freeze_threshold: 2048,
                 fork_dictionary_bytes: ReadableSize::mb(128),
+                primary_key_encoding: PrimaryKeyEncoding::Dense,
             })),
             merge_mode: Some(MergeMode::LastNonNull),
         };
@@ -654,7 +677,7 @@ mod tests {
     #[test]
     fn test_region_options_serde() {
         let options = RegionOptions {
-            ttl: Some(Duration::from_secs(3600 * 24 * 7)),
+            ttl: Some(Duration::from_secs(3600 * 24 * 7).into()),
             compaction: CompactionOptions::Twcs(TwcsOptions {
                 max_active_window_runs: 8,
                 max_active_window_files: usize::MAX,
@@ -680,6 +703,7 @@ mod tests {
                 index_max_keys_per_shard: 2048,
                 data_freeze_threshold: 2048,
                 fork_dictionary_bytes: ReadableSize::mb(128),
+                primary_key_encoding: PrimaryKeyEncoding::Dense,
             })),
             merge_mode: Some(MergeMode::LastNonNull),
         };
@@ -722,7 +746,7 @@ mod tests {
 }"#;
         let got: RegionOptions = serde_json::from_str(region_options_json_str).unwrap();
         let options = RegionOptions {
-            ttl: Some(Duration::from_secs(3600 * 24 * 7)),
+            ttl: Some(Duration::from_secs(3600 * 24 * 7).into()),
             compaction: CompactionOptions::Twcs(TwcsOptions {
                 max_active_window_runs: 8,
                 max_active_window_files: 11,
@@ -748,6 +772,7 @@ mod tests {
                 index_max_keys_per_shard: 2048,
                 data_freeze_threshold: 2048,
                 fork_dictionary_bytes: ReadableSize::mb(128),
+                primary_key_encoding: PrimaryKeyEncoding::Dense,
             })),
             merge_mode: Some(MergeMode::LastNonNull),
         };

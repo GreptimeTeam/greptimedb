@@ -48,7 +48,8 @@ lazy_static! {
             "greptime_mito_handle_request_elapsed",
             "mito handle request elapsed",
             &[TYPE_LABEL],
-            vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 60.0, 300.0]
+            // 0.01 ~ 10000
+            exponential_buckets(0.01, 10.0, 7).unwrap(),
         )
         .unwrap();
 
@@ -69,12 +70,19 @@ lazy_static! {
             "greptime_mito_flush_elapsed",
             "mito flush elapsed",
             &[TYPE_LABEL],
-            vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
+            // 1 ~ 625
+            exponential_buckets(1.0, 5.0, 6).unwrap(),
         )
         .unwrap();
     /// Histogram of flushed bytes.
     pub static ref FLUSH_BYTES_TOTAL: IntCounter =
         register_int_counter!("greptime_mito_flush_bytes_total", "mito flush bytes total").unwrap();
+    /// Gauge for inflight compaction tasks.
+    pub static ref INFLIGHT_FLUSH_COUNT: IntGauge =
+        register_int_gauge!(
+            "greptime_mito_inflight_flush_count",
+            "inflight flush count",
+        ).unwrap();
     // ------ End of flush related metrics
 
 
@@ -93,7 +101,8 @@ lazy_static! {
             "greptime_mito_write_stage_elapsed",
             "mito write stage elapsed",
             &[STAGE_LABEL],
-            vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
+            // 0.01 ~ 1000
+            exponential_buckets(0.01, 10.0, 6).unwrap(),
         )
         .unwrap();
     /// Counter of rows to write.
@@ -112,18 +121,31 @@ lazy_static! {
         "greptime_mito_compaction_stage_elapsed",
         "mito compaction stage elapsed",
         &[STAGE_LABEL],
-        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
+        // 1 ~ 100000
+        exponential_buckets(1.0, 10.0, 6).unwrap(),
     )
     .unwrap();
     /// Timer of whole compaction task.
     pub static ref COMPACTION_ELAPSED_TOTAL: Histogram =
-        register_histogram!("greptime_mito_compaction_total_elapsed", "mito compaction total elapsed").unwrap();
+        register_histogram!(
+        "greptime_mito_compaction_total_elapsed",
+        "mito compaction total elapsed",
+        // 1 ~ 100000
+        exponential_buckets(1.0, 10.0, 6).unwrap(),
+    ).unwrap();
     /// Counter of all requested compaction task.
     pub static ref COMPACTION_REQUEST_COUNT: IntCounter =
         register_int_counter!("greptime_mito_compaction_requests_total", "mito compaction requests total").unwrap();
     /// Counter of failed compaction task.
     pub static ref COMPACTION_FAILURE_COUNT: IntCounter =
         register_int_counter!("greptime_mito_compaction_failure_total", "mito compaction failure total").unwrap();
+
+    /// Gauge for inflight compaction tasks.
+    pub static ref INFLIGHT_COMPACTION_COUNT: IntGauge =
+        register_int_gauge!(
+            "greptime_mito_inflight_compaction_count",
+            "inflight compaction count",
+        ).unwrap();
     // ------- End of compaction metrics.
 
     // Query metrics.
@@ -132,7 +154,8 @@ lazy_static! {
         "greptime_mito_read_stage_elapsed",
         "mito read stage elapsed",
         &[STAGE_LABEL],
-        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
+        // 0.01 ~ 10000
+        exponential_buckets(0.01, 10.0, 7).unwrap(),
     )
     .unwrap();
     pub static ref READ_STAGE_FETCH_PAGES: Histogram = READ_STAGE_ELAPSED.with_label_values(&["fetch_pages"]);
@@ -209,6 +232,8 @@ lazy_static! {
         "mito_write_cache_download_elapsed",
         "mito write cache download elapsed",
         &[TYPE_LABEL],
+        // 0.1 ~ 10000
+        exponential_buckets(0.1, 10.0, 6).unwrap(),
     ).unwrap();
     /// Upload bytes counter.
     pub static ref UPLOAD_BYTES_TOTAL: IntCounter = register_int_counter!(
@@ -230,6 +255,8 @@ lazy_static! {
         "greptime_index_apply_elapsed",
         "index apply elapsed",
         &[TYPE_LABEL],
+        // 0.01 ~ 1000
+        exponential_buckets(0.01, 10.0, 6).unwrap(),
     )
     .unwrap();
     /// Gauge of index apply memory usage.
@@ -243,7 +270,8 @@ lazy_static! {
         "greptime_index_create_elapsed",
         "index create elapsed",
         &[STAGE_LABEL, TYPE_LABEL],
-        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
+        // 0.1 ~ 10000
+        exponential_buckets(0.1, 10.0, 6).unwrap(),
     )
     .unwrap();
     /// Counter of rows indexed.
@@ -324,7 +352,8 @@ lazy_static! {
         "greptime_partition_tree_buffer_freeze_stage_elapsed",
         "mito partition tree data buffer freeze stage elapsed",
         &[STAGE_LABEL],
-        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0]
+        // 0.01 ~ 1000
+        exponential_buckets(0.01, 10.0, 6).unwrap(),
     )
     .unwrap();
 
@@ -333,7 +362,8 @@ lazy_static! {
         "greptime_partition_tree_read_stage_elapsed",
         "mito partition tree read stage elapsed",
         &[STAGE_LABEL],
-        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0]
+        // 0.01 ~ 1000
+        exponential_buckets(0.01, 10.0, 6).unwrap(),
     )
     .unwrap();
 
@@ -346,6 +376,8 @@ lazy_static! {
     pub static ref MANIFEST_OP_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_manifest_op_elapsed",
         "mito manifest operation elapsed",
-        &["op"]
+        &["op"],
+        // 0.01 ~ 1000
+        exponential_buckets(0.01, 10.0, 6).unwrap(),
     ).unwrap();
 }

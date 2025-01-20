@@ -45,6 +45,7 @@ use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
 
 use self::state::MetricEngineState;
+use crate::config::EngineConfig;
 use crate::data_region::DataRegion;
 use crate::error::{self, Result, UnsupportedRegionRequestSnafu};
 use crate::metadata_region::MetadataRegion;
@@ -210,7 +211,6 @@ impl RegionEngine for MetricEngine {
         for x in [
             utils::to_metadata_region_id(region_id),
             utils::to_data_region_id(region_id),
-            region_id,
         ] {
             if let Err(e) = self.inner.mito.set_region_role(x, role)
                 && e.status_code() != StatusCode::RegionNotFound
@@ -226,6 +226,13 @@ impl RegionEngine for MetricEngine {
         region_id: RegionId,
         region_role_state: SettableRegionRoleState,
     ) -> std::result::Result<SetRegionRoleStateResponse, BoxedError> {
+        self.inner
+            .mito
+            .set_region_role_state_gracefully(
+                utils::to_metadata_region_id(region_id),
+                region_role_state,
+            )
+            .await?;
         self.inner
             .mito
             .set_region_role_state_gracefully(region_id, region_role_state)
@@ -249,7 +256,7 @@ impl RegionEngine for MetricEngine {
 }
 
 impl MetricEngine {
-    pub fn new(mito: MitoEngine) -> Self {
+    pub fn new(mito: MitoEngine, config: EngineConfig) -> Self {
         let metadata_region = MetadataRegion::new(mito.clone());
         let data_region = DataRegion::new(mito.clone());
         Self {
@@ -258,6 +265,7 @@ impl MetricEngine {
                 metadata_region,
                 data_region,
                 state: RwLock::default(),
+                config,
             }),
         }
     }
@@ -298,6 +306,9 @@ struct MetricEngineInner {
     metadata_region: MetadataRegion,
     data_region: DataRegion,
     state: RwLock<MetricEngineState>,
+    /// TODO(weny): remove it after the config is used.
+    #[allow(unused)]
+    config: EngineConfig,
 }
 
 #[cfg(test)]

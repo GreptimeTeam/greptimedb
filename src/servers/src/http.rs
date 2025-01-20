@@ -21,6 +21,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use auth::UserProviderRef;
 use axum::extract::DefaultBodyLimit;
+use axum::http::StatusCode as HttpStatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::serve::ListenerExt;
 use axum::{middleware, routing, Router};
@@ -47,6 +48,7 @@ use tower_http::trace::TraceLayer;
 use self::authorize::AuthState;
 use self::result::table_result::TableResponse;
 use crate::configurator::ConfiguratorRef;
+use crate::elasticsearch;
 use crate::error::{
     AddressBindSnafu, AlreadyStartedSnafu, Error, InternalIoSnafu, Result, ToJsonSnafu,
 };
@@ -67,8 +69,8 @@ use crate::metrics_handler::MetricsHandler;
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
-    InfluxdbLineProtocolHandlerRef, OpenTelemetryProtocolHandlerRef, OpentsdbProtocolHandlerRef,
-    PipelineHandlerRef, PromStoreProtocolHandlerRef,
+    InfluxdbLineProtocolHandlerRef, LogQueryHandlerRef, OpenTelemetryProtocolHandlerRef,
+    OpentsdbProtocolHandlerRef, PipelineHandlerRef, PromStoreProtocolHandlerRef,
 };
 use crate::server::Server;
 
@@ -81,6 +83,8 @@ mod extractor;
 pub mod handler;
 pub mod header;
 pub mod influxdb;
+pub mod logs;
+pub mod loki;
 pub mod mem_prof;
 pub mod opentsdb;
 pub mod otlp;
@@ -92,6 +96,7 @@ mod timeout;
 
 pub(crate) use timeout::DynamicTimeoutLayer;
 
+mod hints;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_helpers;
 
@@ -497,6 +502,17 @@ impl HttpServerBuilder {
         }
     }
 
+    pub fn with_logs_handler(self, logs_handler: LogQueryHandlerRef) -> Self {
+        let logs_router = HttpServer::route_logs(logs_handler);
+
+        Self {
+            router: self
+                .router
+                .nest(&format!("/{HTTP_API_VERSION}"), logs_router),
+            ..self
+        }
+    }
+
     pub fn with_opentsdb_handler(self, handler: OpentsdbProtocolHandlerRef) -> Self {
         Self {
             router: self.router.nest(
@@ -584,7 +600,19 @@ impl HttpServerBuilder {
 
         let router = router.nest(
             &format!("/{HTTP_API_VERSION}/loki"),
-            HttpServer::route_loki(log_state),
+            HttpServer::route_loki(log_state.clone()),
+        );
+
+        let router = router.nest(
+            &format!("/{HTTP_API_VERSION}/elasticsearch"),
+            HttpServer::route_elasticsearch(log_state.clone()),
+        );
+
+        let router = router.nest(
+            &format!("/{HTTP_API_VERSION}/elasticsearch/"),
+            Router::new()
+                .route("/", routing::get(elasticsearch::handle_get_version))
+                .with_state(log_state),
         );
 
         Self { router, ..self }
@@ -631,10 +659,15 @@ impl HttpServer {
             router.clone()
         };
 
-        router = router.route(
-            "/health",
-            routing::get(handler::health).post(handler::health),
-        );
+        router = router
+            .route(
+                "/health",
+                routing::get(handler::health).post(handler::health),
+            )
+            .route(
+                "/ready",
+                routing::get(handler::health).post(handler::health),
+            );
 
         router = router.route("/status", routing::get(handler::status));
 
@@ -642,15 +675,30 @@ impl HttpServer {
         {
             if !self.options.disable_dashboard {
                 info!("Enable dashboard service at '/dashboard'");
-                router = router.nest("/dashboard", dashboard::dashboard());
+                // redirect /dashboard to /dashboard/
+                router = router.route(
+                    "/dashboard",
+                    routing::get(|uri: axum::http::uri::Uri| async move {
+                        let path = uri.path();
+                        let query = uri.query().map(|q| format!("?{}", q)).unwrap_or_default();
+
+                        let new_uri = format!("{}/{}", path, query);
+                        axum::response::Redirect::permanent(&new_uri)
+                    }),
+                );
 
                 // "/dashboard" and "/dashboard/" are two different paths in Axum.
                 // We cannot nest "/dashboard/", because we already mapping "/dashboard/*x" while nesting "/dashboard".
                 // So we explicitly route "/dashboard/" here.
-                router = router.route(
-                    "/dashboard/",
-                    routing::get(dashboard::static_handler).post(dashboard::static_handler),
-                );
+                router = router
+                    .route(
+                        "/dashboard/",
+                        routing::get(dashboard::static_handler).post(dashboard::static_handler),
+                    )
+                    .route(
+                        "/dashboard/*x",
+                        routing::get(dashboard::static_handler).post(dashboard::static_handler),
+                    );
             }
         }
 
@@ -692,7 +740,8 @@ impl HttpServer {
                     .layer(middleware::from_fn_with_state(
                         AuthState::new(self.user_provider.clone()),
                         authorize::check_http_auth,
-                    )),
+                    ))
+                    .layer(middleware::from_fn(hints::extract_hints)),
             )
             // Handlers for debug, we don't expect a timeout.
             .nest(
@@ -717,7 +766,87 @@ impl HttpServer {
 
     fn route_loki<S>(log_state: LogState) -> Router<S> {
         Router::new()
-            .route("/api/v1/push", routing::post(event::loki_ingest))
+            .route("/api/v1/push", routing::post(loki::loki_ingest))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
+            )
+            .with_state(log_state)
+    }
+
+    fn route_elasticsearch<S>(log_state: LogState) -> Router<S> {
+        Router::new()
+            // Return fake responsefor HEAD '/' request.
+            .route(
+                "/",
+                routing::head((HttpStatusCode::OK, elasticsearch::elasticsearch_headers())),
+            )
+            // Return fake response for Elasticsearch version request.
+            .route("/", routing::get(elasticsearch::handle_get_version))
+            // Return fake response for Elasticsearch license request.
+            .route("/_license", routing::get(elasticsearch::handle_get_license))
+            .route("/_bulk", routing::post(elasticsearch::handle_bulk_api))
+            .route(
+                "/:index/_bulk",
+                routing::post(elasticsearch::handle_bulk_api_with_index),
+            )
+            // Return fake response for Elasticsearch ilm request.
+            .route(
+                "/_ilm/policy/*path",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            // Return fake response for Elasticsearch index template request.
+            .route(
+                "/_index_template/*path",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            // Return fake response for Elasticsearch ingest pipeline request.
+            // See: https://www.elastic.co/guide/en/elasticsearch/reference/8.8/put-pipeline-api.html.
+            .route(
+                "/_ingest/*path",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            // Return fake response for Elasticsearch nodes discovery request.
+            // See: https://www.elastic.co/guide/en/elasticsearch/reference/8.8/cluster.html.
+            .route(
+                "/_nodes/*path",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            // Return fake response for Logstash APIs requests.
+            // See: https://www.elastic.co/guide/en/elasticsearch/reference/8.8/logstash-apis.html
+            .route(
+                "/logstash/*path",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            .route(
+                "/_logstash/*path",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            .layer(ServiceBuilder::new().layer(RequestDecompressionLayer::new()))
             .with_state(log_state)
     }
 
@@ -733,7 +862,10 @@ impl HttpServer {
                 routing::delete(event::delete_pipeline),
             )
             .route("/pipelines/dryrun", routing::post(event::pipeline_dryrun))
-            .layer(ServiceBuilder::new().layer(RequestDecompressionLayer::new()))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
+            )
             .with_state(log_state)
     }
 
@@ -741,10 +873,20 @@ impl HttpServer {
         Router::new()
             .route("/sql", routing::get(handler::sql).post(handler::sql))
             .route(
+                "/sql/parse",
+                routing::get(handler::sql_parse).post(handler::sql_parse),
+            )
+            .route(
                 "/promql",
                 routing::get(handler::promql).post(handler::promql),
             )
             .with_state(api_state)
+    }
+
+    fn route_logs<S>(log_handler: LogQueryHandlerRef) -> Router<S> {
+        Router::new()
+            .route("/logs", routing::get(logs::logs).post(logs::logs))
+            .with_state(log_handler)
     }
 
     /// Route Prometheus [HTTP API].
@@ -810,7 +952,10 @@ impl HttpServer {
         Router::new()
             .route("/write", routing::post(influxdb_write_v1))
             .route("/api/v2/write", routing::post(influxdb_write_v2))
-            .layer(ServiceBuilder::new().layer(RequestDecompressionLayer::new()))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
+            )
             .route("/ping", routing::get(influxdb_ping))
             .route("/health", routing::get(influxdb_health))
             .with_state(influxdb_handler)
@@ -827,7 +972,10 @@ impl HttpServer {
             .route("/v1/metrics", routing::post(otlp::metrics))
             .route("/v1/traces", routing::post(otlp::traces))
             .route("/v1/logs", routing::post(otlp::logs))
-            .layer(ServiceBuilder::new().layer(RequestDecompressionLayer::new()))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
+            )
             .with_state(otlp_handler)
     }
 

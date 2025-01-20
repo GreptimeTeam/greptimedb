@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::information_extension::DistributedInformationExtension;
@@ -63,12 +64,13 @@ impl Instance {
         }
     }
 
-    pub fn flownode_mut(&mut self) -> &mut FlownodeInstance {
-        &mut self.flownode
-    }
-
     pub fn flownode(&self) -> &FlownodeInstance {
         &self.flownode
+    }
+
+    /// allow customizing flownode for downstream projects
+    pub fn flownode_mut(&mut self) -> &mut FlownodeInstance {
+        &mut self.flownode
     }
 }
 
@@ -141,6 +143,11 @@ struct StartCommand {
     /// The prefix of environment variables, default is `GREPTIMEDB_FLOWNODE`;
     #[clap(long, default_value = "GREPTIMEDB_FLOWNODE")]
     env_prefix: String,
+    #[clap(long)]
+    http_addr: Option<String>,
+    /// HTTP request timeout in seconds.
+    #[clap(long)]
+    http_timeout: Option<u64>,
 }
 
 impl StartCommand {
@@ -197,6 +204,14 @@ impl StartCommand {
             opts.mode = Mode::Distributed;
         }
 
+        if let Some(http_addr) = &self.http_addr {
+            opts.http.addr.clone_from(http_addr);
+        }
+
+        if let Some(http_timeout) = self.http_timeout {
+            opts.http.timeout = Duration::from_secs(http_timeout);
+        }
+
         if let (Mode::Distributed, None) = (&opts.mode, &opts.node_id) {
             return MissingConfigSnafu {
                 msg: "Missing node id option",
@@ -221,7 +236,8 @@ impl StartCommand {
         info!("Flownode start command: {:#?}", self);
         info!("Flownode options: {:#?}", opts);
 
-        let opts = opts.component;
+        let mut opts = opts.component;
+        opts.grpc.detect_hostname();
 
         // TODO(discord9): make it not optionale after cluster id is required
         let cluster_id = opts.cluster_id.unwrap_or(0);

@@ -1,5 +1,5 @@
 -- Test without PK, with a windowed sort query.
-CREATE TABLE test(i INTEGER, t TIMESTAMP TIME INDEX);
+CREATE TABLE test(i INTEGER, t TIMESTAMP TIME INDEX) WITH('compaction.type'='twcs', 'compaction.twcs.max_inactive_window_files'='4');
 
 Affected Rows: 0
 
@@ -111,7 +111,7 @@ DROP TABLE test;
 Affected Rows: 0
 
 -- Test with PK, with a windowed sort query.
-CREATE TABLE test_pk(pk INTEGER PRIMARY KEY, i INTEGER, t TIMESTAMP TIME INDEX);
+CREATE TABLE test_pk(pk INTEGER PRIMARY KEY, i INTEGER, t TIMESTAMP TIME INDEX) WITH('compaction.type'='twcs', 'compaction.twcs.max_inactive_window_files'='4');
 
 Affected Rows: 0
 
@@ -222,4 +222,3 @@ EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t DESC LIMIT 5;
 DROP TABLE test_pk;
 
 Affected Rows: 0
-

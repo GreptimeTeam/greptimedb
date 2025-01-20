@@ -46,6 +46,22 @@ SHOW CREATE TABLE system_metrics;
 |                | )                                                         |
 +----------------+-----------------------------------------------------------+
 
+SHOW CREATE TABLE system_metrics FOR POSTGRES_FOREIGN_TABLE;
+
++----------------+------------------------------------------+
+| Table          | Create Table                             |
++----------------+------------------------------------------+
+| system_metrics | CREATE FOREIGN TABLE ft_system_metrics ( |
+|                |   "id" INT4,                             |
+|                |   "host" VARCHAR,                        |
+|                |   "cpu" FLOAT8,                          |
+|                |   "disk" FLOAT4,                         |
+|                |   "ts" TIMESTAMP                         |
+|                | )                                        |
+|                | SERVER greptimedb                        |
+|                | OPTIONS (table_name 'system_metrics')    |
++----------------+------------------------------------------+
+
 DROP TABLE system_metrics;
 
 Affected Rows: 0
@@ -140,6 +156,20 @@ show create table t1;
 |       |   on_physical_table = 'phy'       |
 |       | )                                 |
 +-------+-----------------------------------+
+
+SHOW CREATE TABLE t1 FOR POSTGRES_FOREIGN_TABLE;
+
++-------+------------------------------+
+| Table | Create Table                 |
++-------+------------------------------+
+| t1    | CREATE FOREIGN TABLE ft_t1 ( |
+|       |   "host" VARCHAR,            |
+|       |   "ts" TIMESTAMP,            |
+|       |   "val" FLOAT8               |
+|       | )                            |
+|       | SERVER greptimedb            |
+|       | OPTIONS (table_name 't1')    |
++-------+------------------------------+
 
 drop table t1;
 

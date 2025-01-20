@@ -1,0 +1,185 @@
+-- test if reordered insert is correctly handled
+CREATE TABLE bytes_log (
+    byte INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    -- event time
+    TIME INDEX(ts)
+);
+
+Affected Rows: 0
+
+-- TODO(discord9): remove this after auto infer table's time index is impl
+CREATE TABLE approx_rate (
+    rate DOUBLE,
+    time_window TIMESTAMP,
+    update_at TIMESTAMP,
+    TIME INDEX(time_window)
+);
+
+Affected Rows: 0
+
+CREATE FLOW find_approx_rate SINK TO approx_rate AS
+SELECT
+    (max(byte) - min(byte)) / 30.0 as rate,
+    date_bin(INTERVAL '30 second', ts) as time_window
+from
+    bytes_log
+GROUP BY
+    time_window;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE approx_rate;
+
++-------------+--------------------------------------------+
+| Table       | Create Table                               |
++-------------+--------------------------------------------+
+| approx_rate | CREATE TABLE IF NOT EXISTS "approx_rate" ( |
+|             |   "rate" DOUBLE NULL,                      |
+|             |   "time_window" TIMESTAMP(3) NOT NULL,     |
+|             |   "update_at" TIMESTAMP(3) NULL,           |
+|             |   TIME INDEX ("time_window")               |
+|             | )                                          |
+|             |                                            |
+|             | ENGINE=mito                                |
+|             |                                            |
++-------------+--------------------------------------------+
+
+-- reordered insert, also test if null is handled correctly
+INSERT INTO
+    bytes_log (ts, byte) 
+VALUES
+    ('2023-01-01 00:00:01', NULL),
+    ('2023-01-01 00:00:29', 300);
+
+Affected Rows: 2
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('find_approx_rate');
+
++--------------------------------------+
+| ADMIN FLUSH_FLOW('find_approx_rate') |
++--------------------------------------+
+|  FLOW_FLUSHED  |
++--------------------------------------+
+
+SELECT
+    rate,
+    time_window
+FROM
+    approx_rate;
+
++------+---------------------+
+| rate | time_window         |
++------+---------------------+
+| 0.0  | 2023-01-01T00:00:00 |
++------+---------------------+
+
+-- reordered insert, also test if null is handled correctly
+INSERT INTO
+    bytes_log (ts, byte) 
+VALUES
+    ('2022-01-01 00:00:01', NULL),
+    ('2022-01-01 00:00:29', NULL);
+
+Affected Rows: 2
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('find_approx_rate');
+
++--------------------------------------+
+| ADMIN FLUSH_FLOW('find_approx_rate') |
++--------------------------------------+
+|  FLOW_FLUSHED  |
++--------------------------------------+
+
+SELECT
+    rate,
+    time_window
+FROM
+    approx_rate;
+
++------+---------------------+
+| rate | time_window         |
++------+---------------------+
+|      | 2022-01-01T00:00:00 |
+| 0.0  | 2023-01-01T00:00:00 |
++------+---------------------+
+
+-- reordered insert
+INSERT INTO
+    bytes_log (ts, byte) 
+VALUES
+    ('2025-01-01 00:00:01', 101),
+    ('2025-01-01 00:00:29', 300);
+
+Affected Rows: 2
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('find_approx_rate');
+
++--------------------------------------+
+| ADMIN FLUSH_FLOW('find_approx_rate') |
++--------------------------------------+
+|  FLOW_FLUSHED  |
++--------------------------------------+
+
+SELECT
+    rate,
+    time_window
+FROM
+    approx_rate;
+
++-------------------+---------------------+
+| rate              | time_window         |
++-------------------+---------------------+
+|                   | 2022-01-01T00:00:00 |
+| 0.0               | 2023-01-01T00:00:00 |
+| 6.633333333333334 | 2025-01-01T00:00:00 |
++-------------------+---------------------+
+
+-- reordered insert
+INSERT INTO
+    bytes_log (ts, byte) 
+VALUES
+    ('2025-01-01 00:00:32', 450),
+    ('2025-01-01 00:00:37', 500);
+
+Affected Rows: 2
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('find_approx_rate');
+
++--------------------------------------+
+| ADMIN FLUSH_FLOW('find_approx_rate') |
++--------------------------------------+
+|  FLOW_FLUSHED  |
++--------------------------------------+
+
+SELECT
+    rate,
+    time_window
+FROM
+    approx_rate;
+
++--------------------+---------------------+
+| rate               | time_window         |
++--------------------+---------------------+
+|                    | 2022-01-01T00:00:00 |
+| 0.0                | 2023-01-01T00:00:00 |
+| 6.633333333333334  | 2025-01-01T00:00:00 |
+| 1.6666666666666667 | 2025-01-01T00:00:30 |
++--------------------+---------------------+
+
+DROP TABLE bytes_log;
+
+Affected Rows: 0
+
+DROP FLOW find_approx_rate;
+
+Affected Rows: 0
+
+DROP TABLE approx_rate;
+
+Affected Rows: 0
+

@@ -28,14 +28,13 @@ pub fn build_same_type_ts_filter(
     ts_schema: &ColumnSchema,
     time_range: Option<TimestampRange>,
 ) -> Option<Expr> {
-    let ts_type = ts_schema.data_type.clone();
     let time_range = time_range?;
     let start = time_range
         .start()
-        .and_then(|start| ts_type.try_cast(Value::Timestamp(start)));
+        .and_then(|start| ts_schema.data_type.try_cast(Value::Timestamp(start)));
     let end = time_range
         .end()
-        .and_then(|end| ts_type.try_cast(Value::Timestamp(end)));
+        .and_then(|end| ts_schema.data_type.try_cast(Value::Timestamp(end)));
 
     let time_range = match (start, end) {
         (Some(Value::Timestamp(start)), Some(Value::Timestamp(end))) => {

@@ -12,15 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashMap};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use api::v1::value::ValueData;
-use api::v1::{
-    ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
-    Value as GreptimeValue,
-};
+use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
 use async_trait::async_trait;
 use axum::extract::{FromRequest, Multipart, Path, Query, Request, State};
 use axum::http::header::CONTENT_TYPE;
@@ -28,28 +24,24 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use axum_extra::TypedHeader;
-use bytes::Bytes;
-use common_query::prelude::GREPTIME_TIMESTAMP;
+use common_error::ext::ErrorExt;
 use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
 use datatypes::value::column_data_to_json;
 use headers::ContentType;
 use lazy_static::lazy_static;
-use loki_api::prost_types::Timestamp;
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
-use pipeline::PipelineVersion;
-use prost::Message;
+use pipeline::{GreptimeTransformer, PipelineVersion};
 use serde::{Deserialize, Serialize};
-use serde_json::{Deserializer, Map, Value};
+use serde_json::{json, Deserializer, Map, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
-    DecodeOtlpRequestSnafu, Error, InvalidParameterSnafu, ParseJson5Snafu, ParseJsonSnafu,
+    status_code_to_http_status, CatalogSnafu, Error, InvalidParameterSnafu, ParseJsonSnafu,
     PipelineSnafu, Result, UnsupportedContentTypeSnafu,
 };
-use crate::http::extractor::LogTableName;
 use crate::http::header::CONTENT_TYPE_PROTOBUF_STR;
 use crate::http::result::greptime_manage_resp::GreptimedbManageResponse;
 use crate::http::result::greptime_result_v1::GreptimedbV1Response;
@@ -57,46 +49,49 @@ use crate::http::HttpResponse;
 use crate::interceptor::{LogIngestInterceptor, LogIngestInterceptorRef};
 use crate::metrics::{
     METRIC_FAILURE_VALUE, METRIC_HTTP_LOGS_INGESTION_COUNTER, METRIC_HTTP_LOGS_INGESTION_ELAPSED,
-    METRIC_HTTP_LOGS_TRANSFORM_ELAPSED, METRIC_LOKI_LOGS_INGESTION_COUNTER,
-    METRIC_LOKI_LOGS_INGESTION_ELAPSED, METRIC_SUCCESS_VALUE,
+    METRIC_HTTP_LOGS_TRANSFORM_ELAPSED, METRIC_SUCCESS_VALUE,
 };
-use crate::prom_store;
 use crate::query_handler::PipelineHandlerRef;
 
+pub const GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME: &str = "greptime_identity";
 const GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX: &str = "greptime_";
-const GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME: &str = "greptime_identity";
-
-const LOKI_TABLE_NAME: &str = "loki_logs";
-const LOKI_LINE_COLUMN: &str = "line";
 
 lazy_static! {
-    static ref LOKI_INIT_SCHEMAS: Vec<ColumnSchema> = vec![
-        ColumnSchema {
-            column_name: GREPTIME_TIMESTAMP.to_string(),
-            datatype: ColumnDataType::TimestampNanosecond.into(),
-            semantic_type: SemanticType::Timestamp.into(),
-            datatype_extension: None,
-            options: None,
-        },
-        ColumnSchema {
-            column_name: LOKI_LINE_COLUMN.to_string(),
-            datatype: ColumnDataType::String.into(),
-            semantic_type: SemanticType::Field.into(),
-            datatype_extension: None,
-            options: None,
-        },
-    ];
+    pub static ref JSON_CONTENT_TYPE: ContentType = ContentType::json();
+    pub static ref TEXT_CONTENT_TYPE: ContentType = ContentType::text();
+    pub static ref TEXT_UTF8_CONTENT_TYPE: ContentType = ContentType::text_utf8();
+    pub static ref PB_CONTENT_TYPE: ContentType =
+        ContentType::from_str(CONTENT_TYPE_PROTOBUF_STR).unwrap();
 }
 
+/// LogIngesterQueryParams is used for query params of log ingester API.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct LogIngesterQueryParams {
-    pub table: Option<String>,
+    /// The database where log data will be written to.
     pub db: Option<String>,
+    /// The table where log data will be written to.
+    pub table: Option<String>,
+    /// The pipeline that will be used for log ingestion.
     pub pipeline_name: Option<String>,
-    pub ignore_errors: Option<bool>,
-
+    /// The version of the pipeline to be used for log ingestion.
     pub version: Option<String>,
+    /// Whether to ignore errors during log ingestion.
+    pub ignore_errors: Option<bool>,
+    /// The source of the log data.
     pub source: Option<String>,
+    /// The JSON field name of the log message. If not provided, it will take the whole log as the message.
+    /// The field must be at the top level of the JSON structure.
+    pub msg_field: Option<String>,
+}
+
+/// LogIngestRequest is the internal request for log ingestion. The raw log input can be transformed into multiple LogIngestRequests.
+/// Multiple LogIngestRequests will be ingested into the same database with the same pipeline.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct LogIngestRequest {
+    /// The table where the log data will be written to.
+    pub table: String,
+    /// The log data to be ingested.
+    pub values: Vec<Value>,
 }
 
 pub struct PipelineContent(String);
@@ -271,39 +266,11 @@ fn transform_ndjson_array_factory(
         })
 }
 
-#[axum_macros::debug_handler]
-pub async fn pipeline_dryrun(
-    State(log_state): State<LogState>,
-    Query(query_params): Query<LogIngesterQueryParams>,
-    Extension(mut query_ctx): Extension<QueryContext>,
-    TypedHeader(content_type): TypedHeader<ContentType>,
-    payload: String,
+/// Dryrun pipeline with given data
+fn dryrun_pipeline_inner(
+    value: Vec<Value>,
+    pipeline: &pipeline::Pipeline<GreptimeTransformer>,
 ) -> Result<Response> {
-    let handler = log_state.log_handler;
-    let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
-        reason: "pipeline_name is required",
-    })?;
-
-    let version = to_pipeline_version(query_params.version).context(PipelineSnafu)?;
-
-    let ignore_errors = query_params.ignore_errors.unwrap_or(false);
-
-    let value = extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
-
-    ensure!(
-        value.len() <= 10,
-        InvalidParameterSnafu {
-            reason: "too many rows for dryrun",
-        }
-    );
-
-    query_ctx.set_channel(Channel::Http);
-    let query_ctx = Arc::new(query_ctx);
-
-    let pipeline = handler
-        .get_pipeline(&pipeline_name, version, query_ctx.clone())
-        .await?;
-
     let mut intermediate_state = pipeline.init_intermediate_state();
 
     let mut results = Vec::with_capacity(value.len());
@@ -382,144 +349,128 @@ pub async fn pipeline_dryrun(
     Ok(Json(result).into_response())
 }
 
-#[axum_macros::debug_handler]
-pub async fn loki_ingest(
-    State(log_state): State<LogState>,
-    Extension(mut ctx): Extension<QueryContext>,
-    TypedHeader(content_type): TypedHeader<ContentType>,
-    LogTableName(table_name): LogTableName,
-    bytes: Bytes,
-) -> Result<HttpResponse> {
-    ctx.set_channel(Channel::Loki);
-    let ctx = Arc::new(ctx);
-    let db = ctx.get_db_string();
-    let db_str = db.as_str();
-    let table_name = table_name.unwrap_or_else(|| LOKI_TABLE_NAME.to_string());
-    let exec_timer = Instant::now();
+/// Dryrun pipeline with given data
+/// pipeline_name and pipeline_version to specify pipeline stored in db
+/// pipeline to specify pipeline raw content
+/// data to specify data
+/// data maght be list of string or list of object
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct PipelineDryrunParams {
+    pub pipeline_name: Option<String>,
+    pub pipeline_version: Option<String>,
+    pub pipeline: Option<String>,
+    pub data: Vec<Value>,
+}
 
-    // decompress req
+/// Check if the payload is valid json
+/// Check if the payload contains pipeline or pipeline_name and data
+/// Return Some if valid, None if invalid
+fn check_pipeline_dryrun_params_valid(payload: &str) -> Option<PipelineDryrunParams> {
+    match serde_json::from_str::<PipelineDryrunParams>(payload) {
+        // payload with pipeline or pipeline_name and data is array
+        Ok(params) if params.pipeline.is_some() || params.pipeline_name.is_some() => Some(params),
+        // because of the pipeline_name or pipeline is required
+        Ok(_) => None,
+        // invalid json
+        Err(_) => None,
+    }
+}
+
+/// Check if the pipeline_name exists
+fn check_pipeline_name_exists(pipeline_name: Option<String>) -> Result<String> {
+    pipeline_name.context(InvalidParameterSnafu {
+        reason: "pipeline_name is required",
+    })
+}
+
+/// Check if the data length less than 10
+fn check_data_valid(data_len: usize) -> Result<()> {
     ensure!(
-        content_type.to_string() == CONTENT_TYPE_PROTOBUF_STR,
-        UnsupportedContentTypeSnafu { content_type }
+        data_len <= 10,
+        InvalidParameterSnafu {
+            reason: "data is required",
+        }
     );
-    let decompressed = prom_store::snappy_decompress(&bytes).unwrap();
-    let req = loki_api::logproto::PushRequest::decode(&decompressed[..])
-        .context(DecodeOtlpRequestSnafu)?;
+    Ok(())
+}
 
-    // init schemas
-    let mut schemas = LOKI_INIT_SCHEMAS.clone();
+fn add_step_info_for_pipeline_dryrun_error(step_msg: &str, e: Error) -> Response {
+    let body = Json(json!({
+        "error": format!("{}: {}", step_msg,e.output_msg()),
+    }));
 
-    let mut global_label_key_index: HashMap<String, i32> = HashMap::new();
-    global_label_key_index.insert(GREPTIME_TIMESTAMP.to_string(), 0);
-    global_label_key_index.insert(LOKI_LINE_COLUMN.to_string(), 1);
+    (status_code_to_http_status(&e.status_code()), body).into_response()
+}
 
-    let mut rows = vec![];
+#[axum_macros::debug_handler]
+pub async fn pipeline_dryrun(
+    State(log_state): State<LogState>,
+    Query(query_params): Query<LogIngesterQueryParams>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+    TypedHeader(content_type): TypedHeader<ContentType>,
+    payload: String,
+) -> Result<Response> {
+    let handler = log_state.log_handler;
 
-    for stream in req.streams {
-        // parse labels for each row
-        // encoding: https://github.com/grafana/alloy/blob/be34410b9e841cc0c37c153f9550d9086a304bca/internal/component/common/loki/client/batch.go#L114-L145
-        // use very dirty hack to parse labels
-        let labels = stream.labels.replace("=", ":");
-        // use btreemap to keep order
-        let labels: BTreeMap<String, String> = json5::from_str(&labels).context(ParseJson5Snafu)?;
+    match check_pipeline_dryrun_params_valid(&payload) {
+        Some(params) => {
+            let data = params.data;
 
-        // process entries
-        for entry in stream.entries {
-            let ts = if let Some(ts) = entry.timestamp {
-                ts
-            } else {
-                continue;
-            };
-            let line = entry.line;
+            check_data_valid(data.len())?;
 
-            // create and init row
-            let mut row = Vec::with_capacity(schemas.capacity());
-            for _ in 0..row.capacity() {
-                row.push(GreptimeValue { value_data: None });
-            }
-            // insert ts and line
-            row[0] = GreptimeValue {
-                value_data: Some(ValueData::TimestampNanosecondValue(prost_ts_to_nano(&ts))),
-            };
-            row[1] = GreptimeValue {
-                value_data: Some(ValueData::StringValue(line)),
-            };
-            // insert labels
-            for (k, v) in labels.iter() {
-                if let Some(index) = global_label_key_index.get(k) {
-                    // exist in schema
-                    // insert value using index
-                    row[*index as usize] = GreptimeValue {
-                        value_data: Some(ValueData::StringValue(v.clone())),
-                    };
-                } else {
-                    // not exist
-                    // add schema and append to values
-                    schemas.push(ColumnSchema {
-                        column_name: k.clone(),
-                        datatype: ColumnDataType::String.into(),
-                        semantic_type: SemanticType::Tag.into(),
-                        datatype_extension: None,
-                        options: None,
-                    });
-                    global_label_key_index.insert(k.clone(), (schemas.len() - 1) as i32);
-
-                    row.push(GreptimeValue {
-                        value_data: Some(ValueData::StringValue(v.clone())),
-                    });
+            match params.pipeline {
+                None => {
+                    let version =
+                        to_pipeline_version(params.pipeline_version).context(PipelineSnafu)?;
+                    let pipeline_name = check_pipeline_name_exists(params.pipeline_name)?;
+                    let pipeline = handler
+                        .get_pipeline(&pipeline_name, version, Arc::new(query_ctx))
+                        .await?;
+                    dryrun_pipeline_inner(data, &pipeline)
+                }
+                Some(pipeline) => {
+                    let pipeline = handler.build_pipeline(&pipeline);
+                    match pipeline {
+                        Ok(pipeline) => match dryrun_pipeline_inner(data, &pipeline) {
+                            Ok(response) => Ok(response),
+                            Err(e) => Ok(add_step_info_for_pipeline_dryrun_error(
+                                "Failed to exec pipeline",
+                                e,
+                            )),
+                        },
+                        Err(e) => Ok(add_step_info_for_pipeline_dryrun_error(
+                            "Failed to build pipeline",
+                            e,
+                        )),
+                    }
                 }
             }
+        }
+        None => {
+            // This path is for back compatibility with the previous dry run code
+            // where the payload is just data (JSON or plain text) and the pipeline name
+            // is specified using query param.
+            let pipeline_name = check_pipeline_name_exists(query_params.pipeline_name)?;
 
-            rows.push(row);
+            let version = to_pipeline_version(query_params.version).context(PipelineSnafu)?;
+
+            let ignore_errors = query_params.ignore_errors.unwrap_or(false);
+
+            let value =
+                extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
+
+            check_data_valid(value.len())?;
+
+            query_ctx.set_channel(Channel::Http);
+            let query_ctx = Arc::new(query_ctx);
+
+            let pipeline = handler
+                .get_pipeline(&pipeline_name, version, query_ctx.clone())
+                .await?;
+
+            dryrun_pipeline_inner(value, &pipeline)
         }
     }
-
-    // fill Null for missing values
-    for row in rows.iter_mut() {
-        if row.len() < schemas.len() {
-            for _ in row.len()..schemas.len() {
-                row.push(GreptimeValue { value_data: None });
-            }
-        }
-    }
-
-    let rows = Rows {
-        rows: rows.into_iter().map(|values| Row { values }).collect(),
-        schema: schemas,
-    };
-
-    let ins_req = RowInsertRequest {
-        table_name,
-        rows: Some(rows),
-    };
-    let ins_reqs = RowInsertRequests {
-        inserts: vec![ins_req],
-    };
-
-    let handler = log_state.log_handler;
-    let output = handler.insert(ins_reqs, ctx).await;
-
-    if let Ok(Output {
-        data: OutputData::AffectedRows(rows),
-        meta: _,
-    }) = &output
-    {
-        METRIC_LOKI_LOGS_INGESTION_COUNTER
-            .with_label_values(&[db_str])
-            .inc_by(*rows as u64);
-        METRIC_LOKI_LOGS_INGESTION_ELAPSED
-            .with_label_values(&[db_str, METRIC_SUCCESS_VALUE])
-            .observe(exec_timer.elapsed().as_secs_f64());
-    } else {
-        METRIC_LOKI_LOGS_INGESTION_ELAPSED
-            .with_label_values(&[db_str, METRIC_FAILURE_VALUE])
-            .observe(exec_timer.elapsed().as_secs_f64());
-    }
-
-    let response = GreptimedbV1Response::from_output(vec![output])
-        .await
-        .with_execution_time(exec_timer.elapsed().as_millis() as u64);
-    Ok(response)
 }
 
 #[axum_macros::debug_handler]
@@ -567,8 +518,10 @@ pub async fn log_ingester(
         handler,
         pipeline_name,
         version,
-        table_name,
-        value,
+        vec![LogIngestRequest {
+            table: table_name,
+            values: value,
+        }],
         query_ctx,
     )
     .await
@@ -580,11 +533,11 @@ fn extract_pipeline_value_by_content_type(
     ignore_errors: bool,
 ) -> Result<Vec<Value>> {
     Ok(match content_type {
-        ct if ct == ContentType::json() => transform_ndjson_array_factory(
+        ct if ct == *JSON_CONTENT_TYPE => transform_ndjson_array_factory(
             Deserializer::from_str(&payload).into_iter(),
             ignore_errors,
         )?,
-        ct if ct == ContentType::text() || ct == ContentType::text_utf8() => payload
+        ct if ct == *TEXT_CONTENT_TYPE || ct == *TEXT_UTF8_CONTENT_TYPE => payload
             .lines()
             .filter(|line| !line.is_empty())
             .map(|line| Value::String(line.to_string()))
@@ -593,73 +546,82 @@ fn extract_pipeline_value_by_content_type(
     })
 }
 
-async fn ingest_logs_inner(
+pub(crate) async fn ingest_logs_inner(
     state: PipelineHandlerRef,
     pipeline_name: String,
     version: PipelineVersion,
-    table_name: String,
-    pipeline_data: Vec<Value>,
+    log_ingest_requests: Vec<LogIngestRequest>,
     query_ctx: QueryContextRef,
 ) -> Result<HttpResponse> {
     let db = query_ctx.get_db_string();
     let exec_timer = std::time::Instant::now();
 
-    let mut results = Vec::with_capacity(pipeline_data.len());
-    let transformed_data: Rows;
-    if pipeline_name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME {
-        let rows = pipeline::identity_pipeline(pipeline_data)
-            .context(PipelineTransformSnafu)
-            .context(PipelineSnafu)?;
-        transformed_data = rows;
-    } else {
-        let pipeline = state
-            .get_pipeline(&pipeline_name, version, query_ctx.clone())
-            .await?;
+    let mut insert_requests = Vec::with_capacity(log_ingest_requests.len());
 
-        let transform_timer = std::time::Instant::now();
-        let mut intermediate_state = pipeline.init_intermediate_state();
-
-        for v in pipeline_data {
-            pipeline
-                .prepare(v, &mut intermediate_state)
-                .inspect_err(|_| {
-                    METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                        .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
-                        .observe(transform_timer.elapsed().as_secs_f64());
-                })
+    for request in log_ingest_requests {
+        let transformed_data: Rows = if pipeline_name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME {
+            let table = state
+                .get_table(&request.table, &query_ctx)
+                .await
+                .context(CatalogSnafu)?;
+            pipeline::identity_pipeline(request.values, table)
                 .context(PipelineTransformSnafu)
-                .context(PipelineSnafu)?;
-            let r = pipeline
-                .exec_mut(&mut intermediate_state)
-                .inspect_err(|_| {
-                    METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                        .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
-                        .observe(transform_timer.elapsed().as_secs_f64());
-                })
-                .context(PipelineTransformSnafu)
-                .context(PipelineSnafu)?;
-            results.push(r);
-            pipeline.reset_intermediate_state(&mut intermediate_state);
-        }
+                .context(PipelineSnafu)?
+        } else {
+            let pipeline = state
+                .get_pipeline(&pipeline_name, version, query_ctx.clone())
+                .await?;
 
-        METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-            .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
-            .observe(transform_timer.elapsed().as_secs_f64());
+            let transform_timer = std::time::Instant::now();
+            let mut intermediate_state = pipeline.init_intermediate_state();
+            let mut results = Vec::with_capacity(request.values.len());
+            for v in request.values {
+                pipeline
+                    .prepare(v, &mut intermediate_state)
+                    .inspect_err(|_| {
+                        METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                            .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
+                            .observe(transform_timer.elapsed().as_secs_f64());
+                    })
+                    .context(PipelineTransformSnafu)
+                    .context(PipelineSnafu)?;
+                let r = pipeline
+                    .exec_mut(&mut intermediate_state)
+                    .inspect_err(|_| {
+                        METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                            .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
+                            .observe(transform_timer.elapsed().as_secs_f64());
+                    })
+                    .context(PipelineTransformSnafu)
+                    .context(PipelineSnafu)?;
+                results.push(r);
+                pipeline.reset_intermediate_state(&mut intermediate_state);
+            }
 
-        transformed_data = Rows {
-            rows: results,
-            schema: pipeline.schemas().clone(),
+            METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
+                .observe(transform_timer.elapsed().as_secs_f64());
+
+            Rows {
+                rows: results,
+                schema: pipeline.schemas().clone(),
+            }
         };
+
+        insert_requests.push(RowInsertRequest {
+            rows: Some(transformed_data),
+            table_name: request.table.clone(),
+        });
     }
 
-    let insert_request = RowInsertRequest {
-        rows: Some(transformed_data),
-        table_name: table_name.clone(),
-    };
-    let insert_requests = RowInsertRequests {
-        inserts: vec![insert_request],
-    };
-    let output = state.insert(insert_requests, query_ctx).await;
+    let output = state
+        .insert(
+            RowInsertRequests {
+                inserts: insert_requests,
+            },
+            query_ctx,
+        )
+        .await;
 
     if let Ok(Output {
         data: OutputData::AffectedRows(rows),
@@ -701,11 +663,6 @@ pub struct LogState {
     pub ingest_interceptor: Option<LogIngestInterceptorRef<Error>>,
 }
 
-#[inline]
-fn prost_ts_to_nano(ts: &Timestamp) -> i64 {
-    ts.seconds * 1_000_000_000 + ts.nanos as i64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -739,17 +696,5 @@ mod tests {
         )
         .to_string();
         assert_eq!(a, "[{\"a\":1},{\"b\":2}]");
-    }
-
-    #[test]
-    fn test_ts_to_nano() {
-        // ts = 1731748568804293888
-        // seconds = 1731748568
-        // nano = 804293888
-        let ts = Timestamp {
-            seconds: 1731748568,
-            nanos: 804293888,
-        };
-        assert_eq!(prost_ts_to_nano(&ts), 1731748568804293888);
     }
 }

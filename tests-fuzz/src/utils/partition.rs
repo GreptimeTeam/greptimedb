@@ -17,8 +17,7 @@ use std::time::Duration;
 
 use common_telemetry::info;
 use snafu::ResultExt;
-use sqlx::database::HasArguments;
-use sqlx::{ColumnIndex, Database, Decode, Encode, Executor, IntoArguments, MySql, Pool, Type};
+use sqlx::MySqlPool;
 use store_api::storage::RegionId;
 
 use super::wait::wait_condition_fn;
@@ -36,61 +35,33 @@ pub struct PartitionCount {
     pub count: i64,
 }
 
-pub async fn count_partitions<'a, DB, E>(e: E, datanode_id: u64) -> Result<PartitionCount>
-where
-    DB: Database,
-    <DB as HasArguments<'a>>::Arguments: IntoArguments<'a, DB>,
-    for<'c> E: 'a + Executor<'c, Database = DB>,
-    for<'c> i64: Decode<'c, DB> + Type<DB>,
-    for<'c> String: Decode<'c, DB> + Type<DB>,
-    for<'c> u64: Encode<'c, DB> + Type<DB>,
-    for<'c> &'c str: ColumnIndex<<DB as Database>::Row>,
-{
+pub async fn count_partitions(db: &MySqlPool, datanode_id: u64) -> Result<PartitionCount> {
     let sql = "select count(1) as count from information_schema.region_peers where peer_id == ?";
-    Ok(sqlx::query_as::<_, PartitionCount>(sql)
+    sqlx::query_as::<_, PartitionCount>(sql)
         .bind(datanode_id)
-        .fetch_all(e)
+        .fetch_one(db)
         .await
-        .context(error::ExecuteQuerySnafu { sql })?
-        .remove(0))
+        .context(error::ExecuteQuerySnafu { sql })
 }
 
 /// Returns the [Partition] of the specific `region_id`
-pub async fn fetch_partition<'a, DB, E>(e: E, region_id: u64) -> Result<Partition>
-where
-    DB: Database,
-    <DB as HasArguments<'a>>::Arguments: IntoArguments<'a, DB>,
-    for<'c> E: 'a + Executor<'c, Database = DB>,
-    for<'c> u64: Decode<'c, DB> + Type<DB>,
-    for<'c> String: Decode<'c, DB> + Type<DB>,
-    for<'c> u64: Encode<'c, DB> + Type<DB>,
-    for<'c> &'c str: ColumnIndex<<DB as Database>::Row>,
-{
+pub async fn fetch_partition(db: &MySqlPool, region_id: u64) -> Result<Partition> {
     let sql = "select region_id, peer_id as datanode_id from information_schema.region_peers where region_id = ?;";
     sqlx::query_as::<_, Partition>(sql)
         .bind(region_id)
-        .fetch_one(e)
+        .fetch_one(db)
         .await
         .context(error::ExecuteQuerySnafu { sql })
 }
 
 /// Returns all [Partition] of the specific `table`
-pub async fn fetch_partitions<'a, DB, E>(e: E, table_name: Ident) -> Result<Vec<Partition>>
-where
-    DB: Database,
-    <DB as HasArguments<'a>>::Arguments: IntoArguments<'a, DB>,
-    for<'c> E: 'a + Executor<'c, Database = DB>,
-    for<'c> u64: Decode<'c, DB> + Type<DB>,
-    for<'c> String: Decode<'c, DB> + Type<DB>,
-    for<'c> String: Encode<'c, DB> + Type<DB>,
-    for<'c> &'c str: ColumnIndex<<DB as Database>::Row>,
-{
+pub async fn fetch_partitions(db: &MySqlPool, table_name: Ident) -> Result<Vec<Partition>> {
     let sql = "select b.peer_id as datanode_id, a.greptime_partition_id as region_id
 from information_schema.partitions a left join information_schema.region_peers b
 on a.greptime_partition_id = b.region_id where a.table_name= ? order by datanode_id asc;";
     sqlx::query_as::<_, Partition>(sql)
         .bind(table_name.value.to_string())
-        .fetch_all(e)
+        .fetch_all(db)
         .await
         .context(error::ExecuteQuerySnafu { sql })
 }
@@ -124,7 +95,7 @@ pub fn pretty_print_region_distribution(distribution: &BTreeMap<u64, Vec<RegionI
 /// This function repeatedly checks the number of partitions on the specified datanode and waits until
 /// the count reaches zero or the timeout period elapses. It logs the number of partitions on each check.
 pub async fn wait_for_all_regions_evicted(
-    greptime: Pool<MySql>,
+    greptime: MySqlPool,
     selected_datanode: u64,
     timeout: Duration,
 ) {

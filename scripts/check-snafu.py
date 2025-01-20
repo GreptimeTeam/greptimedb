@@ -14,6 +14,7 @@
 
 import os
 import re
+from multiprocessing import Pool
 
 
 def find_rust_files(directory):
@@ -33,13 +34,11 @@ def extract_branch_names(file_content):
     return pattern.findall(file_content)
 
 
-def check_snafu_in_files(branch_name, rust_files):
+def check_snafu_in_files(branch_name, rust_files_content):
     branch_name_snafu = f"{branch_name}Snafu"
-    for rust_file in rust_files:
-        with open(rust_file, "r") as file:
-            content = file.read()
-            if branch_name_snafu in content:
-                return True
+    for content in rust_files_content.values():
+        if branch_name_snafu in content:
+            return True
     return False
 
 
@@ -49,19 +48,24 @@ def main():
 
     for error_file in error_files:
         with open(error_file, "r") as file:
-            content = file.read()
-            branch_names.extend(extract_branch_names(content))
+            branch_names.extend(extract_branch_names(file.read()))
 
-    unused_snafu = [
-        branch_name
-        for branch_name in branch_names
-        if not check_snafu_in_files(branch_name, other_rust_files)
-    ]
+    # Read all rust files into memory once
+    rust_files_content = {}
+    for rust_file in other_rust_files:
+        with open(rust_file, "r") as file:
+            rust_files_content[rust_file] = file.read()
 
-    for name in unused_snafu:
-        print(name)
+    with Pool() as pool:
+        results = pool.starmap(
+            check_snafu_in_files, [(bn, rust_files_content) for bn in branch_names]
+        )
+    unused_snafu = [bn for bn, found in zip(branch_names, results) if not found]
 
     if unused_snafu:
+        print("Unused error variants:")
+        for name in unused_snafu:
+            print(name)
         raise SystemExit(1)
 
 

@@ -84,6 +84,7 @@ async fn manager_without_checkpoint() {
 
     // check files
     let mut expected = vec![
+        "/",
         "00000000000000000010.json",
         "00000000000000000009.json",
         "00000000000000000008.json",
@@ -130,6 +131,7 @@ async fn manager_with_checkpoint_distance_1() {
 
     // check files
     let mut expected = vec![
+        "/",
         "00000000000000000009.checkpoint",
         "00000000000000000010.checkpoint",
         "00000000000000000010.json",
@@ -152,7 +154,7 @@ async fn manager_with_checkpoint_distance_1() {
         .unwrap();
     let raw_json = std::str::from_utf8(&raw_bytes).unwrap();
     let expected_json =
-        "{\"size\":848,\"version\":10,\"checksum\":4186457347,\"extend_metadata\":{}}";
+        "{\"size\":879,\"version\":10,\"checksum\":2245967096,\"extend_metadata\":{}}";
     assert_eq!(expected_json, raw_json);
 
     // reopen the manager
@@ -223,6 +225,7 @@ async fn checkpoint_with_different_compression_types() {
             index_file_size: 0,
             num_rows: 0,
             num_row_groups: 0,
+            sequence: None,
         };
         let action = RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
             files_to_add: vec![file_meta],

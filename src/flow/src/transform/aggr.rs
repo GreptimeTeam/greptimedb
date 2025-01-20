@@ -158,7 +158,11 @@ impl AggregateExpr {
         }
 
         if args.len() != 1 {
-            return not_impl_err!("Aggregated function with multiple arguments is not supported");
+            let fn_name = extensions.get(&f.function_reference).cloned();
+            return not_impl_err!(
+                "Aggregated function (name={:?}) with multiple arguments is not supported",
+                fn_name
+            );
         }
 
         let arg = if let Some(first) = args.first() {
@@ -246,6 +250,7 @@ impl KeyValPlan {
 
 /// find out the column that should be time index in group exprs(which is all columns that should be keys)
 /// TODO(discord9): better ways to assign time index
+/// for now, it will found the first column that is timestamp or has a tumble window floor function
 fn find_time_index_in_group_exprs(group_exprs: &[TypedExpr]) -> Option<usize> {
     group_exprs.iter().position(|expr| {
         matches!(
@@ -254,7 +259,7 @@ fn find_time_index_in_group_exprs(group_exprs: &[TypedExpr]) -> Option<usize> {
                 func: UnaryFunc::TumbleWindowFloor { .. },
                 expr: _
             }
-        )
+        ) || expr.typ.scalar_type.is_timestamp()
     })
 }
 
@@ -1572,7 +1577,7 @@ mod test {
                 ColumnType::new(CDT::float64_datatype(), true),
                 ColumnType::new(CDT::timestamp_millisecond_datatype(), true),
             ])
-            .with_key(vec![1])
+            .with_time_index(Some(1))
             .into_named(vec![
                 Some(
                     "max(numbers_with_ts.number) - min(numbers_with_ts.number) / Float64(30)"
@@ -1659,7 +1664,7 @@ mod test {
                             ColumnType::new(ConcreteDataType::uint32_datatype(), true), // max
                             ColumnType::new(ConcreteDataType::uint32_datatype(), true), // min
                         ])
-                        .with_key(vec![0])
+                        .with_time_index(Some(0))
                         .into_unnamed(),
                     ),
                 ),

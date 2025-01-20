@@ -25,7 +25,7 @@ use futures::{FutureExt, TryStreamExt};
 use moka::future::Cache;
 use moka::notification::RemovalCause;
 use object_store::util::join_path;
-use object_store::{ErrorKind, Metakey, ObjectStore, Reader};
+use object_store::{ErrorKind, ObjectStore, Reader};
 use parquet::file::metadata::ParquetMetaData;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -37,8 +37,10 @@ use crate::sst::file::FileId;
 use crate::sst::parquet::helper::fetch_byte_ranges;
 use crate::sst::parquet::metadata::MetadataLoader;
 
-/// Subdirectory of cached files.
-const FILE_DIR: &str = "files/";
+/// Subdirectory of cached files for write.
+///
+/// This must contain three layers, corresponding to [`build_prometheus_metrics_layer`](object_store::layers::build_prometheus_metrics_layer).
+const FILE_DIR: &str = "cache/object/write/";
 
 /// A file cache manages files on local store and evict files based
 /// on size.
@@ -193,7 +195,6 @@ impl FileCache {
         let mut lister = self
             .local_store
             .lister_with(FILE_DIR)
-            .metakey(Metakey::ContentLength)
             .await
             .context(OpenDalSnafu)?;
         // Use i64 for total_size to reduce the risk of overflow.
@@ -207,6 +208,12 @@ impl FileCache {
             let Some(key) = parse_index_key(entry.name()) else {
                 continue;
             };
+
+            let meta = self
+                .local_store
+                .stat(entry.path())
+                .await
+                .context(OpenDalSnafu)?;
             let file_size = meta.content_length() as u32;
             self.memory_index
                 .insert(key, IndexValue { file_size })
@@ -286,7 +293,7 @@ impl FileCache {
     }
 
     async fn get_reader(&self, file_path: &str) -> object_store::Result<Option<Reader>> {
-        if self.local_store.is_exist(file_path).await? {
+        if self.local_store.exists(file_path).await? {
             Ok(Some(self.local_store.reader(file_path).await?))
         } else {
             Ok(None)
@@ -480,7 +487,7 @@ mod tests {
         cache.memory_index.run_pending_tasks().await;
 
         // The file also not exists.
-        assert!(!local_store.is_exist(&file_path).await.unwrap());
+        assert!(!local_store.exists(&file_path).await.unwrap());
         assert_eq!(0, cache.memory_index.weighted_size());
     }
 

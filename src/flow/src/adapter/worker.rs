@@ -197,6 +197,21 @@ impl WorkerHandle {
             .fail()
         }
     }
+
+    pub async fn get_state_size(&self) -> Result<BTreeMap<FlowId, usize>, Error> {
+        let ret = self
+            .itc_client
+            .call_with_resp(Request::QueryStateSize)
+            .await?;
+        ret.into_query_state_size().map_err(|ret| {
+            InternalSnafu {
+                reason: format!(
+                    "Flow Node/Worker itc failed, expect Response::QueryStateSize, found {ret:?}"
+                ),
+            }
+            .build()
+        })
+    }
 }
 
 impl Drop for WorkerHandle {
@@ -232,15 +247,25 @@ impl<'s> Worker<'s> {
         src_recvs: Vec<broadcast::Receiver<Batch>>,
         // TODO(discord9): set expire duration for all arrangement and compare to sys timestamp instead
         expire_after: Option<repr::Duration>,
+        or_replace: bool,
         create_if_not_exists: bool,
         err_collector: ErrCollector,
     ) -> Result<Option<FlowId>, Error> {
-        let already_exists = self.task_states.contains_key(&flow_id);
-        match (already_exists, create_if_not_exists) {
-            (true, true) => return Ok(None),
-            (true, false) => FlowAlreadyExistSnafu { id: flow_id }.fail()?,
-            (false, _) => (),
-        };
+        let already_exist = self.task_states.contains_key(&flow_id);
+        match (create_if_not_exists, or_replace, already_exist) {
+            // if replace, ignore that old flow exists
+            (_, true, true) => {
+                info!("Replacing flow with id={}", flow_id);
+            }
+            (false, false, true) => FlowAlreadyExistSnafu { id: flow_id }.fail()?,
+            // already exists, and not replace, return None
+            (true, false, true) => {
+                info!("Flow with id={} already exists, do nothing", flow_id);
+                return Ok(None);
+            }
+            // continue as normal
+            (_, _, false) => (),
+        }
 
         let mut cur_task_state = ActiveDataflowState::<'s> {
             err_collector,
@@ -326,6 +351,7 @@ impl<'s> Worker<'s> {
                 source_ids,
                 src_recvs,
                 expire_after,
+                or_replace,
                 create_if_not_exists,
                 err_collector,
             } => {
@@ -337,6 +363,7 @@ impl<'s> Worker<'s> {
                     &source_ids,
                     src_recvs,
                     expire_after,
+                    or_replace,
                     create_if_not_exists,
                     err_collector,
                 );
@@ -361,6 +388,13 @@ impl<'s> Worker<'s> {
                 Some(Response::ContainTask { result: ret })
             }
             Request::Shutdown => return Err(()),
+            Request::QueryStateSize => {
+                let mut ret = BTreeMap::new();
+                for (flow_id, task_state) in self.task_states.iter() {
+                    ret.insert(*flow_id, task_state.state.get_state_size());
+                }
+                Some(Response::QueryStateSize { result: ret })
+            }
         };
         Ok(ret)
     }
@@ -376,6 +410,7 @@ pub enum Request {
         source_ids: Vec<GlobalId>,
         src_recvs: Vec<broadcast::Receiver<Batch>>,
         expire_after: Option<repr::Duration>,
+        or_replace: bool,
         create_if_not_exists: bool,
         err_collector: ErrCollector,
     },
@@ -391,6 +426,7 @@ pub enum Request {
         flow_id: FlowId,
     },
     Shutdown,
+    QueryStateSize,
 }
 
 #[derive(Debug, EnumAsInner)]
@@ -406,6 +442,10 @@ enum Response {
         result: bool,
     },
     RunAvail,
+    QueryStateSize {
+        /// each flow tasks' state size
+        result: BTreeMap<FlowId, usize>,
+    },
 }
 
 fn create_inter_thread_call() -> (InterThreadCallClient, InterThreadCallServer) {
@@ -423,10 +463,12 @@ struct InterThreadCallClient {
 }
 
 impl InterThreadCallClient {
+    /// call without response
     fn call_no_resp(&self, req: Request) -> Result<(), Error> {
         self.arg_sender.send((req, None)).map_err(from_send_error)
     }
 
+    /// call with response
     async fn call_with_resp(&self, req: Request) -> Result<Response, Error> {
         let (tx, rx) = oneshot::channel();
         self.arg_sender
@@ -518,6 +560,7 @@ mod test {
             source_ids: src_ids,
             src_recvs: vec![rx],
             expire_after: None,
+            or_replace: false,
             create_if_not_exists: true,
             err_collector: ErrCollector::default(),
         };
@@ -527,6 +570,7 @@ mod test {
         );
         tx.send(Batch::empty()).unwrap();
         handle.run_available(0, true).await.unwrap();
+        assert_eq!(handle.get_state_size().await.unwrap().len(), 1);
         assert_eq!(sink_rx.recv().await.unwrap(), Batch::empty());
         drop(handle);
         worker_thread_handle.join().unwrap();

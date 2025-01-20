@@ -151,6 +151,7 @@ pub enum Error {
 
     #[snafu(display("Pipeline management api error"))]
     Pipeline {
+        #[snafu(source)]
         source: pipeline::error::Error,
         #[snafu(implicit)]
         location: Location,
@@ -171,6 +172,13 @@ pub enum Error {
         reason: String,
         #[snafu(implicit)]
         location: Location,
+    },
+
+    #[snafu(display("Failed to parse query"))]
+    FailedToParseQuery {
+        #[snafu(implicit)]
+        location: Location,
+        source: sql::error::Error,
     },
 
     #[snafu(display("Failed to parse InfluxDB line protocol"))]
@@ -476,10 +484,16 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse payload as json5"))]
-    ParseJson5 {
-        #[snafu(source)]
-        error: json5::Error,
+    #[snafu(display("Invalid Loki labels: {}", msg))]
+    InvalidLokiLabels {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid Loki JSON request: {}", msg))]
+    InvalidLokiPayload {
+        msg: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -560,6 +574,19 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("In-flight write bytes exceeded the maximum limit"))]
+    InFlightWriteBytesExceeded {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid elasticsearch input, reason: {}", reason))]
+    InvalidElasticsearchInput {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -621,13 +648,16 @@ impl ErrorExt for Error {
             | MissingQueryContext { .. }
             | MysqlValueConversion { .. }
             | ParseJson { .. }
-            | ParseJson5 { .. }
+            | InvalidLokiLabels { .. }
+            | InvalidLokiPayload { .. }
             | UnsupportedContentType { .. }
             | TimestampOverflow { .. }
             | OpenTelemetryLog { .. }
             | UnsupportedJsonDataTypeForTag { .. }
             | InvalidTableName { .. }
-            | PrepareStatementNotFound { .. } => StatusCode::InvalidArguments,
+            | PrepareStatementNotFound { .. }
+            | FailedToParseQuery { .. }
+            | InvalidElasticsearchInput { .. } => StatusCode::InvalidArguments,
 
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),
@@ -673,6 +703,8 @@ impl ErrorExt for Error {
             ToJson { .. } => StatusCode::Internal,
 
             ConvertSqlValue { source, .. } => source.status_code(),
+
+            InFlightWriteBytesExceeded { .. } => StatusCode::RateLimited,
         }
     }
 

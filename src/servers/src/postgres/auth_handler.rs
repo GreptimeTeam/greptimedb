@@ -177,7 +177,7 @@ impl StartupHandler for PostgresServerHandlerInner {
                         client.metadata().get(super::METADATA_USER).cloned(),
                     ));
                     set_client_info(client, &self.session);
-                    auth::finish_authentication(client, self.param_provider.as_ref()).await;
+                    auth::finish_authentication(client, self.param_provider.as_ref()).await?;
                 }
             }
             PgWireFrontendMessage::PasswordMessageFamily(pwd) => {
@@ -194,7 +194,7 @@ impl StartupHandler for PostgresServerHandlerInner {
                 if let Ok(Some(user_info)) = auth_result {
                     self.session.set_user_info(user_info);
                     set_client_info(client, &self.session);
-                    auth::finish_authentication(client, self.param_provider.as_ref()).await;
+                    auth::finish_authentication(client, self.param_provider.as_ref()).await?;
                 } else {
                     return send_error(
                         client,

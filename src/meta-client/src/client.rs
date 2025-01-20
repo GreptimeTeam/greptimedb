@@ -25,6 +25,7 @@ use std::sync::Arc;
 
 use api::v1::meta::{ProcedureDetailResponse, Role};
 use cluster::Client as ClusterClient;
+pub use cluster::ClusterKvBackend;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::cluster::{
@@ -33,6 +34,8 @@ use common_meta::cluster::{
 use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, RegionStat};
 use common_meta::ddl::{ExecutorContext, ProcedureExecutor};
 use common_meta::error::{self as meta_error, ExternalSnafu, Result as MetaResult};
+use common_meta::key::flow::flow_state::{FlowStat, FlowStateManager};
+use common_meta::kv_backend::KvBackendRef;
 use common_meta::range_stream::PaginationStream;
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::procedure::{
@@ -54,7 +57,8 @@ use store::Client as StoreClient;
 
 pub use self::heartbeat::{HeartbeatSender, HeartbeatStream};
 use crate::error::{
-    ConvertMetaRequestSnafu, ConvertMetaResponseSnafu, Error, NotStartedSnafu, Result,
+    ConvertMetaRequestSnafu, ConvertMetaResponseSnafu, Error, GetFlowStatSnafu, NotStartedSnafu,
+    Result,
 };
 
 pub type Id = (u64, u64);
@@ -322,8 +326,8 @@ impl ClusterInfo for MetaClient {
         let cluster_kv_backend = Arc::new(self.cluster_client()?);
         let range_prefix = DatanodeStatKey::key_prefix_with_cluster_id(self.id.0);
         let req = RangeRequest::new().with_prefix(range_prefix);
-        let stream = PaginationStream::new(cluster_kv_backend, req, 256, Arc::new(decode_stats))
-            .into_stream();
+        let stream =
+            PaginationStream::new(cluster_kv_backend, req, 256, decode_stats).into_stream();
         let mut datanode_stats = stream
             .try_collect::<Vec<_>>()
             .await
@@ -347,6 +351,15 @@ fn decode_stats(kv: KeyValue) -> MetaResult<DatanodeStatValue> {
 }
 
 impl MetaClient {
+    pub async fn list_flow_stats(&self) -> Result<Option<FlowStat>> {
+        let cluster_backend = ClusterKvBackend::new(Arc::new(self.cluster_client()?));
+        let cluster_backend = Arc::new(cluster_backend) as KvBackendRef;
+        let flow_state_manager = FlowStateManager::new(cluster_backend);
+        let res = flow_state_manager.get().await.context(GetFlowStatSnafu)?;
+
+        Ok(res.map(|r| r.into()))
+    }
+
     pub fn new(id: Id) -> Self {
         Self {
             id,
@@ -981,8 +994,7 @@ mod tests {
 
         let req = RangeRequest::new().with_prefix(b"__prefix/");
         let stream =
-            PaginationStream::new(Arc::new(cluster_client), req, 10, Arc::new(mock_decoder))
-                .into_stream();
+            PaginationStream::new(Arc::new(cluster_client), req, 10, mock_decoder).into_stream();
 
         let res = stream.try_collect::<Vec<_>>().await.unwrap();
         assert_eq!(10, res.len());

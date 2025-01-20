@@ -25,12 +25,15 @@ use datatypes::schema::{ColumnSchema, FulltextOptions, RawSchema};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use table::metadata::TableId;
-use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, ModifyColumnTypeRequest};
+use table::requests::{
+    AddColumnRequest, AlterKind, AlterTableRequest, ModifyColumnTypeRequest, SetIndexOptions,
+    UnsetIndexOptions,
+};
 
 use crate::error::{
     InvalidColumnDefSnafu, InvalidSetFulltextOptionRequestSnafu, InvalidSetTableOptionRequestSnafu,
-    InvalidUnsetTableOptionRequestSnafu, MissingFieldSnafu, MissingTimestampColumnSnafu, Result,
-    UnknownLocationTypeSnafu,
+    InvalidUnsetTableOptionRequestSnafu, MissingAlterIndexOptionSnafu, MissingFieldSnafu,
+    MissingTimestampColumnSnafu, Result, UnknownLocationTypeSnafu,
 };
 
 const LOCATION_TYPE_FIRST: i32 = LocationType::First as i32;
@@ -60,6 +63,7 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<
                         column_schema: schema,
                         is_key: column_def.semantic_type == SemanticType::Tag as i32,
                         location: parse_location(ac.location)?,
+                        add_if_not_exists: ac.add_if_not_exists,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -113,18 +117,43 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<
                     .context(InvalidUnsetTableOptionRequestSnafu)?,
             }
         }
-        Kind::SetColumnFulltext(c) => AlterKind::SetColumnFulltext {
-            column_name: c.column_name,
-            options: FulltextOptions {
-                enable: c.enable,
-                analyzer: as_fulltext_option(
-                    Analyzer::try_from(c.analyzer).context(InvalidSetFulltextOptionRequestSnafu)?,
-                ),
-                case_sensitive: c.case_sensitive,
+        Kind::SetIndex(o) => match o.options {
+            Some(opt) => match opt {
+                api::v1::set_index::Options::Fulltext(f) => AlterKind::SetIndex {
+                    options: SetIndexOptions::Fulltext {
+                        column_name: f.column_name.clone(),
+                        options: FulltextOptions {
+                            enable: f.enable,
+                            analyzer: as_fulltext_option(
+                                Analyzer::try_from(f.analyzer)
+                                    .context(InvalidSetFulltextOptionRequestSnafu)?,
+                            ),
+                            case_sensitive: f.case_sensitive,
+                        },
+                    },
+                },
+                api::v1::set_index::Options::Inverted(i) => AlterKind::SetIndex {
+                    options: SetIndexOptions::Inverted {
+                        column_name: i.column_name,
+                    },
+                },
             },
+            None => return MissingAlterIndexOptionSnafu.fail(),
         },
-        Kind::UnsetColumnFulltext(c) => AlterKind::UnsetColumnFulltext {
-            column_name: c.column_name,
+        Kind::UnsetIndex(o) => match o.options {
+            Some(opt) => match opt {
+                api::v1::unset_index::Options::Fulltext(f) => AlterKind::UnsetIndex {
+                    options: UnsetIndexOptions::Fulltext {
+                        column_name: f.column_name,
+                    },
+                },
+                api::v1::unset_index::Options::Inverted(i) => AlterKind::UnsetIndex {
+                    options: UnsetIndexOptions::Inverted {
+                        column_name: i.column_name,
+                    },
+                },
+            },
+            None => return MissingAlterIndexOptionSnafu.fail(),
         },
     };
 
@@ -220,6 +249,7 @@ mod tests {
                         ..Default::default()
                     }),
                     location: None,
+                    add_if_not_exists: true,
                 }],
             })),
         };
@@ -240,6 +270,7 @@ mod tests {
             add_column.column_schema.data_type
         );
         assert_eq!(None, add_column.location);
+        assert!(add_column.add_if_not_exists);
     }
 
     #[test]
@@ -265,6 +296,7 @@ mod tests {
                             location_type: LocationType::First.into(),
                             after_column_name: String::default(),
                         }),
+                        add_if_not_exists: false,
                     },
                     AddColumn {
                         column_def: Some(ColumnDef {
@@ -280,6 +312,7 @@ mod tests {
                             location_type: LocationType::After.into(),
                             after_column_name: "ts".to_string(),
                         }),
+                        add_if_not_exists: true,
                     },
                 ],
             })),
@@ -308,6 +341,7 @@ mod tests {
             }),
             add_column.location
         );
+        assert!(add_column.add_if_not_exists);
 
         let add_column = add_columns.pop().unwrap();
         assert!(!add_column.is_key);
@@ -317,6 +351,7 @@ mod tests {
             add_column.column_schema.data_type
         );
         assert_eq!(Some(AddColumnLocation::First), add_column.location);
+        assert!(!add_column.add_if_not_exists);
     }
 
     #[test]

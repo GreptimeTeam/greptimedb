@@ -145,6 +145,26 @@ impl StatementExecutor {
     }
 
     #[tracing::instrument(skip_all)]
+    pub async fn show_create_table_for_pg(
+        &self,
+        table_name: TableName,
+        table: TableRef,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let table_info = table.table_info();
+        if table_info.table_type != TableType::Base {
+            return error::ShowCreateTableBaseOnlySnafu {
+                table_name: table_name.to_string(),
+                table_type: table_info.table_type,
+            }
+            .fail();
+        }
+
+        query::sql::show_create_foreign_table_for_pg(table, query_ctx)
+            .context(ExecuteStatementSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
     pub async fn show_create_view(
         &self,
         show: ShowCreateView,
@@ -266,6 +286,11 @@ impl StatementExecutor {
     #[tracing::instrument(skip_all)]
     pub async fn show_status(&self, query_ctx: QueryContextRef) -> Result<Output> {
         query::sql::show_status(query_ctx)
+            .await
+            .context(error::ExecuteStatementSnafu)
+    }
+    pub async fn show_search_path(&self, query_ctx: QueryContextRef) -> Result<Output> {
+        query::sql::show_search_path(query_ctx)
             .await
             .context(error::ExecuteStatementSnafu)
     }

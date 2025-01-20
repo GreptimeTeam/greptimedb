@@ -94,7 +94,10 @@ macro_rules! http_tests {
                 test_otlp_metrics,
                 test_otlp_traces,
                 test_otlp_logs,
-                test_loki_logs,
+                test_loki_pb_logs,
+                test_loki_json_logs,
+                test_elasticsearch_logs,
+                test_elasticsearch_logs_with_index,
             );
         )*
     };
@@ -358,6 +361,14 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), ErrorCode::DatabaseNotFound as u32);
+
+    // test parse method
+    let res = client.get("/v1/sql/parse?sql=desc table t").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.text().await,
+        "[{\"DescribeTable\":{\"name\":[{\"value\":\"t\",\"quote_style\":null}]}}]"
+    );
 
     // test timezone header
     let res = client
@@ -715,21 +726,26 @@ pub async fn test_health_api(store_type: StorageType) {
     let (app, _guard) = setup_test_http_app_with_frontend(store_type, "health_api").await;
     let client = TestClient::new(app).await;
 
-    // we can call health api with both `GET` and `POST` method.
-    let res_post = client.post("/health").send().await;
-    assert_eq!(res_post.status(), StatusCode::OK);
-    let res_get = client.get("/health").send().await;
-    assert_eq!(res_get.status(), StatusCode::OK);
+    async fn health_api(client: &TestClient, endpoint: &str) {
+        // we can call health api with both `GET` and `POST` method.
+        let res_post = client.post(endpoint).send().await;
+        assert_eq!(res_post.status(), StatusCode::OK);
+        let res_get = client.get(endpoint).send().await;
+        assert_eq!(res_get.status(), StatusCode::OK);
 
-    // both `GET` and `POST` method return same result
-    let body_text = res_post.text().await;
-    assert_eq!(body_text, res_get.text().await);
+        // both `GET` and `POST` method return same result
+        let body_text = res_post.text().await;
+        assert_eq!(body_text, res_get.text().await);
 
-    // currently health api simply returns an empty json `{}`, which can be deserialized to an empty `HealthResponse`
-    assert_eq!(body_text, "{}");
+        // currently health api simply returns an empty json `{}`, which can be deserialized to an empty `HealthResponse`
+        assert_eq!(body_text, "{}");
 
-    let body = serde_json::from_str::<HealthResponse>(&body_text).unwrap();
-    assert_eq!(body, HealthResponse {});
+        let body = serde_json::from_str::<HealthResponse>(&body_text).unwrap();
+        assert_eq!(body, HealthResponse {});
+    }
+
+    health_api(&client, "/health").await;
+    health_api(&client, "/ready").await;
 }
 
 pub async fn test_status_api(store_type: StorageType) {
@@ -794,7 +810,7 @@ is_strict_mode = false
 
 [grpc]
 addr = "127.0.0.1:4001"
-hostname = "127.0.0.1"
+hostname = "127.0.0.1:4001"
 max_recv_message_size = "512MiB"
 max_send_message_size = "512MiB"
 runtime_size = 8
@@ -839,9 +855,9 @@ with_metric_engine = true
 
 [wal]
 provider = "raft_engine"
-file_size = "256MiB"
-purge_threshold = "4GiB"
-purge_interval = "10m"
+file_size = "128MiB"
+purge_threshold = "1GiB"
+purge_interval = "1m"
 read_batch_size = 128
 sync_write = false
 enable_log_recycle = true
@@ -856,6 +872,8 @@ purge_threshold = "4GiB"
 [procedure]
 max_retry_times = 3
 retry_delay = "500ms"
+
+[flow]
 
 [logging]
 max_log_files = 720
@@ -873,9 +891,9 @@ worker_request_batch_size = 64
 manifest_checkpoint_distance = 10
 compress_manifest = false
 auto_flush_interval = "30m"
-enable_experimental_write_cache = false
-experimental_write_cache_path = ""
-experimental_write_cache_size = "1GiB"
+enable_write_cache = false
+write_cache_path = ""
+write_cache_size = "5GiB"
 sst_write_buffer_size = "8MiB"
 parallel_scan_channel_size = 32
 allow_stale_entries = false
@@ -885,6 +903,7 @@ min_compaction_interval = "0s"
 aux_path = ""
 staging_size = "2GiB"
 write_buffer_size = "8MiB"
+content_cache_page_size = "64KiB"
 
 [region_engine.mito.inverted_index]
 create_on_flush = "auto"
@@ -898,6 +917,12 @@ create_on_compaction = "auto"
 apply_on_query = "auto"
 mem_threshold_on_create = "auto"
 compress = true
+
+[region_engine.mito.bloom_filter_index]
+create_on_flush = "auto"
+create_on_compaction = "auto"
+apply_on_query = "auto"
+mem_threshold_on_create = "auto"
 
 [region_engine.mito.memtable]
 type = "time_series"
@@ -915,7 +940,7 @@ write_interval = "30s"
     .trim()
     .to_string();
     let body_text = drop_lines_with_inconsistent_results(res_get.text().await);
-    similar_asserts::assert_eq!(body_text, expected_toml_str);
+    similar_asserts::assert_eq!(expected_toml_str, body_text);
 }
 
 fn drop_lines_with_inconsistent_results(input: String) -> String {
@@ -973,9 +998,11 @@ pub async fn test_dashboard_path(store_type: StorageType) {
     let (app, _guard) = setup_test_http_app_with_frontend(store_type, "dashboard_path").await;
     let client = TestClient::new(app).await;
 
-    let res_post = client.post("/dashboard").send().await;
-    assert_eq!(res_post.status(), StatusCode::OK);
     let res_get = client.get("/dashboard").send().await;
+    assert_eq!(res_get.status(), StatusCode::PERMANENT_REDIRECT);
+    let res_post = client.post("/dashboard/").send().await;
+    assert_eq!(res_post.status(), StatusCode::OK);
+    let res_get = client.get("/dashboard/").send().await;
     assert_eq!(res_get.status(), StatusCode::OK);
 
     // both `GET` and `POST` method return same result
@@ -1264,7 +1291,7 @@ pub async fn test_test_pipeline_api(store_type: StorageType) {
     // handshake
     let client = TestClient::new(app).await;
 
-    let body = r#"
+    let pipeline_content = r#"
 processors:
   - date:
       field: time
@@ -1291,7 +1318,7 @@ transform:
     let res = client
         .post("/v1/events/pipelines/test")
         .header("Content-Type", "application/x-yaml")
-        .body(body)
+        .body(pipeline_content)
         .send()
         .await;
 
@@ -1312,8 +1339,87 @@ transform:
     let pipeline = pipelines.first().unwrap();
     assert_eq!(pipeline.get("name").unwrap(), "test");
 
-    // 2. write data
-    let data_body = r#"
+    let dryrun_schema = json!([
+        {
+            "colume_type": "FIELD",
+            "data_type": "INT32",
+            "fulltext": false,
+            "name": "id1"
+        },
+        {
+            "colume_type": "FIELD",
+            "data_type": "INT32",
+            "fulltext": false,
+            "name": "id2"
+        },
+        {
+            "colume_type": "FIELD",
+            "data_type": "STRING",
+            "fulltext": false,
+            "name": "type"
+        },
+        {
+            "colume_type": "FIELD",
+            "data_type": "STRING",
+            "fulltext": false,
+            "name": "log"
+        },
+        {
+            "colume_type": "FIELD",
+            "data_type": "STRING",
+            "fulltext": false,
+            "name": "logger"
+        },
+        {
+            "colume_type": "TIMESTAMP",
+            "data_type": "TIMESTAMP_NANOSECOND",
+            "fulltext": false,
+            "name": "time"
+        }
+    ]);
+    let dryrun_rows = json!([
+        [
+            {
+                "data_type": "INT32",
+                "key": "id1",
+                "semantic_type": "FIELD",
+                "value": 2436
+            },
+            {
+                "data_type": "INT32",
+                "key": "id2",
+                "semantic_type": "FIELD",
+                "value": 2528
+            },
+            {
+                "data_type": "STRING",
+                "key": "type",
+                "semantic_type": "FIELD",
+                "value": "I"
+            },
+            {
+                "data_type": "STRING",
+                "key": "log",
+                "semantic_type": "FIELD",
+                "value": "ClusterAdapter:enter sendTextDataToCluster\\n"
+            },
+            {
+                "data_type": "STRING",
+                "key": "logger",
+                "semantic_type": "FIELD",
+                "value": "INTERACT.MANAGER"
+            },
+            {
+                "data_type": "TIMESTAMP_NANOSECOND",
+                "key": "time",
+                "semantic_type": "TIMESTAMP",
+                "value": "2024-05-25 20:16:37.217+0000"
+            }
+        ]
+    ]);
+    {
+        // test original api
+        let data_body = r#"
         [
           {
             "id1": "2436",
@@ -1325,100 +1431,100 @@ transform:
           }
         ]
         "#;
-    let res = client
-        .post("/v1/events/pipelines/dryrun?pipeline_name=test")
-        .header("Content-Type", "application/json")
-        .body(data_body)
-        .send()
-        .await;
-    assert_eq!(res.status(), StatusCode::OK);
-    let body: Value = res.json().await;
-    let schema = &body["schema"];
-    let rows = &body["rows"];
-    assert_eq!(
-        schema,
-        &json!([
+        let res = client
+            .post("/v1/events/pipelines/dryrun?pipeline_name=test")
+            .header("Content-Type", "application/json")
+            .body(data_body)
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: Value = res.json().await;
+        let schema = &body["schema"];
+        let rows = &body["rows"];
+        assert_eq!(schema, &dryrun_schema);
+        assert_eq!(rows, &dryrun_rows);
+    }
+    {
+        // test new api specify pipeline via pipeline_name
+        let body = r#"
             {
-                "colume_type": "FIELD",
-                "data_type": "INT32",
-                "fulltext": false,
-                "name": "id1"
-            },
-            {
-                "colume_type": "FIELD",
-                "data_type": "INT32",
-                "fulltext": false,
-                "name": "id2"
-            },
-            {
-                "colume_type": "FIELD",
-                "data_type": "STRING",
-                "fulltext": false,
-                "name": "type"
-            },
-            {
-                "colume_type": "FIELD",
-                "data_type": "STRING",
-                "fulltext": false,
-                "name": "log"
-            },
-            {
-                "colume_type": "FIELD",
-                "data_type": "STRING",
-                "fulltext": false,
-                "name": "logger"
-            },
-            {
-                "colume_type": "TIMESTAMP",
-                "data_type": "TIMESTAMP_NANOSECOND",
-                "fulltext": false,
-                "name": "time"
-            }
-        ])
-    );
-    assert_eq!(
-        rows,
-        &json!([
-            [
+            "pipeline_name": "test",
+            "data": [
                 {
-                    "data_type": "INT32",
-                    "key": "id1",
-                    "semantic_type": "FIELD",
-                    "value": 2436
-                },
-                {
-                    "data_type": "INT32",
-                    "key": "id2",
-                    "semantic_type": "FIELD",
-                    "value": 2528
-                },
-                {
-                    "data_type": "STRING",
-                    "key": "type",
-                    "semantic_type": "FIELD",
-                    "value": "I"
-                },
-                {
-                    "data_type": "STRING",
-                    "key": "log",
-                    "semantic_type": "FIELD",
-                    "value": "ClusterAdapter:enter sendTextDataToCluster\\n"
-                },
-                {
-                    "data_type": "STRING",
-                    "key": "logger",
-                    "semantic_type": "FIELD",
-                    "value": "INTERACT.MANAGER"
-                },
-                {
-                    "data_type": "TIMESTAMP_NANOSECOND",
-                    "key": "time",
-                    "semantic_type": "TIMESTAMP",
-                    "value": "2024-05-25 20:16:37.217+0000"
+                "id1": "2436",
+                "id2": "2528",
+                "logger": "INTERACT.MANAGER",
+                "type": "I",
+                "time": "2024-05-25 20:16:37.217",
+                "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
                 }
             ]
-        ])
-    );
+            }
+        "#;
+        let res = client
+            .post("/v1/events/pipelines/dryrun")
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: Value = res.json().await;
+        let schema = &body["schema"];
+        let rows = &body["rows"];
+        assert_eq!(schema, &dryrun_schema);
+        assert_eq!(rows, &dryrun_rows);
+    }
+    {
+        // test new api specify pipeline via pipeline raw data
+        let mut body = json!({
+        "data": [
+            {
+            "id1": "2436",
+            "id2": "2528",
+            "logger": "INTERACT.MANAGER",
+            "type": "I",
+            "time": "2024-05-25 20:16:37.217",
+            "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+            }
+        ]
+        });
+        body["pipeline"] = json!(pipeline_content);
+        let res = client
+            .post("/v1/events/pipelines/dryrun")
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: Value = res.json().await;
+        let schema = &body["schema"];
+        let rows = &body["rows"];
+        assert_eq!(schema, &dryrun_schema);
+        assert_eq!(rows, &dryrun_rows);
+    }
+    {
+        // failback to old version api
+        // not pipeline and pipeline_name in the body
+        let body = json!({
+        "data": [
+            {
+            "id1": "2436",
+            "id2": "2528",
+            "logger": "INTERACT.MANAGER",
+            "type": "I",
+            "time": "2024-05-25 20:16:37.217",
+            "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+            }
+        ]
+        });
+        let res = client
+            .post("/v1/events/pipelines/dryrun")
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
     guard.remove_all().await;
 }
 
@@ -1526,7 +1632,17 @@ pub async fn test_otlp_metrics(store_type: StorageType) {
     let client = TestClient::new(app).await;
 
     // write metrics data
-    let res = send_req(&client, vec![], "/v1/otlp/v1/metrics", body.clone(), false).await;
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )],
+        "/v1/otlp/v1/metrics",
+        body.clone(),
+        false,
+    )
+    .await;
     assert_eq!(StatusCode::OK, res.status());
 
     // select metrics data
@@ -1538,7 +1654,17 @@ pub async fn test_otlp_metrics(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
 
     // write metrics data with gzip
-    let res = send_req(&client, vec![], "/v1/otlp/v1/metrics", body.clone(), true).await;
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )],
+        "/v1/otlp/v1/metrics",
+        body.clone(),
+        true,
+    )
+    .await;
     assert_eq!(StatusCode::OK, res.status());
 
     // select metrics data again
@@ -1569,7 +1695,17 @@ pub async fn test_otlp_traces(store_type: StorageType) {
     let client = TestClient::new(app).await;
 
     // write traces data
-    let res = send_req(&client, vec![], "/v1/otlp/v1/traces", body.clone(), false).await;
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )],
+        "/v1/otlp/v1/traces",
+        body.clone(),
+        false,
+    )
+    .await;
     assert_eq!(StatusCode::OK, res.status());
 
     // select traces data
@@ -1590,7 +1726,17 @@ pub async fn test_otlp_traces(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
 
     // write traces data with gzip
-    let res = send_req(&client, vec![], "/v1/otlp/v1/traces", body.clone(), true).await;
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )],
+        "/v1/otlp/v1/traces",
+        body.clone(),
+        true,
+    )
+    .await;
     assert_eq!(StatusCode::OK, res.status());
 
     // select traces data again
@@ -1621,10 +1767,16 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         // write log data
         let res = send_req(
             &client,
-            vec![(
-                HeaderName::from_static("x-greptime-log-table-name"),
-                HeaderValue::from_static("logs1"),
-            )],
+            vec![
+                (
+                    HeaderName::from_static("content-type"),
+                    HeaderValue::from_static("application/x-protobuf"),
+                ),
+                (
+                    HeaderName::from_static("x-greptime-log-table-name"),
+                    HeaderValue::from_static("logs1"),
+                ),
+            ],
             "/v1/otlp/v1/logs?db=public",
             body.clone(),
             false,
@@ -1640,6 +1792,10 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         let res = send_req(
             &client,
             vec![
+                (
+                    HeaderName::from_static("content-type"),
+                    HeaderValue::from_static("application/x-protobuf"),
+                ),
                 (
                     HeaderName::from_static("x-greptime-log-table-name"),
                     HeaderValue::from_static("logs"),
@@ -1669,20 +1825,26 @@ pub async fn test_otlp_logs(store_type: StorageType) {
     guard.remove_all().await;
 }
 
-pub async fn test_loki_logs(store_type: StorageType) {
+pub async fn test_loki_pb_logs(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_loke_logs").await;
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_loki_pb_logs").await;
 
     let client = TestClient::new(app).await;
 
     // init loki request
     let req: PushRequest = PushRequest {
         streams: vec![StreamAdapter {
-            labels: "{service=\"test\",source=\"integration\"}".to_string(),
-            entries: vec![EntryAdapter {
-                timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
-                line: "this is a log message".to_string(),
-            }],
+            labels: r#"{service="test",source="integration",wadaxi="do anything"}"#.to_string(),
+            entries: vec![
+                EntryAdapter {
+                    timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
+                    line: "this is a log message".to_string(),
+                },
+                EntryAdapter {
+                    timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
+                    line: "this is a log message".to_string(),
+                },
+            ],
             hash: rand::random(),
         }],
     };
@@ -1698,6 +1860,14 @@ pub async fn test_loki_logs(store_type: StorageType) {
                 HeaderValue::from_static("application/x-protobuf"),
             ),
             (
+                HeaderName::from_static("content-encoding"),
+                HeaderValue::from_static("snappy"),
+            ),
+            (
+                HeaderName::from_static("accept-encoding"),
+                HeaderValue::from_static("identity"),
+            ),
+            (
                 HeaderName::from_static(GREPTIME_LOG_TABLE_NAME_HEADER_NAME),
                 HeaderValue::from_static("loki_table_name"),
             ),
@@ -1710,9 +1880,9 @@ pub async fn test_loki_logs(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // test schema
-    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"service\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"service\\\", \\\"source\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"service\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  \\\"wadaxi\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"service\\\", \\\"source\\\", \\\"wadaxi\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
     validate_data(
-        "loki_schema",
+        "loki_pb_schema",
         &client,
         "show create table loki_table_name;",
         expected,
@@ -1720,11 +1890,173 @@ pub async fn test_loki_logs(store_type: StorageType) {
     .await;
 
     // test content
-    let expected = r#"[[1730976830000000000,"this is a log message","test","integration"]]"#;
+    let expected = r#"[[1730976830000000000,"this is a log message","test","integration","do anything"],[1730976830000000000,"this is a log message","test","integration","do anything"]]"#;
     validate_data(
-        "loki_content",
+        "loki_pb_content",
         &client,
         "select * from loki_table_name;",
+        expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_loki_json_logs(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_loki_json_logs").await;
+
+    let client = TestClient::new(app);
+
+    let body = r#"
+{
+  "streams": [
+    {
+      "stream": {
+        "source": "test",
+        "sender": "integration"
+      },
+      "values": [
+          [ "1735901380059465984", "this is line one" ],
+          [ "1735901398478897920", "this is line two" ]
+      ]
+    }
+  ]
+}
+    "#;
+
+    let body = body.as_bytes().to_vec();
+
+    // write plain to loki
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/json"),
+            ),
+            (
+                HeaderName::from_static(GREPTIME_LOG_TABLE_NAME_HEADER_NAME),
+                HeaderValue::from_static("loki_table_name"),
+            ),
+        ],
+        "/v1/loki/api/v1/push",
+        body,
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    // test schema
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"sender\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"sender\\\", \\\"source\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    validate_data(
+        "loki_json_schema",
+        &client,
+        "show create table loki_table_name;",
+        expected,
+    )
+    .await;
+
+    // test content
+    let expected = "[[1735901380059465984,\"this is line one\",\"integration\",\"test\"],[1735901398478897920,\"this is line two\",\"integration\",\"test\"]]";
+    validate_data(
+        "loki_json_content",
+        &client,
+        "select * from loki_table_name;",
+        expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_elasticsearch_logs(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_elasticsearch_logs").await;
+
+    let client = TestClient::new(app);
+
+    let body = r#"
+        {"create":{"_index":"test","_id":"1"}}
+        {"foo":"foo_value1", "bar":"value1"}
+        {"create":{"_index":"test","_id":"2"}}
+        {"foo":"foo_value2","bar":"value2"}
+    "#;
+
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )],
+        "/v1/elasticsearch/_bulk",
+        body.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+
+    assert_eq!(StatusCode::OK, res.status());
+
+    let expected = "[[\"foo_value1\",\"value1\"],[\"foo_value2\",\"value2\"]]";
+
+    validate_data(
+        "test_elasticsearch_logs",
+        &client,
+        "select foo, bar from test;",
+        expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_elasticsearch_logs_with_index(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_elasticsearch_logs_with_index").await;
+
+    let client = TestClient::new(app);
+
+    // It will write to test_index1 and test_index2(specified in the path).
+    let body = r#"
+        {"create":{"_index":"test_index1","_id":"1"}}
+        {"foo":"foo_value1", "bar":"value1"}
+        {"create":{"_id":"2"}}
+        {"foo":"foo_value2","bar":"value2"}
+    "#;
+
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )],
+        "/v1/elasticsearch/test_index2/_bulk",
+        body.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+
+    assert_eq!(StatusCode::OK, res.status());
+
+    // test content of test_index1
+    let expected = "[[\"foo_value1\",\"value1\"]]";
+    validate_data(
+        "test_elasticsearch_logs_with_index",
+        &client,
+        "select foo, bar from test_index1;",
+        expected,
+    )
+    .await;
+
+    // test content of test_index2
+    let expected = "[[\"foo_value2\",\"value2\"]]";
+    validate_data(
+        "test_elasticsearch_logs_with_index_2",
+        &client,
+        "select foo, bar from test_index2;",
         expected,
     )
     .await;
@@ -1741,7 +2073,10 @@ async fn validate_data(test_name: &str, client: &TestClient, sql: &str, expected
     let resp = res.text().await;
     let v = get_rows_from_output(&resp);
 
-    assert_eq!(v, expected, "validate {test_name} fail");
+    assert_eq!(
+        v, expected,
+        "validate {test_name} fail, expected: {expected}, actual: {v}"
+    );
 }
 
 async fn send_req(
@@ -1751,9 +2086,7 @@ async fn send_req(
     body: Vec<u8>,
     with_gzip: bool,
 ) -> TestResponse {
-    let mut req = client
-        .post(path)
-        .header("content-type", "application/x-protobuf");
+    let mut req = client.post(path);
 
     for (k, v) in headers {
         req = req.header(k, v);

@@ -36,6 +36,7 @@ async fn test_last_row(append_mode: bool) {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
     let request = CreateRequestBuilder::new()

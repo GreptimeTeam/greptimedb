@@ -15,12 +15,12 @@
 use std::sync::Arc;
 
 use common_telemetry::debug;
-use futures::FutureExt;
+use futures::{FutureExt, TryStreamExt};
 use moka::future::Cache;
 use moka::notification::ListenerFuture;
 use opendal::raw::oio::{Read, Reader, Write};
-use opendal::raw::{Access, OpDelete, OpRead, OpStat, OpWrite, RpRead};
-use opendal::{Error as OpendalError, ErrorKind, Metakey, OperatorBuilder, Result};
+use opendal::raw::{oio, Access, OpDelete, OpRead, OpStat, OpWrite, RpRead};
+use opendal::{Error as OpendalError, ErrorKind, OperatorBuilder, Result};
 
 use crate::metrics::{
     OBJECT_STORE_LRU_CACHE_BYTES, OBJECT_STORE_LRU_CACHE_ENTRIES, OBJECT_STORE_LRU_CACHE_HIT,
@@ -28,6 +28,10 @@ use crate::metrics::{
 };
 
 const RECOVER_CACHE_LIST_CONCURRENT: usize = 8;
+/// Subdirectory of cached files for read.
+///
+/// This must contain three layers, corresponding to [`build_prometheus_metrics_layer`](object_store::layers::build_prometheus_metrics_layer).
+const READ_CACHE_DIR: &str = "cache/object/read";
 
 /// Cache value for read file
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
@@ -56,10 +60,18 @@ fn can_cache(path: &str) -> bool {
 /// Generate a unique cache key for the read path and range.
 fn read_cache_key(path: &str, args: &OpRead) -> String {
     format!(
-        "{:x}.cache-{}",
+        "{READ_CACHE_DIR}/{:x}.cache-{}",
         md5::compute(path),
         args.range().to_header()
     )
+}
+
+fn read_cache_root() -> String {
+    format!("/{READ_CACHE_DIR}/")
+}
+
+fn read_cache_key_prefix(path: &str) -> String {
+    format!("{READ_CACHE_DIR}/{:x}", md5::compute(path))
 }
 
 /// Local read cache for files in object storage
@@ -83,7 +95,7 @@ impl<C> Clone for ReadCache<C> {
 impl<C: Access> ReadCache<C> {
     /// Create a [`ReadCache`] with capacity in bytes.
     pub(crate) fn new(file_cache: Arc<C>, capacity: usize) -> Self {
-        let file_cache_cloned = file_cache.clone();
+        let file_cache_cloned = OperatorBuilder::new(file_cache.clone()).finish();
         let eviction_listener =
             move |read_key: Arc<String>, read_result: ReadResult, cause| -> ListenerFuture {
                 // Delete the file from local file cache when it's purged from mem_cache.
@@ -94,7 +106,7 @@ impl<C: Access> ReadCache<C> {
                     if let ReadResult::Success(size) = read_result {
                         OBJECT_STORE_LRU_CACHE_BYTES.sub(size as i64);
 
-                        let result = file_cache_cloned.delete(&read_key, OpDelete::new()).await;
+                        let result = file_cache_cloned.delete(&read_key).await;
                         debug!(
                             "Deleted local cache file `{}`, result: {:?}, cause: {:?}.",
                             read_key, result, cause
@@ -125,16 +137,9 @@ impl<C: Access> ReadCache<C> {
         (self.mem_cache.entry_count(), self.mem_cache.weighted_size())
     }
 
-    /// Invalidate all cache items which key starts with `prefix`.
-    pub(crate) async fn invalidate_entries_with_prefix(&self, prefix: String) {
-        // Safety: always ok when building cache with `support_invalidation_closures`.
-        self.mem_cache
-            .invalidate_entries_if(move |k: &String, &_v| k.starts_with(&prefix))
-            .ok();
-    }
-
-    /// Blocking version of `invalidate_entries_with_prefix`.
-    pub(crate) fn blocking_invalidate_entries_with_prefix(&self, prefix: String) {
+    /// Invalidate all cache items belong to the specific path.
+    pub(crate) fn invalidate_entries_with_prefix(&self, path: &str) {
+        let prefix = read_cache_key_prefix(path);
         // Safety: always ok when building cache with `support_invalidation_closures`.
         self.mem_cache
             .invalidate_entries_if(move |k: &String, &_v| k.starts_with(&prefix))
@@ -145,17 +150,33 @@ impl<C: Access> ReadCache<C> {
     /// Return entry count and total approximate entry size in bytes.
     pub(crate) async fn recover_cache(&self) -> Result<(u64, u64)> {
         let op = OperatorBuilder::new(self.file_cache.clone()).finish();
+        let cloned_op = op.clone();
+        let root = read_cache_root();
         let mut entries = op
-            .list_with("/")
-            .metakey(Metakey::ContentLength | Metakey::ContentType)
-            .concurrent(RECOVER_CACHE_LIST_CONCURRENT)
+            .lister_with(&root)
+            .await?
+            .map_ok(|entry| async {
+                let (path, mut meta) = entry.into_parts();
+
+                if !cloned_op.info().full_capability().list_has_content_length {
+                    meta = cloned_op.stat(&path).await?;
+                }
+
+                Ok((path, meta))
+            })
+            .try_buffer_unordered(RECOVER_CACHE_LIST_CONCURRENT)
+            .try_collect::<Vec<_>>()
             .await?;
 
-        while let Some(entry) = entries.pop() {
-            let read_key = entry.path();
-            let size = entry.metadata().content_length();
+        while let Some((read_key, metadata)) = entries.pop() {
+            if !metadata.is_file() {
+                continue;
+            }
+
+            let size = metadata.content_length();
             OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
             OBJECT_STORE_LRU_CACHE_BYTES.add(size as i64);
+
             self.mem_cache
                 .insert(read_key.to_string(), ReadResult::Success(size as u32))
                 .await;
@@ -290,6 +311,29 @@ impl<C: Access> ReadCache<C> {
                 Err(e)
             }
         }
+    }
+}
+
+pub struct CacheAwareDeleter<C, D> {
+    cache: ReadCache<C>,
+    deleter: D,
+}
+
+impl<C: Access, D: oio::Delete> CacheAwareDeleter<C, D> {
+    pub(crate) fn new(cache: ReadCache<C>, deleter: D) -> Self {
+        Self { cache, deleter }
+    }
+}
+
+impl<C: Access, D: oio::Delete> oio::Delete for CacheAwareDeleter<C, D> {
+    fn delete(&mut self, path: &str, args: OpDelete) -> Result<()> {
+        self.cache.invalidate_entries_with_prefix(path);
+        self.deleter.delete(path, args)?;
+        Ok(())
+    }
+
+    async fn flush(&mut self) -> Result<usize> {
+        self.deleter.flush().await
     }
 }
 

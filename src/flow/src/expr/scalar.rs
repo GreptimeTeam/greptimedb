@@ -311,6 +311,9 @@ impl ScalarExpr {
     }
 
     /// Eval this expression with the given values.
+    ///
+    /// TODO(discord9): add tests to make sure `eval_batch` is the same as `eval` in
+    /// most cases
     pub fn eval(&self, values: &[Value]) -> Result<Value, EvalError> {
         match self {
             ScalarExpr::Column(index) => Ok(values[*index].clone()),

@@ -137,8 +137,6 @@ mod tests {
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
-            None,
-            None,
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
@@ -175,8 +173,6 @@ mod tests {
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
-            None,
-            None,
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
@@ -204,8 +200,6 @@ mod tests {
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
-            None,
-            None,
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
@@ -224,8 +218,6 @@ mod tests {
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
-            None,
-            None,
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
@@ -244,8 +236,6 @@ mod tests {
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
-            None,
-            None,
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
@@ -303,8 +293,6 @@ mod tests {
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
-            None,
-            None,
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,
@@ -341,8 +329,6 @@ mod tests {
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
-            None,
-            None,
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,

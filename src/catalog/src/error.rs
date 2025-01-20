@@ -64,6 +64,13 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to list flow stats"))]
+    ListFlowStats {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to list flows in catalog {catalog}"))]
     ListFlows {
         #[snafu(implicit)]
@@ -319,6 +326,7 @@ impl ErrorExt for Error {
             | Error::ListSchemas { source, .. }
             | Error::ListTables { source, .. }
             | Error::ListFlows { source, .. }
+            | Error::ListFlowStats { source, .. }
             | Error::ListProcedures { source, .. }
             | Error::ListRegionStats { source, .. }
             | Error::ConvertProtoData { source, .. } => source.status_code(),

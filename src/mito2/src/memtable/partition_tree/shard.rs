@@ -26,10 +26,10 @@ use crate::memtable::partition_tree::data::{
 };
 use crate::memtable::partition_tree::dict::KeyDictRef;
 use crate::memtable::partition_tree::merger::{Merger, Node};
-use crate::memtable::partition_tree::partition::PrimaryKeyFilter;
 use crate::memtable::partition_tree::shard_builder::ShardBuilderReader;
 use crate::memtable::partition_tree::{PkId, PkIndex, ShardId};
 use crate::metrics::PARTITION_TREE_READ_STAGE_ELAPSED;
+use crate::row_converter::PrimaryKeyFilter;
 
 /// Shard stores data related to the same key dictionary.
 pub struct Shard {
@@ -146,7 +146,10 @@ pub struct ShardReaderBuilder {
 }
 
 impl ShardReaderBuilder {
-    pub(crate) fn build(self, key_filter: Option<PrimaryKeyFilter>) -> Result<ShardReader> {
+    pub(crate) fn build(
+        self,
+        key_filter: Option<Box<dyn PrimaryKeyFilter>>,
+    ) -> Result<ShardReader> {
         let ShardReaderBuilder {
             shard_id,
             key_dict,
@@ -163,7 +166,7 @@ pub struct ShardReader {
     shard_id: ShardId,
     key_dict: Option<KeyDictRef>,
     parts_reader: DataPartsReader,
-    key_filter: Option<PrimaryKeyFilter>,
+    key_filter: Option<Box<dyn PrimaryKeyFilter>>,
     last_yield_pk_index: Option<PkIndex>,
     keys_before_pruning: usize,
     keys_after_pruning: usize,
@@ -176,7 +179,7 @@ impl ShardReader {
         shard_id: ShardId,
         key_dict: Option<KeyDictRef>,
         parts_reader: DataPartsReader,
-        key_filter: Option<PrimaryKeyFilter>,
+        key_filter: Option<Box<dyn PrimaryKeyFilter>>,
         data_build_cost: Duration,
     ) -> Result<Self> {
         let has_pk = key_dict.is_some();
@@ -240,7 +243,7 @@ impl ShardReader {
             // Safety: `key_filter` is some so the shard has primary keys.
             let key = self.key_dict.as_ref().unwrap().key_by_pk_index(pk_index);
             let now = Instant::now();
-            if key_filter.prune_primary_key(key) {
+            if key_filter.matches(key) {
                 self.prune_pk_cost += now.elapsed();
                 self.last_yield_pk_index = Some(pk_index);
                 self.keys_after_pruning += 1;

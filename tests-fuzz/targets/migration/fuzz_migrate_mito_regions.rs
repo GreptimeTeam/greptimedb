@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arbitrary::{Arbitrary, Unstructured};
+use common_meta::distributed_time_constants;
 use common_telemetry::info;
 use libfuzzer_sys::fuzz_target;
 use rand::{Rng, SeedableRng};
@@ -248,18 +249,23 @@ async fn migrate_regions(ctx: &FuzzContext, migrations: &[Migration]) -> Result<
                     {
                         let output = procedure_state(&greptime, &procedure_id).await;
                         info!("Checking procedure: {procedure_id}, output: {output}");
-                        fetch_partition(&greptime, region_id).await.unwrap()
+                        (fetch_partition(&greptime, region_id).await.unwrap(), output)
                     }
                 })
             },
-            |partition| {
+            |(partition, output)| {
                 info!("Region: {region_id},  datanode: {}", partition.datanode_id);
-                partition.datanode_id == migration.to_peer
+                partition.datanode_id == migration.to_peer && output.contains("Done")
             },
             Duration::from_secs(5),
         )
         .await;
     }
+
+    tokio::time::sleep(Duration::from_secs(
+        distributed_time_constants::REGION_LEASE_SECS,
+    ))
+    .await;
 
     Ok(())
 }

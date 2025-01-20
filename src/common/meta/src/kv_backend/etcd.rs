@@ -15,6 +15,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use common_telemetry::info;
 use etcd_client::{
     Client, DeleteOptions, GetOptions, PutOptions, Txn, TxnOp, TxnOpResponse, TxnResponse,
 };
@@ -55,6 +56,7 @@ impl EtcdStore {
     }
 
     pub fn with_etcd_client(client: Client, max_txn_ops: usize) -> KvBackendRef {
+        info!("Connected to etcd");
         Arc::new(Self {
             client,
             max_txn_ops,
@@ -540,6 +542,8 @@ mod tests {
         prepare_kv_with_prefix, test_kv_batch_delete_with_prefix, test_kv_batch_get_with_prefix,
         test_kv_compare_and_put_with_prefix, test_kv_delete_range_with_prefix,
         test_kv_put_with_prefix, test_kv_range_2_with_prefix, test_kv_range_with_prefix,
+        test_txn_compare_equal, test_txn_compare_greater, test_txn_compare_less,
+        test_txn_compare_not_equal, test_txn_one_compare_op, text_txn_multi_compare_op,
         unprepare_kv,
     };
 
@@ -587,7 +591,7 @@ mod tests {
     #[tokio::test]
     async fn test_range_2() {
         if let Some(kv_backend) = build_kv_backend().await {
-            test_kv_range_2_with_prefix(kv_backend, b"range2/".to_vec()).await;
+            test_kv_range_2_with_prefix(&kv_backend, b"range2/".to_vec()).await;
         }
     }
 
@@ -614,7 +618,8 @@ mod tests {
         if let Some(kv_backend) = build_kv_backend().await {
             let prefix = b"deleteRange/";
             prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
-            test_kv_delete_range_with_prefix(kv_backend, prefix.to_vec()).await;
+            test_kv_delete_range_with_prefix(&kv_backend, prefix.to_vec()).await;
+            unprepare_kv(&kv_backend, prefix).await;
         }
     }
 
@@ -623,7 +628,20 @@ mod tests {
         if let Some(kv_backend) = build_kv_backend().await {
             let prefix = b"batchDelete/";
             prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
-            test_kv_batch_delete_with_prefix(kv_backend, prefix.to_vec()).await;
+            test_kv_batch_delete_with_prefix(&kv_backend, prefix.to_vec()).await;
+            unprepare_kv(&kv_backend, prefix).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_etcd_txn() {
+        if let Some(kv_backend) = build_kv_backend().await {
+            test_txn_one_compare_op(&kv_backend).await;
+            text_txn_multi_compare_op(&kv_backend).await;
+            test_txn_compare_equal(&kv_backend).await;
+            test_txn_compare_greater(&kv_backend).await;
+            test_txn_compare_less(&kv_backend).await;
+            test_txn_compare_not_equal(&kv_backend).await;
         }
     }
 }

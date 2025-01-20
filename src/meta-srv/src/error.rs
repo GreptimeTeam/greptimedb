@@ -697,15 +697,34 @@ pub enum Error {
     #[cfg(feature = "pg_kvbackend")]
     #[snafu(display("Failed to execute via postgres"))]
     PostgresExecution {
+        #[snafu(source)]
+        error: tokio_postgres::Error,
         #[snafu(implicit)]
         location: Location,
     },
 
     #[cfg(feature = "pg_kvbackend")]
-    #[snafu(display("Failed to connect to PostgresSQL"))]
+    #[snafu(display("Failed to connect to Postgres"))]
     ConnectPostgres {
         #[snafu(source)]
         error: tokio_postgres::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Failed to create connection pool for Postgres"))]
+    CreatePostgresPool {
+        #[snafu(source)]
+        error: deadpool_postgres::CreatePoolError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Failed to get connection from Postgres pool: {}", reason))]
+    GetPostgresConnection {
+        reason: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -715,6 +734,13 @@ pub enum Error {
         name: String,
         #[snafu(implicit)]
         location: Location,
+    },
+
+    #[snafu(display("Flow state handler error"))]
+    FlowStateHandler {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
     },
 }
 
@@ -761,7 +787,8 @@ impl ErrorExt for Error {
             | Error::Join { .. }
             | Error::PeerUnavailable { .. }
             | Error::ExceededDeadline { .. }
-            | Error::ChooseItems { .. } => StatusCode::Internal,
+            | Error::ChooseItems { .. }
+            | Error::FlowStateHandler { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 
@@ -833,9 +860,10 @@ impl ErrorExt for Error {
             Error::Other { source, .. } => source.status_code(),
             Error::LookupPeer { source, .. } => source.status_code(),
             #[cfg(feature = "pg_kvbackend")]
-            Error::ConnectPostgres { .. } => StatusCode::Internal,
-            #[cfg(feature = "pg_kvbackend")]
-            Error::PostgresExecution { .. } => StatusCode::Internal,
+            Error::CreatePostgresPool { .. }
+            | Error::GetPostgresConnection { .. }
+            | Error::PostgresExecution { .. }
+            | Error::ConnectPostgres { .. } => StatusCode::Internal,
         }
     }
 

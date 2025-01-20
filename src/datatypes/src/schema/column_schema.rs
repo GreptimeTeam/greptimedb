@@ -39,11 +39,19 @@ const DEFAULT_CONSTRAINT_KEY: &str = "greptime:default_constraint";
 pub const FULLTEXT_KEY: &str = "greptime:fulltext";
 /// Key used to store whether the column has inverted index in arrow field's metadata.
 pub const INVERTED_INDEX_KEY: &str = "greptime:inverted_index";
+/// Key used to store skip options in arrow field's metadata.
+pub const SKIPPING_INDEX_KEY: &str = "greptime:skipping_index";
 
 /// Keys used in fulltext options
 pub const COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE: &str = "enable";
 pub const COLUMN_FULLTEXT_OPT_KEY_ANALYZER: &str = "analyzer";
 pub const COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE: &str = "case_sensitive";
+
+/// Keys used in SKIPPING index options
+pub const COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY: &str = "granularity";
+pub const COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE: &str = "type";
+
+pub const DEFAULT_GRANULARITY: u32 = 10240;
 
 /// Schema of a column, used as an immutable struct.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +123,14 @@ impl ColumnSchema {
         self.default_constraint.as_ref()
     }
 
+    /// Check if the default constraint is a impure function.
+    pub fn is_default_impure(&self) -> bool {
+        self.default_constraint
+            .as_ref()
+            .map(|c| c.is_function())
+            .unwrap_or(false)
+    }
+
     #[inline]
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
@@ -142,11 +158,22 @@ impl ColumnSchema {
         self
     }
 
-    pub fn set_inverted_index(mut self, value: bool) -> Self {
-        let _ = self
-            .metadata
-            .insert(INVERTED_INDEX_KEY.to_string(), value.to_string());
-        self
+    pub fn with_inverted_index(&mut self, value: bool) {
+        match value {
+            true => {
+                self.metadata
+                    .insert(INVERTED_INDEX_KEY.to_string(), value.to_string());
+            }
+            false => {
+                self.metadata.remove(INVERTED_INDEX_KEY);
+            }
+        }
+    }
+
+    // Put a placeholder to invalidate schemas.all(!has_inverted_index_key).
+    pub fn insert_inverted_index_placeholder(&mut self) {
+        self.metadata
+            .insert(INVERTED_INDEX_KEY.to_string(), "".to_string());
     }
 
     pub fn is_inverted_indexed(&self) -> bool {
@@ -154,6 +181,17 @@ impl ColumnSchema {
             .get(INVERTED_INDEX_KEY)
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
+    }
+
+    pub fn is_fulltext_indexed(&self) -> bool {
+        self.fulltext_options()
+            .unwrap_or_default()
+            .map(|option| option.enable)
+            .unwrap_or_default()
+    }
+
+    pub fn is_skipping_indexed(&self) -> bool {
+        self.skipping_index_options().unwrap_or_default().is_some()
     }
 
     pub fn has_inverted_index_key(&self) -> bool {
@@ -271,6 +309,15 @@ impl ColumnSchema {
         }
     }
 
+    /// Creates an impure default value for this column, only if it have a impure default constraint.
+    /// Otherwise, returns `Ok(None)`.
+    pub fn create_impure_default(&self) -> Result<Option<Value>> {
+        match &self.default_constraint {
+            Some(c) => c.create_impure_default(&self.data_type),
+            None => Ok(None),
+        }
+    }
+
     /// Retrieves the fulltext options for the column.
     pub fn fulltext_options(&self) -> Result<Option<FulltextOptions>> {
         match self.metadata.get(FULLTEXT_KEY) {
@@ -294,6 +341,34 @@ impl ColumnSchema {
     pub fn set_fulltext_options(&mut self, options: &FulltextOptions) -> Result<()> {
         self.metadata.insert(
             FULLTEXT_KEY.to_string(),
+            serde_json::to_string(options).context(error::SerializeSnafu)?,
+        );
+        Ok(())
+    }
+
+    /// Retrieves the skipping index options for the column.
+    pub fn skipping_index_options(&self) -> Result<Option<SkippingIndexOptions>> {
+        match self.metadata.get(SKIPPING_INDEX_KEY) {
+            None => Ok(None),
+            Some(json) => {
+                let options =
+                    serde_json::from_str(json).context(error::DeserializeSnafu { json })?;
+                Ok(Some(options))
+            }
+        }
+    }
+
+    pub fn with_skipping_options(mut self, options: SkippingIndexOptions) -> Result<Self> {
+        self.metadata.insert(
+            SKIPPING_INDEX_KEY.to_string(),
+            serde_json::to_string(&options).context(error::SerializeSnafu)?,
+        );
+        Ok(self)
+    }
+
+    pub fn set_skipping_options(&mut self, options: &SkippingIndexOptions) -> Result<()> {
+        self.metadata.insert(
+            SKIPPING_INDEX_KEY.to_string(),
             serde_json::to_string(options).context(error::SerializeSnafu)?,
         );
         Ok(())
@@ -506,6 +581,76 @@ impl fmt::Display for FulltextAnalyzer {
             FulltextAnalyzer::English => write!(f, "English"),
             FulltextAnalyzer::Chinese => write!(f, "Chinese"),
         }
+    }
+}
+
+/// Skipping options for a column.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Visit, VisitMut)]
+#[serde(rename_all = "kebab-case")]
+pub struct SkippingIndexOptions {
+    /// The granularity of the skip index.
+    pub granularity: u32,
+    /// The type of the skip index.
+    #[serde(default)]
+    pub index_type: SkippingIndexType,
+}
+
+impl fmt::Display for SkippingIndexOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "granularity={}", self.granularity)?;
+        write!(f, ", index_type={}", self.index_type)?;
+        Ok(())
+    }
+}
+
+/// Skip index types.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, Visit, VisitMut)]
+pub enum SkippingIndexType {
+    #[default]
+    BloomFilter,
+}
+
+impl fmt::Display for SkippingIndexType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SkippingIndexType::BloomFilter => write!(f, "BLOOM"),
+        }
+    }
+}
+
+impl TryFrom<HashMap<String, String>> for SkippingIndexOptions {
+    type Error = Error;
+
+    fn try_from(options: HashMap<String, String>) -> Result<Self> {
+        // Parse granularity with default value 1
+        let granularity = match options.get(COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY) {
+            Some(value) => value.parse::<u32>().map_err(|_| {
+                error::InvalidSkippingIndexOptionSnafu {
+                    msg: format!("Invalid granularity: {value}, expected: positive integer"),
+                }
+                .build()
+            })?,
+            None => DEFAULT_GRANULARITY,
+        };
+
+        // Parse index type with default value BloomFilter
+        let index_type = match options.get(COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE) {
+            Some(typ) => match typ.to_ascii_uppercase().as_str() {
+                "BLOOM" => SkippingIndexType::BloomFilter,
+                _ => {
+                    return error::InvalidSkippingIndexOptionSnafu {
+                        msg: format!("Invalid index type: {typ}, expected: 'BLOOM'"),
+                    }
+                    .fail();
+                }
+            },
+            None => SkippingIndexType::default(),
+        };
+
+        Ok(SkippingIndexOptions {
+            granularity,
+            index_type,
+        })
     }
 }
 

@@ -73,12 +73,19 @@ pub trait Configurable: Serialize + DeserializeOwned + Default + Sized {
             layered_config = layered_config.add_source(File::new(config_file, FileFormat::Toml));
         }
 
-        let opts = layered_config
+        let mut opts: Self = layered_config
             .build()
             .and_then(|x| x.try_deserialize())
             .context(LoadLayeredConfigSnafu)?;
 
+        opts.validate_sanitize()?;
+
         Ok(opts)
+    }
+
+    /// Validate(and possibly sanitize) the configuration.
+    fn validate_sanitize(&mut self) -> Result<()> {
+        Ok(())
     }
 
     /// List of toml keys that should be parsed as a list.

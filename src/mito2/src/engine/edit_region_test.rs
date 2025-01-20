@@ -72,6 +72,7 @@ async fn test_edit_region_schedule_compaction() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
     engine
@@ -139,7 +140,7 @@ async fn test_edit_region_fill_cache() {
         .create_engine_with(
             MitoConfig {
                 // Write cache must be enabled to download the ingested SST file.
-                enable_experimental_write_cache: true,
+                enable_write_cache: true,
                 ..Default::default()
             },
             None,

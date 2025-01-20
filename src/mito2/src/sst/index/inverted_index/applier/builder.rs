@@ -28,16 +28,17 @@ use datatypes::value::Value;
 use index::inverted_index::search::index_apply::PredicatesIndexApplier;
 use index::inverted_index::search::predicate::Predicate;
 use object_store::ObjectStore;
+use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
 use store_api::storage::ColumnId;
 
 use crate::cache::file_cache::FileCacheRef;
-use crate::cache::index::InvertedIndexCacheRef;
+use crate::cache::index::inverted_index::InvertedIndexCacheRef;
 use crate::error::{BuildIndexApplierSnafu, ColumnNotFoundSnafu, ConvertValueSnafu, Result};
 use crate::row_converter::SortField;
+use crate::sst::index::codec::IndexValueCodec;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplier;
-use crate::sst::index::inverted_index::codec::IndexValueCodec;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
 /// Constructs an [`InvertedIndexApplier`] which applies predicates to SST files during scan.
@@ -64,7 +65,10 @@ pub(crate) struct InvertedIndexApplierBuilder<'a> {
     puffin_manager_factory: PuffinManagerFactory,
 
     /// Cache for inverted index.
-    index_cache: Option<InvertedIndexCacheRef>,
+    inverted_index_cache: Option<InvertedIndexCacheRef>,
+
+    /// Cache for puffin metadata.
+    puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
 }
 
 impl<'a> InvertedIndexApplierBuilder<'a> {
@@ -72,8 +76,6 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
     pub fn new(
         region_dir: String,
         object_store: ObjectStore,
-        file_cache: Option<FileCacheRef>,
-        index_cache: Option<InvertedIndexCacheRef>,
         metadata: &'a RegionMetadata,
         indexed_column_ids: HashSet<ColumnId>,
         puffin_manager_factory: PuffinManagerFactory,
@@ -81,13 +83,38 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
         Self {
             region_dir,
             object_store,
-            file_cache,
             metadata,
             indexed_column_ids,
             output: HashMap::default(),
-            index_cache,
             puffin_manager_factory,
+            file_cache: None,
+            inverted_index_cache: None,
+            puffin_metadata_cache: None,
         }
+    }
+
+    /// Sets the file cache.
+    pub fn with_file_cache(mut self, file_cache: Option<FileCacheRef>) -> Self {
+        self.file_cache = file_cache;
+        self
+    }
+
+    /// Sets the puffin metadata cache.
+    pub fn with_puffin_metadata_cache(
+        mut self,
+        puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
+    ) -> Self {
+        self.puffin_metadata_cache = puffin_metadata_cache;
+        self
+    }
+
+    /// Sets the inverted index cache.
+    pub fn with_inverted_index_cache(
+        mut self,
+        inverted_index_cache: Option<InvertedIndexCacheRef>,
+    ) -> Self {
+        self.inverted_index_cache = inverted_index_cache;
+        self
     }
 
     /// Consumes the builder to construct an [`InvertedIndexApplier`], optionally returned based on
@@ -108,15 +135,18 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
             .collect();
         let applier = PredicatesIndexApplier::try_from(predicates);
 
-        Ok(Some(InvertedIndexApplier::new(
-            self.region_dir,
-            self.metadata.region_id,
-            self.object_store,
-            self.file_cache,
-            self.index_cache,
-            Box::new(applier.context(BuildIndexApplierSnafu)?),
-            self.puffin_manager_factory,
-        )))
+        Ok(Some(
+            InvertedIndexApplier::new(
+                self.region_dir,
+                self.metadata.region_id,
+                self.object_store,
+                Box::new(applier.context(BuildIndexApplierSnafu)?),
+                self.puffin_manager_factory,
+            )
+            .with_file_cache(self.file_cache)
+            .with_puffin_metadata_cache(self.puffin_metadata_cache)
+            .with_index_cache(self.inverted_index_cache),
+        ))
     }
 
     /// Recursively traverses expressions to collect predicates.
@@ -322,8 +352,6 @@ mod tests {
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
             test_object_store(),
-            None,
-            None,
             &metadata,
             HashSet::from_iter([1, 2, 3]),
             facotry,

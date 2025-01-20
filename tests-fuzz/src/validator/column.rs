@@ -15,8 +15,7 @@
 use common_telemetry::debug;
 use datatypes::data_type::DataType;
 use snafu::{ensure, ResultExt};
-use sqlx::database::HasArguments;
-use sqlx::{ColumnIndex, Database, Decode, Encode, Executor, IntoArguments, Type};
+use sqlx::MySqlPool;
 
 use crate::error::{self, Result};
 use crate::ir::create_expr::ColumnOption;
@@ -198,24 +197,16 @@ pub fn assert_eq(fetched_columns: &[ColumnEntry], columns: &[Column]) -> Result<
 }
 
 /// Returns all [ColumnEntry] of the `table_name` from `information_schema`.
-pub async fn fetch_columns<'a, DB, E>(
-    e: E,
+pub async fn fetch_columns(
+    db: &MySqlPool,
     schema_name: Ident,
     table_name: Ident,
-) -> Result<Vec<ColumnEntry>>
-where
-    DB: Database,
-    <DB as HasArguments<'a>>::Arguments: IntoArguments<'a, DB>,
-    for<'c> E: 'a + Executor<'c, Database = DB>,
-    for<'c> String: Decode<'c, DB> + Type<DB>,
-    for<'c> String: Encode<'c, DB> + Type<DB>,
-    for<'c> &'c str: ColumnIndex<<DB as Database>::Row>,
-{
+) -> Result<Vec<ColumnEntry>> {
     let sql = "SELECT table_schema, table_name, column_name, greptime_data_type as data_type, semantic_type, column_default, is_nullable FROM information_schema.columns WHERE table_schema = ? AND table_name = ?";
     sqlx::query_as::<_, ColumnEntry>(sql)
         .bind(schema_name.value.to_string())
         .bind(table_name.value.to_string())
-        .fetch_all(e)
+        .fetch_all(db)
         .await
         .context(error::ExecuteQuerySnafu { sql })
 }

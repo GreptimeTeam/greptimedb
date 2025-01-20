@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use common_catalog::consts::INFORMATION_SCHEMA_FLOW_TABLE_ID;
 use common_error::ext::BoxedError;
 use common_meta::key::flow::flow_info::FlowInfoValue;
+use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::FlowId;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
@@ -28,7 +29,9 @@ use datatypes::prelude::ConcreteDataType as CDT;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
-use datatypes::vectors::{Int64VectorBuilder, StringVectorBuilder, UInt32VectorBuilder, VectorRef};
+use datatypes::vectors::{
+    Int64VectorBuilder, StringVectorBuilder, UInt32VectorBuilder, UInt64VectorBuilder, VectorRef,
+};
 use futures::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
@@ -38,6 +41,8 @@ use crate::error::{
 };
 use crate::information_schema::{Predicates, FLOWS};
 use crate::system_schema::information_schema::InformationTable;
+use crate::system_schema::utils;
+use crate::CatalogManager;
 
 const INIT_CAPACITY: usize = 42;
 
@@ -45,6 +50,7 @@ const INIT_CAPACITY: usize = 42;
 // pk is (flow_name, flow_id, table_catalog)
 pub const FLOW_NAME: &str = "flow_name";
 pub const FLOW_ID: &str = "flow_id";
+pub const STATE_SIZE: &str = "state_size";
 pub const TABLE_CATALOG: &str = "table_catalog";
 pub const FLOW_DEFINITION: &str = "flow_definition";
 pub const COMMENT: &str = "comment";
@@ -59,17 +65,20 @@ pub const OPTIONS: &str = "options";
 pub(super) struct InformationSchemaFlows {
     schema: SchemaRef,
     catalog_name: String,
+    catalog_manager: Weak<dyn CatalogManager>,
     flow_metadata_manager: Arc<FlowMetadataManager>,
 }
 
 impl InformationSchemaFlows {
     pub(super) fn new(
         catalog_name: String,
+        catalog_manager: Weak<dyn CatalogManager>,
         flow_metadata_manager: Arc<FlowMetadataManager>,
     ) -> Self {
         Self {
             schema: Self::schema(),
             catalog_name,
+            catalog_manager,
             flow_metadata_manager,
         }
     }
@@ -81,6 +90,7 @@ impl InformationSchemaFlows {
             vec![
                 (FLOW_NAME, CDT::string_datatype(), false),
                 (FLOW_ID, CDT::uint32_datatype(), false),
+                (STATE_SIZE, CDT::uint64_datatype(), true),
                 (TABLE_CATALOG, CDT::string_datatype(), false),
                 (FLOW_DEFINITION, CDT::string_datatype(), false),
                 (COMMENT, CDT::string_datatype(), true),
@@ -100,6 +110,7 @@ impl InformationSchemaFlows {
         InformationSchemaFlowsBuilder::new(
             self.schema.clone(),
             self.catalog_name.clone(),
+            self.catalog_manager.clone(),
             &self.flow_metadata_manager,
         )
     }
@@ -145,10 +156,12 @@ impl InformationTable for InformationSchemaFlows {
 struct InformationSchemaFlowsBuilder {
     schema: SchemaRef,
     catalog_name: String,
+    catalog_manager: Weak<dyn CatalogManager>,
     flow_metadata_manager: Arc<FlowMetadataManager>,
 
     flow_names: StringVectorBuilder,
     flow_ids: UInt32VectorBuilder,
+    state_sizes: UInt64VectorBuilder,
     table_catalogs: StringVectorBuilder,
     raw_sqls: StringVectorBuilder,
     comments: StringVectorBuilder,
@@ -163,15 +176,18 @@ impl InformationSchemaFlowsBuilder {
     fn new(
         schema: SchemaRef,
         catalog_name: String,
+        catalog_manager: Weak<dyn CatalogManager>,
         flow_metadata_manager: &Arc<FlowMetadataManager>,
     ) -> Self {
         Self {
             schema,
             catalog_name,
+            catalog_manager,
             flow_metadata_manager: flow_metadata_manager.clone(),
 
             flow_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             flow_ids: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
+            state_sizes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             table_catalogs: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             raw_sqls: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             comments: StringVectorBuilder::with_capacity(INIT_CAPACITY),
@@ -196,6 +212,11 @@ impl InformationSchemaFlowsBuilder {
             .flow_names(&catalog_name)
             .await;
 
+        let flow_stat = {
+            let information_extension = utils::information_extension(&self.catalog_manager)?;
+            information_extension.flow_stats().await?
+        };
+
         while let Some((flow_name, flow_id)) = stream
             .try_next()
             .await
@@ -214,7 +235,7 @@ impl InformationSchemaFlowsBuilder {
                     catalog_name: catalog_name.to_string(),
                     flow_name: flow_name.to_string(),
                 })?;
-            self.add_flow(&predicates, flow_id.flow_id(), flow_info)?;
+            self.add_flow(&predicates, flow_id.flow_id(), flow_info, &flow_stat)?;
         }
 
         self.finish()
@@ -225,6 +246,7 @@ impl InformationSchemaFlowsBuilder {
         predicates: &Predicates,
         flow_id: FlowId,
         flow_info: FlowInfoValue,
+        flow_stat: &Option<FlowStat>,
     ) -> Result<()> {
         let row = [
             (FLOW_NAME, &Value::from(flow_info.flow_name().to_string())),
@@ -239,6 +261,11 @@ impl InformationSchemaFlowsBuilder {
         }
         self.flow_names.push(Some(flow_info.flow_name()));
         self.flow_ids.push(Some(flow_id));
+        self.state_sizes.push(
+            flow_stat
+                .as_ref()
+                .and_then(|state| state.state_size.get(&flow_id).map(|v| *v as u64)),
+        );
         self.table_catalogs.push(Some(flow_info.catalog_name()));
         self.raw_sqls.push(Some(flow_info.raw_sql()));
         self.comments.push(Some(flow_info.comment()));
@@ -271,6 +298,7 @@ impl InformationSchemaFlowsBuilder {
         let columns: Vec<VectorRef> = vec![
             Arc::new(self.flow_names.finish()),
             Arc::new(self.flow_ids.finish()),
+            Arc::new(self.state_sizes.finish()),
             Arc::new(self.table_catalogs.finish()),
             Arc::new(self.raw_sqls.finish()),
             Arc::new(self.comments.finish()),

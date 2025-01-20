@@ -40,12 +40,13 @@ use common_recordbatch::RecordBatches;
 use common_time::timezone::get_timezone;
 use common_time::Timestamp;
 use datafusion::common::ScalarValue;
-use datafusion::prelude::SessionContext;
+use datafusion::prelude::{concat_ws, SessionContext};
 use datafusion_expr::expr::WildcardOptions;
 use datafusion_expr::{case, col, lit, Expr, SortExpr};
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema, Schema};
 use datatypes::vectors::StringVector;
+use itertools::Itertools;
 use object_store::ObjectStore;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -62,6 +63,7 @@ use sql::statements::show::{
 use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
 use sqlparser::ast::ObjectName;
+use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
 use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 use table::TableRef;
 
@@ -401,6 +403,23 @@ pub async fn show_index(
         query_ctx.current_schema()
     };
 
+    let primary_key_expr = case(col("constraint_name").like(lit("%PRIMARY%")))
+        .when(lit(true), lit("greptime-primary-key-v1"))
+        .otherwise(null())
+        .context(error::PlanSqlSnafu)?;
+    let inverted_index_expr = case(col("constraint_name").like(lit("%INVERTED INDEX%")))
+        .when(lit(true), lit("greptime-inverted-index-v1"))
+        .otherwise(null())
+        .context(error::PlanSqlSnafu)?;
+    let fulltext_index_expr = case(col("constraint_name").like(lit("%FULLTEXT INDEX%")))
+        .when(lit(true), lit("greptime-fulltext-index-v1"))
+        .otherwise(null())
+        .context(error::PlanSqlSnafu)?;
+    let skipping_index_expr = case(col("constraint_name").like(lit("%SKIPPING INDEX%")))
+        .when(lit(true), lit("greptime-bloom-filter-v1"))
+        .otherwise(null())
+        .context(error::PlanSqlSnafu)?;
+
     let select = vec![
         // 1 as `Non_unique`: contain duplicates
         lit(1).alias(INDEX_NONT_UNIQUE_COLUMN),
@@ -418,8 +437,16 @@ pub async fn show_index(
             .otherwise(lit(YES_STR))
             .context(error::PlanSqlSnafu)?
             .alias(COLUMN_NULLABLE_COLUMN),
-        // TODO(dennis): maybe 'BTREE'?
-        lit("greptime-inverted-index-v1").alias(INDEX_INDEX_TYPE_COLUMN),
+        concat_ws(
+            lit(", "),
+            vec![
+                primary_key_expr,
+                inverted_index_expr,
+                fulltext_index_expr,
+                skipping_index_expr,
+            ],
+        )
+        .alias(INDEX_INDEX_TYPE_COLUMN),
         lit("").alias(COLUMN_COMMENT_COLUMN),
         lit("").alias(INDEX_COMMENT_COLUMN),
         lit(YES_STR).alias(INDEX_VISIBLE_COLUMN),
@@ -703,6 +730,20 @@ pub async fn show_status(_query_ctx: QueryContextRef) -> Result<Output> {
     Ok(Output::new_with_record_batches(records))
 }
 
+pub async fn show_search_path(_query_ctx: QueryContextRef) -> Result<Output> {
+    let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+        "search_path",
+        ConcreteDataType::string_datatype(),
+        false,
+    )]));
+    let records = RecordBatches::try_from_columns(
+        schema,
+        vec![Arc::new(StringVector::from(vec![_query_ctx.current_schema()])) as _],
+    )
+    .context(error::CreateRecordBatchSnafu)?;
+    Ok(Output::new_with_record_batches(records))
+}
+
 pub fn show_create_database(database_name: &str, options: OptionMap) -> Result<Output> {
     let stmt = CreateDatabase {
         name: ObjectName(vec![Ident {
@@ -740,6 +781,52 @@ pub fn show_create_table(
         p
     });
     let sql = format!("{}", stmt);
+    let columns = vec![
+        Arc::new(StringVector::from(vec![table_name.clone()])) as _,
+        Arc::new(StringVector::from(vec![sql])) as _,
+    ];
+    let records = RecordBatches::try_from_columns(SHOW_CREATE_TABLE_OUTPUT_SCHEMA.clone(), columns)
+        .context(error::CreateRecordBatchSnafu)?;
+
+    Ok(Output::new_with_record_batches(records))
+}
+
+pub fn show_create_foreign_table_for_pg(
+    table: TableRef,
+    _query_ctx: QueryContextRef,
+) -> Result<Output> {
+    let table_info = table.table_info();
+
+    let table_meta = &table_info.meta;
+    let table_name = &table_info.name;
+    let schema = &table_info.meta.schema;
+    let is_metric_engine = is_metric_engine(&table_meta.engine);
+
+    let columns = schema
+        .column_schemas()
+        .iter()
+        .filter_map(|c| {
+            if is_metric_engine && is_metric_engine_internal_column(&c.name) {
+                None
+            } else {
+                Some(format!(
+                    "\"{}\" {}",
+                    c.name,
+                    c.data_type.postgres_datatype_name()
+                ))
+            }
+        })
+        .join(",\n  ");
+
+    let sql = format!(
+        r#"CREATE FOREIGN TABLE ft_{} (
+  {}
+)
+SERVER greptimedb
+OPTIONS (table_name '{}')"#,
+        table_name, columns, table_name
+    );
+
     let columns = vec![
         Arc::new(StringVector::from(vec![table_name.clone()])) as _,
         Arc::new(StringVector::from(vec![sql])) as _,

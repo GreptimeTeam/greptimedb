@@ -33,15 +33,6 @@ runs:
     - name: Rust Cache
       uses: Swatinem/rust-cache@v2
 
-    - name: Install Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.10"
-
-    - name: Install PyArrow Package
-      shell: pwsh
-      run: pip install pyarrow numpy
-
     - name: Install WSL distribution
       uses: Vampire/setup-wsl@v2
       with:
@@ -76,5 +67,5 @@ runs:
       uses: ./.github/actions/upload-artifacts
       with:
         artifacts-dir: ${{ inputs.artifacts-dir }}
-        target-file: target/${{ inputs.arch }}/${{ inputs.cargo-profile }}/greptime
+        target-files: target/${{ inputs.arch }}/${{ inputs.cargo-profile }}/greptime,target/${{ inputs.arch }}/${{ inputs.cargo-profile }}/greptime.pdb
         version: ${{ inputs.version }}

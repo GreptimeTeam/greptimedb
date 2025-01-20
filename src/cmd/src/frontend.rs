@@ -268,7 +268,8 @@ impl StartCommand {
         info!("Frontend options: {:#?}", opts);
 
         let plugin_opts = opts.plugins;
-        let opts = opts.component;
+        let mut opts = opts.component;
+        opts.grpc.detect_hostname();
         let mut plugins = Plugins::new();
         plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &opts)
             .await

@@ -25,6 +25,7 @@ futures.workspace = true
 lz4_flex = "0.11"
 moka = { workspace = true, features = ["future", "sync"] }
 pin-project.workspace = true
+prometheus.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10.8"
@@ -34,4 +35,5 @@ tokio-util.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+common-base = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true

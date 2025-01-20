@@ -180,8 +180,8 @@ async fn test_engine_region_open_with_options() {
 
     let region = engine.get_region(region_id).unwrap();
     assert_eq!(
-        Duration::from_secs(3600 * 24 * 4),
-        region.version().options.ttl.unwrap()
+        region.version().options.ttl,
+        Some(Duration::from_secs(3600 * 24 * 4).into())
     );
 }
 
@@ -228,13 +228,13 @@ async fn test_engine_region_open_with_custom_store() {
     let object_store_manager = env.get_object_store_manager().unwrap();
     assert!(!object_store_manager
         .default_object_store()
-        .is_exist(region.access_layer.region_dir())
+        .exists(region.access_layer.region_dir())
         .await
         .unwrap());
     assert!(object_store_manager
         .find("Gcs")
         .unwrap()
-        .is_exist(region.access_layer.region_dir())
+        .exists(region.access_layer.region_dir())
         .await
         .unwrap());
 }
@@ -252,6 +252,7 @@ async fn test_open_region_skip_wal_replay() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -441,6 +442,7 @@ async fn test_open_compaction_region() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
     let request = CreateRequestBuilder::new().build();
@@ -462,6 +464,7 @@ async fn test_open_compaction_region() {
         region_id,
         region_dir: region_dir.clone(),
         region_options: RegionOptions::default(),
+        max_parallelism: 1,
     };
 
     let compaction_region = open_compaction_region(

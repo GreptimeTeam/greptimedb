@@ -271,7 +271,8 @@ impl StatementExecutor {
 
         table_info.ident.table_id = table_id;
 
-        let table_info = Arc::new(table_info.try_into().context(CreateTableInfoSnafu)?);
+        let table_info: Arc<TableInfo> =
+            Arc::new(table_info.try_into().context(CreateTableInfoSnafu)?);
         create_table.table_id = Some(api::v1::TableId { id: table_id });
 
         let table = DistTable::table(table_info);
@@ -910,7 +911,7 @@ impl StatementExecutor {
 
         let _ = table_info
             .meta
-            .builder_with_alter_kind(table_name, &request.alter_kind, false)
+            .builder_with_alter_kind(table_name, &request.alter_kind)
             .context(error::TableSnafu)?
             .build()
             .context(error::BuildTableMetaSnafu { table_name })?;

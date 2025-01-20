@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
+use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use api::v1::alter_table_expr::Kind;
-use api::v1::region::{InsertRequests as RegionInsertRequests, RegionRequestHeader};
+use api::v1::region::{
+    InsertRequest as RegionInsertRequest, InsertRequests as RegionInsertRequests,
+    RegionRequestHeader,
+};
 use api::v1::{
     AlterTableExpr, ColumnDataType, ColumnSchema, CreateTableExpr, InsertRequests,
     RowInsertRequest, RowInsertRequests, SemanticType,
@@ -44,6 +47,7 @@ use store_api::metric_engine_consts::{
 };
 use store_api::mito_engine_options::{APPEND_MODE_KEY, MERGE_MODE_KEY};
 use store_api::storage::{RegionId, TableId};
+use table::metadata::TableInfo;
 use table::requests::{InsertRequest as TableInsertRequest, AUTO_CREATE_TABLE_KEY, TTL_KEY};
 use table::table_reference::TableReference;
 use table::TableRef;
@@ -55,7 +59,9 @@ use crate::error::{
 use crate::expr_factory::CreateExprFactory;
 use crate::region_req_factory::RegionRequestFactory;
 use crate::req_convert::common::preprocess_row_insert_requests;
-use crate::req_convert::insert::{ColumnToRow, RowToRegion, StatementToRegion, TableToRegion};
+use crate::req_convert::insert::{
+    fill_reqs_with_impure_default, ColumnToRow, RowToRegion, StatementToRegion, TableToRegion,
+};
 use crate::statement::StatementExecutor;
 
 pub struct Inserter {
@@ -89,6 +95,21 @@ impl AutoCreateTableType {
             AutoCreateTableType::LastNonNull => "last_non_null",
         }
     }
+}
+
+/// Split insert requests into normal and instant requests.
+///
+/// Where instant requests are requests with ttl=instant,
+/// and normal requests are requests with ttl set to other values.
+///
+/// This is used to split requests for different processing.
+#[derive(Clone)]
+pub struct InstantAndNormalInsertRequests {
+    /// Requests with normal ttl.
+    pub normal_requests: RegionInsertRequests,
+    /// Requests with ttl=instant.
+    /// Will be discarded immediately at frontend, wouldn't even insert into memtable, and only sent to flow node if needed.
+    pub instant_requests: RegionInsertRequests,
 }
 
 impl Inserter {
@@ -183,14 +204,26 @@ impl Inserter {
         });
         validate_column_count_match(&requests)?;
 
-        let table_name_to_ids = self
+        let CreateAlterTableResult {
+            instant_table_ids,
+            table_infos,
+        } = self
             .create_or_alter_tables_on_demand(&requests, &ctx, create_type, statement_executor)
             .await?;
-        let inserts = RowToRegion::new(table_name_to_ids, self.partition_manager.as_ref())
-            .convert(requests)
-            .await?;
 
-        self.do_request(inserts, &ctx).await
+        let name_to_info = table_infos
+            .values()
+            .map(|info| (info.name.clone(), info.clone()))
+            .collect::<HashMap<_, _>>();
+        let inserts = RowToRegion::new(
+            name_to_info,
+            instant_table_ids,
+            self.partition_manager.as_ref(),
+        )
+        .convert(requests)
+        .await?;
+
+        self.do_request(inserts, &table_infos, &ctx).await
     }
 
     /// Handles row inserts request with metric engine.
@@ -215,7 +248,10 @@ impl Inserter {
             .await?;
 
         // check and create logical tables
-        let table_name_to_ids = self
+        let CreateAlterTableResult {
+            instant_table_ids,
+            table_infos,
+        } = self
             .create_or_alter_tables_on_demand(
                 &requests,
                 &ctx,
@@ -223,11 +259,15 @@ impl Inserter {
                 statement_executor,
             )
             .await?;
-        let inserts = RowToRegion::new(table_name_to_ids, &self.partition_manager)
+        let name_to_info = table_infos
+            .values()
+            .map(|info| (info.name.clone(), info.clone()))
+            .collect::<HashMap<_, _>>();
+        let inserts = RowToRegion::new(name_to_info, instant_table_ids, &self.partition_manager)
             .convert(requests)
             .await?;
 
-        self.do_request(inserts, &ctx).await
+        self.do_request(inserts, &table_infos, &ctx).await
     }
 
     pub async fn handle_table_insert(
@@ -248,7 +288,10 @@ impl Inserter {
             .convert(request)
             .await?;
 
-        self.do_request(inserts, &ctx).await
+        let table_infos =
+            HashMap::from_iter([(table_info.table_id(), table_info.clone())].into_iter());
+
+        self.do_request(inserts, &table_infos, &ctx).await
     }
 
     pub async fn handle_statement_insert(
@@ -256,21 +299,28 @@ impl Inserter {
         insert: &Insert,
         ctx: &QueryContextRef,
     ) -> Result<Output> {
-        let inserts =
+        let (inserts, table_info) =
             StatementToRegion::new(self.catalog_manager.as_ref(), &self.partition_manager, ctx)
                 .convert(insert, ctx)
                 .await?;
 
-        self.do_request(inserts, ctx).await
+        let table_infos =
+            HashMap::from_iter([(table_info.table_id(), table_info.clone())].into_iter());
+
+        self.do_request(inserts, &table_infos, ctx).await
     }
 }
 
 impl Inserter {
     async fn do_request(
         &self,
-        requests: RegionInsertRequests,
+        requests: InstantAndNormalInsertRequests,
+        table_infos: &HashMap<TableId, Arc<TableInfo>>,
         ctx: &QueryContextRef,
     ) -> Result<Output> {
+        // Fill impure default values in the request
+        let requests = fill_reqs_with_impure_default(table_infos, requests)?;
+
         let write_cost = write_meter!(
             ctx.current_catalog(),
             ctx.current_schema(),
@@ -283,8 +333,21 @@ impl Inserter {
             ..Default::default()
         });
 
+        let InstantAndNormalInsertRequests {
+            normal_requests,
+            instant_requests,
+        } = requests;
+
         // Mirror requests for source table to flownode
-        match self.mirror_flow_node_requests(&requests).await {
+        match self
+            .mirror_flow_node_requests(
+                normal_requests
+                    .requests
+                    .iter()
+                    .chain(instant_requests.requests.iter()),
+            )
+            .await
+        {
             Ok(flow_requests) => {
                 let node_manager = self.node_manager.clone();
                 let flow_tasks = flow_requests.into_iter().map(|(peer, inserts)| {
@@ -320,7 +383,7 @@ impl Inserter {
         }
 
         let write_tasks = self
-            .group_requests_by_peer(requests)
+            .group_requests_by_peer(normal_requests)
             .await?
             .into_iter()
             .map(|(peer, inserts)| {
@@ -350,14 +413,14 @@ impl Inserter {
     }
 
     /// Mirror requests for source table to flownode
-    async fn mirror_flow_node_requests(
-        &self,
-        requests: &RegionInsertRequests,
+    async fn mirror_flow_node_requests<'it, 'zelf: 'it>(
+        &'zelf self,
+        requests: impl Iterator<Item = &'it RegionInsertRequest>,
     ) -> Result<HashMap<Peer, RegionInsertRequests>> {
         // store partial source table requests used by flow node(only store what's used)
         let mut src_table_reqs: HashMap<TableId, Option<(Vec<Peer>, RegionInsertRequests)>> =
             HashMap::new();
-        for req in &requests.requests {
+        for req in requests {
             let table_id = RegionId::from_u64(req.region_id).table_id();
             match src_table_reqs.get_mut(&table_id) {
                 Some(Some((_peers, reqs))) => reqs.requests.push(req.clone()),
@@ -422,7 +485,6 @@ impl Inserter {
         // group by region ids first to reduce repeatedly call `find_region_leader`
         // TODO(discord9): determine if a addition clone is worth it
         let mut requests_per_region: HashMap<RegionId, RegionInsertRequests> = HashMap::new();
-
         for req in requests.requests {
             let region_id = RegionId::from_u64(req.region_id);
             requests_per_region
@@ -462,14 +524,15 @@ impl Inserter {
         ctx: &QueryContextRef,
         auto_create_table_type: AutoCreateTableType,
         statement_executor: &StatementExecutor,
-    ) -> Result<HashMap<String, TableId>> {
+    ) -> Result<CreateAlterTableResult> {
         let _timer = crate::metrics::CREATE_ALTER_ON_DEMAND
             .with_label_values(&[auto_create_table_type.as_str()])
             .start_timer();
 
         let catalog = ctx.current_catalog();
         let schema = ctx.current_schema();
-        let mut table_name_to_ids = HashMap::with_capacity(requests.inserts.len());
+
+        let mut table_infos = HashMap::new();
         // If `auto_create_table` hint is disabled, skip creating/altering tables.
         let auto_create_table_hint = ctx
             .extension(AUTO_CREATE_TABLE_KEY)
@@ -483,6 +546,7 @@ impl Inserter {
             })?
             .unwrap_or(true);
         if !auto_create_table_hint {
+            let mut instant_table_ids = HashSet::new();
             for req in &requests.inserts {
                 let table = self
                     .get_table(catalog, &schema, &req.table_name)
@@ -494,18 +558,30 @@ impl Inserter {
                         ),
                     })?;
                 let table_info = table.table_info();
-                table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
+                if table_info.is_ttl_instant_table() {
+                    instant_table_ids.insert(table_info.table_id());
+                }
+                table_infos.insert(table_info.table_id(), table.table_info());
             }
-            return Ok(table_name_to_ids);
+            let ret = CreateAlterTableResult {
+                instant_table_ids,
+                table_infos,
+            };
+            return Ok(ret);
         }
 
         let mut create_tables = vec![];
         let mut alter_tables = vec![];
+        let mut instant_table_ids = HashSet::new();
+
         for req in &requests.inserts {
             match self.get_table(catalog, &schema, &req.table_name).await? {
                 Some(table) => {
                     let table_info = table.table_info();
-                    table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
+                    if table_info.is_ttl_instant_table() {
+                        instant_table_ids.insert(table_info.table_id());
+                    }
+                    table_infos.insert(table_info.table_id(), table.table_info());
                     if let Some(alter_expr) =
                         self.get_alter_table_expr_on_demand(req, &table, ctx)?
                     {
@@ -530,7 +606,10 @@ impl Inserter {
 
                     for table in tables {
                         let table_info = table.table_info();
-                        table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
+                        if table_info.is_ttl_instant_table() {
+                            instant_table_ids.insert(table_info.table_id());
+                        }
+                        table_infos.insert(table_info.table_id(), table.table_info());
                     }
                 }
                 if !alter_tables.is_empty() {
@@ -543,12 +622,17 @@ impl Inserter {
             AutoCreateTableType::Physical
             | AutoCreateTableType::Log
             | AutoCreateTableType::LastNonNull => {
+                // note that auto create table shouldn't be ttl instant table
+                // for it's a very unexpected behavior and should be set by user explicitly
                 for create_table in create_tables {
                     let table = self
                         .create_physical_table(create_table, ctx, statement_executor)
                         .await?;
                     let table_info = table.table_info();
-                    table_name_to_ids.insert(table_info.name.clone(), table_info.table_id());
+                    if table_info.is_ttl_instant_table() {
+                        instant_table_ids.insert(table_info.table_id());
+                    }
+                    table_infos.insert(table_info.table_id(), table.table_info());
                 }
                 for alter_expr in alter_tables.into_iter() {
                     statement_executor
@@ -558,7 +642,10 @@ impl Inserter {
             }
         }
 
-        Ok(table_name_to_ids)
+        Ok(CreateAlterTableResult {
+            instant_table_ids,
+            table_infos,
+        })
     }
 
     async fn create_physical_table_on_demand(
@@ -687,6 +774,8 @@ impl Inserter {
         Ok(create_table_expr)
     }
 
+    /// Returns an alter table expression if it finds new columns in the request.
+    /// It always adds columns if not exist.
     fn get_alter_table_expr_on_demand(
         &self,
         req: &RowInsertRequest,
@@ -816,5 +905,13 @@ fn build_create_table_expr(
     request_schema: &[ColumnSchema],
     engine: &str,
 ) -> Result<CreateTableExpr> {
-    CreateExprFactory.create_table_expr_by_column_schemas(table, request_schema, engine)
+    CreateExprFactory.create_table_expr_by_column_schemas(table, request_schema, engine, None)
+}
+
+/// Result of `create_or_alter_tables_on_demand`.
+struct CreateAlterTableResult {
+    /// table ids of ttl=instant tables.
+    instant_table_ids: HashSet<TableId>,
+    /// Table Info of the created tables.
+    table_infos: HashMap<TableId, Arc<TableInfo>>,
 }

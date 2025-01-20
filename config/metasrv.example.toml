@@ -8,7 +8,29 @@ bind_addr = "127.0.0.1:3002"
 server_addr = "127.0.0.1:3002"
 
 ## Store server address default to etcd store.
+## For postgres store, the format is:
+## "password=password dbname=postgres user=postgres host=localhost port=5432"
+## For etcd store, the format is:
+## "127.0.0.1:2379"
 store_addrs = ["127.0.0.1:2379"]
+
+## If it's not empty, the metasrv will store all data with this key prefix.
+store_key_prefix = ""
+
+## The datastore for meta server.
+## Available values:
+## - `etcd_store` (default value)
+## - `memory_store`
+## - `postgres_store`
+backend = "etcd_store"
+
+## Table name in RDS to store metadata. Effect when using a RDS kvbackend.
+## **Only used when backend is `postgres_store`.**
+meta_table_name = "greptime_metakv"
+
+## Advisory lock id in PostgreSQL for election. Effect when using PostgreSQL as kvbackend
+## Only used when backend is `postgres_store`.
+meta_election_lock_id = 1
 
 ## Datanode selector type.
 ## - `round_robin` (default value)
@@ -20,20 +42,14 @@ selector = "round_robin"
 ## Store data in memory.
 use_memory_store = false
 
-## Whether to enable greptimedb telemetry.
-enable_telemetry = true
-
-## If it's not empty, the metasrv will store all data with this key prefix.
-store_key_prefix = ""
-
 ## Whether to enable region failover.
 ## This feature is only available on GreptimeDB running on cluster mode and
 ## - Using Remote WAL
 ## - Using shared storage (e.g., s3).
 enable_region_failover = false
 
-## The datastore for meta server.
-backend = "EtcdStore"
+## Whether to enable greptimedb telemetry. Enabled by default.
+#+ enable_telemetry = true
 
 ## The runtime options.
 #+ [runtime]

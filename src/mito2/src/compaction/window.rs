@@ -23,10 +23,9 @@ use common_time::Timestamp;
 use store_api::storage::RegionId;
 
 use crate::compaction::buckets::infer_time_bucket;
-use crate::compaction::compactor::CompactionRegion;
+use crate::compaction::compactor::{CompactionRegion, CompactionVersion};
 use crate::compaction::picker::{Picker, PickerOutput};
 use crate::compaction::{get_expired_ssts, CompactionOutput};
-use crate::region::version::VersionRef;
 use crate::sst::file::{FileHandle, FileId};
 
 /// Compaction picker that splits the time range of all involved files to windows, and merges
@@ -48,7 +47,11 @@ impl WindowedCompactionPicker {
     // use persisted window. If persist window is not present, we check the time window
     // provided while creating table. If all of those are absent, we infer the window
     // from files in level0.
-    fn calculate_time_window(&self, region_id: RegionId, current_version: &VersionRef) -> i64 {
+    fn calculate_time_window(
+        &self,
+        region_id: RegionId,
+        current_version: &CompactionVersion,
+    ) -> i64 {
         self.compaction_time_window_seconds
             .or(current_version
                 .compaction_time_window
@@ -67,7 +70,7 @@ impl WindowedCompactionPicker {
     fn pick_inner(
         &self,
         region_id: RegionId,
-        current_version: &VersionRef,
+        current_version: &CompactionVersion,
         current_time: Timestamp,
     ) -> (Vec<CompactionOutput>, Vec<FileHandle>, i64) {
         let time_window = self.calculate_time_window(region_id, current_version);
@@ -205,28 +208,19 @@ mod tests {
     use common_time::Timestamp;
     use store_api::storage::RegionId;
 
+    use crate::compaction::compactor::CompactionVersion;
     use crate::compaction::window::{file_time_bucket_span, WindowedCompactionPicker};
-    use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtableBuilder};
-    use crate::memtable::time_partition::TimePartitions;
-    use crate::memtable::version::MemtableVersion;
     use crate::region::options::RegionOptions;
-    use crate::region::version::{Version, VersionRef};
     use crate::sst::file::{FileId, FileMeta, Level};
     use crate::sst::version::SstVersion;
     use crate::test_util::memtable_util::metadata_for_test;
     use crate::test_util::NoopFilePurger;
 
-    fn build_version(files: &[(FileId, i64, i64, Level)], ttl: Option<Duration>) -> VersionRef {
+    fn build_version(
+        files: &[(FileId, i64, i64, Level)],
+        ttl: Option<Duration>,
+    ) -> CompactionVersion {
         let metadata = metadata_for_test();
-        let memtables = Arc::new(MemtableVersion::new(Arc::new(TimePartitions::new(
-            metadata.clone(),
-            Arc::new(PartitionTreeMemtableBuilder::new(
-                PartitionTreeConfig::default(),
-                None,
-            )),
-            0,
-            None,
-        ))));
         let file_purger_ref = Arc::new(NoopFilePurger);
 
         let mut ssts = SstVersion::new();
@@ -244,16 +238,11 @@ mod tests {
             }),
         );
 
-        Arc::new(Version {
+        CompactionVersion {
             metadata,
-            memtables,
             ssts: Arc::new(ssts),
-            flushed_entry_id: 0,
-            flushed_sequence: 0,
-            truncated_entry_id: None,
-            compaction_time_window: None,
             options: RegionOptions {
-                ttl,
+                ttl: ttl.map(|t| t.into()),
                 compaction: Default::default(),
                 storage: None,
                 append_mode: false,
@@ -262,7 +251,8 @@ mod tests {
                 memtable: None,
                 merge_mode: None,
             },
-        })
+            compaction_time_window: None,
+        }
     }
 
     #[test]

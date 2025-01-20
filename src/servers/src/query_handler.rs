@@ -34,12 +34,13 @@ use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use common_query::Output;
 use headers::HeaderValue;
+use log_query::LogQuery;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use pipeline::{GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion, PipelineWay};
 use serde_json::Value;
-use session::context::QueryContextRef;
+use session::context::{QueryContext, QueryContextRef};
 
 use crate::error::Result;
 use crate::influxdb::InfluxdbRequest;
@@ -51,6 +52,7 @@ pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + 
 pub type PromStoreProtocolHandlerRef = Arc<dyn PromStoreProtocolHandler + Send + Sync>;
 pub type OpenTelemetryProtocolHandlerRef = Arc<dyn OpenTelemetryProtocolHandler + Send + Sync>;
 pub type PipelineHandlerRef = Arc<dyn PipelineHandler + Send + Sync>;
+pub type LogQueryHandlerRef = Arc<dyn LogQueryHandler + Send + Sync>;
 
 #[async_trait]
 pub trait InfluxdbLineProtocolHandler {
@@ -147,4 +149,19 @@ pub trait PipelineHandler {
         version: PipelineVersion,
         query_ctx: QueryContextRef,
     ) -> Result<Option<()>>;
+
+    async fn get_table(
+        &self,
+        table: &str,
+        query_ctx: &QueryContext,
+    ) -> std::result::Result<Option<Arc<table::Table>>, catalog::error::Error>;
+
+    //// Build a pipeline from a string.
+    fn build_pipeline(&self, pipeline: &str) -> Result<Pipeline<GreptimeTransformer>>;
+}
+
+/// Handle log query requests.
+#[async_trait]
+pub trait LogQueryHandler {
+    async fn query(&self, query: LogQuery, ctx: QueryContextRef) -> Result<Output>;
 }

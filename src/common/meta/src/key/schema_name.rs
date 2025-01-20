@@ -14,10 +14,9 @@
 
 use std::collections::HashMap;
 use std::fmt::Display;
-use std::sync::Arc;
-use std::time::Duration;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_time::DatabaseTimeToLive;
 use futures::stream::BoxStream;
 use humantime_serde::re::humantime;
 use serde::{Deserialize, Serialize};
@@ -57,15 +56,13 @@ impl Default for SchemaNameKey<'_> {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SchemaNameValue {
     #[serde(default)]
-    #[serde(with = "humantime_serde")]
-    pub ttl: Option<Duration>,
+    pub ttl: Option<DatabaseTimeToLive>,
 }
 
 impl Display for SchemaNameValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(ttl) = self.ttl {
-            let ttl = humantime::format_duration(ttl);
-            write!(f, "ttl='{ttl}'")?;
+        if let Some(ttl) = self.ttl.map(|i| i.to_string()) {
+            write!(f, "ttl='{}'", ttl)?;
         }
 
         Ok(())
@@ -96,11 +93,8 @@ impl TryFrom<&HashMap<String, String>> for SchemaNameValue {
 impl From<SchemaNameValue> for HashMap<String, String> {
     fn from(value: SchemaNameValue) -> Self {
         let mut opts = HashMap::new();
-        if let Some(ttl) = value.ttl {
-            opts.insert(
-                OPT_KEY_TTL.to_string(),
-                format!("{}", humantime::format_duration(ttl)),
-            );
+        if let Some(ttl) = value.ttl.map(|ttl| ttl.to_string()) {
+            opts.insert(OPT_KEY_TTL.to_string(), ttl);
         }
         opts
     }
@@ -288,7 +282,7 @@ impl SchemaManager {
             self.kv_backend.clone(),
             req,
             DEFAULT_PAGE_SIZE,
-            Arc::new(schema_decoder),
+            schema_decoder,
         )
         .into_stream();
 
@@ -313,6 +307,8 @@ impl<'a> From<&'a SchemaName> for SchemaNameKey<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
 
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
@@ -323,9 +319,14 @@ mod tests {
         assert_eq!("", schema_value.to_string());
 
         let schema_value = SchemaNameValue {
-            ttl: Some(Duration::from_secs(9)),
+            ttl: Some(Duration::from_secs(9).into()),
         };
         assert_eq!("ttl='9s'", schema_value.to_string());
+
+        let schema_value = SchemaNameValue {
+            ttl: Some(Duration::from_secs(0).into()),
+        };
+        assert_eq!("ttl='forever'", schema_value.to_string());
     }
 
     #[test]
@@ -338,17 +339,36 @@ mod tests {
         assert_eq!(key, parsed);
 
         let value = SchemaNameValue {
-            ttl: Some(Duration::from_secs(10)),
+            ttl: Some(Duration::from_secs(10).into()),
         };
         let mut opts: HashMap<String, String> = HashMap::new();
         opts.insert("ttl".to_string(), "10s".to_string());
         let from_value = SchemaNameValue::try_from(&opts).unwrap();
         assert_eq!(value, from_value);
 
-        let parsed = SchemaNameValue::try_from_raw_value("{\"ttl\":\"10s\"}".as_bytes()).unwrap();
+        let parsed = SchemaNameValue::try_from_raw_value(
+            serde_json::json!({"ttl": "10s"}).to_string().as_bytes(),
+        )
+        .unwrap();
         assert_eq!(Some(value), parsed);
+
+        let forever = SchemaNameValue {
+            ttl: Some(Default::default()),
+        };
+        let parsed = SchemaNameValue::try_from_raw_value(
+            serde_json::json!({"ttl": "forever"}).to_string().as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(Some(forever), parsed);
+
+        let instant_err = SchemaNameValue::try_from_raw_value(
+            serde_json::json!({"ttl": "instant"}).to_string().as_bytes(),
+        );
+        assert!(instant_err.is_err());
+
         let none = SchemaNameValue::try_from_raw_value("null".as_bytes()).unwrap();
         assert!(none.is_none());
+
         let err_empty = SchemaNameValue::try_from_raw_value("".as_bytes());
         assert!(err_empty.is_err());
     }
@@ -374,7 +394,7 @@ mod tests {
 
         let current_schema_value = manager.get(schema_key).await.unwrap().unwrap();
         let new_schema_value = SchemaNameValue {
-            ttl: Some(Duration::from_secs(10)),
+            ttl: Some(Duration::from_secs(10).into()),
         };
         manager
             .update(schema_key, &current_schema_value, &new_schema_value)
@@ -388,10 +408,10 @@ mod tests {
             .unwrap();
 
         let new_schema_value = SchemaNameValue {
-            ttl: Some(Duration::from_secs(40)),
+            ttl: Some(Duration::from_secs(40).into()),
         };
         let incorrect_schema_value = SchemaNameValue {
-            ttl: Some(Duration::from_secs(20)),
+            ttl: Some(Duration::from_secs(20).into()),
         }
         .try_as_raw_value()
         .unwrap();
@@ -402,5 +422,15 @@ mod tests {
             .update(schema_key, &incorrect_schema_value, &new_schema_value)
             .await
             .unwrap_err();
+
+        let current_schema_value = manager.get(schema_key).await.unwrap().unwrap();
+        let new_schema_value = SchemaNameValue { ttl: None };
+        manager
+            .update(schema_key, &current_schema_value, &new_schema_value)
+            .await
+            .unwrap();
+
+        let current_schema_value = manager.get(schema_key).await.unwrap().unwrap();
+        assert_eq!(new_schema_value, *current_schema_value);
     }
 }

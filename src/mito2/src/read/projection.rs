@@ -30,10 +30,10 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 
-use crate::cache::CacheManager;
+use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, Result};
 use crate::read::Batch;
-use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec};
 
 /// Only cache vector when its length `<=` this value.
 const MAX_VECTOR_LENGTH_TO_CACHE: usize = 16384;
@@ -47,7 +47,7 @@ pub struct ProjectionMapper {
     /// Output record batch contains tags.
     has_tags: bool,
     /// Decoder for primary key.
-    codec: McmpRowCodec,
+    codec: DensePrimaryKeyCodec,
     /// Schema for converted [RecordBatch].
     output_schema: SchemaRef,
     /// Ids of columns to project. It keeps ids in the same order as the `projection`
@@ -90,12 +90,7 @@ impl ProjectionMapper {
             // Safety: idx is valid.
             column_schemas.push(metadata.schema.column_schemas()[*idx].clone());
         }
-        let codec = McmpRowCodec::new(
-            metadata
-                .primary_key_columns()
-                .map(|c| SortField::new(c.column_schema.data_type.clone()))
-                .collect(),
-        );
+        let codec = DensePrimaryKeyCodec::new(metadata);
 
         if is_empty_projection {
             // If projection is empty, we don't output any column.
@@ -200,7 +195,7 @@ impl ProjectionMapper {
     pub(crate) fn convert(
         &self,
         batch: &Batch,
-        cache_manager: &CacheManager,
+        cache_strategy: &CacheStrategy,
     ) -> common_recordbatch::error::Result<RecordBatch> {
         if self.is_empty_projection {
             return RecordBatch::new_with_count(self.output_schema.clone(), batch.num_rows());
@@ -219,7 +214,7 @@ impl ProjectionMapper {
                 Some(v) => v.to_vec(),
                 None => self
                     .codec
-                    .decode(batch.primary_key())
+                    .decode_dense(batch.primary_key())
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?,
             }
@@ -241,7 +236,7 @@ impl ProjectionMapper {
                         &column_schema.data_type,
                         value,
                         num_rows,
-                        cache_manager,
+                        cache_strategy,
                     )?;
                     columns.push(vector);
                 }
@@ -274,9 +269,9 @@ fn repeated_vector_with_cache(
     data_type: &ConcreteDataType,
     value: &Value,
     num_rows: usize,
-    cache_manager: &CacheManager,
+    cache_strategy: &CacheStrategy,
 ) -> common_recordbatch::error::Result<VectorRef> {
-    if let Some(vector) = cache_manager.get_repeated_vector(data_type, value) {
+    if let Some(vector) = cache_strategy.get_repeated_vector(data_type, value) {
         // Tries to get the vector from cache manager. If the vector doesn't
         // have enough length, creates a new one.
         match vector.len().cmp(&num_rows) {
@@ -290,7 +285,7 @@ fn repeated_vector_with_cache(
     let vector = new_repeated_vector(data_type, value, num_rows)?;
     // Updates cache.
     if vector.len() <= MAX_VECTOR_LENGTH_TO_CACHE {
-        cache_manager.put_repeated_vector(value.clone(), vector.clone());
+        cache_strategy.put_repeated_vector(value.clone(), vector.clone());
     }
 
     Ok(vector)
@@ -314,13 +309,17 @@ fn new_repeated_vector(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use api::v1::OpType;
     use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray, UInt64Array, UInt8Array};
     use datatypes::arrow::util::pretty;
     use datatypes::value::ValueRef;
 
     use super::*;
+    use crate::cache::CacheManager;
     use crate::read::BatchBuilder;
+    use crate::row_converter::{PrimaryKeyCodecExt, SortField};
     use crate::test_util::meta_util::TestRegionMetadataBuilder;
 
     fn new_batch(
@@ -329,7 +328,7 @@ mod tests {
         fields: &[(ColumnId, i64)],
         num_rows: usize,
     ) -> Batch {
-        let converter = McmpRowCodec::new(
+        let converter = DensePrimaryKeyCodec::with_fields(
             (0..tags.len())
                 .map(|_| SortField::new(ConcreteDataType::int64_datatype()))
                 .collect(),
@@ -389,6 +388,7 @@ mod tests {
 
         // With vector cache.
         let cache = CacheManager::builder().vector_cache_size(1024).build();
+        let cache = CacheStrategy::EnableAll(Arc::new(cache));
         let batch = new_batch(0, &[1, 2], &[(3, 3), (4, 4)], 3);
         let record_batch = mapper.convert(&batch, &cache).unwrap();
         let expect = "\
@@ -432,6 +432,7 @@ mod tests {
 
         let batch = new_batch(0, &[1, 2], &[(4, 4)], 3);
         let cache = CacheManager::builder().vector_cache_size(1024).build();
+        let cache = CacheStrategy::EnableAll(Arc::new(cache));
         let record_batch = mapper.convert(&batch, &cache).unwrap();
         let expect = "\
 +----+----+
@@ -463,6 +464,7 @@ mod tests {
 
         let batch = new_batch(0, &[1, 2], &[], 3);
         let cache = CacheManager::builder().vector_cache_size(1024).build();
+        let cache = CacheStrategy::EnableAll(Arc::new(cache));
         let record_batch = mapper.convert(&batch, &cache).unwrap();
         assert_eq!(3, record_batch.num_rows());
         assert_eq!(0, record_batch.num_columns());

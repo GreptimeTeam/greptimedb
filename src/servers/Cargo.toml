@@ -14,6 +14,9 @@ testing = []
 [lints]
 workspace = true
 
+[target.'cfg(not(target_os = "android"))'.dependencies]
+local-ip-address.workspace = true
+
 [dependencies]
 ahash = "0.8"
 api.workspace = true
@@ -54,19 +57,19 @@ datatypes.workspace = true
 derive_builder.workspace = true
 futures = "0.3"
 futures-util.workspace = true
-hashbrown = "0.14"
+hashbrown = "0.15"
 headers = "0.4"
 hostname = "0.3"
-http = "1"
+http.workspace = true
 http-body = "1"
 humantime.workspace = true
 humantime-serde.workspace = true
 hyper = { workspace = true, features = ["full"] }
 influxdb_line_protocol = { git = "https://github.com/evenyag/influxdb_iox", branch = "feat/line-protocol" }
 itertools.workspace = true
-json5 = "0.4"
 jsonb.workspace = true
 lazy_static.workspace = true
+log-query.workspace = true
 loki-api.workspace = true
 mime_guess = "2.0"
 notify.workspace = true
@@ -78,7 +81,7 @@ openmetrics-parser = "0.4"
 opensrv-mysql = { git = "https://github.com/datafuselabs/opensrv", rev = "6bbc3b65e6b19212c4f7fc4f40c20daf6f452deb" }
 opentelemetry-proto.workspace = true
 parking_lot.workspace = true
-pgwire = { version = "0.25.0", default-features = false, features = ["server-api-ring"] }
+pgwire = { version = "0.28.0", default-features = false, features = ["server-api-ring"] }
 pin-project = "1.0"
 pipeline.workspace = true
 postgres-types = { version = "0.2", features = ["with-chrono-0_4", "with-serde_json-1"] }
@@ -86,11 +89,12 @@ prometheus.workspace = true
 promql-parser.workspace = true
 prost.workspace = true
 query.workspace = true
+quoted-string = "0.6"
 rand.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 rust-embed = { version = "6.6", features = ["debug-embed"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls = { workspace = true, default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-pemfile = "2.0"
 rustls-pki-types = "1.0"
 serde.workspace = true
@@ -102,7 +106,7 @@ sql.workspace = true
 strum.workspace = true
 table.workspace = true
 tokio.workspace = true
-tokio-rustls = "0.26"
+tokio-rustls.workspace = true
 tokio-stream = { workspace = true, features = ["net"] }
 tokio-util.workspace = true
 tonic.workspace = true
@@ -123,6 +127,7 @@ client = { workspace = true, features = ["testing"] }
 common-base.workspace = true
 common-test-util.workspace = true
 criterion = "0.5"
+json5 = "0.4"
 mysql_async = { version = "0.33", default-features = false, features = [
     "default-rustls",
 ] }
@@ -134,15 +139,9 @@ table.workspace = true
 tempfile = "3.0.0"
 tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.12"
-tokio-test = "0.4"
 
 [target.'cfg(unix)'.dev-dependencies]
 pprof = { version = "0.13", features = ["criterion", "flamegraph"] }
-
-[target.'cfg(windows)'.dependencies]
-aws-lc-sys = { version = "0.21.0", features = [
-    "prebuilt-nasm",
-] } # use prebuilt nasm on windows per https://github.com/aws/aws-lc-rs/blob/main/aws-lc-sys/README.md#use-of-prebuilt-nasm-objects
 
 [build-dependencies]
 common-version.workspace = true
@@ -153,4 +152,8 @@ harness = false
 
 [[bench]]
 name = "to_http_output"
+harness = false
+
+[[bench]]
+name = "loki_labels"
 harness = false

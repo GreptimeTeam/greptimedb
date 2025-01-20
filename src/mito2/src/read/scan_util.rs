@@ -82,6 +82,7 @@ impl PartitionMetrics {
     ) -> Self {
         let partition_str = partition.to_string();
         let in_progress_scan = IN_PROGRESS_SCAN.with_label_values(&[scanner_type, &partition_str]);
+        in_progress_scan.inc();
         let inner = PartitionMetricsInner {
             region_id,
             partition,
@@ -137,10 +138,9 @@ pub(crate) fn scan_mem_ranges(
     part_metrics: PartitionMetrics,
     index: RowGroupIndex,
     time_range: FileTimeRange,
-    range_builder_list: Arc<RangeBuilderList>,
 ) -> impl Stream<Item = Result<Batch>> {
     try_stream! {
-        let ranges = range_builder_list.build_mem_ranges(&stream_ctx.input, index);
+        let ranges = stream_ctx.input.build_mem_ranges(index);
         part_metrics.inc_num_mem_ranges(ranges.len());
         for range in ranges {
             let build_reader_start = Instant::now();
@@ -181,8 +181,9 @@ pub(crate) fn scan_file_ranges(
                 }
                 yield batch;
             }
-            if let Source::PruneReader(mut reader) = source {
-                reader_metrics.merge_from(reader.metrics());
+            if let Source::PruneReader(reader) = source {
+                let prune_metrics = reader.metrics();
+                reader_metrics.merge_from(&prune_metrics);
             }
         }
 

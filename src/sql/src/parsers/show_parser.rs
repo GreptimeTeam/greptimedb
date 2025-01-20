@@ -21,9 +21,9 @@ use crate::error::{
 };
 use crate::parser::ParserContext;
 use crate::statements::show::{
-    ShowColumns, ShowCreateDatabase, ShowCreateFlow, ShowCreateTable, ShowCreateView,
-    ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowStatus, ShowTableStatus, ShowTables,
-    ShowVariables, ShowViews,
+    ShowColumns, ShowCreateDatabase, ShowCreateFlow, ShowCreateTable, ShowCreateTableVariant,
+    ShowCreateView, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowSearchPath, ShowStatus,
+    ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
 use crate::statements::statement::Statement;
 
@@ -107,6 +107,8 @@ impl ParserContext<'_> {
             Ok(Statement::ShowVariables(ShowVariables { variable }))
         } else if self.consume_token("STATUS") {
             Ok(Statement::ShowStatus(ShowStatus {}))
+        } else if self.consume_token("SEARCH_PATH") {
+            Ok(Statement::ShowSearchPath(ShowSearchPath {}))
         } else {
             self.unsupported(self.peek_token_as_string())
         }
@@ -146,7 +148,19 @@ impl ParserContext<'_> {
                 name: table_name.to_string(),
             }
         );
-        Ok(Statement::ShowCreateTable(ShowCreateTable { table_name }))
+        let mut variant = ShowCreateTableVariant::Original;
+        if self.consume_token("FOR") {
+            if self.consume_token("POSTGRES_FOREIGN_TABLE") {
+                variant = ShowCreateTableVariant::PostgresForeignTable;
+            } else {
+                self.unsupported(self.peek_token_as_string())?;
+            }
+        }
+
+        Ok(Statement::ShowCreateTable(ShowCreateTable {
+            table_name,
+            variant,
+        }))
     }
 
     fn parse_show_create_flow(&mut self) -> Result<Statement> {
@@ -277,12 +291,14 @@ impl ParserContext<'_> {
             Token::Word(w) => match w.keyword {
                 Keyword::LIKE => {
                     self.parser.next_token();
-                    Ok(ShowKind::Like(self.parse_identifier().with_context(
-                        |_| error::UnexpectedSnafu {
-                            expected: "LIKE",
-                            actual: self.peek_token_as_string(),
-                        },
-                    )?))
+                    Ok(ShowKind::Like(
+                        Self::parse_identifier(&mut self.parser).with_context(|_| {
+                            error::UnexpectedSnafu {
+                                expected: "LIKE",
+                                actual: self.peek_token_as_string(),
+                            }
+                        })?,
+                    ))
                 }
                 Keyword::WHERE => {
                     self.parser.next_token();
@@ -421,12 +437,12 @@ impl ParserContext<'_> {
             ))),
             Token::Word(w) => match w.keyword {
                 Keyword::LIKE => Ok(Statement::ShowDatabases(ShowDatabases::new(
-                    ShowKind::Like(self.parse_identifier().with_context(|_| {
-                        error::UnexpectedSnafu {
+                    ShowKind::Like(Self::parse_identifier(&mut self.parser).with_context(
+                        |_| error::UnexpectedSnafu {
                             expected: "LIKE",
                             actual: tok.to_string(),
-                        }
-                    })?),
+                        },
+                    )?),
                     full,
                 ))),
                 Keyword::WHERE => Ok(Statement::ShowDatabases(ShowDatabases::new(

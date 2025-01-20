@@ -14,6 +14,7 @@
 
 mod pg_catalog_memory_table;
 mod pg_class;
+mod pg_database;
 mod pg_namespace;
 mod table_names;
 
@@ -26,6 +27,7 @@ use lazy_static::lazy_static;
 use paste::paste;
 use pg_catalog_memory_table::get_schema_columns;
 use pg_class::PGClass;
+use pg_database::PGDatabase;
 use pg_namespace::PGNamespace;
 use session::context::{Channel, QueryContext};
 use table::TableRef;
@@ -113,6 +115,10 @@ impl PGCatalogProvider {
             PG_CLASS.to_string(),
             self.build_table(PG_CLASS).expect(PG_NAMESPACE),
         );
+        tables.insert(
+            PG_DATABASE.to_string(),
+            self.build_table(PG_DATABASE).expect(PG_DATABASE),
+        );
         self.tables = tables;
     }
 }
@@ -131,6 +137,11 @@ impl SystemSchemaProviderInner for PGCatalogProvider {
                 self.namespace_oid_map.clone(),
             ))),
             table_names::PG_CLASS => Some(Arc::new(PGClass::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+                self.namespace_oid_map.clone(),
+            ))),
+            table_names::PG_DATABASE => Some(Arc::new(PGDatabase::new(
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
                 self.namespace_oid_map.clone(),

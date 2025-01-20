@@ -34,7 +34,7 @@ use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::debug;
 use either::Either;
-use meta_client::client::MetaClientBuilder;
+use meta_client::client::{ClusterKvBackend, MetaClientBuilder};
 use query::datafusion::DatafusionQueryEngine;
 use query::parser::QueryLanguageParser;
 use query::query_engine::{DefaultSerializer, QueryEngineState};

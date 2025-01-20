@@ -58,7 +58,7 @@ pub enum Error {
 
     #[snafu(display("Processor {processor}: unsupported value {val}"))]
     ProcessorUnsupportedValue {
-        processor: &'static str,
+        processor: String,
         val: String,
         #[snafu(implicit)]
         location: Location,
@@ -180,7 +180,7 @@ pub enum Error {
 
     #[snafu(display("Separator '{separator}' must be a single character, but got '{value}'"))]
     CsvSeparatorName {
-        separator: &'static str,
+        separator: String,
         value: String,
         #[snafu(implicit)]
         location: Location,
@@ -188,7 +188,7 @@ pub enum Error {
 
     #[snafu(display("Quote '{quote}' must be a single character, but got '{value}'"))]
     CsvQuoteName {
-        quote: &'static str,
+        quote: String,
         value: String,
         #[snafu(implicit)]
         location: Location,
@@ -360,6 +360,12 @@ pub enum Error {
     #[snafu(display("Invalid method: {s}"))]
     UrlEncodingInvalidMethod {
         s: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Wrong digest pattern: {pattern}"))]
+    DigestPatternInvalid {
+        pattern: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -582,6 +588,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("Field is required for dispatcher"))]
+    FieldRequiredForDispatcher,
+    #[snafu(display("table_part is required for dispatcher rule"))]
+    TablePartRequiredForDispatcherRule,
+    #[snafu(display("value is required for dispatcher rule"))]
+    ValueRequiredForDispatcherRule,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

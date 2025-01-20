@@ -45,6 +45,7 @@ use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use query::stats::StatementStatistics;
+use servers::grpc::GrpcOptions;
 use servers::Mode;
 use snafu::ResultExt;
 
@@ -291,6 +292,7 @@ impl GreptimeDbStandaloneBuilder {
             procedure: procedure_config,
             metadata_store: kv_backend_config,
             wal: self.metasrv_wal_config.clone().into(),
+            grpc: GrpcOptions::default().with_hostname("127.0.0.1:4001"),
             ..StandaloneOptions::default()
         };
 

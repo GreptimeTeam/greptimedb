@@ -143,6 +143,7 @@ impl Categorizer {
             | Expr::Negative(_)
             | Expr::Between(_)
             | Expr::Exists(_)
+            | Expr::InList(_)
             | Expr::ScalarFunction(_) => Commutativity::Commutative,
 
             Expr::Like(_)
@@ -154,7 +155,6 @@ impl Categorizer {
             | Expr::TryCast(_)
             | Expr::AggregateFunction(_)
             | Expr::WindowFunction(_)
-            | Expr::InList(_)
             | Expr::InSubquery(_)
             | Expr::ScalarSubquery(_)
             | Expr::Wildcard { .. } => Commutativity::Unimplemented,

@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_telemetry::{info, warn};
-use common_time::Timestamp;
+use common_time::{Timestamp, FOREVER};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use datatypes::value::Value;
@@ -540,7 +540,7 @@ pub(crate) fn region_options_for_metadata_region(
     mut original: HashMap<String, String>,
 ) -> HashMap<String, String> {
     original.remove(APPEND_MODE_KEY);
-    original.insert(TTL_KEY.to_string(), "10000 years".to_string());
+    original.insert(TTL_KEY.to_string(), FOREVER.to_string());
     original
 }
 
@@ -549,6 +549,7 @@ mod test {
     use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
 
     use super::*;
+    use crate::config::EngineConfig;
     use crate::engine::MetricEngine;
     use crate::test_util::TestEnv;
 
@@ -707,7 +708,7 @@ mod test {
 
         // set up
         let env = TestEnv::new().await;
-        let engine = MetricEngine::new(env.mito());
+        let engine = MetricEngine::new(env.mito(), EngineConfig::default());
         let engine_inner = engine.inner;
 
         // check create data region request
@@ -731,7 +732,7 @@ mod test {
         );
         assert_eq!(
             metadata_region_request.options.get("ttl").unwrap(),
-            "10000 years"
+            "forever"
         );
     }
 }

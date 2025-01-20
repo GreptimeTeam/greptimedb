@@ -49,14 +49,6 @@ impl TableRoute {
             TableRoute::Logical(_) => None,
         }
     }
-
-    /// Returns [LogicalTableRouteValue] reference if it's [TableRoute::Logical]; Otherwise it returns [None].
-    pub fn as_logical_table_route_ref(&self) -> Option<&Arc<LogicalTableRouteValue>> {
-        match self {
-            TableRoute::Physical(_) => None,
-            TableRoute::Logical(table_route) => Some(table_route),
-        }
-    }
 }
 
 /// [TableRouteCache] caches the [TableId] to [TableRoute] mapping.
@@ -73,7 +65,7 @@ pub fn new_table_route_cache(
     let table_info_manager = Arc::new(TableRouteManager::new(kv_backend));
     let init = init_factory(table_info_manager);
 
-    CacheContainer::new(name, cache, Box::new(invalidator), init, Box::new(filter))
+    CacheContainer::new(name, cache, Box::new(invalidator), init, filter)
 }
 
 fn init_factory(

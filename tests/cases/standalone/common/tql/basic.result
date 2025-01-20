@@ -66,6 +66,10 @@ TQL EVAL (0, 10, '5s') {__name__!="test"};
 
 Error: 2000(InvalidSyntax), vector selector must contain at least one non-empty matcher
 
+TQL EVAL (0, 10, '5s') {__name__=~"test"};
+
+Error: 1004(InvalidArguments), Matcher operator =~ is not supported for __name__
+
 -- the point at 1ms will be shadowed by the point at 2ms
 TQL EVAL (0, 10, '5s') test{k="a"};
 

@@ -13,7 +13,7 @@ workspace = true
 [dependencies]
 async-stream.workspace = true
 async-trait.workspace = true
-backon = "1"
+backon.workspace = true
 common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true

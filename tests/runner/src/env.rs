@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::fs::OpenOptions;
 use std::io;
@@ -45,6 +46,7 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio_postgres::{Client as PgClient, SimpleQueryMessage as PgRow};
 
 use crate::protocol_interceptor::{MYSQL, PROTOCOL_KEY};
+use crate::util::{get_workspace_root, maybe_pull_binary, PROGRAM};
 use crate::{util, ServerAddr};
 
 const METASRV_ADDR: &str = "127.0.0.1:29302";
@@ -65,6 +67,13 @@ pub enum WalConfig {
 }
 
 #[derive(Clone)]
+pub struct StoreConfig {
+    pub store_addrs: Vec<String>,
+    pub setup_etcd: bool,
+    pub setup_pg: bool,
+}
+
+#[derive(Clone)]
 pub struct Env {
     sqlness_home: PathBuf,
     server_addrs: ServerAddr,
@@ -74,6 +83,12 @@ pub struct Env {
     /// When running in CI, this is expected to be set.
     /// If not set, this runner will build the GreptimeDB binary itself when needed, and set this field by then.
     bins_dir: Arc<Mutex<Option<PathBuf>>>,
+    /// The path to the directory that contains the old pre-built GreptimeDB binaries.
+    versioned_bins_dirs: Arc<Mutex<HashMap<String, PathBuf>>>,
+    /// Pull different versions of GreptimeDB on need.
+    pull_version_on_need: bool,
+    /// Store address for metasrv metadata
+    store_config: StoreConfig,
 }
 
 #[async_trait]
@@ -100,13 +115,21 @@ impl Env {
         data_home: PathBuf,
         server_addrs: ServerAddr,
         wal: WalConfig,
+        pull_version_on_need: bool,
         bins_dir: Option<PathBuf>,
+        store_config: StoreConfig,
     ) -> Self {
         Self {
             sqlness_home: data_home,
             server_addrs,
             wal,
-            bins_dir: Arc::new(Mutex::new(bins_dir)),
+            pull_version_on_need,
+            bins_dir: Arc::new(Mutex::new(bins_dir.clone())),
+            versioned_bins_dirs: Arc::new(Mutex::new(HashMap::from_iter([(
+                "latest".to_string(),
+                bins_dir.clone().unwrap_or(util::get_binary_dir("debug")),
+            )]))),
+            store_config,
         }
     }
 
@@ -117,7 +140,7 @@ impl Env {
             self.build_db();
             self.setup_wal();
 
-            let db_ctx = GreptimeDBContext::new(self.wal.clone());
+            let db_ctx = GreptimeDBContext::new(self.wal.clone(), self.store_config.clone());
 
             let server_process = self.start_server("standalone", &db_ctx, true).await;
 
@@ -136,8 +159,10 @@ impl Env {
         } else {
             self.build_db();
             self.setup_wal();
+            self.setup_etcd();
+            self.setup_pg();
 
-            let db_ctx = GreptimeDBContext::new(self.wal.clone());
+            let db_ctx = GreptimeDBContext::new(self.wal.clone(), self.store_config.clone());
 
             // start a distributed GreptimeDB
             let meta_server = self.start_server("metasrv", &db_ctx, true).await;
@@ -152,12 +177,12 @@ impl Env {
 
             let mut greptimedb = self.connect_db(&Default::default()).await;
 
-            greptimedb.metasrv_process = Some(meta_server);
+            greptimedb.metasrv_process = Some(meta_server).into();
             greptimedb.server_processes = Some(Arc::new(Mutex::new(vec![
                 datanode_1, datanode_2, datanode_3,
             ])));
-            greptimedb.frontend_process = Some(frontend);
-            greptimedb.flownode_process = Some(flownode);
+            greptimedb.frontend_process = Some(frontend).into();
+            greptimedb.flownode_process = Some(flownode).into();
             greptimedb.is_standalone = false;
             greptimedb.ctx = db_ctx;
 
@@ -237,13 +262,14 @@ impl Env {
             pg_client: TokioMutex::new(pg_client),
             mysql_client: TokioMutex::new(mysql_client),
             server_processes: None,
-            metasrv_process: None,
-            frontend_process: None,
-            flownode_process: None,
+            metasrv_process: None.into(),
+            frontend_process: None.into(),
+            flownode_process: None.into(),
             ctx: GreptimeDBContext {
                 time: 0,
                 datanode_id: Default::default(),
                 wal: self.wal.clone(),
+                store_config: self.store_config.clone(),
             },
             is_standalone: false,
             env: self.clone(),
@@ -330,6 +356,8 @@ impl Env {
                         "--log-dir={}/greptimedb-frontend/logs",
                         self.sqlness_home.display()
                     ),
+                    "-c".to_string(),
+                    self.generate_config_file(subcommand, db_ctx),
                 ];
                 (
                     args,
@@ -341,7 +369,7 @@ impl Env {
                 )
             }
             "metasrv" => {
-                let args = vec![
+                let mut args = vec![
                     DEFAULT_LOG_LEVEL.to_string(),
                     subcommand.to_string(),
                     "start".to_string(),
@@ -349,8 +377,6 @@ impl Env {
                     "127.0.0.1:29302".to_string(),
                     "--server-addr".to_string(),
                     "127.0.0.1:29302".to_string(),
-                    "--backend".to_string(),
-                    "memory-store".to_string(),
                     "--enable-region-failover".to_string(),
                     "false".to_string(),
                     "--http-addr=127.0.0.1:29502".to_string(),
@@ -361,6 +387,23 @@ impl Env {
                     "-c".to_string(),
                     self.generate_config_file(subcommand, db_ctx),
                 ];
+                if db_ctx.store_config().setup_pg {
+                    let client_ports = self
+                        .store_config
+                        .store_addrs
+                        .iter()
+                        .map(|s| s.split(':').nth(1).unwrap().parse::<u16>().unwrap())
+                        .collect::<Vec<_>>();
+                    let client_port = client_ports.first().unwrap_or(&5432);
+                    let pg_server_addr = format!(
+                        "postgresql://greptimedb:admin@127.0.0.1:{}/postgres",
+                        client_port
+                    );
+                    args.extend(vec!["--backend".to_string(), "postgres-store".to_string()]);
+                    args.extend(vec!["--store-addrs".to_string(), pg_server_addr]);
+                } else if db_ctx.store_config().store_addrs.is_empty() {
+                    args.extend(vec!["--backend".to_string(), "memory-store".to_string()])
+                }
                 (args, vec![METASRV_ADDR.to_string()])
             }
             _ => panic!("Unexpected subcommand: {subcommand}"),
@@ -375,23 +418,20 @@ impl Env {
             }
         }
 
-        #[cfg(not(windows))]
-        let program = "./greptime";
-        #[cfg(windows)]
-        let program = "greptime.exe";
+        let program = PROGRAM;
 
         let bins_dir = self.bins_dir.lock().unwrap().clone().expect(
             "GreptimeDB binary is not available. Please pass in the path to the directory that contains the pre-built GreptimeDB binary. Or you may call `self.build_db()` beforehand.",
         );
 
         let mut process = Command::new(program)
-            .current_dir(bins_dir)
+            .current_dir(bins_dir.clone())
             .env("TZ", "UTC")
             .args(args)
             .stdout(stdout_file)
             .spawn()
             .unwrap_or_else(|error| {
-                panic!("Failed to start the DB with subcommand {subcommand},Error: {error}")
+                panic!("Failed to start the DB with subcommand {subcommand},Error: {error}, path: {:?}", bins_dir.join(program));
             });
 
         for check_ip_addr in &check_ip_addrs {
@@ -418,6 +458,7 @@ impl Env {
             "start".to_string(),
         ];
         args.push(format!("--rpc-addr=127.0.0.1:2941{id}"));
+        args.push(format!("--rpc-hostname=127.0.0.1:2941{id}"));
         args.push(format!("--http-addr=127.0.0.1:2943{id}"));
         args.push(format!("--data-home={}", data_home.display()));
         args.push(format!("--log-dir={}/logs", data_home.display()));
@@ -442,23 +483,44 @@ impl Env {
             "start".to_string(),
         ];
         args.push(format!("--rpc-addr=127.0.0.1:2968{id}"));
+        args.push(format!("--rpc-hostname=127.0.0.1:2968{id}"));
         args.push(format!("--node-id={id}"));
         args.push(format!(
             "--log-dir={}/greptimedb-flownode/logs",
             sqlness_home.display()
         ));
         args.push("--metasrv-addrs=127.0.0.1:29302".to_string());
+        args.push(format!("--http-addr=127.0.0.1:2951{id}"));
         (args, format!("127.0.0.1:2968{id}"))
     }
 
     /// stop and restart the server process
-    async fn restart_server(&self, db: &GreptimeDB) {
+    async fn restart_server(&self, db: &GreptimeDB, is_full_restart: bool) {
         {
             if let Some(server_process) = db.server_processes.clone() {
                 let mut server_processes = server_process.lock().unwrap();
                 for server_process in server_processes.iter_mut() {
                     Env::stop_server(server_process);
                 }
+            }
+
+            if is_full_restart {
+                if let Some(mut metasrv_process) =
+                    db.metasrv_process.lock().expect("poisoned lock").take()
+                {
+                    Env::stop_server(&mut metasrv_process);
+                }
+                if let Some(mut frontend_process) =
+                    db.frontend_process.lock().expect("poisoned lock").take()
+                {
+                    Env::stop_server(&mut frontend_process);
+                }
+            }
+
+            if let Some(mut flownode_process) =
+                db.flownode_process.lock().expect("poisoned lock").take()
+            {
+                Env::stop_server(&mut flownode_process);
             }
         }
 
@@ -468,12 +530,37 @@ impl Env {
             vec![new_server_process]
         } else {
             db.ctx.reset_datanode_id();
+            if is_full_restart {
+                let metasrv = self.start_server("metasrv", &db.ctx, false).await;
+                db.metasrv_process
+                    .lock()
+                    .expect("lock poisoned")
+                    .replace(metasrv);
+
+                // wait for metasrv to start
+                // since it seems older version of db might take longer to complete election
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
 
             let mut processes = vec![];
             for _ in 0..3 {
                 let new_server_process = self.start_server("datanode", &db.ctx, false).await;
                 processes.push(new_server_process);
             }
+
+            if is_full_restart {
+                let frontend = self.start_server("frontend", &db.ctx, false).await;
+                db.frontend_process
+                    .lock()
+                    .expect("lock poisoned")
+                    .replace(frontend);
+            }
+            let flownode = self.start_server("flownode", &db.ctx, false).await;
+            db.flownode_process
+                .lock()
+                .expect("lock poisoned")
+                .replace(flownode);
+
             processes
         };
 
@@ -493,6 +580,33 @@ impl Env {
         }
     }
 
+    /// Setup etcd if needed.
+    fn setup_etcd(&self) {
+        if self.store_config.setup_etcd {
+            let client_ports = self
+                .store_config
+                .store_addrs
+                .iter()
+                .map(|s| s.split(':').nth(1).unwrap().parse::<u16>().unwrap())
+                .collect::<Vec<_>>();
+            util::setup_etcd(client_ports, None, None);
+        }
+    }
+
+    /// Setup PostgreSql if needed.
+    fn setup_pg(&self) {
+        if self.store_config.setup_pg {
+            let client_ports = self
+                .store_config
+                .store_addrs
+                .iter()
+                .map(|s| s.split(':').nth(1).unwrap().parse::<u16>().unwrap())
+                .collect::<Vec<_>>();
+            let client_port = client_ports.first().unwrap_or(&5432);
+            util::setup_pg(*client_port, None);
+        }
+    }
+
     /// Generate config file to `/tmp/{subcommand}-{current_time}.toml`
     fn generate_config_file(&self, subcommand: &str, db_ctx: &GreptimeDBContext) -> String {
         let mut tt = TinyTemplate::new();
@@ -509,6 +623,8 @@ impl Env {
             procedure_dir: String,
             is_raft_engine: bool,
             kafka_wal_broker_endpoints: String,
+            use_etcd: bool,
+            store_addrs: String,
         }
 
         let data_home = self.sqlness_home.join(format!("greptimedb-{subcommand}"));
@@ -522,6 +638,15 @@ impl Env {
             procedure_dir,
             is_raft_engine: db_ctx.is_raft_engine(),
             kafka_wal_broker_endpoints: db_ctx.kafka_wal_broker_endpoints(),
+            use_etcd: !self.store_config.store_addrs.is_empty(),
+            store_addrs: self
+                .store_config
+                .store_addrs
+                .clone()
+                .iter()
+                .map(|p| format!("\"{p}\""))
+                .collect::<Vec<_>>()
+                .join(","),
         };
         let rendered = tt.render(subcommand, &ctx).unwrap();
 
@@ -580,9 +705,9 @@ impl Env {
 
 pub struct GreptimeDB {
     server_processes: Option<Arc<Mutex<Vec<Child>>>>,
-    metasrv_process: Option<Child>,
-    frontend_process: Option<Child>,
-    flownode_process: Option<Child>,
+    metasrv_process: Mutex<Option<Child>>,
+    frontend_process: Mutex<Option<Child>>,
+    flownode_process: Mutex<Option<Child>>,
     grpc_client: TokioMutex<DB>,
     pg_client: TokioMutex<PgClient>,
     mysql_client: TokioMutex<MySqlClient>,
@@ -693,8 +818,35 @@ impl GreptimeDB {
 impl Database for GreptimeDB {
     async fn query(&self, ctx: QueryContext, query: String) -> Box<dyn Display> {
         if ctx.context.contains_key("restart") && self.env.server_addrs.server_addr.is_none() {
-            self.env.restart_server(self).await;
+            self.env.restart_server(self, false).await;
+        } else if let Some(version) = ctx.context.get("version") {
+            let version_bin_dir = self
+                .env
+                .versioned_bins_dirs
+                .lock()
+                .expect("lock poison")
+                .get(version.as_str())
+                .cloned();
+
+            match version_bin_dir {
+                Some(path) if path.clone().join(PROGRAM).is_file() => {
+                    // use version in versioned_bins_dirs
+                    *self.env.bins_dir.lock().unwrap() = Some(path.clone());
+                }
+                _ => {
+                    // use version in dir files
+                    maybe_pull_binary(version, self.env.pull_version_on_need).await;
+                    let root = get_workspace_root();
+                    let new_path = PathBuf::from_iter([&root, version]);
+                    *self.env.bins_dir.lock().unwrap() = Some(new_path);
+                }
+            }
+
+            self.env.restart_server(self, true).await;
+            // sleep for a while to wait for the server to fully boot up
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
+
         if let Some(protocol) = ctx.context.get(PROTOCOL_KEY) {
             // protocol is bound to be either "mysql" or "postgres"
             if protocol == MYSQL {
@@ -720,15 +872,30 @@ impl GreptimeDB {
                 );
             }
         }
-        if let Some(mut metasrv) = self.metasrv_process.take() {
+        if let Some(mut metasrv) = self
+            .metasrv_process
+            .lock()
+            .expect("someone else panic when holding lock")
+            .take()
+        {
             Env::stop_server(&mut metasrv);
             println!("Metasrv (pid = {}) is stopped", metasrv.id());
         }
-        if let Some(mut frontend) = self.frontend_process.take() {
+        if let Some(mut frontend) = self
+            .frontend_process
+            .lock()
+            .expect("someone else panic when holding lock")
+            .take()
+        {
             Env::stop_server(&mut frontend);
             println!("Frontend (pid = {}) is stopped", frontend.id());
         }
-        if let Some(mut flownode) = self.flownode_process.take() {
+        if let Some(mut flownode) = self
+            .flownode_process
+            .lock()
+            .expect("someone else panic when holding lock")
+            .take()
+        {
             Env::stop_server(&mut flownode);
             println!("Flownode (pid = {}) is stopped", flownode.id());
         }
@@ -752,14 +919,16 @@ struct GreptimeDBContext {
     time: i64,
     datanode_id: AtomicU32,
     wal: WalConfig,
+    store_config: StoreConfig,
 }
 
 impl GreptimeDBContext {
-    pub fn new(wal: WalConfig) -> Self {
+    pub fn new(wal: WalConfig, store_config: StoreConfig) -> Self {
         Self {
             time: common_time::util::current_time_millis(),
             datanode_id: AtomicU32::new(0),
             wal,
+            store_config,
         }
     }
 
@@ -786,6 +955,10 @@ impl GreptimeDBContext {
 
     fn reset_datanode_id(&self) {
         self.datanode_id.store(0, Ordering::Relaxed);
+    }
+
+    fn store_config(&self) -> StoreConfig {
+        self.store_config.clone()
     }
 }
 

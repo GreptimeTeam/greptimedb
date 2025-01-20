@@ -22,6 +22,7 @@ use catalog::information_schema::InformationExtension;
 use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
 use client::api::v1::meta::RegionRole;
+use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::{metadata_store_dir, Configurable, KvBackendConfig};
@@ -34,6 +35,7 @@ use common_meta::ddl::flow_meta::{FlowMetadataAllocator, FlowMetadataAllocatorRe
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
 use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl, ProcedureExecutorRef};
 use common_meta::ddl_manager::DdlManager;
+use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
@@ -52,7 +54,7 @@ use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, Sto
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::region_server::RegionServer;
 use file_engine::config::EngineConfig as FileEngineConfig;
-use flow::{FlowWorkerManager, FlownodeBuilder, FrontendInvoker};
+use flow::{FlowConfig, FlowWorkerManager, FlownodeBuilder, FlownodeOptions, FrontendInvoker};
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
@@ -70,7 +72,7 @@ use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::ResultExt;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, RwLock};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
@@ -143,6 +145,7 @@ pub struct StandaloneOptions {
     pub storage: StorageConfig,
     pub metadata_store: KvBackendConfig,
     pub procedure: ProcedureConfig,
+    pub flow: FlowConfig,
     pub logging: LoggingOptions,
     pub user_provider: Option<String>,
     /// Options for different store engines.
@@ -151,6 +154,7 @@ pub struct StandaloneOptions {
     pub tracing: TracingOptions,
     pub init_regions_in_background: bool,
     pub init_regions_parallelism: usize,
+    pub max_in_flight_write_bytes: Option<ReadableSize>,
 }
 
 impl Default for StandaloneOptions {
@@ -170,6 +174,7 @@ impl Default for StandaloneOptions {
             storage: StorageConfig::default(),
             metadata_store: KvBackendConfig::default(),
             procedure: ProcedureConfig::default(),
+            flow: FlowConfig::default(),
             logging: LoggingOptions::default(),
             export_metrics: ExportMetricsOption::default(),
             user_provider: None,
@@ -180,6 +185,7 @@ impl Default for StandaloneOptions {
             tracing: TracingOptions::default(),
             init_regions_in_background: false,
             init_regions_parallelism: 16,
+            max_in_flight_write_bytes: None,
         }
     }
 }
@@ -217,6 +223,7 @@ impl StandaloneOptions {
             user_provider: cloned_opts.user_provider,
             // Handle the export metrics task run by standalone to frontend for execution
             export_metrics: cloned_opts.export_metrics,
+            max_in_flight_write_bytes: cloned_opts.max_in_flight_write_bytes,
             ..Default::default()
         }
     }
@@ -456,7 +463,8 @@ impl StartCommand {
 
         let mut plugins = Plugins::new();
         let plugin_opts = opts.plugins;
-        let opts = opts.component;
+        let mut opts = opts.component;
+        opts.grpc.detect_hostname();
         let fe_opts = opts.frontend_options();
         let dn_opts = opts.datanode_options();
 
@@ -507,7 +515,7 @@ impl StartCommand {
             procedure_manager.clone(),
         ));
         let catalog_manager = KvBackendCatalogManager::new(
-            information_extension,
+            information_extension.clone(),
             kv_backend.clone(),
             layered_cache_registry.clone(),
             Some(procedure_manager.clone()),
@@ -517,8 +525,12 @@ impl StartCommand {
             Self::create_table_metadata_manager(kv_backend.clone()).await?;
 
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
+        let flownode_options = FlownodeOptions {
+            flow: opts.flow.clone(),
+            ..Default::default()
+        };
         let flow_builder = FlownodeBuilder::new(
-            Default::default(),
+            flownode_options,
             plugins.clone(),
             table_metadata_manager.clone(),
             catalog_manager.clone(),
@@ -531,6 +543,14 @@ impl StartCommand {
                 .map_err(BoxedError::new)
                 .context(OtherSnafu)?,
         );
+
+        // set the ref to query for the local flow state
+        {
+            let flow_worker_manager = flownode.flow_worker_manager();
+            information_extension
+                .set_flow_worker_manager(flow_worker_manager.clone())
+                .await;
+        }
 
         let node_manager = Arc::new(StandaloneDatanodeManager {
             region_server: datanode.region_server(),
@@ -669,6 +689,7 @@ pub struct StandaloneInformationExtension {
     region_server: RegionServer,
     procedure_manager: ProcedureManagerRef,
     start_time_ms: u64,
+    flow_worker_manager: RwLock<Option<Arc<FlowWorkerManager>>>,
 }
 
 impl StandaloneInformationExtension {
@@ -677,7 +698,14 @@ impl StandaloneInformationExtension {
             region_server,
             procedure_manager,
             start_time_ms: common_time::util::current_time_millis() as u64,
+            flow_worker_manager: RwLock::new(None),
         }
+    }
+
+    /// Set the flow worker manager for the standalone instance.
+    pub async fn set_flow_worker_manager(&self, flow_worker_manager: Arc<FlowWorkerManager>) {
+        let mut guard = self.flow_worker_manager.write().await;
+        *guard = Some(flow_worker_manager);
     }
 }
 
@@ -749,6 +777,18 @@ impl InformationExtension for StandaloneInformationExtension {
             })
             .collect::<Vec<_>>();
         Ok(stats)
+    }
+
+    async fn flow_stats(&self) -> std::result::Result<Option<FlowStat>, Self::Error> {
+        Ok(Some(
+            self.flow_worker_manager
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .gen_state_report()
+                .await,
+        ))
     }
 }
 

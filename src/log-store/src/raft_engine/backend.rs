@@ -644,7 +644,7 @@ mod tests {
         let dir = create_temp_dir("range2");
         let backend = build_kv_backend(dir.path().to_str().unwrap().to_string());
 
-        test_kv_range_2(backend).await;
+        test_kv_range_2(&backend).await;
     }
 
     #[tokio::test]
@@ -671,7 +671,7 @@ mod tests {
         let backend = build_kv_backend(dir.path().to_str().unwrap().to_string());
         prepare_kv(&backend).await;
 
-        test_kv_batch_delete(backend).await;
+        test_kv_batch_delete(&backend).await;
     }
 
     #[tokio::test]
@@ -680,7 +680,7 @@ mod tests {
         let backend = build_kv_backend(dir.path().to_str().unwrap().to_string());
         prepare_kv(&backend).await;
 
-        test_kv_delete_range(backend).await;
+        test_kv_delete_range(&backend).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

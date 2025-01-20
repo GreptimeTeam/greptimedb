@@ -16,6 +16,7 @@ pub mod builder;
 mod grpc;
 mod influxdb;
 mod log_handler;
+mod logs;
 mod opentsdb;
 mod otlp;
 mod prom_store;
@@ -63,8 +64,8 @@ use servers::prometheus_handler::PrometheusHandler;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{
-    InfluxdbLineProtocolHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
-    PipelineHandler, PromStoreProtocolHandler,
+    InfluxdbLineProtocolHandler, LogQueryHandler, OpenTelemetryProtocolHandler,
+    OpentsdbProtocolHandler, PipelineHandler, PromStoreProtocolHandler,
 };
 use servers::server::ServerHandlers;
 use session::context::QueryContextRef;
@@ -85,6 +86,7 @@ use crate::error::{
 };
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::HeartbeatTask;
+use crate::limiter::LimiterRef;
 
 #[async_trait]
 pub trait FrontendInstance:
@@ -96,6 +98,7 @@ pub trait FrontendInstance:
     + OpenTelemetryProtocolHandler
     + PrometheusHandler
     + PipelineHandler
+    + LogQueryHandler
     + Send
     + Sync
     + 'static
@@ -120,6 +123,7 @@ pub struct Instance {
     export_metrics_task: Option<ExportMetricsTask>,
     table_metadata_manager: TableMetadataManagerRef,
     stats: StatementStatistics,
+    limiter: Option<LimiterRef>,
 }
 
 impl Instance {
@@ -481,7 +485,12 @@ pub fn check_permission(
         // TODO(dennis): add a hook for admin commands.
         Statement::Admin(_) => {}
         // These are executed by query engine, and will be checked there.
-        Statement::Query(_) | Statement::Explain(_) | Statement::Tql(_) | Statement::Delete(_) => {}
+        Statement::Query(_)
+        | Statement::Explain(_)
+        | Statement::Tql(_)
+        | Statement::Delete(_)
+        | Statement::DeclareCursor(_)
+        | Statement::Copy(sql::statements::copy::Copy::CopyQueryTo(_)) => {}
         // database ops won't be checked
         Statement::CreateDatabase(_)
         | Statement::ShowDatabases(_)
@@ -556,6 +565,7 @@ pub fn check_permission(
             validate_db_permission!(stmt, query_ctx);
         }
         Statement::ShowStatus(_stmt) => {}
+        Statement::ShowSearchPath(_stmt) => {}
         Statement::DescribeTable(stmt) => {
             validate_param(stmt.name(), query_ctx)?;
         }
@@ -574,6 +584,8 @@ pub fn check_permission(
         Statement::TruncateTable(stmt) => {
             validate_param(stmt.table_name(), query_ctx)?;
         }
+        // cursor operations are always allowed once it's created
+        Statement::FetchCursor(_) | Statement::CloseCursor(_) => {}
     }
     Ok(())
 }

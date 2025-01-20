@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, TimeZone, Utc};
+use serde::{Deserialize, Serialize};
 use table::table_name::TableName;
 
 use crate::error::{
@@ -21,17 +22,89 @@ use crate::error::{
 };
 
 /// GreptimeDB's log query request.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct LogQuery {
+    // Global query parameters
     /// A fully qualified table name to query logs from.
-    pub table_name: TableName,
+    pub table: TableName,
     /// Specifies the time range for the log query. See [`TimeFilter`] for more details.
     pub time_filter: TimeFilter,
-    /// Columns with filters to query.
-    pub columns: Vec<ColumnFilters>,
-    /// Maximum number of logs to return. If not provided, it will return all matched logs.
-    pub limit: Option<usize>,
-    /// Adjacent lines to return.
+    /// Controls row skipping and fetch on the result set.
+    pub limit: Limit,
+    /// Columns to return in the result set.
+    ///
+    /// The columns can be either from the original log or derived from processing exprs.
+    /// Default (empty) means all columns.
+    ///
+    /// TODO(ruihang): Do we need negative select?
+    pub columns: Vec<String>,
+
+    // Filters
+    /// Conjunction of filters to apply for the raw logs.
+    ///
+    /// Filters here can only refer to the columns from the original log.
+    pub filters: Vec<ColumnFilters>,
+    /// Adjacent lines to return. Applies to all filters above.
+    ///
+    /// TODO(ruihang): Do we need per-filter context?
     pub context: Context,
+
+    // Processors
+    /// Expressions to calculate after filter.
+    pub exprs: Vec<LogExpr>,
+}
+
+/// Expression to calculate on log after filtering.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum LogExpr {
+    NamedIdent(String),
+    PositionalIdent(usize),
+    Literal(String),
+    ScalarFunc {
+        name: String,
+        args: Vec<LogExpr>,
+    },
+    AggrFunc {
+        name: String,
+        args: Vec<LogExpr>,
+        /// Optional range function parameter. Stands for the time range for both step and align.
+        range: Option<String>,
+        by: Vec<LogExpr>,
+    },
+    Decompose {
+        expr: Box<LogExpr>,
+        /// JSON, CSV, etc.
+        schema: String,
+        /// Fields with type name to extract from the decomposed value.
+        fields: Vec<(String, String)>,
+    },
+    BinaryOp {
+        left: Box<LogExpr>,
+        op: String,
+        right: Box<LogExpr>,
+    },
+    Alias {
+        expr: Box<LogExpr>,
+        alias: String,
+    },
+    Filter {
+        expr: Box<LogExpr>,
+        filter: ContentFilter,
+    },
+}
+
+impl Default for LogQuery {
+    fn default() -> Self {
+        Self {
+            table: TableName::new("", "", ""),
+            time_filter: Default::default(),
+            filters: vec![],
+            limit: Limit::default(),
+            context: Default::default(),
+            columns: vec![],
+            exprs: vec![],
+        }
+    }
 }
 
 /// Represents a time range for log query.
@@ -58,7 +131,7 @@ pub struct LogQuery {
 ///
 /// This struct doesn't require a timezone to be presented. When the timezone is not
 /// provided, it will fill the default timezone with the same rules akin to other queries.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TimeFilter {
     pub start: Option<String>,
     pub end: Option<String>,
@@ -69,8 +142,7 @@ impl TimeFilter {
     /// Validate and canonicalize the time filter.
     ///
     /// This function will try to fill the missing fields and convert all dates to timestamps
-    // false positive
-    #[allow(unused_assignments)]
+    #[allow(unused_assignments)] // false positive
     pub fn canonicalize(&mut self) -> Result<()> {
         let mut start_dt = None;
         let mut end_dt = None;
@@ -209,6 +281,7 @@ impl TimeFilter {
 }
 
 /// Represents a column with filters to query.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ColumnFilters {
     /// Case-sensitive column name to query.
     pub column_name: String,
@@ -216,7 +289,9 @@ pub struct ColumnFilters {
     pub filters: Vec<ContentFilter>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 pub enum ContentFilter {
+    // Search-based filters
     /// Only match the exact content.
     ///
     /// For example, if the content is "pale blue dot", the filter "pale" or "pale blue" will match.
@@ -231,21 +306,41 @@ pub enum ContentFilter {
     Contains(String),
     /// Match the content with a regex pattern. The pattern should be a valid Rust regex.
     Regex(String),
+
+    // Value-based filters
+    /// Content exists, a.k.a. not null.
+    Exist,
+    Between(String, String),
+    // TODO(ruihang): arithmetic operations
+
+    // Compound filters
     Compound(Vec<ContentFilter>, BinaryOperator),
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 pub enum BinaryOperator {
     And,
     Or,
 }
 
 /// Controls how many adjacent lines to return.
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub enum Context {
+    #[default]
     None,
     /// Specify the number of lines before and after the matched line separately.
     Lines(usize, usize),
     /// Specify the number of seconds before and after the matched line occurred.
     Seconds(usize, usize),
+}
+
+/// Represents limit and offset parameters for query pagination.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Limit {
+    /// Optional number of items to skip before starting to return results
+    pub skip: Option<usize>,
+    /// Optional number of items to return after skipping
+    pub fetch: Option<usize>,
 }
 
 #[cfg(test)]

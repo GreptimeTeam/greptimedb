@@ -37,7 +37,6 @@ async fn scan_in_parallel(
 ) {
     let engine = env
         .open_engine(MitoConfig {
-            scan_parallelism: parallelism,
             parallel_scan_channel_size: channel_size,
             ..Default::default()
         })
@@ -57,7 +56,9 @@ async fn scan_in_parallel(
         .unwrap();
 
     let request = ScanRequest::default();
-    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
+    let mut scanner = engine.scanner(region_id, request).unwrap();
+    scanner.set_target_partitions(parallelism);
+    let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
@@ -83,6 +84,7 @@ async fn test_parallel_scan() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 

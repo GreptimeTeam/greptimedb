@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use serde::Serialize;
 use sqlparser::ast::{
     Insert as SpInsert, ObjectName, Query, SetExpr, Statement, UnaryOperator, Values,
 };
@@ -22,7 +23,7 @@ use crate::ast::{Expr, Value};
 use crate::error::Result;
 use crate::statements::query::Query as GtQuery;
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct Insert {
     // Can only be sqlparser::ast::Statement::Insert variant
     pub inner: Statement,

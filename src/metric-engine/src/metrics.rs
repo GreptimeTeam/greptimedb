@@ -46,7 +46,8 @@ lazy_static! {
         "greptime_metric_engine_mito_op_elapsed",
         "metric engine's mito operation elapsed",
         &[OPERATION_LABEL],
-        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
+        // 0.01 ~ 10000
+        exponential_buckets(0.01, 10.0, 7).unwrap(),
     )
     .unwrap();
 }

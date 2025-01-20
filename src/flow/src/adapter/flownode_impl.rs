@@ -24,20 +24,26 @@ use common_error::ext::BoxedError;
 use common_meta::error::{ExternalSnafu, Result, UnexpectedSnafu};
 use common_meta::node_manager::Flownode;
 use common_telemetry::{debug, trace};
+use datatypes::value::Value;
 use itertools::Itertools;
-use snafu::{OptionExt, ResultExt};
+use snafu::{IntoError, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
 use crate::adapter::{CreateFlowArgs, FlowWorkerManager};
-use crate::error::InternalSnafu;
+use crate::error::{CreateFlowSnafu, InsertIntoFlowSnafu, InternalSnafu};
 use crate::metrics::METRIC_FLOW_TASK_COUNT;
 use crate::repr::{self, DiffRow};
 
-fn to_meta_err(err: crate::error::Error) -> common_meta::error::Error {
-    // TODO(discord9): refactor this
-    Err::<(), _>(BoxedError::new(err))
-        .with_context(|_| ExternalSnafu)
-        .unwrap_err()
+/// return a function to convert `crate::error::Error` to `common_meta::error::Error`
+fn to_meta_err(
+    location: snafu::Location,
+) -> impl FnOnce(crate::error::Error) -> common_meta::error::Error {
+    move |err: crate::error::Error| -> common_meta::error::Error {
+        common_meta::error::Error::External {
+            location,
+            source: BoxedError::new(err),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -74,11 +80,16 @@ impl Flownode for FlowWorkerManager {
                     or_replace,
                     expire_after,
                     comment: Some(comment),
-                    sql,
+                    sql: sql.clone(),
                     flow_options,
                     query_ctx,
                 };
-                let ret = self.create_flow(args).await.map_err(to_meta_err)?;
+                let ret = self
+                    .create_flow(args)
+                    .await
+                    .map_err(BoxedError::new)
+                    .with_context(|_| CreateFlowSnafu { sql: sql.clone() })
+                    .map_err(to_meta_err(snafu::location!()))?;
                 METRIC_FLOW_TASK_COUNT.inc();
                 Ok(FlowResponse {
                     affected_flows: ret
@@ -93,7 +104,7 @@ impl Flownode for FlowWorkerManager {
             })) => {
                 self.remove_flow(flow_id.id as u64)
                     .await
-                    .map_err(to_meta_err)?;
+                    .map_err(to_meta_err(snafu::location!()))?;
                 METRIC_FLOW_TASK_COUNT.dec();
                 Ok(Default::default())
             }
@@ -111,9 +122,15 @@ impl Flownode for FlowWorkerManager {
                     .await
                     .flush_all_sender()
                     .await
-                    .map_err(to_meta_err)?;
-                let rows_send = self.run_available(true).await.map_err(to_meta_err)?;
-                let row = self.send_writeback_requests().await.map_err(to_meta_err)?;
+                    .map_err(to_meta_err(snafu::location!()))?;
+                let rows_send = self
+                    .run_available(true)
+                    .await
+                    .map_err(to_meta_err(snafu::location!()))?;
+                let row = self
+                    .send_writeback_requests()
+                    .await
+                    .map_err(to_meta_err(snafu::location!()))?;
 
                 debug!(
                     "Done to flush flow_id={:?} with {} input rows flushed, {} rows sended and {} output rows flushed",
@@ -137,7 +154,7 @@ impl Flownode for FlowWorkerManager {
     }
 
     async fn handle_inserts(&self, request: InsertRequests) -> Result<FlowResponse> {
-        // using try_read makesure two things:
+        // using try_read to ensure two things:
         // 1. flush wouldn't happen until inserts before it is inserted
         // 2. inserts happening concurrently with flush wouldn't be block by flush
         let _flush_lock = self.flush_lock.try_read();
@@ -153,17 +170,41 @@ impl Flownode for FlowWorkerManager {
             // TODO(discord9): reconsider time assignment mechanism
             let now = self.tick_manager.tick();
 
-            let fetch_order = {
+            let (table_types, fetch_order) = {
                 let ctx = self.node_context.read().await;
-                let table_col_names = ctx
-                    .table_repr
-                    .get_by_table_id(&table_id)
-                    .map(|r| r.1)
-                    .and_then(|id| ctx.schema.get(&id))
-                    .map(|desc| &desc.names)
-                    .context(UnexpectedSnafu {
-                        err_msg: format!("Table not found: {}", table_id),
-                    })?;
+
+                // TODO(discord9): also check schema version so that altered table can be reported
+                let table_schema = ctx
+                    .table_source
+                    .table_from_id(&table_id)
+                    .await
+                    .map_err(to_meta_err(snafu::location!()))?;
+                let default_vals = table_schema
+                    .default_values
+                    .iter()
+                    .zip(table_schema.relation_desc.typ().column_types.iter())
+                    .map(|(v, ty)| {
+                        v.as_ref().and_then(|v| {
+                            match v.create_default(ty.scalar_type(), ty.nullable()) {
+                                Ok(v) => Some(v),
+                                Err(err) => {
+                                    common_telemetry::error!(err; "Failed to create default value");
+                                    None
+                                }
+                            }
+                        })
+                    })
+                    .collect_vec();
+
+                let table_types = table_schema
+                    .relation_desc
+                    .typ()
+                    .column_types
+                    .clone()
+                    .into_iter()
+                    .map(|t| t.scalar_type)
+                    .collect_vec();
+                let table_col_names = table_schema.relation_desc.names;
                 let table_col_names = table_col_names
                     .iter().enumerate()
                     .map(|(idx,name)| match name {
@@ -180,36 +221,80 @@ impl Flownode for FlowWorkerManager {
                         .enumerate()
                         .map(|(i, name)| (&name.column_name, i)),
                 );
-                let fetch_order: Vec<usize> = table_col_names
+
+                let fetch_order: Vec<FetchFromRow> = table_col_names
                     .iter()
-                    .map(|names| {
-                        name_to_col.get(names).copied().context(UnexpectedSnafu {
-                            err_msg: format!("Column not found: {}", names),
-                        })
+                    .zip(default_vals.into_iter())
+                    .map(|(col_name, col_default_val)| {
+                        name_to_col
+                            .get(col_name)
+                            .copied()
+                            .map(FetchFromRow::Idx)
+                            .or_else(|| col_default_val.clone().map(FetchFromRow::Default))
+                            .with_context(|| UnexpectedSnafu {
+                                err_msg: format!(
+                                    "Column not found: {}, default_value: {:?}",
+                                    col_name, col_default_val
+                                ),
+                            })
                     })
                     .try_collect()?;
-                if !fetch_order.iter().enumerate().all(|(i, &v)| i == v) {
-                    trace!("Reordering columns: {:?}", fetch_order)
-                }
-                fetch_order
+
+                trace!("Reordering columns: {:?}", fetch_order);
+                (table_types, fetch_order)
             };
 
+            // TODO(discord9): use column instead of row
             let rows: Vec<DiffRow> = rows_proto
                 .into_iter()
                 .map(|r| {
                     let r = repr::Row::from(r);
-                    let reordered = fetch_order
-                        .iter()
-                        .map(|&i| r.inner[i].clone())
-                        .collect_vec();
+                    let reordered = fetch_order.iter().map(|i| i.fetch(&r)).collect_vec();
                     repr::Row::new(reordered)
                 })
                 .map(|r| (r, now, 1))
                 .collect_vec();
-            self.handle_write_request(region_id.into(), rows)
+            if let Err(err) = self
+                .handle_write_request(region_id.into(), rows, &table_types)
                 .await
-                .map_err(to_meta_err)?;
+            {
+                let err = BoxedError::new(err);
+                let flow_ids = self
+                    .node_context
+                    .read()
+                    .await
+                    .get_flow_ids(table_id)
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+                    .collect_vec();
+                let err = InsertIntoFlowSnafu {
+                    region_id,
+                    flow_ids,
+                }
+                .into_error(err);
+                common_telemetry::error!(err; "Failed to handle write request");
+                let err = to_meta_err(snafu::location!())(err);
+                return Err(err);
+            }
         }
         Ok(Default::default())
+    }
+}
+
+/// Simple helper enum for fetching value from row with default value
+#[derive(Debug, Clone)]
+enum FetchFromRow {
+    Idx(usize),
+    Default(Value),
+}
+
+impl FetchFromRow {
+    /// Panic if idx is out of bound
+    fn fetch(&self, row: &repr::Row) -> Value {
+        match self {
+            FetchFromRow::Idx(idx) => row.get(*idx).unwrap().clone(),
+            FetchFromRow::Default(v) => v.clone(),
+        }
     }
 }

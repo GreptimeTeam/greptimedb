@@ -14,9 +14,10 @@
 
 use std::fmt::Display;
 
+use serde::Serialize;
 use sqlparser_derive::{Visit, VisitMut};
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum Tql {
     Eval(TqlEval),
     Explain(TqlExplain),
@@ -49,7 +50,7 @@ fn format_tql(
 }
 
 /// TQL EVAL (<start>, <end>, <step>, [lookback]) <promql>
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct TqlEval {
     pub start: String,
     pub end: String,
@@ -74,7 +75,7 @@ impl Display for TqlEval {
 
 /// TQL EXPLAIN [VERBOSE] [<start>, <end>, <step>, [lookback]] <promql>
 /// doesn't execute the query but tells how the query would be executed (similar to SQL EXPLAIN).
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct TqlExplain {
     pub start: String,
     pub end: String,
@@ -103,7 +104,7 @@ impl Display for TqlExplain {
 
 /// TQL ANALYZE [VERBOSE] (<start>, <end>, <step>, [lookback]) <promql>
 /// executes the plan and tells the detailed per-step execution time (similar to SQL ANALYZE).
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct TqlAnalyze {
     pub start: String,
     pub end: String,

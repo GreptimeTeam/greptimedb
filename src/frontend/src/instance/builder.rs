@@ -43,6 +43,7 @@ use crate::frontend::FrontendOptions;
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::region_query::FrontendRegionQueryHandler;
 use crate::instance::Instance;
+use crate::limiter::Limiter;
 
 /// The frontend [`Instance`] builder.
 pub struct FrontendBuilder {
@@ -191,6 +192,14 @@ impl FrontendBuilder {
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
+        // Create the limiter if the max_in_flight_write_bytes is set.
+        let limiter = self
+            .options
+            .max_in_flight_write_bytes
+            .map(|max_in_flight_write_bytes| {
+                Arc::new(Limiter::new(max_in_flight_write_bytes.as_bytes()))
+            });
+
         Ok(Instance {
             options: self.options,
             catalog_manager: self.catalog_manager,
@@ -205,6 +214,7 @@ impl FrontendBuilder {
             export_metrics_task: None,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend)),
             stats: self.stats,
+            limiter,
         })
     }
 }
