@@ -72,8 +72,7 @@ async fn test_http_auth() {
     check_http_auth(AUTHORIZATION_HEADER).await;
 }
 
-#[tokio::test]
-async fn test_schema_validating() {
+async fn check_schema_validating(header: &str) {
     // In mock user provider, right username:password == "greptime:greptime"
     let mock_user_provider = Some(Arc::new(MockUserProvider::default()) as Arc<dyn UserProvider>);
 
@@ -81,7 +80,7 @@ async fn test_schema_validating() {
     // http://localhost/{http_api_version}/sql?db=greptime
     let version = servers::http::HTTP_API_VERSION;
     let req = mock_http_request(
-        AUTHORIZATION_HEADER,
+        header,
         Some("Basic Z3JlcHRpbWU6Z3JlcHRpbWU="),
         Some(format!("http://localhost/{version}/sql?db=public").as_str()),
     )
@@ -94,7 +93,7 @@ async fn test_schema_validating() {
 
     // wrong database
     let req = mock_http_request(
-        AUTHORIZATION_HEADER,
+        header,
         Some("Basic Z3JlcHRpbWU6Z3JlcHRpbWU="),
         Some(format!("http://localhost/{version}/sql?db=wrong").as_str()),
     )
@@ -107,6 +106,12 @@ async fn test_schema_validating() {
         b"{\"code\":7005,\"error\":\"Access denied for user 'greptime' to database 'greptime-wrong'\",\"execution_time_ms\":0}",
         resp.data().await.unwrap().unwrap().as_ref()
     );
+}
+
+#[tokio::test]
+async fn test_schema_validating() {
+    check_schema_validating(http::header::AUTHORIZATION.as_str()).await;
+    check_schema_validating(AUTHORIZATION_HEADER).await;
 }
 
 async fn check_auth_header(header_key: &str) {
