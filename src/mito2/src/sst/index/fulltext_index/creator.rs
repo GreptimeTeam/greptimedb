@@ -319,12 +319,12 @@ impl AltFulltextCreator {
         match self {
             Self::V1(creator) => {
                 if let Err(err) = creator.abort().await {
-                    warn!(err; "Failed to abort fulltext index creator, col_id: {:?}", column_id);
+                    warn!(err; "Failed to abort fulltext index creator v1, col_id: {:?}", column_id);
                 }
             }
             Self::V2(creator) => {
                 if let Err(err) = creator.abort().await {
-                    warn!(err; "Failed to abort fulltext index creator, col_id: {:?}", column_id);
+                    warn!(err; "Failed to abort fulltext index creator v2, col_id: {:?}", column_id);
                 }
             }
         }

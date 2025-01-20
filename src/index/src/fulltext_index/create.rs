@@ -38,6 +38,7 @@ pub trait FulltextIndexCreator: Send {
         put_options: PutOptions,
     ) -> Result<u64>;
 
+    /// Aborts the creation of the index.
     async fn abort(&mut self) -> Result<()>;
 
     /// Returns the memory usage in bytes during the creation of the index.
