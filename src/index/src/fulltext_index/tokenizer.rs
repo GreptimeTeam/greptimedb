@@ -23,21 +23,21 @@ pub trait Tokenizer: Send {
 }
 
 /// `EnglishTokenizer` tokenizes an English text.
-/// 
+///
 /// It splits the text by non-alphabetic characters.
 #[derive(Debug, Default)]
 pub struct EnglishTokenizer;
 
 impl Tokenizer for EnglishTokenizer {
     fn tokenize<'a>(&self, text: &'a str) -> Vec<&'a str> {
-        text.split(|c: char| !c.is_alphabetic())
+        text.split(|c: char| !c.is_alphanumeric())
             .filter(|s| !s.is_empty())
             .collect()
     }
 }
 
 /// `ChineseTokenizer` tokenizes a Chinese text.
-/// 
+///
 /// It uses the Jieba tokenizer to split the text into Chinese words.
 #[derive(Debug, Default)]
 pub struct ChineseTokenizer;
@@ -50,7 +50,7 @@ impl Tokenizer for ChineseTokenizer {
 }
 
 /// `Analyzer` analyzes a text into a list of tokens.
-/// 
+///
 /// It uses a `Tokenizer` to tokenize the text and optionally lowercases the tokens.
 pub struct Analyzer {
     tokenizer: Box<dyn Tokenizer>,
@@ -91,9 +91,9 @@ mod tests {
     #[test]
     fn test_english_tokenizer() {
         let tokenizer = EnglishTokenizer;
-        let text = "Hello, world! This is a test.";
+        let text = "Hello, world! This is a test0.";
         let tokens = tokenizer.tokenize(text);
-        assert_eq!(tokens, vec!["Hello", "world", "This", "is", "a", "test"]);
+        assert_eq!(tokens, vec!["Hello", "world", "This", "is", "a", "test0"]);
     }
 
     #[test]

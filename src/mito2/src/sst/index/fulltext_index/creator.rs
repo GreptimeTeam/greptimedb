@@ -86,11 +86,11 @@ impl FulltextIndexer {
                 case_sensitive: options.case_sensitive,
             };
 
-            // TODO(zhongzc): according to fulltext options, choose v1 or v2
+            // TODO(zhongzc): according to fulltext options, choose in the Tantivy flavor or Bloom Filter flavor.
             let creator = TantivyFulltextIndexCreator::new(&intm_path, config, mem_limit)
                 .await
                 .context(CreateFulltextCreatorSnafu)?;
-            let inner = AltFulltextCreator::V1(creator);
+            let inner = AltFulltextCreator::Tantivy(creator);
 
             creators.insert(
                 column_id,
@@ -272,22 +272,22 @@ impl SingleCreator {
 #[allow(dead_code, clippy::large_enum_variant)]
 /// `AltFulltextCreator` is an alternative fulltext index creator that can be either Tantivy or BloomFilter.
 enum AltFulltextCreator {
-    V1(TantivyFulltextIndexCreator),
-    V2(BloomFilterFulltextIndexCreator),
+    Tantivy(TantivyFulltextIndexCreator),
+    Bloom(BloomFilterFulltextIndexCreator),
 }
 
 impl AltFulltextCreator {
     async fn push_text(&mut self, text: &str) -> Result<()> {
         match self {
-            Self::V1(creator) => creator.push_text(text).await.context(FulltextPushTextSnafu),
-            Self::V2(creator) => creator.push_text(text).await.context(FulltextPushTextSnafu),
+            Self::Tantivy(creator) => creator.push_text(text).await.context(FulltextPushTextSnafu),
+            Self::Bloom(creator) => creator.push_text(text).await.context(FulltextPushTextSnafu),
         }
     }
 
     fn memory_usage(&self) -> usize {
         match self {
-            Self::V1(creator) => creator.memory_usage(),
-            Self::V2(creator) => creator.memory_usage(),
+            Self::Tantivy(creator) => creator.memory_usage(),
+            Self::Bloom(creator) => creator.memory_usage(),
         }
     }
 
@@ -298,14 +298,14 @@ impl AltFulltextCreator {
         put_options: PutOptions,
     ) -> Result<ByteCount> {
         match self {
-            Self::V1(creator) => {
+            Self::Tantivy(creator) => {
                 let key = format!("{INDEX_BLOB_TYPE_V1}-{}", column_id);
                 creator
                     .finish(puffin_writer, &key, put_options)
                     .await
                     .context(FulltextFinishSnafu)
             }
-            Self::V2(creator) => {
+            Self::Bloom(creator) => {
                 let key = format!("{INDEX_BLOB_TYPE_V2}-{}", column_id);
                 creator
                     .finish(puffin_writer, &key, put_options)
@@ -317,14 +317,14 @@ impl AltFulltextCreator {
 
     async fn abort(&mut self, column_id: &ColumnId) {
         match self {
-            Self::V1(creator) => {
+            Self::Tantivy(creator) => {
                 if let Err(err) = creator.abort().await {
-                    warn!(err; "Failed to abort fulltext index creator v1, col_id: {:?}", column_id);
+                    warn!(err; "Failed to abort the fulltext index creator in the Tantivy flavor, col_id: {:?}", column_id);
                 }
             }
-            Self::V2(creator) => {
+            Self::Bloom(creator) => {
                 if let Err(err) = creator.abort().await {
-                    warn!(err; "Failed to abort fulltext index creator v2, col_id: {:?}", column_id);
+                    warn!(err; "Failed to abort the fulltext index creator in the Bloom Filter flavor, col_id: {:?}", column_id);
                 }
             }
         }
