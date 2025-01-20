@@ -455,6 +455,15 @@ impl PrimaryKeyCodec for DensePrimaryKeyCodec {
         self.encode_dense(values.iter().map(|(_, v)| v.as_value_ref()), buffer)
     }
 
+    fn encode_value_refs(
+        &self,
+        values: &[(ColumnId, ValueRef)],
+        buffer: &mut Vec<u8>,
+    ) -> Result<()> {
+        let iter = values.iter().map(|(_, v)| *v);
+        self.encode_dense(iter, buffer)
+    }
+
     fn estimated_size(&self) -> Option<usize> {
         Some(self.estimated_size())
     }

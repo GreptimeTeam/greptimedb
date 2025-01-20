@@ -22,7 +22,7 @@ use datatypes::value::{Value, ValueRef};
 pub use dense::{DensePrimaryKeyCodec, SortField};
 pub use sparse::{SparsePrimaryKeyCodec, SparseValues};
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::metadata::RegionMetadataRef;
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
 use crate::error::Result;
@@ -103,6 +103,13 @@ pub trait PrimaryKeyCodec: Send + Sync + Debug {
     /// Encodes values to bytes.
     fn encode_values(&self, values: &[(ColumnId, Value)], buffer: &mut Vec<u8>) -> Result<()>;
 
+    /// Encodes values to bytes.
+    fn encode_value_refs(
+        &self,
+        values: &[(ColumnId, ValueRef)],
+        buffer: &mut Vec<u8>,
+    ) -> Result<()>;
+
     /// Returns the number of fields in the primary key.
     fn num_fields(&self) -> usize;
 
@@ -131,7 +138,7 @@ pub trait PrimaryKeyCodec: Send + Sync + Debug {
 }
 
 /// Builds a primary key codec from region metadata.
-pub fn build_primary_key_codec(region_metadata: &RegionMetadataRef) -> Arc<dyn PrimaryKeyCodec> {
+pub fn build_primary_key_codec(region_metadata: &RegionMetadata) -> Arc<dyn PrimaryKeyCodec> {
     let fields = region_metadata.primary_key_columns().map(|col| {
         (
             col.column_id,

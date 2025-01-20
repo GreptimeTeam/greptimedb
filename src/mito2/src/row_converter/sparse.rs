@@ -254,6 +254,14 @@ impl PrimaryKeyCodec for SparsePrimaryKeyCodec {
         self.encode_to_vec(values.iter().map(|v| (v.0, v.1.as_value_ref())), buffer)
     }
 
+    fn encode_value_refs(
+        &self,
+        values: &[(ColumnId, ValueRef)],
+        buffer: &mut Vec<u8>,
+    ) -> Result<()> {
+        self.encode_to_vec(values.iter().map(|v| (v.0, v.1)), buffer)
+    }
+
     fn estimated_size(&self) -> Option<usize> {
         None
     }
