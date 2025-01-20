@@ -15,12 +15,12 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use api::v1::index::BloomFilterMeta;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::future::try_join_all;
 use index::bloom_filter::error::Result;
 use index::bloom_filter::reader::BloomFilterReader;
-use index::bloom_filter::BloomFilterMeta;
 use store_api::storage::ColumnId;
 
 use crate::cache::index::{IndexCache, PageKey, INDEX_METADATA_TYPE};

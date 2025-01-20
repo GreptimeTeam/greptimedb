@@ -25,11 +25,12 @@ use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, DEFAULT_OTLP_E
 use common_wal::config::raft_engine::RaftEngineConfig;
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
-use file_engine::config::EngineConfig;
+use file_engine::config::EngineConfig as FileEngineConfig;
 use frontend::frontend::FrontendOptions;
 use meta_client::MetaClientOptions;
 use meta_srv::metasrv::MetasrvOptions;
 use meta_srv::selector::SelectorType;
+use metric_engine::config::EngineConfig as MetricEngineConfig;
 use mito2::config::MitoConfig;
 use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
@@ -72,7 +73,10 @@ fn test_load_datanode_example_config() {
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     ..Default::default()
                 }),
-                RegionEngineConfig::File(EngineConfig {}),
+                RegionEngineConfig::File(FileEngineConfig {}),
+                RegionEngineConfig::Metric(MetricEngineConfig {
+                    experimental_sparse_primary_key_encoding: false,
+                }),
             ],
             logging: LoggingOptions {
                 level: Some("info".to_string()),
@@ -210,7 +214,10 @@ fn test_load_standalone_example_config() {
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     ..Default::default()
                 }),
-                RegionEngineConfig::File(EngineConfig {}),
+                RegionEngineConfig::File(FileEngineConfig {}),
+                RegionEngineConfig::Metric(MetricEngineConfig {
+                    experimental_sparse_primary_key_encoding: false,
+                }),
             ],
             storage: StorageConfig {
                 data_home: "/tmp/greptimedb/".to_string(),

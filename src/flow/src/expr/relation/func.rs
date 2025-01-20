@@ -103,11 +103,6 @@ impl AggregateFunc {
         self.signature().generic_fn == GenericFn::Min
     }
 
-    /// if this function is a `sum`
-    pub fn is_sum(&self) -> bool {
-        self.signature().generic_fn == GenericFn::Sum
-    }
-
     /// Eval value, diff with accumulator
     ///
     /// Expect self to be accumulable aggregate function, i.e. sum/count

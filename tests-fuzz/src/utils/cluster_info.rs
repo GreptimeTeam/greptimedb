@@ -17,8 +17,7 @@ use std::time::Duration;
 use common_telemetry::info;
 use humantime::parse_duration;
 use snafu::ResultExt;
-use sqlx::database::HasArguments;
-use sqlx::{ColumnIndex, Database, Decode, Encode, Executor, IntoArguments, MySql, Pool, Type};
+use sqlx::MySqlPool;
 
 use super::wait::wait_condition_fn;
 use crate::error::{self, Result};
@@ -34,19 +33,10 @@ pub struct NodeInfo {
 }
 
 /// Returns all [NodeInfo] in the cluster.
-pub async fn fetch_nodes<'a, DB, E>(e: E) -> Result<Vec<NodeInfo>>
-where
-    DB: Database,
-    <DB as HasArguments<'a>>::Arguments: IntoArguments<'a, DB>,
-    for<'c> E: 'a + Executor<'c, Database = DB>,
-    for<'c> i64: Decode<'c, DB> + Type<DB>,
-    for<'c> String: Decode<'c, DB> + Type<DB>,
-    for<'c> String: Encode<'c, DB> + Type<DB>,
-    for<'c> &'c str: ColumnIndex<<DB as Database>::Row>,
-{
-    let sql = "select * from information_schema.cluster_info;";
+pub async fn fetch_nodes(db: &MySqlPool) -> Result<Vec<NodeInfo>> {
+    let sql = "select * from information_schema.cluster_info";
     sqlx::query_as::<_, NodeInfo>(sql)
-        .fetch_all(e)
+        .fetch_all(db)
         .await
         .context(error::ExecuteQuerySnafu { sql })
 }
@@ -55,7 +45,7 @@ where
 ///
 /// This function repeatedly checks the status of all datanodes and waits until all of them are online
 /// or the timeout period elapses. A datanode is considered online if its `active_time` is less than 3 seconds.
-pub async fn wait_for_all_datanode_online(greptime: Pool<MySql>, timeout: Duration) {
+pub async fn wait_for_all_datanode_online(greptime: MySqlPool, timeout: Duration) {
     wait_condition_fn(
         timeout,
         || {

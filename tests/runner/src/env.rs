@@ -490,6 +490,7 @@ impl Env {
             sqlness_home.display()
         ));
         args.push("--metasrv-addrs=127.0.0.1:29302".to_string());
+        args.push(format!("--http-addr=127.0.0.1:2951{id}"));
         (args, format!("127.0.0.1:2968{id}"))
     }
 

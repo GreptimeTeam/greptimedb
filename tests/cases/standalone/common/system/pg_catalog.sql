@@ -13,13 +13,28 @@ select current_schema();
 -- SQLNESS PROTOCOL POSTGRES
 show search_path;
 
+-- set search_path for pg using schema for now FIXME when support real search_path
+create database test;
+-- SQLNESS PROTOCOL POSTGRES
+set search_path to 'test';
+drop database test;
+-- SQLNESS PROTOCOL POSTGRES
+set search_path to 'public';
+
+-- SQLNESS PROTOCOL POSTGRES
+select current_schema();
+
 -- make sure all the pg_catalog tables are only visible to postgres
 select * from pg_catalog.pg_class;
 select * from pg_catalog.pg_namespace;
 select * from pg_catalog.pg_type;
+select * from pg_catalog.pg_database;
 
 -- SQLNESS PROTOCOL POSTGRES
 select * from pg_catalog.pg_type order by oid;
+
+-- SQLNESS PROTOCOL POSTGRES
+select * from pg_catalog.pg_database where datname = 'public';
 
 -- \d
 -- SQLNESS PROTOCOL POSTGRES

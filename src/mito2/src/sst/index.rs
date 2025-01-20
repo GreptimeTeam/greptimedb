@@ -222,9 +222,12 @@ impl<'a> IndexerBuilder<'a> {
             return None;
         }
 
-        if self.metadata.primary_key.is_empty() {
+        let indexed_column_ids = self.metadata.inverted_indexed_column_ids(
+            self.index_options.inverted_index.ignore_column_ids.iter(),
+        );
+        if indexed_column_ids.is_empty() {
             debug!(
-                "No tag columns, skip creating index, region_id: {}, file_id: {}",
+                "No columns to be indexed, skip creating inverted index, region_id: {}, file_id: {}",
                 self.metadata.region_id, self.file_id,
             );
             return None;
@@ -259,9 +262,7 @@ impl<'a> IndexerBuilder<'a> {
             self.intermediate_manager.clone(),
             self.inverted_index_config.mem_threshold_on_create(),
             segment_row_count,
-            self.metadata.inverted_indexed_column_ids(
-                self.index_options.inverted_index.ignore_column_ids.iter(),
-            ),
+            indexed_column_ids,
         );
 
         Some(indexer)

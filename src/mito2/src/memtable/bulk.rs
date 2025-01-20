@@ -17,7 +17,7 @@
 use std::sync::{Arc, RwLock};
 
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error::Result;
@@ -63,6 +63,7 @@ impl Memtable for BulkMemtable {
         &self,
         _projection: Option<&[ColumnId]>,
         _predicate: Option<Predicate>,
+        _sequence: Option<SequenceNumber>,
     ) -> Result<BoxedBatchIterator> {
         todo!()
     }
@@ -71,6 +72,7 @@ impl Memtable for BulkMemtable {
         &self,
         _projection: Option<&[ColumnId]>,
         _predicate: Option<Predicate>,
+        _sequence: Option<SequenceNumber>,
     ) -> MemtableRanges {
         todo!()
     }

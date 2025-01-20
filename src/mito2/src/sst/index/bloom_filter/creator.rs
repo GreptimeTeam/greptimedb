@@ -338,7 +338,7 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::read::BatchColumn;
-    use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+    use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
     pub fn mock_object_store() -> ObjectStore {
@@ -412,7 +412,7 @@ pub(crate) mod tests {
 
     pub fn new_batch(str_tag: impl AsRef<str>, u64_field: impl IntoIterator<Item = u64>) -> Batch {
         let fields = vec![SortField::new(ConcreteDataType::string_datatype())];
-        let codec = McmpRowCodec::new(fields);
+        let codec = DensePrimaryKeyCodec::with_fields(fields);
         let row: [ValueRef; 1] = [str_tag.as_ref().into()];
         let primary_key = codec.encode(row.into_iter()).unwrap();
 
@@ -485,19 +485,15 @@ pub(crate) mod tests {
             let bloom_filter = BloomFilterReaderImpl::new(reader);
             let metadata = bloom_filter.metadata().await.unwrap();
 
-            assert_eq!(metadata.bloom_filter_segments.len(), 10);
+            assert_eq!(metadata.segment_count, 10);
             for i in 0..5 {
-                let bf = bloom_filter
-                    .bloom_filter(&metadata.bloom_filter_segments[i])
-                    .await
-                    .unwrap();
+                let loc = &metadata.bloom_filter_locs[metadata.segment_loc_indices[i] as usize];
+                let bf = bloom_filter.bloom_filter(loc).await.unwrap();
                 assert!(bf.contains(b"tag1"));
             }
             for i in 5..10 {
-                let bf = bloom_filter
-                    .bloom_filter(&metadata.bloom_filter_segments[i])
-                    .await
-                    .unwrap();
+                let loc = &metadata.bloom_filter_locs[metadata.segment_loc_indices[i] as usize];
+                let bf = bloom_filter.bloom_filter(loc).await.unwrap();
                 assert!(bf.contains(b"tag2"));
             }
         }
@@ -514,12 +510,11 @@ pub(crate) mod tests {
             let bloom_filter = BloomFilterReaderImpl::new(reader);
             let metadata = bloom_filter.metadata().await.unwrap();
 
-            assert_eq!(metadata.bloom_filter_segments.len(), 5);
+            assert_eq!(metadata.segment_count, 5);
             for i in 0u64..20 {
-                let bf = bloom_filter
-                    .bloom_filter(&metadata.bloom_filter_segments[i as usize / 4])
-                    .await
-                    .unwrap();
+                let idx = i as usize / 4;
+                let loc = &metadata.bloom_filter_locs[metadata.segment_loc_indices[idx] as usize];
+                let bf = bloom_filter.bloom_filter(loc).await.unwrap();
                 let mut buf = vec![];
                 IndexValueCodec::encode_nonnull_value(ValueRef::UInt64(i), &sort_field, &mut buf)
                     .unwrap();

@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use async_stream::stream;
 use common_runtime::{RepeatedTask, TaskFunction};
-use common_telemetry::{error, info};
+use common_telemetry::{debug, error, info};
 use common_wal::config::raft_engine::RaftEngineConfig;
 use raft_engine::{Config, Engine, LogBatch, MessageExt, ReadableSize, RecoveryMode};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -64,10 +64,15 @@ impl TaskFunction<Error> for PurgeExpiredFilesFunction {
             Ok(res) => {
                 // TODO(hl): the retval of purge_expired_files indicates the namespaces need to be compact,
                 // which is useful when monitoring regions failed to flush it's memtable to SSTs.
-                info!(
+                let log_string = format!(
                     "Successfully purged logstore files, namespaces need compaction: {:?}",
                     res
                 );
+                if res.is_empty() {
+                    debug!(log_string);
+                } else {
+                    info!(log_string);
+                }
             }
             Err(e) => {
                 error!(e; "Failed to purge files in logstore");

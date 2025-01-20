@@ -36,6 +36,7 @@ use query::QueryEngine;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
+use servers::http::HttpOptions;
 use servers::Mode;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -45,9 +46,10 @@ use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 pub(crate) use crate::adapter::node_context::FlownodeContext;
+use crate::adapter::refill::RefillTask;
 use crate::adapter::table_source::ManagedTableSource;
 use crate::adapter::util::relation_desc_to_column_schemas_with_fallback;
-use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
+pub(crate) use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
 use crate::df_optimizer::sql_to_flow_plan;
 use crate::error::{EvalSnafu, ExternalSnafu, InternalSnafu, InvalidQuerySnafu, UnexpectedSnafu};
@@ -57,6 +59,7 @@ use crate::repr::{self, DiffRow, RelationDesc, Row, BATCH_SIZE};
 
 mod flownode_impl;
 mod parse_expr;
+pub(crate) mod refill;
 mod stat;
 #[cfg(test)]
 mod tests;
@@ -80,6 +83,21 @@ pub const UPDATE_AT_TS_COL: &str = "update_at";
 pub type FlowId = u64;
 pub type TableName = [String; 3];
 
+/// Flow config that exists both in standalone&distributed mode
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FlowConfig {
+    pub num_workers: usize,
+}
+
+impl Default for FlowConfig {
+    fn default() -> Self {
+        Self {
+            num_workers: (common_config::utils::get_cpus() / 2).max(1),
+        }
+    }
+}
+
 /// Options for flow node
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -87,7 +105,9 @@ pub struct FlownodeOptions {
     pub mode: Mode,
     pub cluster_id: Option<u64>,
     pub node_id: Option<u64>,
+    pub flow: FlowConfig,
     pub grpc: GrpcOptions,
+    pub http: HttpOptions,
     pub meta_client: Option<MetaClientOptions>,
     pub logging: LoggingOptions,
     pub tracing: TracingOptions,
@@ -100,7 +120,9 @@ impl Default for FlownodeOptions {
             mode: servers::Mode::Standalone,
             cluster_id: None,
             node_id: None,
+            flow: FlowConfig::default(),
             grpc: GrpcOptions::default().with_addr("127.0.0.1:3004"),
+            http: HttpOptions::default(),
             meta_client: None,
             logging: LoggingOptions::default(),
             tracing: TracingOptions::default(),
@@ -109,7 +131,14 @@ impl Default for FlownodeOptions {
     }
 }
 
-impl Configurable for FlownodeOptions {}
+impl Configurable for FlownodeOptions {
+    fn validate_sanitize(&mut self) -> common_config::error::Result<()> {
+        if self.flow.num_workers == 0 {
+            self.flow.num_workers = (common_config::utils::get_cpus() / 2).max(1);
+        }
+        Ok(())
+    }
+}
 
 /// Arc-ed FlowNodeManager, cheaper to clone
 pub type FlowWorkerManagerRef = Arc<FlowWorkerManager>;
@@ -120,7 +149,9 @@ pub type FlowWorkerManagerRef = Arc<FlowWorkerManager>;
 pub struct FlowWorkerManager {
     /// The handler to the worker that will run the dataflow
     /// which is `!Send` so a handle is used
-    pub worker_handles: Vec<Mutex<WorkerHandle>>,
+    pub worker_handles: Vec<WorkerHandle>,
+    /// The selector to select a worker to run the dataflow
+    worker_selector: Mutex<usize>,
     /// The query engine that will be used to parse the query and convert it to a dataflow plan
     pub query_engine: Arc<dyn QueryEngine>,
     /// Getting table name and table schema from table info manager
@@ -128,6 +159,8 @@ pub struct FlowWorkerManager {
     frontend_invoker: RwLock<Option<FrontendInvoker>>,
     /// contains mapping from table name to global id, and table schema
     node_context: RwLock<FlownodeContext>,
+    /// Contains all refill tasks
+    refill_tasks: RwLock<BTreeMap<FlowId, RefillTask>>,
     flow_err_collectors: RwLock<BTreeMap<FlowId, ErrCollector>>,
     src_send_buf_lens: RwLock<BTreeMap<TableId, watch::Receiver<usize>>>,
     tick_manager: FlowTickManager,
@@ -162,10 +195,12 @@ impl FlowWorkerManager {
         let worker_handles = Vec::new();
         FlowWorkerManager {
             worker_handles,
+            worker_selector: Mutex::new(0),
             query_engine,
             table_info_source: srv_map,
             frontend_invoker: RwLock::new(None),
             node_context: RwLock::new(node_context),
+            refill_tasks: Default::default(),
             flow_err_collectors: Default::default(),
             src_send_buf_lens: Default::default(),
             tick_manager,
@@ -181,20 +216,27 @@ impl FlowWorkerManager {
     }
 
     /// Create a flownode manager with one worker
-    pub fn new_with_worker<'s>(
+    pub fn new_with_workers<'s>(
         node_id: Option<u32>,
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
-    ) -> (Self, Worker<'s>) {
+        num_workers: usize,
+    ) -> (Self, Vec<Worker<'s>>) {
         let mut zelf = Self::new(node_id, query_engine, table_meta);
-        let (handle, worker) = create_worker();
-        zelf.add_worker_handle(handle);
-        (zelf, worker)
+
+        let workers: Vec<_> = (0..num_workers)
+            .map(|_| {
+                let (handle, worker) = create_worker();
+                zelf.add_worker_handle(handle);
+                worker
+            })
+            .collect();
+        (zelf, workers)
     }
 
     /// add a worker handler to manager, meaning this corresponding worker is under it's manage
     pub fn add_worker_handle(&mut self, handle: WorkerHandle) {
-        self.worker_handles.push(Mutex::new(handle));
+        self.worker_handles.push(handle);
     }
 }
 
@@ -242,12 +284,29 @@ impl FlowWorkerManager {
             let (catalog, schema) = (table_name[0].clone(), table_name[1].clone());
             let ctx = Arc::new(QueryContext::with(&catalog, &schema));
 
-            let (is_ts_placeholder, proto_schema) = self
+            let (is_ts_placeholder, proto_schema) = match self
                 .try_fetch_existing_table(&table_name)
                 .await?
                 .context(UnexpectedSnafu {
                     reason: format!("Table not found: {}", table_name.join(".")),
-                })?;
+                }) {
+                Ok(r) => r,
+                Err(e) => {
+                    if self
+                        .table_info_source
+                        .get_opt_table_id_from_name(&table_name)
+                        .await?
+                        .is_none()
+                    {
+                        // deal with both flow&sink table no longer exists
+                        // but some output is still in output buf
+                        common_telemetry::warn!(e; "Table `{}` no longer exists, skip writeback", table_name.join("."));
+                        continue;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
             let schema_len = proto_schema.len();
 
             let total_rows = reqs.iter().map(|r| r.len()).sum::<usize>();
@@ -535,13 +594,16 @@ impl FlowWorkerManager {
     pub async fn run(&self, mut shutdown: Option<broadcast::Receiver<()>>) {
         debug!("Starting to run");
         let default_interval = Duration::from_secs(1);
+        let mut tick_interval = tokio::time::interval(default_interval);
+        // burst mode, so that if we miss a tick, we will run immediately to fully utilize the cpu
+        tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
         let mut avg_spd = 0; // rows/sec
         let mut since_last_run = tokio::time::Instant::now();
         let run_per_trace = 10;
         let mut run_cnt = 0;
         loop {
             // TODO(discord9): only run when new inputs arrive or scheduled to
-            let row_cnt = self.run_available(true).await.unwrap_or_else(|err| {
+            let row_cnt = self.run_available(false).await.unwrap_or_else(|err| {
                 common_telemetry::error!(err;"Run available errors");
                 0
             });
@@ -571,9 +633,9 @@ impl FlowWorkerManager {
 
             // for now we want to batch rows until there is around `BATCH_SIZE` rows in send buf
             // before trigger a run of flow's worker
-            // (plus one for prevent div by zero)
             let wait_for = since_last_run.elapsed();
 
+            // last runs insert speed
             let cur_spd = row_cnt * 1000 / wait_for.as_millis().max(1) as usize;
             // rapid increase, slow decay
             avg_spd = if cur_spd > avg_spd {
@@ -596,7 +658,10 @@ impl FlowWorkerManager {
 
             METRIC_FLOW_RUN_INTERVAL_MS.set(new_wait.as_millis() as i64);
             since_last_run = tokio::time::Instant::now();
-            tokio::time::sleep(new_wait).await;
+            tokio::select! {
+                _ = tick_interval.tick() => (),
+                _ = tokio::time::sleep(new_wait) => ()
+            }
         }
         // flow is now shutdown, drop frontend_invoker early so a ref cycle(in standalone mode) can be prevent:
         // FlowWorkerManager.frontend_invoker -> FrontendInvoker.inserter
@@ -607,9 +672,9 @@ impl FlowWorkerManager {
     /// Run all available subgraph in the flow node
     /// This will try to run all dataflow in this node
     ///
-    /// set `blocking` to true to wait until lock is acquired
-    /// and false to return immediately if lock is not acquired
-    /// return numbers of rows send to worker
+    /// set `blocking` to true to wait until worker finish running
+    /// false to just trigger run and return immediately
+    /// return numbers of rows send to worker(Inaccuary)
     /// TODO(discord9): add flag for subgraph that have input since last run
     pub async fn run_available(&self, blocking: bool) -> Result<usize, Error> {
         let mut row_cnt = 0;
@@ -617,13 +682,7 @@ impl FlowWorkerManager {
         let now = self.tick_manager.tick();
         for worker in self.worker_handles.iter() {
             // TODO(discord9): consider how to handle error in individual worker
-            if blocking {
-                worker.lock().await.run_available(now, blocking).await?;
-            } else if let Ok(worker) = worker.try_lock() {
-                worker.run_available(now, blocking).await?;
-            } else {
-                return Ok(row_cnt);
-            }
+            worker.run_available(now, blocking).await?;
         }
         // check row send and rows remain in send buf
         let flush_res = if blocking {
@@ -694,7 +753,6 @@ impl FlowWorkerManager {
     /// remove a flow by it's id
     pub async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
         for handle in self.worker_handles.iter() {
-            let handle = handle.lock().await;
             if handle.contains_flow(flow_id).await? {
                 handle.remove_flow(flow_id).await?;
                 break;
@@ -830,7 +888,8 @@ impl FlowWorkerManager {
             .write()
             .await
             .insert(flow_id, err_collector.clone());
-        let handle = &self.worker_handles[0].lock().await;
+        // TODO(discord9): load balance?
+        let handle = self.get_worker_handle_for_create_flow().await;
         let create_request = worker::Request::Create {
             flow_id,
             plan: flow_plan,

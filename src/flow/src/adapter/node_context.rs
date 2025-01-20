@@ -130,7 +130,16 @@ impl SourceSender {
             // TODO(discord9): send rows instead so it's just moving a point
             if let Some(batch) = send_buf.recv().await {
                 let len = batch.row_count();
-                self.send_buf_row_cnt.fetch_sub(len, Ordering::SeqCst);
+                if let Err(prev_row_cnt) =
+                    self.send_buf_row_cnt
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| x.checked_sub(len))
+                {
+                    common_telemetry::error!(
+                        "send buf row count underflow, prev = {}, len = {}",
+                        prev_row_cnt,
+                        len
+                    );
+                }
                 row_cnt += len;
                 self.sender
                     .send(batch)
@@ -162,18 +171,21 @@ impl SourceSender {
         batch_datatypes: &[ConcreteDataType],
     ) -> Result<usize, Error> {
         METRIC_FLOW_INPUT_BUF_SIZE.add(rows.len() as _);
+        // important for backpressure. if send buf is full, block until it's not
         while self.send_buf_row_cnt.load(Ordering::SeqCst) >= BATCH_SIZE * 4 {
             tokio::task::yield_now().await;
         }
+
         // row count metrics is approx so relaxed order is ok
-        self.send_buf_row_cnt
-            .fetch_add(rows.len(), Ordering::SeqCst);
         let batch = Batch::try_from_rows_with_types(
             rows.into_iter().map(|(row, _, _)| row).collect(),
             batch_datatypes,
         )
         .context(EvalSnafu)?;
         common_telemetry::trace!("Send one batch to worker with {} rows", batch.row_count());
+
+        self.send_buf_row_cnt
+            .fetch_add(batch.row_count(), Ordering::SeqCst);
         self.send_buf_tx.send(batch).await.map_err(|e| {
             crate::error::InternalSnafu {
                 reason: format!("Failed to send row, error = {:?}", e),
@@ -353,7 +365,7 @@ impl FlownodeContext {
                 name: name.join("."),
             })?;
         let schema = self.table_source.table(name).await?;
-        Ok((id, schema))
+        Ok((id, schema.relation_desc))
     }
 
     /// Assign a global id to a table, if already assigned, return the existing global id

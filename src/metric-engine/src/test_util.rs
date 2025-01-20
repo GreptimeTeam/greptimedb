@@ -32,6 +32,7 @@ use store_api::region_request::{
 };
 use store_api::storage::{ColumnId, RegionId};
 
+use crate::config::EngineConfig;
 use crate::data_region::DataRegion;
 use crate::engine::MetricEngine;
 use crate::metadata_region::MetadataRegion;
@@ -54,7 +55,7 @@ impl TestEnv {
     pub async fn with_prefix(prefix: &str) -> Self {
         let mut mito_env = MitoTestEnv::with_prefix(prefix);
         let mito = mito_env.create_engine(MitoConfig::default()).await;
-        let metric = MetricEngine::new(mito.clone());
+        let metric = MetricEngine::new(mito.clone(), EngineConfig::default());
         Self {
             mito_env,
             mito,

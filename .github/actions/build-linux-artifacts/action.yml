@@ -48,8 +48,7 @@ runs:
         path: /tmp/greptime-*.log
         retention-days: 3
 
-    - name: Build greptime
-      if: ${{ inputs.dev-mode == 'false' }}
+    - name: Build greptime # Builds standard greptime binary
       uses: ./.github/actions/build-greptime-binary
       with:
         base-image: ubuntu

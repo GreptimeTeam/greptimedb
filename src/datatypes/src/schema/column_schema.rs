@@ -123,6 +123,14 @@ impl ColumnSchema {
         self.default_constraint.as_ref()
     }
 
+    /// Check if the default constraint is a impure function.
+    pub fn is_default_impure(&self) -> bool {
+        self.default_constraint
+            .as_ref()
+            .map(|c| c.is_function())
+            .unwrap_or(false)
+    }
+
     #[inline]
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
@@ -150,11 +158,22 @@ impl ColumnSchema {
         self
     }
 
-    pub fn set_inverted_index(mut self, value: bool) -> Self {
-        let _ = self
-            .metadata
-            .insert(INVERTED_INDEX_KEY.to_string(), value.to_string());
-        self
+    pub fn with_inverted_index(&mut self, value: bool) {
+        match value {
+            true => {
+                self.metadata
+                    .insert(INVERTED_INDEX_KEY.to_string(), value.to_string());
+            }
+            false => {
+                self.metadata.remove(INVERTED_INDEX_KEY);
+            }
+        }
+    }
+
+    // Put a placeholder to invalidate schemas.all(!has_inverted_index_key).
+    pub fn insert_inverted_index_placeholder(&mut self) {
+        self.metadata
+            .insert(INVERTED_INDEX_KEY.to_string(), "".to_string());
     }
 
     pub fn is_inverted_indexed(&self) -> bool {
@@ -287,6 +306,15 @@ impl ColumnSchema {
                     Ok(None)
                 }
             }
+        }
+    }
+
+    /// Creates an impure default value for this column, only if it have a impure default constraint.
+    /// Otherwise, returns `Ok(None)`.
+    pub fn create_impure_default(&self) -> Result<Option<Value>> {
+        match &self.default_constraint {
+            Some(c) => c.create_impure_default(&self.data_type),
+            None => Ok(None),
         }
     }
 

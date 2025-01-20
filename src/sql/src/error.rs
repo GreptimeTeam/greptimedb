@@ -132,6 +132,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("ConcreteDataType not supported yet: {:?}", t))]
+    ConcreteTypeNotSupported {
+        t: ConcreteDataType,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to parse value: {}", msg))]
     ParseSqlValue {
@@ -355,6 +361,7 @@ impl ErrorExt for Error {
             | InvalidSql { .. }
             | ParseSqlValue { .. }
             | SqlTypeNotSupported { .. }
+            | ConcreteTypeNotSupported { .. }
             | UnexpectedToken { .. }
             | InvalidDefault { .. } => StatusCode::InvalidSyntax,
 

@@ -29,7 +29,7 @@ use store_api::metadata::{
 use store_api::storage::RegionId;
 
 use crate::read::{Batch, BatchBuilder, Source};
-use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
 use crate::sst::file::{FileHandle, FileId, FileMeta};
 use crate::test_util::{new_batch_builder, new_noop_file_purger, VecBatchReader};
 
@@ -87,7 +87,7 @@ pub fn new_primary_key(tags: &[&str]) -> Vec<u8> {
     let fields = (0..tags.len())
         .map(|_| SortField::new(ConcreteDataType::string_datatype()))
         .collect();
-    let converter = McmpRowCodec::new(fields);
+    let converter = DensePrimaryKeyCodec::with_fields(fields);
     converter
         .encode(tags.iter().map(|tag| ValueRef::String(tag)))
         .unwrap()

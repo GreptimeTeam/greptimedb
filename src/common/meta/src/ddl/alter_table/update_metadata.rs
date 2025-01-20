@@ -60,8 +60,8 @@ impl AlterTableProcedure {
             | AlterKind::ModifyColumnTypes { .. }
             | AlterKind::SetTableOptions { .. }
             | AlterKind::UnsetTableOptions { .. }
-            | AlterKind::SetColumnFulltext { .. }
-            | AlterKind::UnsetColumnFulltext { .. } => {}
+            | AlterKind::SetIndex { .. }
+            | AlterKind::UnsetIndex { .. } => {}
         }
 
         Ok(new_info)

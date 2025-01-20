@@ -180,7 +180,7 @@ pub enum Error {
 
     #[snafu(display("Failed to parse format {} with value: {}", key, value))]
     ParseFormat {
-        key: &'static str,
+        key: String,
         value: String,
         #[snafu(implicit)]
         location: Location,

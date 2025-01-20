@@ -45,6 +45,7 @@ use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
 
 use self::state::MetricEngineState;
+use crate::config::EngineConfig;
 use crate::data_region::DataRegion;
 use crate::error::{self, Result, UnsupportedRegionRequestSnafu};
 use crate::metadata_region::MetadataRegion;
@@ -255,7 +256,7 @@ impl RegionEngine for MetricEngine {
 }
 
 impl MetricEngine {
-    pub fn new(mito: MitoEngine) -> Self {
+    pub fn new(mito: MitoEngine, config: EngineConfig) -> Self {
         let metadata_region = MetadataRegion::new(mito.clone());
         let data_region = DataRegion::new(mito.clone());
         Self {
@@ -264,6 +265,7 @@ impl MetricEngine {
                 metadata_region,
                 data_region,
                 state: RwLock::default(),
+                config,
             }),
         }
     }
@@ -304,6 +306,9 @@ struct MetricEngineInner {
     metadata_region: MetadataRegion,
     data_region: DataRegion,
     state: RwLock<MetricEngineState>,
+    /// TODO(weny): remove it after the config is used.
+    #[allow(unused)]
+    config: EngineConfig,
 }
 
 #[cfg(test)]

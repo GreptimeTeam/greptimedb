@@ -15,6 +15,7 @@
 
 //! Storage related APIs
 
+pub mod codec;
 pub mod data_source;
 pub mod logstore;
 pub mod manifest;

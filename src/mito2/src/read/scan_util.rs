@@ -82,6 +82,7 @@ impl PartitionMetrics {
     ) -> Self {
         let partition_str = partition.to_string();
         let in_progress_scan = IN_PROGRESS_SCAN.with_label_values(&[scanner_type, &partition_str]);
+        in_progress_scan.inc();
         let inner = PartitionMetricsInner {
             region_id,
             partition,

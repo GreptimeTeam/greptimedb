@@ -25,7 +25,7 @@ impl CreateLogicalTablesProcedure {
         Ok(())
     }
 
-    pub(crate) async fn check_tables_already_exist(&mut self) -> Result<()> {
+    pub async fn check_tables_already_exist(&mut self) -> Result<()> {
         let table_name_keys = self
             .data
             .all_create_table_exprs()

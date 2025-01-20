@@ -48,7 +48,7 @@ use crate::error::{
     ConvertVectorSnafu, InvalidBatchSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
 };
 use crate::read::{Batch, BatchBuilder, BatchColumn};
-use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, SortField};
 use crate::sst::file::{FileMeta, FileTimeRange};
 use crate::sst::to_sst_arrow_schema;
 
@@ -402,8 +402,9 @@ impl ReadFormat {
             return None;
         }
 
-        let converter =
-            McmpRowCodec::new(vec![SortField::new(column.column_schema.data_type.clone())]);
+        let converter = DensePrimaryKeyCodec::with_fields(vec![SortField::new(
+            column.column_schema.data_type.clone(),
+        )]);
         let values = row_groups.iter().map(|meta| {
             let stats = meta
                 .borrow()
@@ -421,8 +422,7 @@ impl ReadFormat {
                 Statistics::Double(_) => None,
                 Statistics::ByteArray(s) => {
                     let bytes = if is_min { s.min_bytes() } else { s.max_bytes() };
-                    let mut values = converter.decode(bytes).ok()?;
-                    values.pop()
+                    converter.decode_leftmost(bytes).ok()?
                 }
                 Statistics::FixedLenByteArray(_) => None,
             }

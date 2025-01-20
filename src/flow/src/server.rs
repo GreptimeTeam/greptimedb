@@ -39,6 +39,8 @@ use operator::statement::StatementExecutor;
 use partition::manager::PartitionRuleManager;
 use query::{QueryEngine, QueryEngineFactory};
 use servers::error::{AlreadyStartedSnafu, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu};
+use servers::http::{HttpServer, HttpServerBuilder};
+use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -48,7 +50,7 @@ use tonic::codec::CompressionEncoding;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
-use crate::adapter::{CreateFlowArgs, FlowWorkerManagerRef};
+use crate::adapter::{create_worker, CreateFlowArgs, FlowWorkerManagerRef};
 use crate::error::{
     to_status_with_last_err, CacheRequiredSnafu, CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu,
     ListFlowsSnafu, ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
@@ -86,6 +88,10 @@ impl flow_server::Flow for FlowService {
         self.manager
             .handle(request)
             .await
+            .map_err(|err| {
+                common_telemetry::error!(err; "Failed to handle flow request");
+                err
+            })
             .map(Response::new)
             .map_err(to_status_with_last_err)
     }
@@ -210,6 +216,9 @@ impl servers::server::Server for FlownodeServer {
 pub struct FlownodeInstance {
     server: FlownodeServer,
     addr: SocketAddr,
+    /// only used for health check
+    http_server: HttpServer,
+    http_addr: SocketAddr,
     heartbeat_task: Option<HeartbeatTask>,
 }
 
@@ -224,6 +233,12 @@ impl FlownodeInstance {
             .start(self.addr)
             .await
             .context(StartServerSnafu)?;
+
+        self.http_server
+            .start(self.http_addr)
+            .await
+            .context(StartServerSnafu)?;
+
         Ok(())
     }
     pub async fn shutdown(&self) -> Result<(), crate::Error> {
@@ -232,6 +247,11 @@ impl FlownodeInstance {
         if let Some(task) = &self.heartbeat_task {
             task.shutdown();
         }
+
+        self.http_server
+            .shutdown()
+            .await
+            .context(ShutdownServerSnafu)?;
 
         Ok(())
     }
@@ -305,12 +325,21 @@ impl FlownodeBuilder {
 
         let server = FlownodeServer::new(FlowService::new(manager.clone()));
 
+        let http_addr = self.opts.http.addr.parse().context(ParseAddrSnafu {
+            addr: self.opts.http.addr.clone(),
+        })?;
+        let http_server = HttpServerBuilder::new(self.opts.http)
+            .with_metrics_handler(MetricsHandler)
+            .build();
+
         let heartbeat_task = self.heartbeat_task;
 
         let addr = self.opts.grpc.addr;
         let instance = FlownodeInstance {
             server,
             addr: addr.parse().context(ParseAddrSnafu { addr })?,
+            http_server,
+            http_addr,
             heartbeat_task,
         };
         Ok(instance)
@@ -414,24 +443,30 @@ impl FlownodeBuilder {
 
         register_function_to_query_engine(&query_engine);
 
-        let (tx, rx) = oneshot::channel();
+        let num_workers = self.opts.flow.num_workers;
 
         let node_id = self.opts.node_id.map(|id| id as u32);
-        let _handle = std::thread::Builder::new()
-            .name("flow-worker".to_string())
-            .spawn(move || {
-                let (flow_node_manager, mut worker) =
-                    FlowWorkerManager::new_with_worker(node_id, query_engine, table_meta);
-                let _ = tx.send(flow_node_manager);
-                info!("Flow Worker started in new thread");
-                worker.run();
-            });
-        let mut man = rx.await.map_err(|_e| {
-            UnexpectedSnafu {
-                reason: "sender is dropped, failed to create flow node manager",
-            }
-            .build()
-        })?;
+
+        let mut man = FlowWorkerManager::new(node_id, query_engine, table_meta);
+        for worker_id in 0..num_workers {
+            let (tx, rx) = oneshot::channel();
+
+            let _handle = std::thread::Builder::new()
+                .name(format!("flow-worker-{}", worker_id))
+                .spawn(move || {
+                    let (handle, mut worker) = create_worker();
+                    let _ = tx.send(handle);
+                    info!("Flow Worker started in new thread");
+                    worker.run();
+                });
+            let worker_handle = rx.await.map_err(|e| {
+                UnexpectedSnafu {
+                    reason: format!("Failed to receive worker handle: {}", e),
+                }
+                .build()
+            })?;
+            man.add_worker_handle(worker_handle);
+        }
         if let Some(handler) = self.state_report_handler.take() {
             man = man.with_state_report_handler(handler).await;
         }

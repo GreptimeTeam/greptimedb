@@ -165,15 +165,14 @@ nextest: ## Install nextest tools.
 sqlness-test: ## Run sqlness test.
 	cargo sqlness ${SQLNESS_OPTS}
 
-# Run fuzz test ${FUZZ_TARGET}.
 RUNS ?= 1
 FUZZ_TARGET ?= fuzz_alter_table
 .PHONY: fuzz
-fuzz:
+fuzz: ## Run fuzz test ${FUZZ_TARGET}.
 	cargo fuzz run ${FUZZ_TARGET} --fuzz-dir tests-fuzz -D -s none -- -runs=${RUNS}
 
 .PHONY: fuzz-ls
-fuzz-ls:
+fuzz-ls: ## List all fuzz targets.
 	cargo fuzz list --fuzz-dir tests-fuzz
 
 .PHONY: check
