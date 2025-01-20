@@ -178,6 +178,12 @@ impl TopicRegionMapManager {
             })
             .collect::<Result<Vec<_>>>()
     }
+
+    pub async fn delete(&self, key: TopicRegionMapKey<'_>) -> Result<()> {
+        let raw_key = key.to_bytes();
+        self.kv_backend.delete(&raw_key, false).await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -199,12 +205,27 @@ mod tests {
 
         manager.batch_put(keys.clone()).await.unwrap();
 
+        let sort_kvs = |kvs: &mut [(RegionId, String)]| {
+            kvs.sort_by(|a, b| a.0.as_u64().cmp(&b.0.as_u64()).then(a.1.cmp(&b.1)));
+        };
+
         let mut key_values = manager.range().await.unwrap();
         let expected = keys
             .iter()
             .map(|key| (key.region_id, key.topic.to_string()))
             .collect::<Vec<_>>();
-        key_values.sort_by(|a, b| a.0.as_u64().cmp(&b.0.as_u64()).then(a.1.cmp(&b.1)));
+        sort_kvs(&mut key_values);
+        assert_eq!(key_values, expected);
+
+        let key = TopicRegionMapKey::new(RegionId::from_u64(0), "topic_0");
+        manager.delete(key.clone()).await.unwrap();
+        let mut key_values = manager.range().await.unwrap();
+        let expected = keys
+            .iter()
+            .filter(|k| k != &&key)
+            .map(|key| (key.region_id, key.topic.to_string()))
+            .collect::<Vec<_>>();
+        sort_kvs(&mut key_values);
         assert_eq!(key_values, expected);
     }
 }
