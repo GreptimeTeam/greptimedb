@@ -16,7 +16,6 @@
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{
     METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION,
     METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION_DEFAULT, METRIC_ENGINE_INDEX_TYPE_OPTION,
@@ -30,20 +29,14 @@ use crate::error::{Error, ParseRegionOptionsSnafu, Result};
 /// value and appropriately increasing the size of the index, it results in an improved indexing effect.
 const SEG_ROW_COUNT_FOR_DATA_REGION: u32 = 256;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum IndexType {
-    Inverted,
-    Skipping,
-}
-
 /// Physical region options.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalRegionOptions {
     pub index: IndexOptions,
 }
 
 /// Index options for auto created columns
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum IndexOptions {
     #[default]
     Inverted,
