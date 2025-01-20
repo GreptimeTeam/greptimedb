@@ -556,7 +556,7 @@ fn extract_pipeline_value_by_content_type(
 }
 
 #[inline]
-fn pipline_exec_with_intermediate_state(
+fn pipeline_exec_with_intermediate_state(
     pipeline: &Arc<Pipeline<GreptimeTransformer>>,
     intermediate_state: &mut Vec<pipeline::Value>,
     transformed: &mut Vec<Row>,
@@ -643,7 +643,7 @@ async fn run_pipeline(
                         .context(PipelineTransformSnafu)
                         .context(PipelineSnafu)?;
 
-                    pipline_exec_with_intermediate_state(
+                    pipeline_exec_with_intermediate_state(
                         &pipeline,
                         &mut intermediate_state,
                         &mut transformed,
@@ -658,7 +658,7 @@ async fn run_pipeline(
             }
             PipelineExecInput::Intermediate { array, .. } => {
                 for mut intermediate_state in array {
-                    pipline_exec_with_intermediate_state(
+                    pipeline_exec_with_intermediate_state(
                         &pipeline,
                         &mut intermediate_state,
                         &mut transformed,
