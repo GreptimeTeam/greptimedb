@@ -160,7 +160,6 @@ impl common_function::function::Function for TumbleFunction {
 
 #[cfg(test)]
 mod test {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     use catalog::RegisterTableRequest;
