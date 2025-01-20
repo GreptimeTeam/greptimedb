@@ -622,6 +622,12 @@ fork_dictionary_bytes = "1GiB"
 ## Enable the file engine.
 [region_engine.file]
 
+[[region_engine]]
+## Metric engine options.
+[region_engine.metric]
+## Whether to enable the experimental sparse primary key encoding.
+experimental_sparse_primary_key_encoding = false
+
 ## The logging options.
 [logging]
 ## The directory to store the log files. If set to empty, logs will not be written to files.

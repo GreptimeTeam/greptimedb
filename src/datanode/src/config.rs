@@ -24,6 +24,7 @@ use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_wal::config::DatanodeWalConfig;
 use file_engine::config::EngineConfig as FileEngineConfig;
 use meta_client::MetaClientOptions;
+use metric_engine::config::EngineConfig as MetricEngineConfig;
 use mito2::config::MitoConfig;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
@@ -432,6 +433,8 @@ pub enum RegionEngineConfig {
     Mito(MitoConfig),
     #[serde(rename = "file")]
     File(FileEngineConfig),
+    #[serde(rename = "metric")]
+    Metric(MetricEngineConfig),
 }
 
 #[cfg(test)]
