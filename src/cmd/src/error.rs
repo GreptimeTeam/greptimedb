@@ -345,6 +345,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to build wal options allocator"))]
+    BuildWalOptionsAllocator {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -378,7 +385,8 @@ impl ErrorExt for Error {
 
             Error::StartProcedureManager { source, .. }
             | Error::StopProcedureManager { source, .. } => source.status_code(),
-            Error::StartWalOptionsAllocator { source, .. } => source.status_code(),
+            Error::BuildWalOptionsAllocator { source, .. }
+            | Error::StartWalOptionsAllocator { source, .. } => source.status_code(),
             Error::ReplCreation { .. } | Error::Readline { .. } | Error::HttpQuerySql { .. } => {
                 StatusCode::Internal
             }
