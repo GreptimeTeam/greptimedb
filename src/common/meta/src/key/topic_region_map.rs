@@ -82,7 +82,7 @@ impl Display for TopicRegionMapKey<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}/{}_{}",
+            "{}/{}/{}",
             TOPIC_REGION_MAP_PREFIX,
             self.topic,
             self.region_id.as_u64()
