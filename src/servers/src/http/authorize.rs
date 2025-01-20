@@ -31,7 +31,7 @@ use session::context::QueryContextBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use super::header::{GreptimeDbName, GREPTIME_TIMEZONE_HEADER_NAME};
-use super::PUBLIC_APIS;
+use super::{AUTHORIZATION_HEADER, PUBLIC_APIS};
 use crate::error::{
     self, InvalidAuthHeaderInvisibleASCIISnafu, InvalidAuthHeaderSnafu, InvalidParameterSnafu,
     NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu, UrlDecodeSnafu,
@@ -246,7 +246,8 @@ type Credential<'a> = &'a str;
 fn auth_header<B>(req: &Request<B>) -> Result<AuthScheme> {
     let auth_header = req
         .headers()
-        .get(http::header::AUTHORIZATION)
+        .get(AUTHORIZATION_HEADER)
+        .or_else(|| req.headers().get(http::header::AUTHORIZATION))
         .context(error::NotFoundAuthHeaderSnafu)?
         .to_str()
         .context(InvalidAuthHeaderInvisibleASCIISnafu)?;

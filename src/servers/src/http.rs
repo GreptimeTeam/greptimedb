@@ -104,6 +104,9 @@ pub const HTTP_API_PREFIX: &str = "/v1/";
 /// Default http body limit (64M).
 const DEFAULT_BODY_LIMIT: ReadableSize = ReadableSize::mb(64);
 
+/// Authorization header
+pub const AUTHORIZATION_HEADER: &str = "x-greptime-auth";
+
 // TODO(fys): This is a temporary workaround, it will be improved later
 pub static PUBLIC_APIS: [&str; 2] = ["/v1/influxdb/ping", "/v1/influxdb/health"];
 
