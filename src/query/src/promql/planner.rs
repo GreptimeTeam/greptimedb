@@ -409,7 +409,7 @@ impl PromPlanner {
                     }
                 }
                 let mut field_columns = left_field_columns.iter().zip(right_field_columns.iter());
-                let is_vector_matching = (left_field_columns.len() == 1
+                let has_special_vector_function = (left_field_columns.len() == 1
                     && left_field_columns[0] == GREPTIME_VALUE)
                     || (right_field_columns.len() == 1 && right_field_columns[0] == GREPTIME_VALUE);
 
@@ -421,7 +421,7 @@ impl PromPlanner {
                     // if left plan or right plan tag is empty, means case like `scalar(...) + host` or `host + scalar(...)`
                     // under this case we only join on time index
                     left_context.tag_columns.is_empty() || right_context.tag_columns.is_empty(),
-                    is_vector_matching,
+                    has_special_vector_function,
                 )?;
                 let join_plan_schema = join_plan.schema().clone();
 
@@ -2008,7 +2008,7 @@ impl PromPlanner {
         left_table_ref: TableReference,
         right_table_ref: TableReference,
         only_join_time_index: bool,
-        is_vector_matching: bool,
+        has_special_vector_function: bool,
     ) -> Result<LogicalPlan> {
         let mut tag_columns = if only_join_time_index {
             vec![]
@@ -2023,7 +2023,7 @@ impl PromPlanner {
         // push time index column if it exists
         if let Some(time_index_column) = &self.ctx.time_index_column {
             // issue #5392 if is special vector function
-            if !is_vector_matching {
+            if !has_special_vector_function {
                 tag_columns.push(Column::from_name(time_index_column));
             }
         }
