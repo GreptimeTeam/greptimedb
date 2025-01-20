@@ -1907,7 +1907,7 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
     let (app, mut guard) =
         setup_test_http_app_with_frontend(store_type, "test_loki_json_logs").await;
 
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     let body = r#"
 {
@@ -1976,7 +1976,7 @@ pub async fn test_elasticsearch_logs(store_type: StorageType) {
     let (app, mut guard) =
         setup_test_http_app_with_frontend(store_type, "test_elasticsearch_logs").await;
 
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     let body = r#"
         {"create":{"_index":"test","_id":"1"}}
@@ -2017,7 +2017,7 @@ pub async fn test_elasticsearch_logs_with_index(store_type: StorageType) {
     let (app, mut guard) =
         setup_test_http_app_with_frontend(store_type, "test_elasticsearch_logs_with_index").await;
 
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // It will write to test_index1 and test_index2(specified in the path).
     let body = r#"
