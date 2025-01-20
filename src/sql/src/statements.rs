@@ -497,7 +497,7 @@ pub fn column_to_schema(
                 column_schema.insert_inverted_index_placeholder();
             }
         } else if inverted_index_cols.contains(&column.name().value) {
-            column_schema.with_inverted_index(true);
+            column_schema.set_inverted_index(true);
         }
     }
 
