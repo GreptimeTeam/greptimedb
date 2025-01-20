@@ -22,7 +22,7 @@ use crate::inverted_index::create::sort::{SortOutput, Sorter};
 use crate::inverted_index::create::InvertedIndexCreator;
 use crate::inverted_index::error::{InconsistentRowCountSnafu, Result};
 use crate::inverted_index::format::writer::InvertedIndexWriter;
-use crate::inverted_index::BytesRef;
+use crate::BytesRef;
 
 type IndexName = String;
 type SegmentRowCount = NonZeroUsize;
@@ -120,7 +120,7 @@ mod tests {
     use crate::inverted_index::create::sort::SortedStream;
     use crate::inverted_index::error::Error;
     use crate::inverted_index::format::writer::MockInvertedIndexWriter;
-    use crate::inverted_index::Bytes;
+    use crate::Bytes;
 
     #[tokio::test]
     async fn test_sort_index_creator_basic() {

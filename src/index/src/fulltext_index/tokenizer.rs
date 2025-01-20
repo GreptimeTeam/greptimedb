@@ -15,7 +15,7 @@
 use jieba_rs::Jieba;
 
 use crate::fulltext_index::error::Result;
-use crate::fulltext_index::Bytes;
+use crate::Bytes;
 
 /// `Tokenizer` tokenizes a text into a list of tokens.
 pub trait Tokenizer: Send {

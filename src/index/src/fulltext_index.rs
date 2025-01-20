@@ -19,9 +19,6 @@ pub mod error;
 pub mod search;
 pub mod tokenizer;
 
-pub type Bytes = Vec<u8>;
-pub type BytesRef<'a> = &'a [u8];
-
 #[cfg(test)]
 mod tests;
 

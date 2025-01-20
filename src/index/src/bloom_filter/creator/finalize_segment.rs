@@ -25,8 +25,8 @@ use snafu::ResultExt;
 use super::intermediate_codec::IntermediateBloomFilterCodecV1;
 use crate::bloom_filter::creator::{FALSE_POSITIVE_RATE, SEED};
 use crate::bloom_filter::error::{IntermediateSnafu, IoSnafu, Result};
-use crate::bloom_filter::Bytes;
 use crate::external_provider::ExternalTempFileProvider;
+use crate::Bytes;
 
 /// The minimum memory usage threshold for flushing in-memory Bloom filters to disk.
 const MIN_MEMORY_USAGE_THRESHOLD: usize = 1024 * 1024; // 1MB

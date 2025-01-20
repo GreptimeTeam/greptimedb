@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use datafusion_expr::{BinaryExpr, Expr as DfExpr, Operator};
 use datatypes::data_type::ConcreteDataType;
 use index::inverted_index::search::predicate::{InListPredicate, Predicate};
-use index::inverted_index::Bytes;
+use index::Bytes;
 
 use crate::error::Result;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
