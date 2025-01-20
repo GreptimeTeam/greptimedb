@@ -17,10 +17,14 @@ use jieba_rs::Jieba;
 use crate::fulltext_index::error::Result;
 use crate::fulltext_index::Bytes;
 
+/// `Tokenizer` tokenizes a text into a list of tokens.
 pub trait Tokenizer: Send {
     fn tokenize<'a>(&self, text: &'a str) -> Vec<&'a str>;
 }
 
+/// `EnglishTokenizer` tokenizes an English text.
+/// 
+/// It splits the text by non-alphabetic characters.
 #[derive(Debug, Default)]
 pub struct EnglishTokenizer;
 
@@ -32,6 +36,9 @@ impl Tokenizer for EnglishTokenizer {
     }
 }
 
+/// `ChineseTokenizer` tokenizes a Chinese text.
+/// 
+/// It uses the Jieba tokenizer to split the text into Chinese words.
 #[derive(Debug, Default)]
 pub struct ChineseTokenizer;
 
@@ -42,12 +49,16 @@ impl Tokenizer for ChineseTokenizer {
     }
 }
 
+/// `Analyzer` analyzes a text into a list of tokens.
+/// 
+/// It uses a `Tokenizer` to tokenize the text and optionally lowercases the tokens.
 pub struct Analyzer {
     tokenizer: Box<dyn Tokenizer>,
     case_sensitive: bool,
 }
 
 impl Analyzer {
+    /// Creates a new `Analyzer` with the given `Tokenizer` and case sensitivity.
     pub fn new(tokenizer: Box<dyn Tokenizer>, case_sensitive: bool) -> Self {
         Self {
             tokenizer,
@@ -55,6 +66,7 @@ impl Analyzer {
         }
     }
 
+    /// Analyzes the given text into a list of tokens.
     pub fn analyze_text(&self, text: &str) -> Result<Vec<Bytes>> {
         let res = self
             .tokenizer
@@ -69,5 +81,45 @@ impl Analyzer {
             })
             .collect();
         Ok(res)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_english_tokenizer() {
+        let tokenizer = EnglishTokenizer;
+        let text = "Hello, world! This is a test.";
+        let tokens = tokenizer.tokenize(text);
+        assert_eq!(tokens, vec!["Hello", "world", "This", "is", "a", "test"]);
+    }
+
+    #[test]
+    fn test_chinese_tokenizer() {
+        let tokenizer = ChineseTokenizer;
+        let text = "我喜欢苹果";
+        let tokens = tokenizer.tokenize(text);
+        assert_eq!(tokens, vec!["我", "喜欢", "苹果"]);
+    }
+
+    #[test]
+    fn test_analyzer() {
+        let tokenizer = EnglishTokenizer;
+        let analyzer = Analyzer::new(Box::new(tokenizer), false);
+        let text = "Hello, world! This is a test.";
+        let tokens = analyzer.analyze_text(text).unwrap();
+        assert_eq!(
+            tokens,
+            vec![
+                b"hello".to_vec(),
+                b"world".to_vec(),
+                b"this".to_vec(),
+                b"is".to_vec(),
+                b"a".to_vec(),
+                b"test".to_vec()
+            ]
+        );
     }
 }
