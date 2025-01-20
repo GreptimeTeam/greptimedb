@@ -216,9 +216,17 @@ pub enum PipelineExecOutput<O> {
 }
 
 impl<O> PipelineExecOutput<O> {
-    pub(crate) fn into_transformed(self) -> Option<O> {
+    pub fn into_transformed(self) -> Option<O> {
         if let Self::Transformed(o) = self {
             Some(o)
+        } else {
+            None
+        }
+    }
+
+    pub fn into_dispatched(self) -> Option<DispatchedTo> {
+        if let Self::DispatchedTo(d) = self {
+            Some(d)
         } else {
             None
         }

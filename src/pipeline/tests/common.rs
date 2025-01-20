@@ -34,7 +34,9 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
                 pipeline.prepare(value, &mut result).unwrap();
                 let row = pipeline
                     .exec_mut(&mut result)
-                    .expect("failed to exec pipeline");
+                    .expect("failed to exec pipeline")
+                    .into_transformed()
+                    .expect("expect transformed result ");
                 rows.push(row);
                 pipeline.reset_intermediate_state(&mut result);
             }
@@ -43,7 +45,9 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
             pipeline.prepare(input_value, &mut result).unwrap();
             let row = pipeline
                 .exec_mut(&mut result)
-                .expect("failed to exec pipeline");
+                .expect("failed to exec pipeline")
+                .into_transformed()
+                .expect("expect transformed result ");
             rows.push(row);
         }
         _ => {

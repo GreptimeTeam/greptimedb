@@ -675,7 +675,7 @@ mod tests {
     use api::v1::SemanticType;
 
     use crate::etl::transform::transformer::greptime::identity_pipeline_inner;
-    use crate::identity_pipeline;
+    use crate::{identity_pipeline, PipelineExecInput};
 
     #[test]
     fn test_identify_pipeline() {
@@ -700,7 +700,7 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let rows = identity_pipeline(array, None);
+            let rows = identity_pipeline(PipelineExecInput::Original(array), None);
             assert!(rows.is_err());
             assert_eq!(
                 rows.err().unwrap().to_string(),
@@ -728,7 +728,7 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let rows = identity_pipeline(array, None);
+            let rows = identity_pipeline(PipelineExecInput::Original(array), None);
             assert!(rows.is_err());
             assert_eq!(
                 rows.err().unwrap().to_string(),
@@ -756,7 +756,7 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let rows = identity_pipeline(array, None);
+            let rows = identity_pipeline(PipelineExecInput::Original(array), None);
             assert!(rows.is_ok());
             let rows = rows.unwrap();
             assert_eq!(rows.schema.len(), 8);
@@ -786,7 +786,10 @@ mod tests {
                 }),
             ];
             let tag_column_names = ["name".to_string(), "address".to_string()];
-            let rows = identity_pipeline_inner(array, Some(tag_column_names.iter()));
+            let rows = identity_pipeline_inner(
+                PipelineExecInput::Original(array),
+                Some(tag_column_names.iter()),
+            );
             assert!(rows.is_ok());
             let rows = rows.unwrap();
             assert_eq!(rows.schema.len(), 8);

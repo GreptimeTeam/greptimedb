@@ -25,7 +25,10 @@ fn processor_mut(
 
     for v in input_values {
         pipeline.prepare(v, &mut payload)?;
-        let r = pipeline.exec_mut(&mut payload)?;
+        let r = pipeline
+            .exec_mut(&mut payload)?
+            .into_transformed()
+            .expect("expect transformed result ");
         result.push(r);
         pipeline.reset_intermediate_state(&mut payload);
     }
