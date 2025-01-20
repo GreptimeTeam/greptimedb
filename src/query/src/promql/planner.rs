@@ -20,7 +20,7 @@ use arrow::datatypes::IntervalDayTime;
 use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
 use common_query::prelude::GREPTIME_VALUE;
-use datafusion::common::{DFSchemaRef, Result as DfResult};
+use datafusion::common::DFSchemaRef;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::context::SessionState;
 use datafusion::functions_aggregate::average::avg_udaf;
@@ -1473,7 +1473,7 @@ impl PromPlanner {
         exprs = exprs
             .into_iter()
             .map(|expr| {
-                let display_name = expr.display_name()?;
+                let display_name = expr.schema_name().to_string();
                 new_field_columns.push(display_name.clone());
                 Ok(expr.alias(display_name))
             })
@@ -1711,7 +1711,7 @@ impl PromPlanner {
         let normalized_exprs =
             normalize_cols(exprs.iter().cloned(), input_plan).context(DataFusionPlanningSnafu)?;
         for expr in normalized_exprs {
-            new_field_columns.push(expr.display_name().context(DataFusionPlanningSnafu)?);
+            new_field_columns.push(expr.schema_name().to_string());
         }
         self.ctx.field_columns = new_field_columns;
 
@@ -2397,9 +2397,8 @@ impl PromPlanner {
         // alias the computation exprs to remove qualifier
         self.ctx.field_columns = result_field_columns
             .iter()
-            .map(|expr| expr.display_name())
-            .collect::<DfResult<Vec<_>>>()
-            .context(DataFusionPlanningSnafu)?;
+            .map(|expr| expr.schema_name().to_string())
+            .collect();
         let field_columns_iter = result_field_columns
             .into_iter()
             .zip(self.ctx.field_columns.iter())
@@ -2491,10 +2490,9 @@ mod test {
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::test_util::DummyDecoder;
-    use datafusion::execution::runtime_env::RuntimeEnv;
+    use datafusion::execution::SessionStateBuilder;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
-    use df_prelude::SessionConfig;
     use promql_parser::label::Labels;
     use promql_parser::parser;
     use session::context::QueryContext;
@@ -2504,7 +2502,7 @@ mod test {
     use super::*;
 
     fn build_session_state() -> SessionState {
-        SessionState::new_with_config_rt(SessionConfig::new(), Arc::new(RuntimeEnv::default()))
+        SessionStateBuilder::new().with_default_features().build()
     }
 
     async fn build_test_table_provider(

@@ -31,6 +31,7 @@ use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionContext, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
+use datafusion::execution::SessionStateBuilder;
 use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
 use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
@@ -133,7 +134,10 @@ impl QueryEngineState {
         );
         physical_optimizer.rules.push(Arc::new(SanityCheckPlan {}));
 
-        let session_state = SessionState::new_with_config_rt(session_config, runtime_env)
+        let session_state = SessionStateBuilder::new()
+            .with_config(session_config)
+            .with_runtime_env(runtime_env)
+            .with_default_features()
             .with_analyzer_rules(analyzer.rules)
             .with_serializer_registry(Arc::new(DefaultSerializer))
             .with_query_planner(Arc::new(DfQueryPlanner::new(
@@ -141,7 +145,8 @@ impl QueryEngineState {
                 region_query_handler,
             )))
             .with_optimizer_rules(optimizer.rules)
-            .with_physical_optimizer_rules(physical_optimizer.rules);
+            .with_physical_optimizer_rules(physical_optimizer.rules)
+            .build();
 
         let df_context = SessionContext::new_with_state(session_state);
 

@@ -560,7 +560,7 @@ impl RangeSelect {
             .range_expr
             .iter()
             .map(|range_fn| {
-                let name = range_fn.expr.display_name()?;
+                let name = range_fn.expr.schema_name().to_string();
                 let range_expr = match &range_fn.expr {
                     Expr::Alias(expr) => expr.expr.as_ref(),
                     others => others,

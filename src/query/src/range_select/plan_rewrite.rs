@@ -89,7 +89,7 @@ fn dispose_parse_error(expr: Option<&Expr>) -> DataFusionError {
         expr.map(|x| {
             format!(
                 "Illegal argument `{}` in range select query",
-                x.display_name().unwrap_or_default()
+                x.schema_name()
             )
         })
         .unwrap_or("Missing argument in range select query".into()),
@@ -106,7 +106,7 @@ fn parse_str_expr(args: &[Expr], i: usize) -> DFResult<&str> {
 fn parse_expr_to_string(args: &[Expr], i: usize) -> DFResult<String> {
     match args.get(i) {
         Some(Expr::Literal(ScalarValue::Utf8(Some(str)))) => Ok(str.to_string()),
-        Some(expr) => Ok(expr.display_name().unwrap_or_default()),
+        Some(expr) => Ok(expr.schema_name().to_string()),
         None => Err(dispose_parse_error(None)),
     }
 }
@@ -295,14 +295,14 @@ impl TreeNodeRewriter for RangeExprRewriter<'_> {
                     name: if let Some(fill) = &fill {
                         format!(
                             "{} RANGE {} FILL {}",
-                            range_expr.display_name()?,
+                            range_expr.schema_name(),
                             parse_expr_to_string(&func.args, 1)?,
                             fill
                         )
                     } else {
                         format!(
                             "{} RANGE {}",
-                            range_expr.display_name()?,
+                            range_expr.schema_name(),
                             parse_expr_to_string(&func.args, 1)?,
                         )
                     },

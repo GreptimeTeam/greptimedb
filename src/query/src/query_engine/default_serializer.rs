@@ -35,7 +35,6 @@ use substrait::extension_serializer::ExtensionSerializer;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
 use crate::dist_plan::MergeScanLogicalPlan;
-use crate::error::DataFusionSnafu;
 
 /// Extended [`substrait::extension_serializer::ExtensionSerializer`] but supports [`MergeScanLogicalPlan`] serialization.
 #[derive(Debug)]

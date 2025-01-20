@@ -341,7 +341,7 @@ impl DatafusionQueryEngine {
     #[tracing::instrument(skip_all)]
     fn optimize_physical_plan(
         &self,
-        ctx: &mut QueryEngineContext,
+        _ctx: &mut QueryEngineContext,
         plan: Arc<dyn ExecutionPlan>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let _timer = metrics::OPTIMIZE_PHYSICAL_ELAPSED.start_timer();

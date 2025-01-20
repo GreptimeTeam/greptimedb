@@ -171,8 +171,8 @@ impl Categorizer {
     /// In this case the plan can be treated as fully commutative.
     fn check_partition(exprs: &[Expr], partition_cols: &[String]) -> bool {
         let mut ref_cols = HashSet::new();
-        if exprlist_to_columns(exprs, &mut ref_cols).is_err() {
-            return false;
+        for expr in exprs {
+            expr.add_column_refs(&mut ref_cols);
         }
         let ref_cols = ref_cols
             .into_iter()
