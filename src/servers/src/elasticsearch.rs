@@ -90,9 +90,10 @@ pub async fn handle_bulk_api(
     Query(params): Query<LogIngesterQueryParams>,
     Extension(query_ctx): Extension<QueryContext>,
     TypedHeader(_content_type): TypedHeader<ContentType>,
+    headers: HeaderMap,
     payload: String,
 ) -> impl IntoResponse {
-    do_handle_bulk_api(log_state, None, params, query_ctx, payload).await
+    do_handle_bulk_api(log_state, None, params, query_ctx, headers, payload).await
 }
 
 /// Process `/${index}/_bulk` API requests. Only support to create logs.
@@ -104,9 +105,10 @@ pub async fn handle_bulk_api_with_index(
     Query(params): Query<LogIngesterQueryParams>,
     Extension(query_ctx): Extension<QueryContext>,
     TypedHeader(_content_type): TypedHeader<ContentType>,
+    headers: HeaderMap,
     payload: String,
 ) -> impl IntoResponse {
-    do_handle_bulk_api(log_state, Some(index), params, query_ctx, payload).await
+    do_handle_bulk_api(log_state, Some(index), params, query_ctx, headers, payload).await
 }
 
 async fn do_handle_bulk_api(
@@ -114,6 +116,7 @@ async fn do_handle_bulk_api(
     index: Option<String>,
     params: LogIngesterQueryParams,
     mut query_ctx: QueryContext,
+    headers: HeaderMap,
     payload: String,
 ) -> impl IntoResponse {
     let start = Instant::now();
@@ -163,6 +166,7 @@ async fn do_handle_bulk_api(
         None,
         requests,
         Arc::new(query_ctx),
+        headers,
     )
     .await
     {

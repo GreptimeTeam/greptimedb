@@ -20,7 +20,7 @@ use std::time::Instant;
 use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
 use axum::body::HttpBody;
 use axum::extract::{FromRequest, Multipart, Path, Query, State};
-use axum::headers::ContentType;
+use axum::headers::{ContentType, HeaderMap};
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -32,7 +32,7 @@ use datatypes::value::column_data_to_json;
 use lazy_static::lazy_static;
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
-use pipeline::{GreptimeTransformer, PipelineVersion};
+use pipeline::{GreptimeIdentityPipelineParams, GreptimeTransformer, PipelineVersion};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Map, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -484,6 +484,7 @@ pub async fn log_ingester(
     Query(query_params): Query<LogIngesterQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
     TypedHeader(content_type): TypedHeader<ContentType>,
+    headers: HeaderMap,
     payload: String,
 ) -> Result<HttpResponse> {
     // validate source and payload
@@ -528,6 +529,7 @@ pub async fn log_ingester(
             values: value,
         }],
         query_ctx,
+        headers,
     )
     .await
 }
@@ -557,6 +559,7 @@ pub(crate) async fn ingest_logs_inner(
     version: PipelineVersion,
     log_ingest_requests: Vec<LogIngestRequest>,
     query_ctx: QueryContextRef,
+    headers: HeaderMap,
 ) -> Result<HttpResponse> {
     let db = query_ctx.get_db_string();
     let exec_timer = std::time::Instant::now();
@@ -569,9 +572,13 @@ pub(crate) async fn ingest_logs_inner(
                 .get_table(&request.table, &query_ctx)
                 .await
                 .context(CatalogSnafu)?;
-            pipeline::identity_pipeline(request.values, table)
-                .context(PipelineTransformSnafu)
-                .context(PipelineSnafu)?
+            pipeline::identity_pipeline(
+                request.values,
+                table,
+                GreptimeIdentityPipelineParams::from_headers(&headers),
+            )
+            .context(PipelineTransformSnafu)
+            .context(PipelineSnafu)?
         } else {
             let pipeline = state
                 .get_pipeline(&pipeline_name, version, query_ctx.clone())
