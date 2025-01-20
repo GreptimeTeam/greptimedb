@@ -525,6 +525,67 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_add_column_if_not_exists() {
+        let sql = "ALTER TABLE test ADD COLUMN IF NOT EXISTS a INTEGER, ADD COLUMN b STRING, ADD COLUMN IF NOT EXISTS c INT;";
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(result.len(), 1);
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::AlterTable { .. });
+        match statement {
+            Statement::AlterTable(alter) => {
+                assert_eq!(alter.table_name.0[0].value, "test");
+                assert_matches!(
+                    alter.alter_operation,
+                    AlterTableOperation::AddColumns { .. }
+                );
+                match alter.alter_operation {
+                    AlterTableOperation::AddColumns { add_columns } => {
+                        let expected = vec![
+                            AddColumn {
+                                column_def: ColumnDef {
+                                    name: Ident::new("a"),
+                                    data_type: DataType::Integer(None),
+                                    collation: None,
+                                    options: vec![],
+                                },
+                                location: None,
+                                add_if_not_exists: true,
+                            },
+                            AddColumn {
+                                column_def: ColumnDef {
+                                    name: Ident::new("b"),
+                                    data_type: DataType::String(None),
+                                    collation: None,
+                                    options: vec![],
+                                },
+                                location: None,
+                                add_if_not_exists: false,
+                            },
+                            AddColumn {
+                                column_def: ColumnDef {
+                                    name: Ident::new("c"),
+                                    data_type: DataType::Int(None),
+                                    collation: None,
+                                    options: vec![],
+                                },
+                                location: None,
+                                add_if_not_exists: true,
+                            },
+                        ];
+                        for (idx, add_column) in add_columns.into_iter().enumerate() {
+                            assert_eq!(add_column, expected[idx]);
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
     fn test_parse_alter_drop_column() {
         let sql = "ALTER TABLE my_metric_1 DROP a";
         let result =

@@ -886,6 +886,10 @@ impl StatementExecutor {
     }
 
     /// Verifies an alter and returns whether it is necessary to perform the alter.
+    ///
+    /// # Returns
+    ///
+    /// Returns true if the alter need to be porformed; otherwise, it returns false.
     fn verify_alter(
         &self,
         table_id: TableId,
@@ -911,12 +915,12 @@ impl StatementExecutor {
         } else if let AlterKind::AddColumns { columns } = alter_kind {
             // If all the columns are marked as add_if_not_exists and they already exist in the table,
             // there is no need to perform the alter.
-            let column_names: HashSet<String> = table_info
+            let column_names: HashSet<_> = table_info
                 .meta
                 .schema
                 .column_schemas()
                 .iter()
-                .map(|schema| schema.name.clone())
+                .map(|schema| &schema.name)
                 .collect();
             if columns.iter().all(|column| {
                 column_names.contains(&column.column_schema.name) && column.add_if_not_exists
