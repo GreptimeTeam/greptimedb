@@ -276,86 +276,105 @@ fn transform_ndjson_array_factory(
 }
 
 /// Dryrun pipeline with given data
-fn dryrun_pipeline_inner(
+async fn dryrun_pipeline_inner(
     value: Vec<Value>,
-    pipeline: &pipeline::Pipeline<GreptimeTransformer>,
+    pipeline: Arc<pipeline::Pipeline<GreptimeTransformer>>,
+    pipeline_handler: PipelineHandlerRef,
+    query_ctx: &QueryContextRef,
 ) -> Result<Response> {
-    let mut intermediate_state = pipeline.init_intermediate_state();
+    let db = query_ctx.get_db_string();
 
-    let mut results = Vec::with_capacity(value.len());
-    for v in value {
-        pipeline
-            .prepare(v, &mut intermediate_state)
-            .context(PipelineTransformSnafu)
-            .context(PipelineSnafu)?;
-        let r = pipeline
-            .exec_mut(&mut intermediate_state)
-            .context(PipelineTransformSnafu)
-            .context(PipelineSnafu)?;
-        results.push(r);
-        pipeline.reset_intermediate_state(&mut intermediate_state);
-    }
+    let results = run_pipeline(
+        &pipeline_handler,
+        PipelineDefinition::Resolved(pipeline),
+        PipelineExecInput::Original(value),
+        "dry_run".to_owned(),
+        query_ctx,
+        db.as_ref(),
+        true,
+    )
+    .await?;
 
     let colume_type_key = "colume_type";
     let data_type_key = "data_type";
     let name_key = "name";
 
-    let schema = pipeline
-        .schemas()
-        .iter()
-        .map(|cs| {
-            let mut map = Map::new();
-            map.insert(name_key.to_string(), Value::String(cs.column_name.clone()));
-            map.insert(
-                data_type_key.to_string(),
-                Value::String(cs.datatype().as_str_name().to_string()),
-            );
-            map.insert(
-                colume_type_key.to_string(),
-                Value::String(cs.semantic_type().as_str_name().to_string()),
-            );
-            map.insert(
-                "fulltext".to_string(),
-                Value::Bool(
-                    cs.options
-                        .clone()
-                        .is_some_and(|x| x.options.contains_key("fulltext")),
-                ),
-            );
-            Value::Object(map)
-        })
-        .collect::<Vec<_>>();
-    let rows = results
+    let results = results
         .into_iter()
-        .map(|row| {
-            let row = row
-                .values
-                .into_iter()
-                .enumerate()
-                .map(|(idx, v)| {
-                    v.value_data
-                        .map(|d| {
-                            let mut map = Map::new();
-                            map.insert("value".to_string(), column_data_to_json(d));
-                            map.insert("key".to_string(), schema[idx][name_key].clone());
-                            map.insert(
-                                "semantic_type".to_string(),
-                                schema[idx][colume_type_key].clone(),
-                            );
-                            map.insert("data_type".to_string(), schema[idx][data_type_key].clone());
-                            Value::Object(map)
-                        })
-                        .unwrap_or(Value::Null)
-                })
-                .collect();
-            Value::Array(row)
+        .filter_map(|row| {
+            if let Some(rows) = row.rows {
+                let table_name = row.table_name;
+                let schema = rows.schema;
+
+                let schema = schema
+                    .iter()
+                    .map(|cs| {
+                        let mut map = Map::new();
+                        map.insert(name_key.to_string(), Value::String(cs.column_name.clone()));
+                        map.insert(
+                            data_type_key.to_string(),
+                            Value::String(cs.datatype().as_str_name().to_string()),
+                        );
+                        map.insert(
+                            colume_type_key.to_string(),
+                            Value::String(cs.semantic_type().as_str_name().to_string()),
+                        );
+                        map.insert(
+                            "fulltext".to_string(),
+                            Value::Bool(
+                                cs.options
+                                    .clone()
+                                    .is_some_and(|x| x.options.contains_key("fulltext")),
+                            ),
+                        );
+                        Value::Object(map)
+                    })
+                    .collect::<Vec<_>>();
+
+                let rows = rows
+                    .rows
+                    .into_iter()
+                    .map(|row| {
+                        row.values
+                            .into_iter()
+                            .enumerate()
+                            .map(|(idx, v)| {
+                                v.value_data
+                                    .map(|d| {
+                                        let mut map = Map::new();
+                                        map.insert("value".to_string(), column_data_to_json(d));
+                                        map.insert(
+                                            "key".to_string(),
+                                            schema[idx][name_key].clone(),
+                                        );
+                                        map.insert(
+                                            "semantic_type".to_string(),
+                                            schema[idx][colume_type_key].clone(),
+                                        );
+                                        map.insert(
+                                            "data_type".to_string(),
+                                            schema[idx][data_type_key].clone(),
+                                        );
+                                        Value::Object(map)
+                                    })
+                                    .unwrap_or(Value::Null)
+                            })
+                            .collect()
+                    })
+                    .collect();
+
+                let mut result = Map::new();
+                result.insert("schema".to_string(), Value::Array(schema));
+                result.insert("rows".to_string(), Value::Array(rows));
+                result.insert("table_name".to_string(), Value::String(table_name));
+                let result = Value::Object(result);
+                Some(result)
+            } else {
+                None
+            }
         })
-        .collect::<Vec<_>>();
-    let mut result = Map::new();
-    result.insert("schema".to_string(), Value::Array(schema));
-    result.insert("rows".to_string(), Value::Array(rows));
-    let result = Value::Object(result);
-    Ok(Json(result).into_response())
+        .collect();
+    Ok(Json(Value::Array(results)).into_response())
 }
 
 /// Dryrun pipeline with given data
@@ -421,6 +440,9 @@ pub async fn pipeline_dryrun(
 ) -> Result<Response> {
     let handler = log_state.log_handler;
 
+    query_ctx.set_channel(Channel::Http);
+    let query_ctx = Arc::new(query_ctx);
+
     match check_pipeline_dryrun_params_valid(&payload) {
         Some(params) => {
             let data = params.data;
@@ -433,20 +455,29 @@ pub async fn pipeline_dryrun(
                         to_pipeline_version(params.pipeline_version).context(PipelineSnafu)?;
                     let pipeline_name = check_pipeline_name_exists(params.pipeline_name)?;
                     let pipeline = handler
-                        .get_pipeline(&pipeline_name, version, Arc::new(query_ctx))
+                        .get_pipeline(&pipeline_name, version, query_ctx.clone())
                         .await?;
-                    dryrun_pipeline_inner(data, &pipeline)
+                    dryrun_pipeline_inner(data, pipeline, handler, &query_ctx).await
                 }
                 Some(pipeline) => {
                     let pipeline = handler.build_pipeline(&pipeline);
                     match pipeline {
-                        Ok(pipeline) => match dryrun_pipeline_inner(data, &pipeline) {
-                            Ok(response) => Ok(response),
-                            Err(e) => Ok(add_step_info_for_pipeline_dryrun_error(
-                                "Failed to exec pipeline",
-                                e,
-                            )),
-                        },
+                        Ok(pipeline) => {
+                            match dryrun_pipeline_inner(
+                                data,
+                                Arc::new(pipeline),
+                                handler,
+                                &query_ctx,
+                            )
+                            .await
+                            {
+                                Ok(response) => Ok(response),
+                                Err(e) => Ok(add_step_info_for_pipeline_dryrun_error(
+                                    "Failed to exec pipeline",
+                                    e,
+                                )),
+                            }
+                        }
                         Err(e) => Ok(add_step_info_for_pipeline_dryrun_error(
                             "Failed to build pipeline",
                             e,
@@ -470,14 +501,11 @@ pub async fn pipeline_dryrun(
 
             check_data_valid(value.len())?;
 
-            query_ctx.set_channel(Channel::Http);
-            let query_ctx = Arc::new(query_ctx);
-
             let pipeline = handler
                 .get_pipeline(&pipeline_name, version, query_ctx.clone())
                 .await?;
 
-            dryrun_pipeline_inner(value, &pipeline)
+            dryrun_pipeline_inner(value, pipeline, handler, &query_ctx).await
         }
     }
 }
@@ -593,17 +621,54 @@ fn pipeline_exec_with_intermediate_state(
     Ok(())
 }
 
-async fn run_pipeline(
+/// Enum for holding information of a pipeline, which is either pipeline itself,
+/// or information that be used to retrieve a pipeline from `PipelineHandler`
+enum PipelineDefinition<'a> {
+    Resolved(Arc<Pipeline<GreptimeTransformer>>),
+    ByNameAndValue((&'a str, PipelineVersion)),
+    GreptimeIdentityPipeline,
+}
+
+impl<'a> PipelineDefinition<'a> {
+    pub fn from_name(name: &'a str, version: PipelineVersion) -> Self {
+        if name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME {
+            Self::GreptimeIdentityPipeline
+        } else {
+            Self::ByNameAndValue((name, version))
+        }
+    }
+
+    /// Never call this on `GreptimeIdentityPipeline` because it's a real pipeline
+    pub async fn get_pipeline(
+        self,
+        handler: &PipelineHandlerRef,
+        query_ctx: &QueryContextRef,
+    ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
+        match self {
+            Self::Resolved(pipeline) => Ok(pipeline),
+            Self::ByNameAndValue((name, version)) => {
+                handler.get_pipeline(name, version, query_ctx.clone()).await
+            }
+            _ => {
+                unreachable!("Never call get_pipeline on identity.")
+            }
+        }
+    }
+}
+
+async fn run_pipeline<'a>(
     state: &PipelineHandlerRef,
-    pipeline_name: &str,
-    version: PipelineVersion,
+    pipeline_definition: PipelineDefinition<'a>,
     values: PipelineExecInput,
     table_name: String,
     query_ctx: &QueryContextRef,
     db: &str,
     is_top_level: bool,
 ) -> Result<Vec<RowInsertRequest>> {
-    if pipeline_name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME {
+    if matches!(
+        pipeline_definition,
+        PipelineDefinition::GreptimeIdentityPipeline
+    ) {
         let table = state
             .get_table(&table_name, &query_ctx)
             .await
@@ -618,9 +683,7 @@ async fn run_pipeline(
             .context(PipelineTransformSnafu)
             .context(PipelineSnafu)
     } else {
-        let pipeline = state
-            .get_pipeline(&pipeline_name, version, query_ctx.clone())
-            .await?;
+        let pipeline = pipeline_definition.get_pipeline(state, query_ctx).await?;
 
         let transform_timer = std::time::Instant::now();
         let mut intermediate_state = pipeline.init_intermediate_state();
@@ -701,8 +764,7 @@ async fn run_pipeline(
             // `Vec<Vec<pipeline::Value>>`.
             let requests = Box::pin(run_pipeline(
                 state,
-                next_pipeline_name,
-                None,
+                PipelineDefinition::from_name(next_pipeline_name, None),
                 PipelineExecInput::Intermediate {
                     array: values,
                     // FIXME(sunng87): this intermediate_keys is incorrect. what
@@ -744,8 +806,7 @@ pub(crate) async fn ingest_logs_inner(
     for request in log_ingest_requests {
         let requests = run_pipeline(
             &state,
-            &pipeline_name,
-            version,
+            PipelineDefinition::from_name(&pipeline_name, version),
             PipelineExecInput::Original(request.values),
             request.table,
             &query_ctx,
