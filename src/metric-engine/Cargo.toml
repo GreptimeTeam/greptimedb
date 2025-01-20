@@ -27,6 +27,7 @@ mito2.workspace = true
 mur3 = "0.1"
 object-store.workspace = true
 prometheus.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
 store-api.workspace = true
