@@ -70,7 +70,7 @@ impl<'a> MetadataKey<'a, TopicRegionKey<'a>> for TopicRegionKey<'a> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
             InvalidMetadataSnafu {
                 err_msg: format!(
-                    "RegionTopicMapKey '{}' is not a valid UTF8 string: {e}",
+                    "TopicRegionKey '{}' is not a valid UTF8 string: {e}",
                     String::from_utf8_lossy(bytes)
                 ),
             }
@@ -100,12 +100,12 @@ impl<'a> TryFrom<&'a str> for TopicRegionKey<'a> {
         let captures = TOPIC_REGION_PATTERN
             .captures(value)
             .context(InvalidMetadataSnafu {
-                err_msg: format!("Invalid region topic map key: {}", value),
+                err_msg: format!("Invalid TopicRegionKey: {}", value),
             })?;
         let topic = captures.get(1).map(|m| m.as_str()).unwrap();
         let region_id = captures[2].parse::<u64>().map_err(|_| {
             InvalidMetadataSnafu {
-                err_msg: format!("Invalid region id in region topic map key: {}", value),
+                err_msg: format!("Invalid region id in TopicRegionKey: {}", value),
             }
             .build()
         })?;
