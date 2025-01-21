@@ -26,7 +26,8 @@ use common_wal::options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
 use snafu::ResultExt;
 use store_api::storage::{RegionId, RegionNumber};
 
-use crate::error::{EncodeWalOptionsSnafu, Result};
+use crate::error::{EncodeWalOptionsSnafu, InvalidTopicNamePrefixSnafu, Result};
+use crate::key::NAME_PATTERN_REGEX;
 use crate::kv_backend::KvBackendRef;
 use crate::leadership_notifier::LeadershipChangeListener;
 use crate::wal_options_allocator::topic_creator::build_kafka_topic_creator;
@@ -113,6 +114,12 @@ pub async fn build_wal_options_allocator(
     match config {
         MetasrvWalConfig::RaftEngine => Ok(WalOptionsAllocator::RaftEngine),
         MetasrvWalConfig::Kafka(kafka_config) => {
+            if !NAME_PATTERN_REGEX.is_match(&kafka_config.kafka_topic.topic_name_prefix) {
+                return InvalidTopicNamePrefixSnafu {
+                    prefix: kafka_config.kafka_topic.topic_name_prefix.clone(),
+                }
+                .fail();
+            }
             let topic_creator = build_kafka_topic_creator(kafka_config).await?;
             let topic_pool = KafkaTopicPool::new(kafka_config, kv_backend, topic_creator);
             Ok(WalOptionsAllocator::Kafka(topic_pool))
@@ -176,6 +183,20 @@ mod tests {
             .zip(vec![encoded_wal_options; num_regions as usize])
             .collect();
         assert_eq!(got, expected);
+    }
+
+    #[tokio::test]
+    async fn test_refuse_invalid_topic_name_prefix() {
+        let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
+        let wal_config = MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
+            kafka_topic: KafkaTopicConfig {
+                topic_name_prefix: "``````".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let got = build_wal_options_allocator(&wal_config, kv_backend).await;
+        assert!(got.is_err());
     }
 
     // Tests that the wal options allocator could successfully allocate Kafka wal options.

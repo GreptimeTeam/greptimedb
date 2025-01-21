@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::fmt::{self, Display};
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -22,7 +21,6 @@ use crate::error::{DecodeJsonSnafu, Error, InvalidMetadataSnafu, Result};
 use crate::key::{
     MetadataKey, KAFKA_TOPIC_KEY_PATTERN, KAFKA_TOPIC_KEY_PREFIX, LEGACY_TOPIC_KEY_PREFIX,
 };
-use crate::kv_backend::memory::MemoryKvBackend;
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::{BatchPutRequest, RangeRequest};
@@ -100,12 +98,6 @@ fn topic_decoder(kv: &KeyValue) -> Result<String> {
 
 pub struct TopicNameManager {
     kv_backend: KvBackendRef,
-}
-
-impl Default for TopicNameManager {
-    fn default() -> Self {
-        Self::new(Arc::new(MemoryKvBackend::default()))
-    }
 }
 
 impl TopicNameManager {

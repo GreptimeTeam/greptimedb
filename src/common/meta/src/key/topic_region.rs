@@ -27,44 +27,46 @@
 // limitations under the License.
 
 use std::fmt::{self, Display};
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use store_api::storage::RegionId;
 
 use crate::error::{Error, InvalidMetadataSnafu, Result};
-use crate::key::{MetadataKey, TOPIC_REGION_MAP_PATTERN, TOPIC_REGION_MAP_PREFIX};
-use crate::kv_backend::memory::MemoryKvBackend;
+use crate::key::{MetadataKey, TOPIC_REGION_MAP_PATTERN, TOPIC_REGION_PREFIX};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::{BatchPutRequest, PutRequest, RangeRequest};
 use crate::rpc::KeyValue;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct TopicRegionMapKey<'a> {
+pub struct TopicRegionKey<'a> {
     pub region_id: RegionId,
     pub topic: &'a str,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct TopicRegionMapValue;
+pub struct TopicRegionValue;
 
-impl<'a> TopicRegionMapKey<'a> {
+impl<'a> TopicRegionKey<'a> {
     pub fn new(region_id: RegionId, topic: &'a str) -> Self {
         Self { region_id, topic }
     }
 
     pub fn range_start_key() -> String {
-        TOPIC_REGION_MAP_PREFIX.to_string()
+        TOPIC_REGION_PREFIX.to_string()
+    }
+
+    pub fn range_topic_key(topic: &str) -> String {
+        format!("{}/{}", TOPIC_REGION_PREFIX, topic)
     }
 }
 
-impl<'a> MetadataKey<'a, TopicRegionMapKey<'a>> for TopicRegionMapKey<'a> {
+impl<'a> MetadataKey<'a, TopicRegionKey<'a>> for TopicRegionKey<'a> {
     fn to_bytes(&self) -> Vec<u8> {
         self.to_string().into_bytes()
     }
 
-    fn from_bytes(bytes: &'a [u8]) -> Result<TopicRegionMapKey<'a>> {
+    fn from_bytes(bytes: &'a [u8]) -> Result<TopicRegionKey<'a>> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
             InvalidMetadataSnafu {
                 err_msg: format!(
@@ -74,27 +76,27 @@ impl<'a> MetadataKey<'a, TopicRegionMapKey<'a>> for TopicRegionMapKey<'a> {
             }
             .build()
         })?;
-        TopicRegionMapKey::try_from(key)
+        TopicRegionKey::try_from(key)
     }
 }
 
-impl Display for TopicRegionMapKey<'_> {
+impl Display for TopicRegionKey<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "{}/{}/{}",
-            TOPIC_REGION_MAP_PREFIX,
+            TOPIC_REGION_PREFIX,
             self.topic,
             self.region_id.as_u64()
         )
     }
 }
 
-impl<'a> TryFrom<&'a str> for TopicRegionMapKey<'a> {
+impl<'a> TryFrom<&'a str> for TopicRegionKey<'a> {
     type Error = Error;
 
     /// Value is of format `{prefix}/{topic}_{region_id}`
-    fn try_from(value: &'a str) -> Result<TopicRegionMapKey<'a>> {
+    fn try_from(value: &'a str) -> Result<TopicRegionKey<'a>> {
         let captures = TOPIC_REGION_MAP_PATTERN
             .captures(value)
             .context(InvalidMetadataSnafu {
@@ -112,35 +114,29 @@ impl<'a> TryFrom<&'a str> for TopicRegionMapKey<'a> {
             }
             .build()
         })?;
-        Ok(TopicRegionMapKey {
+        Ok(TopicRegionKey {
             region_id: RegionId::from_u64(region_id),
             topic,
         })
     }
 }
 
-fn topic_region_map_decoder(value: &KeyValue) -> Result<TopicRegionMapKey<'_>> {
-    let key = TopicRegionMapKey::from_bytes(&value.key)?;
+fn topic_region_decoder(value: &KeyValue) -> Result<TopicRegionKey<'_>> {
+    let key = TopicRegionKey::from_bytes(&value.key)?;
     Ok(key)
 }
 
 /// Manages map of topics and regions in kvbackend.
-pub struct TopicRegionMapManager {
+pub struct TopicRegionManager {
     kv_backend: KvBackendRef,
 }
 
-impl Default for TopicRegionMapManager {
-    fn default() -> Self {
-        Self::new(Arc::new(MemoryKvBackend::default()))
-    }
-}
-
-impl TopicRegionMapManager {
+impl TopicRegionManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
     }
 
-    pub async fn put(&self, key: TopicRegionMapKey<'_>) -> Result<()> {
+    pub async fn put(&self, key: TopicRegionKey<'_>) -> Result<()> {
         let put_req = PutRequest {
             key: key.to_bytes(),
             value: vec![],
@@ -150,7 +146,7 @@ impl TopicRegionMapManager {
         Ok(())
     }
 
-    pub async fn batch_put(&self, keys: Vec<TopicRegionMapKey<'_>>) -> Result<()> {
+    pub async fn batch_put(&self, keys: Vec<TopicRegionKey<'_>>) -> Result<()> {
         let req = BatchPutRequest {
             kvs: keys
                 .into_iter()
@@ -165,21 +161,20 @@ impl TopicRegionMapManager {
         Ok(())
     }
 
-    /// Returns all topic-region mappings to avoid parsing again.
-    pub async fn range(&self) -> Result<Vec<(RegionId, String)>> {
-        let prefix = TopicRegionMapKey::range_start_key();
-        let range_req = RangeRequest::new().with_prefix(prefix.as_bytes());
-        let resp = self.kv_backend.range(range_req).await?;
-        resp.kvs
+    /// Returns the list of region ids using specified topic.
+    pub async fn range(&self, topic: &str) -> Result<Vec<RegionId>> {
+        let prefix = TopicRegionKey::range_topic_key(topic);
+        let req = RangeRequest::new().with_prefix(prefix.as_bytes());
+        let resp = self.kv_backend.range(req).await?;
+        let region_ids = resp
+            .kvs
             .iter()
-            .map(|kv| {
-                let key = topic_region_map_decoder(kv)?;
-                Ok((key.region_id, key.topic.to_string()))
-            })
-            .collect::<Result<Vec<_>>>()
+            .map(topic_region_decoder)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(region_ids.iter().map(|key| key.region_id).collect())
     }
 
-    pub async fn delete(&self, key: TopicRegionMapKey<'_>) -> Result<()> {
+    pub async fn delete(&self, key: TopicRegionKey<'_>) -> Result<()> {
         let raw_key = key.to_bytes();
         self.kv_backend.delete(&raw_key, false).await?;
         Ok(())
@@ -194,38 +189,45 @@ mod tests {
     use crate::kv_backend::memory::MemoryKvBackend;
 
     #[tokio::test]
-    async fn test_topic_region_map_manager() {
+    async fn test_topic_region_manager() {
         let kv_backend = Arc::new(MemoryKvBackend::default());
-        let manager = TopicRegionMapManager::new(kv_backend.clone());
+        let manager = TopicRegionManager::new(kv_backend.clone());
 
         let topics = (0..16).map(|i| format!("topic_{}", i)).collect::<Vec<_>>();
         let keys = (0..64)
-            .map(|i| TopicRegionMapKey::new(RegionId::from_u64(i), &topics[(i % 16) as usize]))
+            .map(|i| TopicRegionKey::new(RegionId::from_u64(i), &topics[(i % 16) as usize]))
             .collect::<Vec<_>>();
 
         manager.batch_put(keys.clone()).await.unwrap();
 
-        let sort_kvs = |kvs: &mut [(RegionId, String)]| {
-            kvs.sort_by(|a, b| a.0.as_u64().cmp(&b.0.as_u64()).then(a.1.cmp(&b.1)));
-        };
-
-        let mut key_values = manager.range().await.unwrap();
+        let mut key_values = manager.range(&topics[0]).await.unwrap();
         let expected = keys
             .iter()
-            .map(|key| (key.region_id, key.topic.to_string()))
+            .filter_map(|key| {
+                if key.topic == topics[0] {
+                    Some(key.region_id)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-        sort_kvs(&mut key_values);
+        key_values.sort_by_key(|id| id.as_u64());
         assert_eq!(key_values, expected);
 
-        let key = TopicRegionMapKey::new(RegionId::from_u64(0), "topic_0");
+        let key = TopicRegionKey::new(RegionId::from_u64(0), "topic_0");
         manager.delete(key.clone()).await.unwrap();
-        let mut key_values = manager.range().await.unwrap();
+        let mut key_values = manager.range(&topics[0]).await.unwrap();
         let expected = keys
             .iter()
-            .filter(|k| k != &&key)
-            .map(|key| (key.region_id, key.topic.to_string()))
+            .filter_map(|key| {
+                if key.topic == topics[0] && key.region_id != RegionId::from_u64(0) {
+                    Some(key.region_id)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-        sort_kvs(&mut key_values);
+        key_values.sort_by_key(|id| id.as_u64());
         assert_eq!(key_values, expected);
     }
 }
