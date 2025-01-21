@@ -179,6 +179,7 @@ struct IterIndex {
 impl IterIndex {
     fn new(row_schema: &[ColumnSchema], name_to_column_id: &HashMap<String, ColumnId>) -> Self {
         let mut reserved_indices = SmallVec::<[ValueIndex; 2]>::new();
+        // Uses BTreeMap to keep the primary key column name order (lexicographical)
         let mut primary_key_indices = BTreeMap::new();
         let mut field_indices = SmallVec::<[ValueIndex; 1]>::new();
         let mut ts_index = None;
@@ -198,6 +199,7 @@ impl IterIndex {
                         });
                     }
                     _ => {
+                        // Inserts primary key column name follower the column name order (lexicographical)
                         primary_key_indices.insert(
                             col.column_name.as_str(),
                             ValueIndex {
