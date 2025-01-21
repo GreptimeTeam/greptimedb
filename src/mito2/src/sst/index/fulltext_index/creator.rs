@@ -32,7 +32,7 @@ use crate::error::{
 };
 use crate::read::Batch;
 use crate::sst::file::FileId;
-use crate::sst::index::fulltext_index::{INDEX_BLOB_TYPE_V1, INDEX_BLOB_TYPE_V2};
+use crate::sst::index::fulltext_index::{INDEX_BLOB_TYPE_BLOOM, INDEX_BLOB_TYPE_TANTIVY};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
@@ -299,14 +299,14 @@ impl AltFulltextCreator {
     ) -> Result<ByteCount> {
         match self {
             Self::Tantivy(creator) => {
-                let key = format!("{INDEX_BLOB_TYPE_V1}-{}", column_id);
+                let key = format!("{INDEX_BLOB_TYPE_TANTIVY}-{}", column_id);
                 creator
                     .finish(puffin_writer, &key, put_options)
                     .await
                     .context(FulltextFinishSnafu)
             }
             Self::Bloom(creator) => {
-                let key = format!("{INDEX_BLOB_TYPE_V2}-{}", column_id);
+                let key = format!("{INDEX_BLOB_TYPE_BLOOM}-{}", column_id);
                 creator
                     .finish(puffin_writer, &key, put_options)
                     .await

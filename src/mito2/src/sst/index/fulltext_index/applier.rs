@@ -24,7 +24,7 @@ use store_api::storage::ColumnId;
 use crate::error::{ApplyFulltextIndexSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result};
 use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::sst::file::FileId;
-use crate::sst::index::fulltext_index::INDEX_BLOB_TYPE_V1;
+use crate::sst::index::fulltext_index::INDEX_BLOB_TYPE_TANTIVY;
 use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinDir};
 use crate::sst::index::TYPE_FULLTEXT_INDEX;
 use crate::sst::location;
@@ -118,7 +118,7 @@ impl FulltextIndexApplier {
             .reader(&file_path)
             .await
             .context(PuffinBuildReaderSnafu)?
-            .dir(&format!("{INDEX_BLOB_TYPE_V1}-{column_id}"))
+            .dir(&format!("{INDEX_BLOB_TYPE_TANTIVY}-{column_id}"))
             .await
         {
             Ok(dir) => Ok(Some(dir)),
