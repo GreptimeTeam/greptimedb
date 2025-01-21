@@ -86,6 +86,7 @@ mod extractor;
 pub mod handler;
 pub mod header;
 pub mod influxdb;
+pub mod jaeger;
 pub mod logs;
 pub mod loki;
 pub mod mem_prof;
@@ -652,6 +653,16 @@ impl HttpServerBuilder {
         }
     }
 
+    pub fn with_jaeger_handler(self, sql_handler: ServerSqlQueryHandlerRef) -> Self {
+        Self {
+            router: self.router.nest(
+                &format!("/{HTTP_API_VERSION}/jaeger"),
+                HttpServer::route_jaeger(ApiState { sql_handler }),
+            ),
+            ..self
+        }
+    }
+
     pub fn with_extra_router(self, router: Router) -> Self {
         Self {
             router: self.router.merge(router),
@@ -1052,6 +1063,25 @@ impl HttpServer {
     fn route_config<S>(state: GreptimeOptionsConfigState) -> Router<S> {
         Router::new()
             .route("/config", routing::get(handler::config))
+            .with_state(state)
+    }
+
+    fn route_jaeger<S>(state: ApiState) -> Router<S> {
+        Router::new()
+            .route("/api/services", routing::get(jaeger::handle_get_services))
+            .route(
+                "/api/services/{service_name}/operations",
+                routing::get(jaeger::handle_get_operations_by_service),
+            )
+            .route(
+                "/api/operations",
+                routing::get(jaeger::handle_get_operations),
+            )
+            .route("/api/traces", routing::get(jaeger::handle_get_traces))
+            .route(
+                "/api/traces/{trace_id}",
+                routing::get(jaeger::handle_get_trace_by_id),
+            )
             .with_state(state)
     }
 }
