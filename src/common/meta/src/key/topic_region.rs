@@ -52,10 +52,6 @@ impl<'a> TopicRegionKey<'a> {
         Self { region_id, topic }
     }
 
-    pub fn range_start_key() -> String {
-        TOPIC_REGION_PREFIX.to_string()
-    }
-
     pub fn range_topic_key(topic: &str) -> String {
         format!("{}/{}", TOPIC_REGION_PREFIX, topic)
     }
@@ -84,9 +80,8 @@ impl Display for TopicRegionKey<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}/{}/{}",
-            TOPIC_REGION_PREFIX,
-            self.topic,
+            "{}/{}",
+            Self::range_topic_key(self.topic),
             self.region_id.as_u64()
         )
     }

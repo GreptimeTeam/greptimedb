@@ -23,7 +23,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_wal::config::MetasrvWalConfig;
 use common_wal::options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 
 use crate::error::{EncodeWalOptionsSnafu, InvalidTopicNamePrefixSnafu, Result};
@@ -114,12 +114,11 @@ pub async fn build_wal_options_allocator(
     match config {
         MetasrvWalConfig::RaftEngine => Ok(WalOptionsAllocator::RaftEngine),
         MetasrvWalConfig::Kafka(kafka_config) => {
-            if !NAME_PATTERN_REGEX.is_match(&kafka_config.kafka_topic.topic_name_prefix) {
-                return InvalidTopicNamePrefixSnafu {
-                    prefix: kafka_config.kafka_topic.topic_name_prefix.clone(),
-                }
-                .fail();
-            }
+            let prefix = &kafka_config.kafka_topic.topic_name_prefix;
+            ensure!(
+                NAME_PATTERN_REGEX.is_match(prefix),
+                InvalidTopicNamePrefixSnafu { prefix }
+            );
             let topic_creator = build_kafka_topic_creator(kafka_config).await?;
             let topic_pool = KafkaTopicPool::new(kafka_config, kv_backend, topic_creator);
             Ok(WalOptionsAllocator::Kafka(topic_pool))
