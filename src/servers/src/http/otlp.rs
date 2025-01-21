@@ -30,7 +30,7 @@ use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
 use pipeline::util::to_pipeline_version;
-use pipeline::PipelineWay;
+use pipeline::{PipelineDefinition, PipelineWay};
 use prost::Message;
 use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
@@ -39,7 +39,7 @@ use super::header::{write_cost_header_map, CONTENT_TYPE_PROTOBUF};
 use crate::error::{self, PipelineSnafu, Result};
 use crate::http::extractor::{LogTableName, PipelineInfo, SelectInfoWrapper, TraceTableName};
 use crate::otlp::trace::TRACE_TABLE_NAME;
-use crate::query_handler::OpenTelemetryProtocolHandlerRef;
+use crate::query_handler::{OpenTelemetryProtocolHandlerRef, PipelineHandler};
 
 #[axum_macros::debug_handler]
 #[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "metrics"))]
@@ -117,25 +117,20 @@ pub async fn logs(
         .start_timer();
     let request = ExportLogsServiceRequest::decode(bytes).context(error::DecodeOtlpRequestSnafu)?;
 
-    let pipeline_way = if let Some(pipeline_name) = &pipeline_info.pipeline_name {
-        let pipeline_version =
-            to_pipeline_version(pipeline_info.pipeline_version).context(PipelineSnafu)?;
-        let pipeline = match handler
-            .get_pipeline(pipeline_name, pipeline_version, query_ctx.clone())
-            .await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                return Err(e);
-            }
-        };
-        PipelineWay::Custom(pipeline)
+    let pipeline = if let Some(pipeline_name) = pipeline_info.pipeline_name {
+        PipelineWay::Pipeline(PipelineDefinition::from_name(
+            &pipeline_name,
+            to_pipeline_version(pipeline_info.pipeline_version).context(PipelineSnafu)?,
+        ))
     } else {
-        PipelineWay::OtlpLog(Box::new(select_info))
+        PipelineWay::OtlpLogDirect(Box::new(select_info))
     };
 
+    // here we use nightly feature `trait_upcasting` to convert handler to
+    // pipeline_handler
+    let pipeline_handler: Arc<dyn PipelineHandler + Send + Sync> = handler.clone();
     handler
-        .logs(request, pipeline_way, tablename, query_ctx)
+        .logs(pipeline_handler, request, pipeline, tablename, query_ctx)
         .await
         .map(|o| OtlpResponse {
             resp_body: ExportLogsServiceResponse {

@@ -17,6 +17,7 @@
 #![feature(exclusive_wrapper)]
 #![feature(let_chains)]
 #![feature(if_let_guard)]
+#![feature(trait_upcasting)]
 
 use datafusion_expr::LogicalPlan;
 use datatypes::schema::Schema;

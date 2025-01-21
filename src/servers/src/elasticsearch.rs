@@ -23,6 +23,7 @@ use axum::{Extension, TypedHeader};
 use common_error::ext::ErrorExt;
 use common_telemetry::{debug, error};
 use once_cell::sync::Lazy;
+use pipeline::GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME;
 use serde_json::{json, Deserializer, Value};
 use session::context::{Channel, QueryContext};
 use snafu::{ensure, ResultExt};
@@ -35,7 +36,6 @@ use crate::http::event::{ingest_logs_inner, LogIngestRequest, LogIngesterQueryPa
 use crate::metrics::{
     METRIC_ELASTICSEARCH_LOGS_DOCS_COUNT, METRIC_ELASTICSEARCH_LOGS_INGESTION_ELAPSED,
 };
-use crate::pipeline::GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME;
 
 // The headers for every response of Elasticsearch API.
 static ELASTICSEARCH_HEADERS: Lazy<HeaderMap> = Lazy::new(|| {

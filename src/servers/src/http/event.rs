@@ -31,7 +31,7 @@ use common_telemetry::{error, warn};
 use datatypes::value::column_data_to_json;
 use lazy_static::lazy_static;
 use pipeline::util::to_pipeline_version;
-use pipeline::{GreptimeTransformer, PipelineExecInput, PipelineVersion};
+use pipeline::{GreptimeTransformer, PipelineDefinition, PipelineExecInput, PipelineVersion};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Map, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -50,7 +50,7 @@ use crate::metrics::{
     METRIC_FAILURE_VALUE, METRIC_HTTP_LOGS_INGESTION_COUNTER, METRIC_HTTP_LOGS_INGESTION_ELAPSED,
     METRIC_SUCCESS_VALUE,
 };
-use crate::pipeline::{run_pipeline, PipelineDefinition};
+use crate::pipeline::run_pipeline;
 use crate::query_handler::PipelineHandlerRef;
 
 const GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX: &str = "greptime_";

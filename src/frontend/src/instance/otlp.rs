@@ -24,7 +24,7 @@ use pipeline::PipelineWay;
 use servers::error::{self, AuthSnafu, InFlightWriteBytesExceededSnafu, Result as ServerResult};
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
-use servers::query_handler::OpenTelemetryProtocolHandler;
+use servers::query_handler::{OpenTelemetryProtocolHandler, PipelineHandlerRef};
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
@@ -112,6 +112,7 @@ impl OpenTelemetryProtocolHandler for Instance {
     #[tracing::instrument(skip_all)]
     async fn logs(
         &self,
+        pipeline_handler: PipelineHandlerRef,
         request: ExportLogsServiceRequest,
         pipeline: PipelineWay,
         table_name: String,
@@ -128,7 +129,14 @@ impl OpenTelemetryProtocolHandler for Instance {
             .get::<OpenTelemetryProtocolInterceptorRef<servers::error::Error>>();
         interceptor_ref.pre_execute(ctx.clone())?;
 
-        let (requests, rows) = otlp::logs::to_grpc_insert_requests(request, pipeline, table_name)?;
+        let (requests, rows) = otlp::logs::to_grpc_insert_requests(
+            request,
+            pipeline,
+            table_name,
+            &ctx,
+            &pipeline_handler,
+        )
+        .await?;
 
         let _guard = if let Some(limiter) = &self.limiter {
             let result = limiter.limit_row_inserts(&requests);

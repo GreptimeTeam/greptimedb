@@ -110,6 +110,7 @@ pub trait OpenTelemetryProtocolHandler: PipelineHandler {
 
     async fn logs(
         &self,
+        pipeline_handler: PipelineHandlerRef,
         request: ExportLogsServiceRequest,
         pipeline: PipelineWay,
         table_name: String,

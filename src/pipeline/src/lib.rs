@@ -24,8 +24,8 @@ pub use etl::transform::transformer::identity_pipeline;
 pub use etl::transform::{GreptimeTransformer, Transformer};
 pub use etl::value::{Array, Map, Value};
 pub use etl::{
-    error as etl_error, parse, Content, DispatchedTo, Pipeline, PipelineExecOutput, PipelineWay,
-    SelectInfo,
+    error as etl_error, parse, Content, DispatchedTo, Pipeline, PipelineDefinition,
+    PipelineExecOutput, PipelineWay, SelectInfo, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
 pub use manager::{
     error, pipeline_operator, table, util, PipelineInfo, PipelineRef, PipelineTableRef,

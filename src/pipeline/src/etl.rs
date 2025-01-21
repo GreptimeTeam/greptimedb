@@ -20,6 +20,8 @@ pub mod processor;
 pub mod transform;
 pub mod value;
 
+use std::sync::Arc;
+
 use ahash::HashSet;
 use common_telemetry::debug;
 use error::{IntermediateKeyIndexSnafu, PrepareValueMustBeObjectSnafu, YamlLoadSnafu};
@@ -32,6 +34,7 @@ use yaml_rust::YamlLoader;
 
 use crate::dispatcher::{Dispatcher, Rule};
 use crate::etl::error::Result;
+use crate::{GreptimeTransformer, PipelineVersion};
 
 const DESCRIPTION: &str = "description";
 const PROCESSORS: &str = "processors";
@@ -256,36 +259,36 @@ where
         }
     }
 
-    pub fn prepare_pipeline_value(&self, val: Value, result: &mut [Value]) -> Result<()> {
-        match val {
-            Value::Map(map) => {
-                let mut search_from = 0;
-                // because of the key in the json map is ordered
-                for (payload_key, payload_value) in map.values.into_iter() {
-                    if search_from >= self.required_keys.len() {
-                        break;
-                    }
+    // pub fn prepare_pipeline_value(&self, val: Value, result: &mut [Value]) -> Result<()> {
+    //     match val {
+    //         Value::Map(map) => {
+    //             let mut search_from = 0;
+    //             // because of the key in the json map is ordered
+    //             for (payload_key, payload_value) in map.values.into_iter() {
+    //                 if search_from >= self.required_keys.len() {
+    //                     break;
+    //                 }
 
-                    // because of map key is ordered, required_keys is ordered too
-                    if let Some(pos) = self.required_keys[search_from..]
-                        .iter()
-                        .position(|k| k == &payload_key)
-                    {
-                        result[search_from + pos] = payload_value;
-                        // next search from is always after the current key
-                        search_from += pos;
-                    }
-                }
-            }
-            Value::String(_) => {
-                result[0] = val;
-            }
-            _ => {
-                return PrepareValueMustBeObjectSnafu.fail();
-            }
-        }
-        Ok(())
-    }
+    //                 // because of map key is ordered, required_keys is ordered too
+    //                 if let Some(pos) = self.required_keys[search_from..]
+    //                     .iter()
+    //                     .position(|k| k == &payload_key)
+    //                 {
+    //                     result[search_from + pos] = payload_value;
+    //                     // next search from is always after the current key
+    //                     search_from += pos;
+    //                 }
+    //             }
+    //         }
+    //         Value::String(_) => {
+    //             result[0] = val;
+    //         }
+    //         _ => {
+    //             return PrepareValueMustBeObjectSnafu.fail();
+    //         }
+    //     }
+    //     Ok(())
+    // }
 
     pub fn prepare(&self, val: serde_json::Value, result: &mut [Value]) -> Result<()> {
         match val {
@@ -388,9 +391,29 @@ impl SelectInfo {
     }
 }
 
+pub const GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME: &str = "greptime_identity";
+
+/// Enum for holding information of a pipeline, which is either pipeline itself,
+/// or information that be used to retrieve a pipeline from `PipelineHandler`
+pub enum PipelineDefinition {
+    Resolved(Arc<Pipeline<GreptimeTransformer>>),
+    ByNameAndValue((String, PipelineVersion)),
+    GreptimeIdentityPipeline,
+}
+
+impl PipelineDefinition {
+    pub fn from_name(name: &str, version: PipelineVersion) -> Self {
+        if name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME {
+            Self::GreptimeIdentityPipeline
+        } else {
+            Self::ByNameAndValue((name.to_owned(), version))
+        }
+    }
+}
+
 pub enum PipelineWay {
-    OtlpLog(Box<SelectInfo>),
-    Custom(std::sync::Arc<Pipeline<crate::GreptimeTransformer>>),
+    OtlpLogDirect(Box<SelectInfo>),
+    Pipeline(PipelineDefinition),
 }
 
 #[cfg(test)]

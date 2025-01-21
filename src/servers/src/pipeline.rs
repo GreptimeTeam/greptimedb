@@ -22,8 +22,8 @@ use snafu::ResultExt;
 use api::v1::{Row, RowInsertRequest, Rows};
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::{
-    DispatchedTo, GreptimeTransformer, Pipeline, PipelineExecInput, PipelineExecOutput,
-    PipelineVersion,
+    DispatchedTo, GreptimeTransformer, Pipeline, PipelineDefinition, PipelineExecInput,
+    PipelineExecOutput, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
 
 use crate::error::{CatalogSnafu, PipelineSnafu, Result};
@@ -31,8 +31,6 @@ use crate::metrics::{
     METRIC_FAILURE_VALUE, METRIC_HTTP_LOGS_TRANSFORM_ELAPSED, METRIC_SUCCESS_VALUE,
 };
 use crate::query_handler::PipelineHandlerRef;
-
-pub(crate) const GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME: &str = "greptime_identity";
 
 #[inline]
 pub(crate) fn pipeline_exec_with_intermediate_state(
@@ -72,44 +70,28 @@ pub(crate) fn pipeline_exec_with_intermediate_state(
     Ok(())
 }
 
-/// Enum for holding information of a pipeline, which is either pipeline itself,
-/// or information that be used to retrieve a pipeline from `PipelineHandler`
-pub(crate) enum PipelineDefinition<'a> {
-    Resolved(Arc<Pipeline<GreptimeTransformer>>),
-    ByNameAndValue((&'a str, PipelineVersion)),
-    GreptimeIdentityPipeline,
-}
-
-impl<'a> PipelineDefinition<'a> {
-    pub fn from_name(name: &'a str, version: PipelineVersion) -> Self {
-        if name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME {
-            Self::GreptimeIdentityPipeline
-        } else {
-            Self::ByNameAndValue((name, version))
+/// Never call this on `GreptimeIdentityPipeline` because it's a real pipeline
+pub async fn get_pipeline(
+    pipeline_def: PipelineDefinition,
+    handler: &PipelineHandlerRef,
+    query_ctx: &QueryContextRef,
+) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
+    match pipeline_def {
+        PipelineDefinition::Resolved(pipeline) => Ok(pipeline),
+        PipelineDefinition::ByNameAndValue((name, version)) => {
+            handler
+                .get_pipeline(&name, version, query_ctx.clone())
+                .await
         }
-    }
-
-    /// Never call this on `GreptimeIdentityPipeline` because it's a real pipeline
-    pub async fn get_pipeline(
-        self,
-        handler: &PipelineHandlerRef,
-        query_ctx: &QueryContextRef,
-    ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
-        match self {
-            Self::Resolved(pipeline) => Ok(pipeline),
-            Self::ByNameAndValue((name, version)) => {
-                handler.get_pipeline(name, version, query_ctx.clone()).await
-            }
-            _ => {
-                unreachable!("Never call get_pipeline on identity.")
-            }
+        _ => {
+            unreachable!("Never call get_pipeline on identity.")
         }
     }
 }
 
-pub(crate) async fn run_pipeline<'a>(
+pub(crate) async fn run_pipeline(
     state: &PipelineHandlerRef,
-    pipeline_definition: PipelineDefinition<'a>,
+    pipeline_definition: PipelineDefinition,
     values: PipelineExecInput,
     table_name: String,
     query_ctx: &QueryContextRef,
@@ -121,7 +103,7 @@ pub(crate) async fn run_pipeline<'a>(
         PipelineDefinition::GreptimeIdentityPipeline
     ) {
         let table = state
-            .get_table(&table_name, &query_ctx)
+            .get_table(&table_name, query_ctx)
             .await
             .context(CatalogSnafu)?;
         pipeline::identity_pipeline(values, table)
@@ -134,7 +116,7 @@ pub(crate) async fn run_pipeline<'a>(
             .context(PipelineTransformSnafu)
             .context(PipelineSnafu)
     } else {
-        let pipeline = pipeline_definition.get_pipeline(state, query_ctx).await?;
+        let pipeline = get_pipeline(pipeline_definition, state, query_ctx).await?;
 
         let transform_timer = std::time::Instant::now();
         let mut intermediate_state = pipeline.init_intermediate_state();
