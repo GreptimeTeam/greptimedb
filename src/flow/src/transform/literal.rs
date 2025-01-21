@@ -178,8 +178,8 @@ pub(crate) fn from_substrait_literal(lit: &Literal) -> Result<(Value, CDT), Erro
             )
         }
         Some(LiteralType::Null(ntype)) => (Value::Null, from_substrait_type(ntype)?),
-        Some(LiteralType::IntervalDayToSecond(interval)) => from_interval_day_sec(&interval)?,
-        Some(LiteralType::IntervalYearToMonth(interval)) => from_interval_year_month(&interval)?,
+        Some(LiteralType::IntervalDayToSecond(interval)) => from_interval_day_sec(interval)?,
+        Some(LiteralType::IntervalYearToMonth(interval)) => from_interval_year_month(interval)?,
         Some(LiteralType::IntervalCompound(interval_compound)) => {
             let interval_day_time = &interval_compound
                 .interval_day_to_second

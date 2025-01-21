@@ -158,7 +158,7 @@ mod tests {
     fn create_timestamp_cast_project(unit: TimeUnit, timestamp_str: &str) -> (TimeUnit, Vec<Expr>) {
         let proj = vec![Expr::Cast(Cast::new(
             Box::new(lit(timestamp_str)),
-            DataType::Timestamp(unit.clone(), None),
+            DataType::Timestamp(unit, None),
         ))];
         (unit, proj)
     }

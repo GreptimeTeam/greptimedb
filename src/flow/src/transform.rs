@@ -98,7 +98,7 @@ impl FunctionExtensions {
             functions: self
                 .anchor_to_name
                 .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
+                .map(|(k, v)| (*k, v.clone()))
                 .collect(),
             ..Default::default()
         }

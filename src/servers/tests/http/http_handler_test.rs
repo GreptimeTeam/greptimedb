@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::usize;
 
 use axum::extract::{Json, Query, State};
 use axum::http::header;

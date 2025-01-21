@@ -155,7 +155,7 @@ impl WriteRequest {
                 ensure!(
                     is_column_type_value_eq(
                         input_col.datatype,
-                        input_col.datatype_extension.clone(),
+                        input_col.datatype_extension,
                         &column.column_schema.data_type
                     ),
                     InvalidRequestSnafu {

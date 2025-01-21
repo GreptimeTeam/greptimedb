@@ -50,7 +50,7 @@ impl BloomFilterApplier {
         let deduped_locs = locs
             .iter()
             .dedup()
-            .map(|i| self.meta.bloom_filter_locs[*i as usize].clone())
+            .map(|i| self.meta.bloom_filter_locs[*i as usize])
             .collect::<Vec<_>>();
         let bfs = self.reader.bloom_filter_vec(&deduped_locs).await?;
 

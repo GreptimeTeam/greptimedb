@@ -712,7 +712,7 @@ mod test {
 
             let schema = Schema::new(vec![Field::new(
                 "ts",
-                DataType::Timestamp(unit.clone(), None),
+                DataType::Timestamp(unit, None),
                 false,
             )]);
             let schema = Arc::new(schema);
@@ -733,8 +733,8 @@ mod test {
                         .unwrap_or_else(|| rng.i64(-100000000..100000000));
                     bound_val = Some(end);
                     let start = end - rng.i64(1..range_size_bound);
-                    let start = Timestamp::new(start, unit.clone().into());
-                    let end = Timestamp::new(end, unit.clone().into());
+                    let start = Timestamp::new(start, unit.into());
+                    let end = Timestamp::new(end, unit.into());
                     (start, end)
                 } else {
                     let start = bound_val
@@ -742,8 +742,8 @@ mod test {
                         .unwrap_or_else(|| rng.i64(..));
                     bound_val = Some(start);
                     let end = start + rng.i64(1..range_size_bound);
-                    let start = Timestamp::new(start, unit.clone().into());
-                    let end = Timestamp::new(end, unit.clone().into());
+                    let start = Timestamp::new(start, unit.into());
+                    let end = Timestamp::new(end, unit.into());
                     (start, end)
                 };
                 assert!(start < end);
@@ -763,7 +763,7 @@ mod test {
                     // mito always sort on ASC order
                     data_gen.sort();
                     per_part_sort_data.extend(data_gen.clone());
-                    let arr = new_ts_array(unit.clone(), data_gen.clone());
+                    let arr = new_ts_array(unit, data_gen.clone());
                     let batch = DfRecordBatch::try_new(schema.clone(), vec![arr]).unwrap();
                     batches.push(batch);
                 }
@@ -810,8 +810,7 @@ mod test {
             let expected_output = output_data
                 .into_iter()
                 .map(|a| {
-                    DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit.clone(), a)])
-                        .unwrap()
+                    DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, a)]).unwrap()
                 })
                 .map(|rb| {
                     // trim expected output with limit
@@ -948,7 +947,7 @@ mod test {
         {
             let schema = Schema::new(vec![Field::new(
                 "ts",
-                DataType::Timestamp(unit.clone(), None),
+                DataType::Timestamp(unit, None),
                 false,
             )]);
             let schema = Arc::new(schema);
@@ -961,8 +960,8 @@ mod test {
                 .into_iter()
                 .map(|(range, data)| {
                     let part = PartitionRange {
-                        start: Timestamp::new(range.0, unit.clone().into()),
-                        end: Timestamp::new(range.1, unit.clone().into()),
+                        start: Timestamp::new(range.0, unit.into()),
+                        end: Timestamp::new(range.1, unit.into()),
                         num_rows: data.iter().map(|b| b.len()).sum(),
                         identifier,
                     };
@@ -970,7 +969,7 @@ mod test {
                     let batches = data
                         .into_iter()
                         .map(|b| {
-                            let arr = new_ts_array(unit.clone(), b);
+                            let arr = new_ts_array(unit, b);
                             DfRecordBatch::try_new(schema.clone(), vec![arr]).unwrap()
                         })
                         .collect_vec();
@@ -981,8 +980,7 @@ mod test {
             let expected_output = expected_output
                 .into_iter()
                 .map(|a| {
-                    DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit.clone(), a)])
-                        .unwrap()
+                    DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, a)]).unwrap()
                 })
                 .collect_vec();
 

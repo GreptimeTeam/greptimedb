@@ -3189,8 +3189,8 @@ mod test {
                         .unwrap_or_else(|| rng.i64(..));
                     bound_val = Some(end);
                     let start = end - rng.i64(1..range_size_bound);
-                    let start = Timestamp::new(start, unit.clone().into());
-                    let end = Timestamp::new(end, unit.clone().into());
+                    let start = Timestamp::new(start, unit.into());
+                    let end = Timestamp::new(end, unit.into());
                     (start, end)
                 } else {
                     let start = bound_val
@@ -3198,8 +3198,8 @@ mod test {
                         .unwrap_or_else(|| rng.i64(..));
                     bound_val = Some(start);
                     let end = start + rng.i64(1..range_size_bound);
-                    let start = Timestamp::new(start, unit.clone().into());
-                    let end = Timestamp::new(end, unit.clone().into());
+                    let start = Timestamp::new(start, unit.into());
+                    let end = Timestamp::new(end, unit.into());
                     (start, end)
                 };
 
@@ -3209,7 +3209,7 @@ mod test {
                     .sorted_by(ret_cmp_fn(descending))
                     .collect_vec();
                 output_data.extend(data_gen.clone());
-                let arr = new_ts_array(unit.clone(), data_gen);
+                let arr = new_ts_array(unit, data_gen);
                 let range = PartitionRange {
                     start,
                     end,
@@ -3223,7 +3223,7 @@ mod test {
             if let Some(fetch) = fetch {
                 output_data.truncate(fetch);
             }
-            let output_arr = new_ts_array(unit.clone(), output_data);
+            let output_arr = new_ts_array(unit, output_data);
 
             let test_stream = TestStream::new(
                 Column::new("ts", 0),
@@ -3232,11 +3232,7 @@ mod test {
                     nulls_first: true,
                 },
                 fetch,
-                vec![Field::new(
-                    "ts",
-                    DataType::Timestamp(unit.clone(), None),
-                    false,
-                )],
+                vec![Field::new("ts", DataType::Timestamp(unit, None), false)],
                 input_ranged_data.clone(),
                 vec![vec![output_arr]],
             );

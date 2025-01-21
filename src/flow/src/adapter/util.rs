@@ -185,12 +185,10 @@ pub fn table_info_value_to_relation_desc(
 pub fn from_proto_to_data_type(
     column_schema: &api::v1::ColumnSchema,
 ) -> Result<ConcreteDataType, Error> {
-    let wrapper = ColumnDataTypeWrapper::try_new(
-        column_schema.datatype,
-        column_schema.datatype_extension.clone(),
-    )
-    .map_err(BoxedError::new)
-    .context(ExternalSnafu)?;
+    let wrapper =
+        ColumnDataTypeWrapper::try_new(column_schema.datatype, column_schema.datatype_extension)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
     let cdt = ConcreteDataType::from(wrapper);
 
     Ok(cdt)

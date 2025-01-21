@@ -56,18 +56,14 @@ impl Insert {
     /// Extracts the literal insert statement body if possible
     pub fn values_body(&self) -> Result<Vec<Vec<Value>>> {
         match &self.inner {
-            Statement::Insert(insert)
-                if let SpInsert {
-                    source:
-                        Some(box Query {
-                            body: box SetExpr::Values(Values { rows, .. }),
-                            ..
-                        }),
-                    ..
-                } = insert =>
-            {
-                sql_exprs_to_values(rows)
-            }
+            Statement::Insert(SpInsert {
+                source:
+                    Some(box Query {
+                        body: box SetExpr::Values(Values { rows, .. }),
+                        ..
+                    }),
+                ..
+            }) => sql_exprs_to_values(rows),
             _ => unreachable!(),
         }
     }
@@ -76,48 +72,40 @@ impl Insert {
     /// The rules is the same as function `values_body()`.
     pub fn can_extract_values(&self) -> bool {
         match &self.inner {
-            Statement::Insert(insert)
-                if let SpInsert {
-                    source:
-                        Some(box Query {
-                            body: box SetExpr::Values(Values { rows, .. }),
-                            ..
-                        }),
-                    ..
-                } = insert =>
-            {
-                rows.iter().all(|es| {
-                    es.iter().all(|expr| match expr {
-                        Expr::Value(_) => true,
-                        Expr::Identifier(ident) => {
-                            if ident.quote_style.is_none() {
-                                ident.value.to_lowercase() == "default"
-                            } else {
-                                ident.quote_style == Some('"')
-                            }
+            Statement::Insert(SpInsert {
+                source:
+                    Some(box Query {
+                        body: box SetExpr::Values(Values { rows, .. }),
+                        ..
+                    }),
+                ..
+            }) => rows.iter().all(|es| {
+                es.iter().all(|expr| match expr {
+                    Expr::Value(_) => true,
+                    Expr::Identifier(ident) => {
+                        if ident.quote_style.is_none() {
+                            ident.value.to_lowercase() == "default"
+                        } else {
+                            ident.quote_style == Some('"')
                         }
-                        Expr::UnaryOp { op, expr } => {
-                            matches!(op, UnaryOperator::Minus | UnaryOperator::Plus)
-                                && matches!(&**expr, Expr::Value(Value::Number(_, _)))
-                        }
-                        _ => false,
-                    })
+                    }
+                    Expr::UnaryOp { op, expr } => {
+                        matches!(op, UnaryOperator::Minus | UnaryOperator::Plus)
+                            && matches!(&**expr, Expr::Value(Value::Number(_, _)))
+                    }
+                    _ => false,
                 })
-            }
+            }),
             _ => false,
         }
     }
 
     pub fn query_body(&self) -> Result<Option<GtQuery>> {
         Ok(match &self.inner {
-            Statement::Insert(insert)
-                if let SpInsert {
-                    source: Some(box query),
-                    ..
-                } = insert =>
-            {
-                Some(query.clone().try_into()?)
-            }
+            Statement::Insert(SpInsert {
+                source: Some(box query),
+                ..
+            }) => Some(query.clone().try_into()?),
             _ => None,
         })
     }

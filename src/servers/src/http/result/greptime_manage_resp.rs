@@ -97,8 +97,6 @@ impl IntoResponse for GreptimedbManageResponse {
 
 #[cfg(test)]
 mod tests {
-    use std::usize;
-
     use arrow::datatypes::ToByteSlice;
     use axum::body::to_bytes;
 

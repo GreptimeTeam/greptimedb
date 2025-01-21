@@ -50,7 +50,7 @@ impl ParserContext<'_> {
 
     /// Parses parser context to Query.
     pub fn parser_query(&mut self) -> Result<Box<Query>> {
-        Ok(self.parser.parse_query().context(SyntaxSnafu)?)
+        self.parser.parse_query().context(SyntaxSnafu)
     }
 
     /// Parses SQL with given dialect

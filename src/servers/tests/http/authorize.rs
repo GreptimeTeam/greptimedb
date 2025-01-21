@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::sync::Arc;
-use std::usize;
 
 use auth::tests::MockUserProvider;
 use auth::UserProvider;

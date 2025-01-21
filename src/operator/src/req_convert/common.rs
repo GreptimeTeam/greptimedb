@@ -112,7 +112,7 @@ fn validate_rows(rows: &Option<Rows>) -> Result<()> {
 
     for (col_idx, schema) in rows.schema.iter().enumerate() {
         let column_type =
-            ColumnDataTypeWrapper::try_new(schema.datatype, schema.datatype_extension.clone())
+            ColumnDataTypeWrapper::try_new(schema.datatype, schema.datatype_extension)
                 .context(ColumnDataTypeSnafu)?
                 .into();
 
@@ -172,7 +172,7 @@ pub fn columns_to_rows(columns: Vec<Column>, row_count: u32) -> Result<Rows> {
             column_name: column.column_name.clone(),
             datatype: column.datatype,
             semantic_type: column.semantic_type,
-            datatype_extension: column.datatype_extension.clone(),
+            datatype_extension: column.datatype_extension,
             options: column.options.clone(),
         };
         schema.push(column_schema);
