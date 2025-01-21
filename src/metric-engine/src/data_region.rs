@@ -16,6 +16,7 @@ use api::v1::SemanticType;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_telemetry::{debug, info, warn};
+use datatypes::schema::{SkippingIndexOptions, SkippingIndexType};
 use mito2::engine::MitoEngine;
 use snafu::ResultExt;
 use store_api::metadata::ColumnMetadata;
@@ -26,9 +27,10 @@ use store_api::region_request::{
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{ConcreteDataType, RegionId};
 
+use crate::engine::IndexOptions;
 use crate::error::{
     ColumnTypeMismatchSnafu, ForbiddenPhysicalAlterSnafu, MitoReadOperationSnafu,
-    MitoWriteOperationSnafu, Result,
+    MitoWriteOperationSnafu, Result, SetSkippingIndexOptionSnafu,
 };
 use crate::metrics::{FORBIDDEN_OPERATION_COUNT, MITO_DDL_DURATION};
 use crate::utils;
@@ -64,13 +66,16 @@ impl DataRegion {
         &self,
         region_id: RegionId,
         columns: &mut [ColumnMetadata],
+        index_options: IndexOptions,
     ) -> Result<()> {
         let region_id = utils::to_data_region_id(region_id);
 
         let mut retries = 0;
         // submit alter request
         while retries < MAX_RETRIES {
-            let request = self.assemble_alter_request(region_id, columns).await?;
+            let request = self
+                .assemble_alter_request(region_id, columns, index_options)
+                .await?;
 
             let _timer = MITO_DDL_DURATION.start_timer();
 
@@ -97,6 +102,7 @@ impl DataRegion {
         &self,
         region_id: RegionId,
         columns: &mut [ColumnMetadata],
+        index_options: IndexOptions,
     ) -> Result<RegionRequest> {
         // retrieve underlying version
         let region_metadata = self
@@ -142,6 +148,19 @@ impl DataRegion {
 
                 c.column_id = new_column_id_start + delta as u32;
                 c.column_schema.set_nullable();
+                match index_options {
+                    IndexOptions::Inverted => {
+                        c.column_schema.set_inverted_index(true);
+                    }
+                    IndexOptions::Skipping { granularity } => {
+                        c.column_schema
+                            .set_skipping_options(&SkippingIndexOptions {
+                                granularity,
+                                index_type: SkippingIndexType::BloomFilter,
+                            })
+                            .context(SetSkippingIndexOptionSnafu)?;
+                    }
+                }
 
                 Ok(AddColumn {
                     column_metadata: c.clone(),
@@ -256,7 +275,11 @@ mod test {
             },
         ];
         env.data_region()
-            .add_columns(env.default_physical_region_id(), &mut new_columns)
+            .add_columns(
+                env.default_physical_region_id(),
+                &mut new_columns,
+                IndexOptions::Inverted,
+            )
             .await
             .unwrap();
 
@@ -295,7 +318,11 @@ mod test {
         }];
         let result = env
             .data_region()
-            .add_columns(env.default_physical_region_id(), &mut new_columns)
+            .add_columns(
+                env.default_physical_region_id(),
+                &mut new_columns,
+                IndexOptions::Inverted,
+            )
             .await;
         assert!(result.is_err());
     }

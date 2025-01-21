@@ -51,8 +51,7 @@ impl App for Instance {
     }
 
     async fn start(&mut self) -> Result<()> {
-        self.start().await.unwrap();
-        Ok(())
+        self.start().await
     }
 
     fn wait_signal(&self) -> bool {

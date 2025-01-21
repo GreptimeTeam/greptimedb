@@ -36,7 +36,7 @@ use crate::error::{
 };
 use crate::http::header::{GreptimeDbName, GREPTIME_TIMEZONE_HEADER_NAME};
 use crate::http::result::error_result::ErrorResponse;
-use crate::http::{HTTP_API_PREFIX, PUBLIC_APIS};
+use crate::http::{AUTHORIZATION_HEADER, HTTP_API_PREFIX, PUBLIC_APIS};
 use crate::influxdb::{is_influxdb_request, is_influxdb_v2_request};
 
 /// AuthState is a holder state for [`UserProviderRef`]
@@ -245,7 +245,8 @@ type Credential<'a> = &'a str;
 fn auth_header<B>(req: &Request<B>) -> Result<AuthScheme> {
     let auth_header = req
         .headers()
-        .get(http::header::AUTHORIZATION)
+        .get(AUTHORIZATION_HEADER)
+        .or_else(|| req.headers().get(http::header::AUTHORIZATION))
         .context(error::NotFoundAuthHeaderSnafu)?
         .to_str()
         .context(InvalidAuthHeaderInvisibleASCIISnafu)?;

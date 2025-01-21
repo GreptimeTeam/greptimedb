@@ -84,6 +84,36 @@ show create table phy;
 
 drop table phy;
 
+CREATE TABLE IF NOT EXISTS "phy" (
+  "ts" TIMESTAMP(3) NOT NULL,
+  "val" DOUBLE NULL,
+  "host" STRING NULL SKIPPING INDEX WITH(granularity = '8192', type = 'BLOOM'),
+  TIME INDEX ("ts"),
+  PRIMARY KEY ("host"),
+)
+ENGINE=metric
+WITH(
+  'index.granularity' = '8192',
+  'index.type' = 'skipping',
+  physical_metric_table = ''
+);
+
+show create table phy;
+
+CREATE TABLE t1 (
+    ts TIMESTAMP TIME INDEX, 
+    val DOUBLE, 
+    job STRING PRIMARY KEY
+) ENGINE=metric WITH (
+    "on_physical_table" = "phy"
+);
+
+show index from phy;
+
+drop table t1;
+
+drop table phy;
+
 show create table numbers;
 
 show create table information_schema.columns;

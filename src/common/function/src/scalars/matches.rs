@@ -723,7 +723,8 @@ struct Tokenizer {
 impl Tokenizer {
     pub fn tokenize(mut self, pattern: &str) -> Result<Vec<Token>> {
         let mut tokens = vec![];
-        while self.cursor < pattern.len() {
+        let char_len = pattern.chars().count();
+        while self.cursor < char_len {
             // TODO: collect pattern into Vec<char> if this tokenizer is bottleneck in the future
             let c = pattern.chars().nth(self.cursor).unwrap();
             match c {
@@ -792,7 +793,8 @@ impl Tokenizer {
         let mut phase = String::new();
         let mut is_quote_present = false;
 
-        while self.cursor < pattern.len() {
+        let char_len = pattern.chars().count();
+        while self.cursor < char_len {
             let mut c = pattern.chars().nth(self.cursor).unwrap();
 
             match c {
@@ -895,6 +897,26 @@ mod test {
                     Phase("b".to_string()),
                     Or,
                     Phase("c".to_string()),
+                ],
+            ),
+            (
+                r#"中文 测试"#,
+                vec![Phase("中文".to_string()), Phase("测试".to_string())],
+            ),
+            (
+                r#"中文 AND 测试"#,
+                vec![Phase("中文".to_string()), And, Phase("测试".to_string())],
+            ),
+            (
+                r#"中文 +测试"#,
+                vec![Phase("中文".to_string()), Must, Phase("测试".to_string())],
+            ),
+            (
+                r#"中文 -测试"#,
+                vec![
+                    Phase("中文".to_string()),
+                    Negative,
+                    Phase("测试".to_string()),
                 ],
             ),
         ];
@@ -1024,6 +1046,61 @@ mod test {
                                     pattern: "d".to_string(),
                                 },
                             ],
+                        },
+                    ],
+                },
+            ),
+            (
+                r#"中文 测试"#,
+                PatternAst::Binary {
+                    op: BinaryOp::Or,
+                    children: vec![
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "中文".to_string(),
+                        },
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "测试".to_string(),
+                        },
+                    ],
+                },
+            ),
+            (
+                r#"中文 AND 测试"#,
+                PatternAst::Binary {
+                    op: BinaryOp::And,
+                    children: vec![
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "中文".to_string(),
+                        },
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "测试".to_string(),
+                        },
+                    ],
+                },
+            ),
+            (
+                r#"中文 +测试"#,
+                PatternAst::Literal {
+                    op: UnaryOp::Must,
+                    pattern: "测试".to_string(),
+                },
+            ),
+            (
+                r#"中文 -测试"#,
+                PatternAst::Binary {
+                    op: BinaryOp::And,
+                    children: vec![
+                        PatternAst::Literal {
+                            op: UnaryOp::Negative,
+                            pattern: "测试".to_string(),
+                        },
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "中文".to_string(),
                         },
                     ],
                 },

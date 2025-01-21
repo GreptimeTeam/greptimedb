@@ -186,7 +186,7 @@ mod tests {
                 case_sensitive: false,
             })
             .unwrap();
-        schema.with_inverted_index(true);
+        schema.set_inverted_index(true);
         let options = options_from_column_schema(&schema).unwrap();
         assert_eq!(
             options.options.get(FULLTEXT_GRPC_KEY).unwrap(),

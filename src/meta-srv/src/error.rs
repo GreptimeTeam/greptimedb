@@ -742,6 +742,13 @@ pub enum Error {
         location: Location,
         source: common_meta::error::Error,
     },
+
+    #[snafu(display("Failed to build wal options allocator"))]
+    BuildWalOptionsAllocator {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
 }
 
 impl Error {
@@ -788,7 +795,8 @@ impl ErrorExt for Error {
             | Error::PeerUnavailable { .. }
             | Error::ExceededDeadline { .. }
             | Error::ChooseItems { .. }
-            | Error::FlowStateHandler { .. } => StatusCode::Internal,
+            | Error::FlowStateHandler { .. }
+            | Error::BuildWalOptionsAllocator { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 

@@ -42,12 +42,8 @@ impl MetricEngineInner {
         region_id: RegionId,
         request: RegionPutRequest,
     ) -> Result<AffectedRows> {
-        let is_putting_physical_region = self
-            .state
-            .read()
-            .unwrap()
-            .physical_regions()
-            .contains_key(&region_id);
+        let is_putting_physical_region =
+            self.state.read().unwrap().exist_physical_region(region_id);
 
         if is_putting_physical_region {
             info!(
@@ -114,16 +110,16 @@ impl MetricEngineInner {
         }
 
         // Check if a physical column exists
-        let physical_columns =
-            state
-                .physical_columns()
-                .get(&data_region_id)
-                .context(PhysicalRegionNotFoundSnafu {
-                    region_id: data_region_id,
-                })?;
+        let physical_columns = state
+            .physical_region_states()
+            .get(&data_region_id)
+            .context(PhysicalRegionNotFoundSnafu {
+                region_id: data_region_id,
+            })?
+            .physical_columns();
         for col in &request.rows.schema {
             ensure!(
-                physical_columns.contains(&col.column_name),
+                physical_columns.contains_key(&col.column_name),
                 ColumnNotFoundSnafu {
                     name: col.column_name.clone(),
                     region_id: logical_region_id,

@@ -1709,7 +1709,7 @@ pub async fn test_otlp_traces(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // select traces data
-    let expected = "[[1736480942444376000,1736480942444499000,123000,\"c05d7a4ec8e1f231f02ed6e8da8655b4\",\"9630f2916e2f7909\",\"d24f921c75f68e23\",\"SPAN_KIND_SERVER\",\"okey-dokey-0\",\"STATUS_CODE_UNSET\",\"\",\"\",{\"net.peer.ip\":\"1.2.3.4\",\"peer.service\":\"telemetrygen-client\"},[],[],\"telemetrygen\",\"\",{},{\"service.name\":\"telemetrygen\"}],[1736480942444376000,1736480942444499000,123000,\"c05d7a4ec8e1f231f02ed6e8da8655b4\",\"d24f921c75f68e23\",\"\",\"SPAN_KIND_CLIENT\",\"lets-go\",\"STATUS_CODE_UNSET\",\"\",\"\",{\"net.peer.ip\":\"1.2.3.4\",\"peer.service\":\"telemetrygen-server\"},[],[],\"telemetrygen\",\"\",{},{\"service.name\":\"telemetrygen\"}],[1736480942444589000,1736480942444712000,123000,\"cc9e0991a2e63d274984bd44ee669203\",\"8f847259b0f6e1ab\",\"eba7be77e3558179\",\"SPAN_KIND_SERVER\",\"okey-dokey-0\",\"STATUS_CODE_UNSET\",\"\",\"\",{\"net.peer.ip\":\"1.2.3.4\",\"peer.service\":\"telemetrygen-client\"},[],[],\"telemetrygen\",\"\",{},{\"service.name\":\"telemetrygen\"}],[1736480942444589000,1736480942444712000,123000,\"cc9e0991a2e63d274984bd44ee669203\",\"eba7be77e3558179\",\"\",\"SPAN_KIND_CLIENT\",\"lets-go\",\"STATUS_CODE_UNSET\",\"\",\"\",{\"net.peer.ip\":\"1.2.3.4\",\"peer.service\":\"telemetrygen-server\"},[],[],\"telemetrygen\",\"\",{},{\"service.name\":\"telemetrygen\"}]]";
+    let expected = r#"[[1736480942444376000,1736480942444499000,123000,"telemetrygen","c05d7a4ec8e1f231f02ed6e8da8655b4","9630f2916e2f7909","d24f921c75f68e23","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-client"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1736480942444376000,1736480942444499000,123000,"telemetrygen","c05d7a4ec8e1f231f02ed6e8da8655b4","d24f921c75f68e23","","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-server"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1736480942444589000,1736480942444712000,123000,"telemetrygen","cc9e0991a2e63d274984bd44ee669203","8f847259b0f6e1ab","eba7be77e3558179","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-client"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1736480942444589000,1736480942444712000,123000,"telemetrygen","cc9e0991a2e63d274984bd44ee669203","eba7be77e3558179","","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-server"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}]]"#;
     validate_data(
         "otlp_traces",
         &client,
@@ -2074,7 +2074,7 @@ async fn validate_data(test_name: &str, client: &TestClient, sql: &str, expected
     let v = get_rows_from_output(&resp);
 
     assert_eq!(
-        v, expected,
+        expected, v,
         "validate {test_name} fail, expected: {expected}, actual: {v}"
     );
 }
