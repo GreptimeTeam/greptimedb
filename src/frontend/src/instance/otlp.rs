@@ -134,7 +134,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             pipeline,
             table_name,
             &ctx,
-            &pipeline_handler,
+            pipeline_handler,
         )
         .await?;
 
