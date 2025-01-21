@@ -1440,8 +1440,8 @@ transform:
             .await;
         assert_eq!(res.status(), StatusCode::OK);
         let body: Value = res.json().await;
-        let schema = &body["schema"];
-        let rows = &body["rows"];
+        let schema = &body[0]["schema"];
+        let rows = &body[0]["rows"];
         assert_eq!(schema, &dryrun_schema);
         assert_eq!(rows, &dryrun_rows);
     }
@@ -1470,8 +1470,8 @@ transform:
             .await;
         assert_eq!(res.status(), StatusCode::OK);
         let body: Value = res.json().await;
-        let schema = &body["schema"];
-        let rows = &body["rows"];
+        let schema = &body[0]["schema"];
+        let rows = &body[0]["rows"];
         assert_eq!(schema, &dryrun_schema);
         assert_eq!(rows, &dryrun_rows);
     }
@@ -1498,8 +1498,8 @@ transform:
             .await;
         assert_eq!(res.status(), StatusCode::OK);
         let body: Value = res.json().await;
-        let schema = &body["schema"];
-        let rows = &body["rows"];
+        let schema = &body[0]["schema"];
+        let rows = &body[0]["rows"];
         assert_eq!(schema, &dryrun_schema);
         assert_eq!(rows, &dryrun_rows);
     }

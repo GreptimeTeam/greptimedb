@@ -554,12 +554,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("OpenTelemetry log error"))]
-    OpenTelemetryLog {
-        source: pipeline::etl_error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
     #[snafu(display("Unsupported json data type for tag: {} {}", key, ty))]
     UnsupportedJsonDataTypeForTag {
         key: String,
@@ -658,7 +652,6 @@ impl ErrorExt for Error {
             | InvalidLokiPayload { .. }
             | UnsupportedContentType { .. }
             | TimestampOverflow { .. }
-            | OpenTelemetryLog { .. }
             | UnsupportedJsonDataTypeForTag { .. }
             | InvalidTableName { .. }
             | PrepareStatementNotFound { .. }
