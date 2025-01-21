@@ -131,7 +131,7 @@ mod test {
     use futures::stream;
     use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
     use index::inverted_index::format::writer::{InvertedIndexBlobWriter, InvertedIndexWriter};
-    use index::inverted_index::Bytes;
+    use index::Bytes;
     use prometheus::register_int_counter_vec;
     use rand::{Rng, RngCore};
 

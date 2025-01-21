@@ -13,25 +13,26 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use common_telemetry::warn;
 use datatypes::schema::FulltextAnalyzer;
-use index::fulltext_index::create::{FulltextIndexCreator, TantivyFulltextIndexCreator};
+use index::fulltext_index::create::{
+    BloomFilterFulltextIndexCreator, FulltextIndexCreator, TantivyFulltextIndexCreator,
+};
 use index::fulltext_index::{Analyzer, Config};
 use puffin::blob_metadata::CompressionCodec;
-use puffin::puffin_manager::{PuffinWriter, PutOptions};
+use puffin::puffin_manager::PutOptions;
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, ConcreteDataType, RegionId};
 
 use crate::error::{
     CastVectorSnafu, CreateFulltextCreatorSnafu, FieldTypeMismatchSnafu, FulltextFinishSnafu,
-    FulltextPushTextSnafu, IndexOptionsSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu, Result,
+    FulltextPushTextSnafu, IndexOptionsSnafu, OperateAbortedIndexSnafu, Result,
 };
 use crate::read::Batch;
 use crate::sst::file::FileId;
-use crate::sst::index::fulltext_index::INDEX_BLOB_TYPE;
+use crate::sst::index::fulltext_index::{INDEX_BLOB_TYPE_BLOOM, INDEX_BLOB_TYPE_TANTIVY};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
@@ -85,16 +86,17 @@ impl FulltextIndexer {
                 case_sensitive: options.case_sensitive,
             };
 
+            // TODO(zhongzc): according to fulltext options, choose in the Tantivy flavor or Bloom Filter flavor.
             let creator = TantivyFulltextIndexCreator::new(&intm_path, config, mem_limit)
                 .await
                 .context(CreateFulltextCreatorSnafu)?;
+            let inner = AltFulltextCreator::Tantivy(creator);
 
             creators.insert(
                 column_id,
                 SingleCreator {
                     column_id,
-                    inner: Box::new(creator),
-                    intm_path,
+                    inner,
                     compress,
                 },
             );
@@ -209,9 +211,7 @@ struct SingleCreator {
     /// Column ID.
     column_id: ColumnId,
     /// Inner creator.
-    inner: Box<dyn FulltextIndexCreator>,
-    /// Intermediate path where the index is written to.
-    intm_path: PathBuf,
+    inner: AltFulltextCreator,
     /// Whether the index should be compressed.
     compress: bool,
 }
@@ -238,10 +238,7 @@ impl SingleCreator {
                         .as_string()
                         .context(FieldTypeMismatchSnafu)?
                         .unwrap_or_default();
-                    self.inner
-                        .push_text(text)
-                        .await
-                        .context(FulltextPushTextSnafu)?;
+                    self.inner.push_text(text).await?;
                 }
             }
             _ => {
@@ -249,10 +246,7 @@ impl SingleCreator {
                 // Ensure that the number of texts pushed is the same as the number of rows in the SST,
                 // so that the texts are aligned with the row ids.
                 for _ in 0..batch.num_rows() {
-                    self.inner
-                        .push_text("")
-                        .await
-                        .context(FulltextPushTextSnafu)?;
+                    self.inner.push_text("").await?;
                 }
             }
         }
@@ -261,27 +255,79 @@ impl SingleCreator {
     }
 
     async fn finish(&mut self, puffin_writer: &mut SstPuffinWriter) -> Result<ByteCount> {
-        self.inner.finish().await.context(FulltextFinishSnafu)?;
-
         let options = PutOptions {
             compression: self.compress.then_some(CompressionCodec::Zstd),
         };
-
-        let key = format!("{INDEX_BLOB_TYPE}-{}", self.column_id);
-        puffin_writer
-            .put_dir(&key, self.intm_path.clone(), options)
+        self.inner
+            .finish(puffin_writer, &self.column_id, options)
             .await
-            .context(PuffinAddBlobSnafu)
     }
 
     async fn abort(&mut self) -> Result<()> {
-        if let Err(err) = self.inner.finish().await {
-            warn!(err; "Failed to finish fulltext index creator, col_id: {:?}, dir_path: {:?}", self.column_id, self.intm_path);
-        }
-        if let Err(err) = tokio::fs::remove_dir_all(&self.intm_path).await {
-            warn!(err; "Failed to remove fulltext index directory, col_id: {:?}, dir_path: {:?}", self.column_id, self.intm_path);
-        }
+        self.inner.abort(&self.column_id).await;
         Ok(())
+    }
+}
+
+#[allow(dead_code, clippy::large_enum_variant)]
+/// `AltFulltextCreator` is an alternative fulltext index creator that can be either Tantivy or BloomFilter.
+enum AltFulltextCreator {
+    Tantivy(TantivyFulltextIndexCreator),
+    Bloom(BloomFilterFulltextIndexCreator),
+}
+
+impl AltFulltextCreator {
+    async fn push_text(&mut self, text: &str) -> Result<()> {
+        match self {
+            Self::Tantivy(creator) => creator.push_text(text).await.context(FulltextPushTextSnafu),
+            Self::Bloom(creator) => creator.push_text(text).await.context(FulltextPushTextSnafu),
+        }
+    }
+
+    fn memory_usage(&self) -> usize {
+        match self {
+            Self::Tantivy(creator) => creator.memory_usage(),
+            Self::Bloom(creator) => creator.memory_usage(),
+        }
+    }
+
+    async fn finish(
+        &mut self,
+        puffin_writer: &mut SstPuffinWriter,
+        column_id: &ColumnId,
+        put_options: PutOptions,
+    ) -> Result<ByteCount> {
+        match self {
+            Self::Tantivy(creator) => {
+                let key = format!("{INDEX_BLOB_TYPE_TANTIVY}-{}", column_id);
+                creator
+                    .finish(puffin_writer, &key, put_options)
+                    .await
+                    .context(FulltextFinishSnafu)
+            }
+            Self::Bloom(creator) => {
+                let key = format!("{INDEX_BLOB_TYPE_BLOOM}-{}", column_id);
+                creator
+                    .finish(puffin_writer, &key, put_options)
+                    .await
+                    .context(FulltextFinishSnafu)
+            }
+        }
+    }
+
+    async fn abort(&mut self, column_id: &ColumnId) {
+        match self {
+            Self::Tantivy(creator) => {
+                if let Err(err) = creator.abort().await {
+                    warn!(err; "Failed to abort the fulltext index creator in the Tantivy flavor, col_id: {:?}", column_id);
+                }
+            }
+            Self::Bloom(creator) => {
+                if let Err(err) = creator.abort().await {
+                    warn!(err; "Failed to abort the fulltext index creator in the Bloom Filter flavor, col_id: {:?}", column_id);
+                }
+            }
+        }
     }
 }
 
@@ -299,7 +345,7 @@ mod tests {
     use index::fulltext_index::search::RowId;
     use object_store::services::Memory;
     use object_store::ObjectStore;
-    use puffin::puffin_manager::PuffinManager;
+    use puffin::puffin_manager::{PuffinManager, PuffinWriter};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
     use store_api::storage::{ConcreteDataType, RegionId};
 

@@ -15,16 +15,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use common_base::range_read::{FileReader, RangeReader};
+use common_base::range_read::RangeReader;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
-use tokio::fs::File;
 use tokio::io::AsyncReadExt as _;
-use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
 use crate::blob_metadata::CompressionCodec;
-use crate::error::Result;
-use crate::puffin_manager::file_accessor::PuffinFileAccessor;
+use crate::puffin_manager::file_accessor::MockFileAccessor;
 use crate::puffin_manager::fs_puffin_manager::FsPuffinManager;
 use crate::puffin_manager::stager::BoundedStager;
 use crate::puffin_manager::{
@@ -369,39 +365,5 @@ async fn check_dir(
         };
         let buf = std::fs::read(file_path).unwrap();
         assert_eq!(buf, *raw_data);
-    }
-}
-
-pub struct MockFileAccessor {
-    tempdir: TempDir,
-}
-
-impl MockFileAccessor {
-    pub fn new(prefix: &str) -> Self {
-        let tempdir = create_temp_dir(prefix);
-        Self { tempdir }
-    }
-}
-
-#[async_trait]
-impl PuffinFileAccessor for MockFileAccessor {
-    type Reader = FileReader;
-    type Writer = Compat<File>;
-
-    async fn reader(&self, puffin_file_name: &str) -> Result<Self::Reader> {
-        Ok(FileReader::new(self.tempdir.path().join(puffin_file_name))
-            .await
-            .unwrap())
-    }
-
-    async fn writer(&self, puffin_file_name: &str) -> Result<Self::Writer> {
-        let p = self.tempdir.path().join(puffin_file_name);
-        if let Some(p) = p.parent() {
-            if !tokio::fs::try_exists(p).await.unwrap() {
-                tokio::fs::create_dir_all(p).await.unwrap();
-            }
-        }
-        let f = tokio::fs::File::create(p).await.unwrap();
-        Ok(f.compat())
     }
 }

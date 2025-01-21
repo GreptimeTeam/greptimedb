@@ -19,7 +19,7 @@ use async_trait::async_trait;
 
 use crate::inverted_index::error::Result;
 use crate::inverted_index::format::writer::InvertedIndexWriter;
-use crate::inverted_index::BytesRef;
+use crate::BytesRef;
 
 /// `InvertedIndexCreator` provides functionality to construct an inverted index
 #[async_trait]

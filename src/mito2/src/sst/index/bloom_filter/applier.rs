@@ -441,8 +441,9 @@ mod tests {
         //   - column_id: 3
         let region_metadata = mock_region_metadata();
         let prefix = "test_bloom_filter_applier_";
+        let (d, factory) = PuffinManagerFactory::new_for_test_async(prefix).await;
         let object_store = mock_object_store();
-        let intm_mgr = new_intm_mgr(prefix).await;
+        let intm_mgr = new_intm_mgr(d.path().to_string_lossy()).await;
         let memory_usage_threshold = Some(1024);
         let file_id = FileId::random();
         let region_dir = "region_dir".to_string();
@@ -459,7 +460,6 @@ mod tests {
         let batch = new_batch("tag2", 10..20);
         indexer.update(&batch).await.unwrap();
 
-        let (_d, factory) = PuffinManagerFactory::new_for_test_async(prefix).await;
         let puffin_manager = factory.build(object_store.clone());
 
         let mut puffin_writer = puffin_manager.writer(&path).await.unwrap();
