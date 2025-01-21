@@ -294,15 +294,36 @@ pub struct RangeSelect {
 
 impl PartialOrd for RangeSelect {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        let order = self
-            .input
-            .partial_cmp(&other.input)?
-            .then_with(|| self.range_expr.cmp(&other.range_expr))
-            .then_with(|| self.align.cmp(&other.align))
-            .then_with(|| self.align_to.cmp(&other.align_to))
-            .then_with(|| self.time_index.cmp(&other.time_index));
-        let by_order = self.by.partial_cmp(&other.by)?;
-        Some(order.then(by_order))
+        // Compare fields in order excluding `schema`, `by_schema`, `schema_before_project`.
+        match self.input.partial_cmp(&other.input) {
+            Some(Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.range_expr.partial_cmp(&other.range_expr) {
+            Some(Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.align.partial_cmp(&other.align) {
+            Some(Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.align_to.partial_cmp(&other.align_to) {
+            Some(Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.time_index.partial_cmp(&other.time_index) {
+            Some(Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.time_expr.partial_cmp(&other.time_expr) {
+            Some(Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.by.partial_cmp(&other.by) {
+            Some(Ordering::Equal) => {}
+            ord => return ord,
+        }
+        self.schema_project.partial_cmp(&other.schema_project)
     }
 }
 
