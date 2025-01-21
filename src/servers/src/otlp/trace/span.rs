@@ -27,6 +27,7 @@ use crate::otlp::utils::bytes_to_hex_string;
 #[derive(Debug, Clone)]
 pub struct TraceSpan {
     // the following are tags
+    pub service_name: Option<String>,
     pub trace_id: String,
     pub span_id: String,
     pub parent_span_id: String,
@@ -189,6 +190,7 @@ impl SpanEvents {
 }
 
 pub fn parse_span(
+    service_name: Option<String>,
     resource_attrs: &[KeyValue],
     scope: &InstrumentationScope,
     span: Span,
@@ -196,6 +198,7 @@ pub fn parse_span(
     let (span_status_code, span_status_message) = status_to_string(&span.status);
     let span_kind = span.kind().as_str_name().into();
     TraceSpan {
+        service_name,
         trace_id: bytes_to_hex_string(&span.trace_id),
         span_id: bytes_to_hex_string(&span.span_id),
         parent_span_id: bytes_to_hex_string(&span.parent_span_id),
