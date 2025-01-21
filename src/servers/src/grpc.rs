@@ -170,7 +170,10 @@ impl GrpcServer {
             .with_service_name("greptime.v1.GreptimeDatabase")
             .with_service_name("greptime.v1.HealthCheck")
             .with_service_name("greptime.v1.RegionServer")
-            .build()
+            .build_v1()
+            .inspect_err(|e| {
+                common_telemetry::error!(e; "Failed to build gRPC reflection server");
+            })
             .unwrap()
     }
 
