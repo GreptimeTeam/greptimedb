@@ -43,7 +43,7 @@ struct SparsePrimaryKeyCodecInner {
     label_field: SortField,
     // Columns in primary key
     //
-    // None means all unknown columns is primary key(label field).
+    // None means all unknown columns is primary key(`Self::label_field`).
     columns: Option<HashSet<ColumnId>>,
 }
 

@@ -23,10 +23,9 @@ use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metric_engine_consts::{
-    DATA_SCHEMA_ENCODED_PRIMARY_KEY_COLUMN_NAME, DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
-    DATA_SCHEMA_TSID_COLUMN_NAME,
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
 };
-use store_api::storage::consts::ReservedColumnId;
+use store_api::storage::consts::{ReservedColumnId, PRIMARY_KEY_COLUMN_NAME};
 use store_api::storage::{ColumnId, TableId};
 
 use crate::error::{EncodePrimaryKeySnafu, Result};
@@ -37,7 +36,7 @@ const TSID_HASH_SEED: u32 = 846793005;
 /// A row modifier modifies [`Rows`].
 ///
 /// - For [`PrimaryKeyEncoding::Sparse`] encoding,
-///   it replaces the primary key columns with the encoded primary key column(`__encoded_primary_key`).
+///   it replaces the primary key columns with the encoded primary key column(`__primary_key`).
 ///
 /// - For [`PrimaryKeyEncoding::Dense`] encoding,
 ///   it adds two columns(`__table_id`, `__tsid`) to the row.
@@ -66,7 +65,7 @@ impl RowModifier {
     }
 
     /// Modifies rows with sparse primary key encoding.
-    /// It replaces the primary key columns with the encoded primary key column(`__encoded_primary_key`).
+    /// It replaces the primary key columns with the encoded primary key column(`__primary_key`).
     fn modify_rows_sparse(&self, mut iter: RowsIter, table_id: TableId) -> Result<Rows> {
         let num_column = iter.rows.schema.len();
         let num_primary_key_column = iter.index.num_primary_key_column;
@@ -77,7 +76,6 @@ impl RowModifier {
         for mut iter in iter.iter_mut() {
             let (table_id, tsid) = self.fill_internal_columns(table_id, &iter);
             let mut values = Vec::with_capacity(num_output_column);
-            // TODO(weny): reserve the buffer.
             buffer.clear();
             let internal_columns = [
                 (
@@ -105,7 +103,7 @@ impl RowModifier {
         // Update the schema
         let mut schema = Vec::with_capacity(num_output_column);
         schema.push(ColumnSchema {
-            column_name: DATA_SCHEMA_ENCODED_PRIMARY_KEY_COLUMN_NAME.to_string(),
+            column_name: PRIMARY_KEY_COLUMN_NAME.to_string(),
             datatype: ColumnDataType::Binary as i32,
             semantic_type: SemanticType::Tag as _,
             datatype_extension: None,
@@ -149,9 +147,9 @@ impl RowModifier {
     fn fill_internal_columns(&self, table_id: TableId, iter: &RowIter<'_>) -> (Value, Value) {
         let mut hasher = mur3::Hasher128::with_seed(TSID_HASH_SEED);
         for (name, value) in iter.primary_keys_with_name() {
-            name.hash(&mut hasher);
             // The type is checked before. So only null is ignored.
             if let Some(ValueData::StringValue(string)) = &value.value_data {
+                name.hash(&mut hasher);
                 string.hash(&mut hasher);
             }
         }
@@ -309,8 +307,6 @@ impl RowIter<'_> {
     }
 }
 
-// src/metric-engine/src/encoder.rs
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -379,7 +375,7 @@ mod tests {
 
     fn expected_sparse_schema() -> Vec<ColumnSchema> {
         vec![ColumnSchema {
-            column_name: DATA_SCHEMA_ENCODED_PRIMARY_KEY_COLUMN_NAME.to_string(),
+            column_name: PRIMARY_KEY_COLUMN_NAME.to_string(),
             datatype: ColumnDataType::Binary as i32,
             semantic_type: SemanticType::Tag as _,
             datatype_extension: None,

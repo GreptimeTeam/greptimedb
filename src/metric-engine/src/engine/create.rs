@@ -35,7 +35,7 @@ use store_api::metric_engine_consts::{
 use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionCreateRequest, RegionRequest};
-use store_api::storage::consts::ReservedColumnId;
+use store_api::storage::consts::{ReservedColumnId, PRIMARY_KEY_COLUMN_NAME};
 use store_api::storage::RegionId;
 
 use crate::engine::options::{set_data_region_options, IndexOptions, PhysicalRegionOptions};
@@ -361,6 +361,12 @@ impl MetricEngineInner {
             !name_to_index.contains_key(DATA_SCHEMA_TSID_COLUMN_NAME),
             InternalColumnOccupiedSnafu {
                 column: DATA_SCHEMA_TSID_COLUMN_NAME,
+            }
+        );
+        ensure!(
+            !name_to_index.contains_key(PRIMARY_KEY_COLUMN_NAME),
+            InternalColumnOccupiedSnafu {
+                column: PRIMARY_KEY_COLUMN_NAME,
             }
         );
 

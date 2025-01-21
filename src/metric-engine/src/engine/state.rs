@@ -113,7 +113,7 @@ impl MetricEngineState {
         physical_region_id: RegionId,
         logical_region_id: RegionId,
     ) {
-        let physical_region_id: RegionId = to_data_region_id(physical_region_id);
+        let physical_region_id = to_data_region_id(physical_region_id);
         self.physical_regions
             .get_mut(&physical_region_id)
             .unwrap()
