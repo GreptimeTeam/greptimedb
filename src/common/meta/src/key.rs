@@ -246,7 +246,7 @@ lazy_static! {
 }
 
 lazy_static! {
-    pub static ref TOPIC_REGION_MAP_PATTERN: Regex = Regex::new(&format!(
+    pub static ref TOPIC_REGION_PATTERN: Regex = Regex::new(&format!(
         "^{TOPIC_REGION_PREFIX}/({NAME_PATTERN})/([0-9]+)$"
     ))
     .unwrap();

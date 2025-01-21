@@ -33,7 +33,7 @@ use snafu::OptionExt;
 use store_api::storage::RegionId;
 
 use crate::error::{Error, InvalidMetadataSnafu, Result};
-use crate::key::{MetadataKey, TOPIC_REGION_MAP_PATTERN, TOPIC_REGION_PREFIX};
+use crate::key::{MetadataKey, TOPIC_REGION_PATTERN, TOPIC_REGION_PREFIX};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::{BatchPutRequest, PutRequest, RangeRequest};
 use crate::rpc::KeyValue;
@@ -97,7 +97,7 @@ impl<'a> TryFrom<&'a str> for TopicRegionKey<'a> {
 
     /// Value is of format `{prefix}/{topic}_{region_id}`
     fn try_from(value: &'a str) -> Result<TopicRegionKey<'a>> {
-        let captures = TOPIC_REGION_MAP_PATTERN
+        let captures = TOPIC_REGION_PATTERN
             .captures(value)
             .context(InvalidMetadataSnafu {
                 err_msg: format!("Invalid region topic map key: {}", value),
@@ -162,7 +162,7 @@ impl TopicRegionManager {
     }
 
     /// Returns the list of region ids using specified topic.
-    pub async fn range(&self, topic: &str) -> Result<Vec<RegionId>> {
+    pub async fn regions(&self, topic: &str) -> Result<Vec<RegionId>> {
         let prefix = TopicRegionKey::range_topic_key(topic);
         let req = RangeRequest::new().with_prefix(prefix.as_bytes());
         let resp = self.kv_backend.range(req).await?;
@@ -200,7 +200,7 @@ mod tests {
 
         manager.batch_put(keys.clone()).await.unwrap();
 
-        let mut key_values = manager.range(&topics[0]).await.unwrap();
+        let mut key_values = manager.regions(&topics[0]).await.unwrap();
         let expected = keys
             .iter()
             .filter_map(|key| {
@@ -216,7 +216,7 @@ mod tests {
 
         let key = TopicRegionKey::new(RegionId::from_u64(0), "topic_0");
         manager.delete(key.clone()).await.unwrap();
-        let mut key_values = manager.range(&topics[0]).await.unwrap();
+        let mut key_values = manager.regions(&topics[0]).await.unwrap();
         let expected = keys
             .iter()
             .filter_map(|key| {
