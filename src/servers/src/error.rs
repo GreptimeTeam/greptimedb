@@ -31,6 +31,8 @@ use query::parser::PromQuery;
 use serde_json::json;
 use snafu::{Location, Snafu};
 
+use crate::http::result::error_result::ErrorResponse;
+
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
@@ -587,6 +589,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to execute jaeger query, sql response: {:?}", sql_response))]
+    FailedToExecuteJaegerQuery {
+        sql_response: ErrorResponse,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid Jaeger query, reason: {}", reason))]
+    InvalidJaegerQuery {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -657,7 +673,8 @@ impl ErrorExt for Error {
             | InvalidTableName { .. }
             | PrepareStatementNotFound { .. }
             | FailedToParseQuery { .. }
-            | InvalidElasticsearchInput { .. } => StatusCode::InvalidArguments,
+            | InvalidElasticsearchInput { .. }
+            | InvalidJaegerQuery { .. } => StatusCode::InvalidArguments,
 
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),
@@ -700,7 +717,7 @@ impl ErrorExt for Error {
 
             ConvertScalarValue { source, .. } => source.status_code(),
 
-            ToJson { .. } => StatusCode::Internal,
+            ToJson { .. } | FailedToExecuteJaegerQuery { .. } => StatusCode::Internal,
 
             ConvertSqlValue { source, .. } => source.status_code(),
 
