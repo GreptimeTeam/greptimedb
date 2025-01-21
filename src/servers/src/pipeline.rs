@@ -16,15 +16,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use session::context::QueryContextRef;
-use snafu::ResultExt;
-
 use api::v1::{Row, RowInsertRequest, Rows};
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::{
     DispatchedTo, GreptimeTransformer, Pipeline, PipelineDefinition, PipelineExecInput,
     PipelineExecOutput, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
+use session::context::QueryContextRef;
+use snafu::ResultExt;
 
 use crate::error::{CatalogSnafu, PipelineSnafu, Result};
 use crate::metrics::{
