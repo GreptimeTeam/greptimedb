@@ -70,7 +70,6 @@ impl DfContextProviderAdapter {
         );
 
         let tables = resolve_tables(table_names, &mut table_provider).await?;
-
         Ok(Self {
             engine_state,
             session_state,
