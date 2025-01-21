@@ -42,6 +42,7 @@ use crate::etl::value::{Timestamp, Value};
 
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
+const GREPTIME_IDENTITY_PIPELINE_PARAMS_HEADER: &str = "x-greptime-identity-pipeline-params";
 
 /// fields not in the columns will be discarded
 /// to prevent automatic column creation in GreptimeDB
@@ -55,18 +56,29 @@ pub struct GreptimeTransformer {
 #[derive(Debug, Clone, Default)]
 pub struct GreptimeIdentityPipelineParams {
     /// Whether to flatten the JSON object.
-    pub flatten_json_object: bool,
+    pub flatten_json_object: Option<bool>,
 }
 
 impl GreptimeIdentityPipelineParams {
     /// Create a `GreptimeIdentityPipelineParams` from the HTTP headers.
+    /// The params is in the format of `key1=value1&key2=value2`,for example:
+    /// x-greptime-identity-pipeline-params: flatten_json_object=true
     pub fn from_headers(headers: &HeaderMap) -> Self {
-        Self {
-            flatten_json_object: headers
-                .get("X-Greptime-Identity-Flatten-JSON-Object")
-                .map(|v| v == "true")
-                .unwrap_or(false),
-        }
+        headers
+            .get(GREPTIME_IDENTITY_PIPELINE_PARAMS_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(|params| {
+                let params = params
+                    .split('&')
+                    .filter_map(|s| s.split_once('='))
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect::<HashMap<String, String>>();
+
+                Self {
+                    flatten_json_object: params.get("flatten_json_object").map(|v| v == "true"),
+                }
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -394,7 +406,7 @@ fn identity_pipeline_inner<'a>(
     let mut schema_info = SchemaInfo::default();
     for value in array {
         if let serde_json::Value::Object(map) = value {
-            let object = if params.flatten_json_object {
+            let object = if let Some(true) = params.flatten_json_object {
                 flatten_json_object(map, DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING)?
             } else {
                 map
