@@ -59,7 +59,7 @@
 //! 12. Kafka topic key: `__topic_name/kafka/{topic_name}`
 //！    - The key is used to mark existing topics in kafka for WAL.
 //!
-//! 13. Topic name to region map key `__topic_region_map/{topic_name}/{region_id}`
+//! 13. Topic name to region map key `__topic_region/{topic_name}/{region_id}`
 //!     - The key is used to map a pair of topic name and region id.
 //!
 //! All keys have related managers. The managers take care of the serialization and deserialization
@@ -170,7 +170,7 @@ pub const NODE_ADDRESS_PREFIX: &str = "__node_address";
 pub const KAFKA_TOPIC_KEY_PREFIX: &str = "__topic_name/kafka";
 // The legacy topic key prefix is used to store the topic name in previous versions.
 pub const LEGACY_TOPIC_KEY_PREFIX: &str = "__created_wal_topics/kafka";
-pub const TOPIC_REGION_MAP_PREFIX: &str = "__topic_region_map";
+pub const TOPIC_REGION_MAP_PREFIX: &str = "__topic_region";
 
 /// The keys with these prefixes will be loaded into the cache when the leader starts.
 pub const CACHE_KEY_PREFIXES: [&str; 5] = [
