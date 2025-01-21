@@ -21,11 +21,9 @@ use common_query::error::{
 };
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeIterator, TreeNodeRecursion};
 use datafusion::common::{DFSchema, Result as DfResult};
-use datafusion::execution::context::SessionState;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::logical_expr::{self, Expr, Volatility};
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
-use datafusion::prelude::SessionConfig;
 use datatypes::arrow::array::RecordBatch;
 use datatypes::arrow::datatypes::{DataType, Field};
 use datatypes::prelude::VectorRef;

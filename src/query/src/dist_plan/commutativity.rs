@@ -15,7 +15,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use datafusion_expr::utils::exprlist_to_columns;
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
