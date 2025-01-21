@@ -95,19 +95,14 @@ impl Display for TopicRegionKey<'_> {
 impl<'a> TryFrom<&'a str> for TopicRegionKey<'a> {
     type Error = Error;
 
-    /// Value is of format `{prefix}/{topic}_{region_id}`
+    /// Value is of format `{prefix}/{topic}/{region_id}`
     fn try_from(value: &'a str) -> Result<TopicRegionKey<'a>> {
         let captures = TOPIC_REGION_PATTERN
             .captures(value)
             .context(InvalidMetadataSnafu {
                 err_msg: format!("Invalid region topic map key: {}", value),
             })?;
-        let topic = captures
-            .get(1)
-            .map(|m| m.as_str())
-            .context(InvalidMetadataSnafu {
-                err_msg: format!("Invalid topic in region topic map key: {}", value),
-            })?;
+        let topic = captures.get(1).map(|m| m.as_str()).unwrap();
         let region_id = captures[2].parse::<u64>().map_err(|_| {
             InvalidMetadataSnafu {
                 err_msg: format!("Invalid region id in region topic map key: {}", value),
