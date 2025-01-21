@@ -31,13 +31,11 @@ use crate::error::{
     status_code_to_http_status, InvalidElasticsearchInputSnafu, ParseJsonSnafu,
     Result as ServersResult,
 };
-use crate::http::event::{
-    ingest_logs_inner, LogIngestRequest, LogIngesterQueryParams, LogState,
-    GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
-};
+use crate::http::event::{ingest_logs_inner, LogIngestRequest, LogIngesterQueryParams, LogState};
 use crate::metrics::{
     METRIC_ELASTICSEARCH_LOGS_DOCS_COUNT, METRIC_ELASTICSEARCH_LOGS_INGESTION_ELAPSED,
 };
+use crate::pipeline::GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME;
 
 // The headers for every response of Elasticsearch API.
 static ELASTICSEARCH_HEADERS: Lazy<HeaderMap> = Lazy::new(|| {
