@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::Rows;
+use api::v1::{Rows, WriteHint};
 use common_telemetry::{error, info};
 use snafu::{ensure, OptionExt};
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::region_engine::WriteHint;
 use store_api::region_request::{AffectedRows, RegionPutRequest};
 use store_api::storage::{RegionId, TableId};
 
@@ -87,7 +86,9 @@ impl MetricEngineInner {
             encoding,
         )?;
         if encoding == PrimaryKeyEncoding::Sparse {
-            request.hint = WriteHint::PRIMARY_KEY_ENCODED | WriteHint::SPARSE_KEY_ENCODING;
+            request.hint = Some(WriteHint {
+                primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
+            });
         }
         self.data_region.write_data(data_region_id, request).await
     }
@@ -166,7 +167,7 @@ impl MetricEngineInner {
 #[cfg(test)]
 mod tests {
     use common_recordbatch::RecordBatches;
-    use store_api::region_engine::{RegionEngine, WriteHint};
+    use store_api::region_engine::RegionEngine;
     use store_api::region_request::RegionRequest;
     use store_api::storage::ScanRequest;
 
@@ -183,7 +184,7 @@ mod tests {
         let rows = test_util::build_rows(1, 5);
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
-            hint: WriteHint::empty(),
+            hint: None,
         });
 
         // write data
@@ -257,7 +258,7 @@ mod tests {
         let rows = test_util::build_rows(3, 100);
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
-            hint: WriteHint::empty(),
+            hint: None,
         });
 
         // write data
@@ -279,7 +280,7 @@ mod tests {
         let rows = test_util::build_rows(1, 100);
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
-            hint: WriteHint::empty(),
+            hint: None,
         });
 
         engine
@@ -299,7 +300,7 @@ mod tests {
         let rows = test_util::build_rows(1, 100);
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
-            hint: WriteHint::empty(),
+            hint: None,
         });
 
         engine

@@ -115,7 +115,7 @@ mod tests {
                 op_type: OpType::Put as i32,
                 sequence: 1u64,
                 rows: None,
-                write_hint: 0,
+                write_hint: None,
             }],
         };
         let encoded_entry = wal_entry.encode_to_vec();

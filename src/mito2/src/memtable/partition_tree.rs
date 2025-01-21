@@ -741,7 +741,7 @@ mod tests {
                 schema: column_schema,
                 rows,
             }),
-            write_hint: 0,
+            write_hint: None,
         };
         KeyValues::new(metadata.as_ref(), mutation).unwrap()
     }

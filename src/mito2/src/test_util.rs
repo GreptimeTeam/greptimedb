@@ -57,7 +57,7 @@ use rskafka::client::{Client, ClientBuilder};
 use rskafka::record::Record;
 use rstest_reuse::template;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
-use store_api::region_engine::{RegionEngine, RegionRole, WriteHint};
+use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
     RegionCloseRequest, RegionCreateRequest, RegionDeleteRequest, RegionFlushRequest,
     RegionOpenRequest, RegionPutRequest, RegionRequest,
@@ -1051,10 +1051,7 @@ pub async fn put_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
     let result = engine
         .handle_request(
             region_id,
-            RegionRequest::Put(RegionPutRequest {
-                rows,
-                hint: WriteHint::empty(),
-            }),
+            RegionRequest::Put(RegionPutRequest { rows, hint: None }),
         )
         .await
         .unwrap();

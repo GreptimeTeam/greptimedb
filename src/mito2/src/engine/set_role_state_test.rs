@@ -16,7 +16,7 @@ use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use store_api::region_engine::{
-    RegionEngine, RegionRole, SetRegionRoleStateResponse, SettableRegionRoleState, WriteHint,
+    RegionEngine, RegionRole, SetRegionRoleStateResponse, SettableRegionRoleState,
 };
 use store_api::region_request::{RegionPutRequest, RegionRequest};
 use store_api::storage::RegionId;
@@ -76,7 +76,7 @@ async fn test_set_role_state_gracefully() {
                 region_id,
                 RegionRequest::Put(RegionPutRequest {
                     rows: rows.clone(),
-                    hint: WriteHint::empty(),
+                    hint: None,
                 }),
             )
             .await
@@ -159,7 +159,7 @@ async fn test_write_downgrading_region() {
             region_id,
             RegionRequest::Put(RegionPutRequest {
                 rows: rows.clone(),
-                hint: WriteHint::empty(),
+                hint: None,
             }),
         )
         .await

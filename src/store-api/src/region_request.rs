@@ -23,7 +23,7 @@ use api::v1::region::{
     CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
     FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
-use api::v1::{self, set_index, Analyzer, Option as PbOption, Rows, SemanticType};
+use api::v1::{self, set_index, Analyzer, Option as PbOption, Rows, SemanticType, WriteHint};
 pub use common_base::AffectedRows;
 use common_time::TimeToLive;
 use datatypes::data_type::ConcreteDataType;
@@ -45,7 +45,6 @@ use crate::mito_engine_options::{
     TWCS_TIME_WINDOW,
 };
 use crate::path_utils::region_dir;
-use crate::region_engine::WriteHint;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
 
 #[derive(Debug, IntoStaticStr)]
@@ -99,10 +98,7 @@ fn make_region_puts(inserts: InsertRequests) -> Result<Vec<(RegionId, RegionRequ
             r.rows.map(|rows| {
                 (
                     region_id,
-                    RegionRequest::Put(RegionPutRequest {
-                        rows,
-                        hint: WriteHint::empty(),
-                    }),
+                    RegionRequest::Put(RegionPutRequest { rows, hint: None }),
                 )
             })
         })
@@ -241,7 +237,7 @@ pub struct RegionPutRequest {
     /// Rows to put.
     pub rows: Rows,
     /// Write hint.
-    pub hint: WriteHint,
+    pub hint: Option<WriteHint>,
 }
 
 #[derive(Debug)]
