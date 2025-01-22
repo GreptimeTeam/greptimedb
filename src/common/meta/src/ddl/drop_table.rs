@@ -15,6 +15,8 @@
 pub(crate) mod executor;
 mod metadata;
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_procedure::error::{ExternalSnafu, FromJsonSnafu, ToJsonSnafu};
@@ -163,7 +165,11 @@ impl DropTableProcedure {
             self.data.physical_region_routes.clone(),
         );
         self.executor
-            .on_delete_metadata_tombstone(&self.context, table_route_value)
+            .on_delete_metadata_tombstone(
+                &self.context,
+                table_route_value,
+                &self.data.region_wal_options,
+            )
             .await?;
 
         self.dropping_regions.clear();
@@ -256,6 +262,7 @@ pub struct DropTableData {
     pub task: DropTableTask,
     pub physical_region_routes: Vec<RegionRoute>,
     pub physical_table_id: Option<TableId>,
+    pub region_wal_options: HashMap<u32, String>,
     #[serde(default)]
     pub allow_rollback: bool,
 }
@@ -268,6 +275,7 @@ impl DropTableData {
             task,
             physical_region_routes: vec![],
             physical_table_id: None,
+            region_wal_options: HashMap::new(),
             allow_rollback: false,
         }
     }

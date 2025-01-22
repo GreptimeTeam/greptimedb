@@ -174,17 +174,13 @@ impl TombstoneManager {
         self.move_values(keys, dest_keys).await
     }
 
-    /// Deletes tombstones values for the specified `keys`.
-    pub(crate) async fn delete(&self, keys: Vec<Vec<u8>>) -> Result<()> {
-        let operations = keys
+    pub(crate) fn build_delete_txn(&self, keys: &[Vec<u8>]) -> Result<Txn> {
+        let operations: Vec<TxnOp> = keys
             .iter()
             .map(|key| TxnOp::Delete(to_tombstone(key)))
             .collect::<Vec<_>>();
 
-        let txn = Txn::new().and_then(operations);
-        // Always success.
-        let _ = self.kv_backend.txn(txn).await?;
-        Ok(())
+        Ok(Txn::new().and_then(operations))
     }
 }
 
@@ -198,7 +194,7 @@ mod tests {
     use crate::error::Error;
     use crate::key::tombstone::TombstoneManager;
     use crate::kv_backend::memory::MemoryKvBackend;
-    use crate::kv_backend::KvBackend;
+    use crate::kv_backend::{KvBackend, TxnService};
     use crate::rpc::store::PutRequest;
 
     #[derive(Debug, Clone)]
@@ -334,10 +330,10 @@ mod tests {
             .create(vec![b"bar".to_vec(), b"foo".to_vec()])
             .await
             .unwrap();
-        tombstone_manager
-            .delete(vec![b"bar".to_vec(), b"foo".to_vec()])
-            .await
+        let delete_txn = tombstone_manager
+            .build_delete_txn(&[b"bar".to_vec(), b"foo".to_vec()])
             .unwrap();
+        kv_backend.txn(delete_txn).await.unwrap();
         assert!(kv_backend.is_empty());
     }
 

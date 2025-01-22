@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::collections::HashMap;
 
 use common_procedure::Status;
 use common_telemetry::info;
@@ -107,8 +108,29 @@ impl State for DropDatabaseExecutor {
             self.physical_table_id,
             self.physical_region_routes.clone(),
         );
+
+        // Deletes topic-region mapping if dropping physical table
+        let region_wal_options =
+            if let TableRouteValue::Physical(table_route_value) = &table_route_value {
+                ddl_ctx
+                    .table_metadata_manager
+                    .datanode_table_manager()
+                    .regions(self.physical_table_id, table_route_value)
+                    .await?
+                    .into_iter()
+                    .flat_map(|datanode_table_value| {
+                        datanode_table_value
+                            .region_info
+                            .region_wal_options
+                            .into_iter()
+                    })
+                    .collect::<HashMap<_, _>>()
+            } else {
+                HashMap::new()
+            };
+
         executor
-            .on_destroy_metadata(ddl_ctx, &table_route_value)
+            .on_destroy_metadata(ddl_ctx, &table_route_value, &region_wal_options)
             .await?;
         executor.invalidate_table_cache(ddl_ctx).await?;
         executor

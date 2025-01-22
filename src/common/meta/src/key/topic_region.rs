@@ -34,8 +34,9 @@ use store_api::storage::RegionId;
 
 use crate::error::{Error, InvalidMetadataSnafu, Result};
 use crate::key::{MetadataKey, TOPIC_REGION_PATTERN, TOPIC_REGION_PREFIX};
+use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::store::{BatchPutRequest, PutRequest, RangeRequest};
+use crate::rpc::store::{BatchDeleteRequest, BatchPutRequest, PutRequest, RangeRequest};
 use crate::rpc::KeyValue;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,7 +54,7 @@ impl<'a> TopicRegionKey<'a> {
     }
 
     pub fn range_topic_key(topic: &str) -> String {
-        format!("{}/{}", TOPIC_REGION_PREFIX, topic)
+        format!("{}/{}/", TOPIC_REGION_PREFIX, topic)
     }
 }
 
@@ -80,7 +81,7 @@ impl Display for TopicRegionKey<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}/{}",
+            "{}{}",
             Self::range_topic_key(self.topic),
             self.region_id.as_u64()
         )
@@ -151,6 +152,14 @@ impl TopicRegionManager {
         Ok(())
     }
 
+    pub fn build_create_txn(&self, keys: Vec<TopicRegionKey<'_>>) -> Txn {
+        let operations = keys
+            .into_iter()
+            .map(|key| TxnOp::Put(key.to_bytes(), vec![]))
+            .collect::<Vec<_>>();
+        Txn::new().and_then(operations)
+    }
+
     /// Returns the list of region ids using specified topic.
     pub async fn regions(&self, topic: &str) -> Result<Vec<RegionId>> {
         let prefix = TopicRegionKey::range_topic_key(topic);
@@ -167,6 +176,24 @@ impl TopicRegionManager {
     pub async fn delete(&self, key: TopicRegionKey<'_>) -> Result<()> {
         let raw_key = key.to_bytes();
         self.kv_backend.delete(&raw_key, false).await?;
+        Ok(())
+    }
+
+    pub(crate) fn build_delete_txn(&self, keys: Vec<TopicRegionKey<'_>>) -> Result<Txn> {
+        let operations = keys
+            .into_iter()
+            .map(|key| TxnOp::Delete(key.to_bytes()))
+            .collect::<Vec<_>>();
+        Ok(Txn::new().and_then(operations))
+    }
+
+    pub async fn batch_delete(&self, keys: Vec<TopicRegionKey<'_>>) -> Result<()> {
+        let raw_keys = keys.iter().map(|key| key.to_bytes()).collect::<Vec<_>>();
+        let req = BatchDeleteRequest {
+            keys: raw_keys,
+            prev_kv: false,
+        };
+        self.kv_backend.batch_delete(req).await?;
         Ok(())
     }
 }
