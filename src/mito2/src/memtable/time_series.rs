@@ -1165,6 +1165,7 @@ mod tests {
                 schema: column_schema,
                 rows,
             }),
+            write_hint: None,
         };
         KeyValues::new(schema.as_ref(), mutation).unwrap()
     }

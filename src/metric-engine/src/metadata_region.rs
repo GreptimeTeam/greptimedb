@@ -512,7 +512,7 @@ impl MetadataRegion {
             }],
         };
 
-        RegionPutRequest { rows }
+        RegionPutRequest { rows, hint: None }
     }
 
     fn build_delete_request(keys: &[String]) -> RegionDeleteRequest {

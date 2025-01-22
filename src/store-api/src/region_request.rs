@@ -23,7 +23,7 @@ use api::v1::region::{
     CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
     FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
-use api::v1::{self, set_index, Analyzer, Option as PbOption, Rows, SemanticType};
+use api::v1::{self, set_index, Analyzer, Option as PbOption, Rows, SemanticType, WriteHint};
 pub use common_base::AffectedRows;
 use common_time::TimeToLive;
 use datatypes::data_type::ConcreteDataType;
@@ -95,8 +95,12 @@ fn make_region_puts(inserts: InsertRequests) -> Result<Vec<(RegionId, RegionRequ
         .into_iter()
         .filter_map(|r| {
             let region_id = r.region_id.into();
-            r.rows
-                .map(|rows| (region_id, RegionRequest::Put(RegionPutRequest { rows })))
+            r.rows.map(|rows| {
+                (
+                    region_id,
+                    RegionRequest::Put(RegionPutRequest { rows, hint: None }),
+                )
+            })
         })
         .collect();
     Ok(requests)
@@ -232,6 +236,8 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
 pub struct RegionPutRequest {
     /// Rows to put.
     pub rows: Rows,
+    /// Write hint.
+    pub hint: Option<WriteHint>,
 }
 
 #[derive(Debug)]

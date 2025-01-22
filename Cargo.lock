@@ -4451,7 +4451,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=ec801a91aa22f9666063d02805f1f60f7c93458a#ec801a91aa22f9666063d02805f1f60f7c93458a"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=6cee3db98a552f1dd848dec3eefcce8f26343748#6cee3db98a552f1dd848dec3eefcce8f26343748"
 dependencies = [
  "prost 0.12.6",
  "serde",
@@ -6495,6 +6495,7 @@ dependencies = [
  "prometheus",
  "serde",
  "serde_json",
+ "smallvec",
  "snafu 0.8.5",
  "store-api",
  "tokio",

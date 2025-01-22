@@ -275,6 +275,7 @@ impl CpuDataGenerator {
                 schema: self.column_schemas.clone(),
                 rows,
             }),
+            write_hint: None,
         };
 
         KeyValues::new(&self.metadata, mutation).unwrap()
