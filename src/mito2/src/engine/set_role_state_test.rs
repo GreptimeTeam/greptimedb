@@ -74,7 +74,10 @@ async fn test_set_role_state_gracefully() {
         let error = engine
             .handle_request(
                 region_id,
-                RegionRequest::Put(RegionPutRequest { rows: rows.clone() }),
+                RegionRequest::Put(RegionPutRequest {
+                    rows: rows.clone(),
+                    hint: None,
+                }),
             )
             .await
             .unwrap_err();
@@ -152,7 +155,13 @@ async fn test_write_downgrading_region() {
         rows: build_rows(0, 42),
     };
     let err = engine
-        .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: rows.clone(),
+                hint: None,
+            }),
+        )
         .await
         .unwrap_err();
     assert_eq!(err.status_code(), StatusCode::RegionNotReady)

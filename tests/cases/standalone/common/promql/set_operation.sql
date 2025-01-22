@@ -165,6 +165,10 @@ tql eval (3000, 3000, '1s') http_requests AND ON (dummy) vector(1);
 -- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') http_requests AND IGNORING (g, instance, job) vector(1);
 
+-- https://github.com/GreptimeTeam/greptimedb/issues/5392
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') vector(1) * http_requests;
+
 drop table http_requests;
 
 drop table cpu_count;

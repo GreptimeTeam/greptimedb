@@ -4337,6 +4337,7 @@ dependencies = [
  "partition",
  "pipeline",
  "prometheus",
+ "promql-parser",
  "prost 0.13.3",
  "query",
  "raft-engine",
@@ -4709,7 +4710,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=8a63580f65453bd688db6662f70616a62a7214f3#8a63580f65453bd688db6662f70616a62a7214f3"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=683e9d10ae7f3dfb8aaabd89082fc600c17e3795#683e9d10ae7f3dfb8aaabd89082fc600c17e3795"
 dependencies = [
  "prost 0.13.3",
  "serde",
@@ -5428,9 +5429,11 @@ dependencies = [
  "futures",
  "greptime-proto",
  "itertools 0.10.5",
+ "jieba-rs",
  "mockall",
  "pin-project",
  "prost 0.13.3",
+ "puffin",
  "rand",
  "regex",
  "regex-automata 0.4.8",
@@ -6620,6 +6623,7 @@ dependencies = [
  "prometheus",
  "serde",
  "serde_json",
+ "smallvec",
  "snafu 0.8.5",
  "store-api",
  "tokio",
@@ -10421,6 +10425,7 @@ dependencies = [
  "snafu 0.8.5",
  "snap",
  "sql",
+ "store-api",
  "strum 0.25.0",
  "table",
  "tempfile",

@@ -20,7 +20,7 @@ use itertools::Itertools;
 
 use crate::bloom_filter::error::Result;
 use crate::bloom_filter::reader::BloomFilterReader;
-use crate::bloom_filter::Bytes;
+use crate::Bytes;
 
 pub struct BloomFilterApplier {
     reader: Box<dyn BloomFilterReader + Send>,

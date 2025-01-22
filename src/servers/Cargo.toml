@@ -103,6 +103,7 @@ session.workspace = true
 snafu.workspace = true
 snap = "1"
 sql.workspace = true
+store-api.workspace = true
 strum.workspace = true
 table.workspace = true
 tokio.workspace = true

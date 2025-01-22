@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 pub mod create;
 pub mod error;
 pub mod search;
+pub mod tokenizer;
 
 #[cfg(test)]
 mod tests;

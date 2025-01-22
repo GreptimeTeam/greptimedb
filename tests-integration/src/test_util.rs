@@ -438,6 +438,11 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
     (app, instance.guard)
 }
 
+async fn run_sql(sql: &str, instance: &GreptimeDbStandalone) {
+    let result = instance.instance.do_query(sql, QueryContext::arc()).await;
+    let _ = result.first().unwrap().as_ref().unwrap();
+}
+
 pub async fn setup_test_prom_app_with_frontend(
     store_type: StorageType,
     name: &str,
@@ -446,11 +451,20 @@ pub async fn setup_test_prom_app_with_frontend(
 
     let instance = setup_standalone_instance(name, store_type).await;
 
-    create_test_table(instance.instance.as_ref(), "demo").await;
-
-    let sql = "INSERT INTO demo VALUES ('host1', 1.1, 2.2, 0), ('host2', 2.1, 4.3, 600000)";
-    let result = instance.instance.do_query(sql, QueryContext::arc()).await;
-    let _ = result.first().unwrap().as_ref().unwrap();
+    // build physical table
+    let sql = "CREATE TABLE phy (ts timestamp time index, val double, host string primary key) engine=metric with ('physical_metric_table' = '')";
+    run_sql(sql, &instance).await;
+    // build metric tables
+    let sql = "CREATE TABLE demo (ts timestamp time index, val double, host string primary key) engine=metric with ('on_physical_table' = 'phy')";
+    run_sql(sql, &instance).await;
+    let sql = "CREATE TABLE demo_metrics (ts timestamp time index, val double, idc string primary key) engine=metric with ('on_physical_table' = 'phy')";
+    run_sql(sql, &instance).await;
+    // insert rows
+    let sql = "INSERT INTO demo(host, val, ts) VALUES ('host1', 1.1, 0), ('host2', 2.1, 600000)";
+    run_sql(sql, &instance).await;
+    let sql =
+        "INSERT INTO demo_metrics(idc, val, ts) VALUES ('idc1', 1.1, 0), ('idc2', 2.1, 600000)";
+    run_sql(sql, &instance).await;
 
     let http_opts = HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),

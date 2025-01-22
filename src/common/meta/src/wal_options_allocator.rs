@@ -23,17 +23,18 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_wal::config::MetasrvWalConfig;
 use common_wal::options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 
-use crate::error::{EncodeWalOptionsSnafu, Result};
+use crate::error::{EncodeWalOptionsSnafu, InvalidTopicNamePrefixSnafu, Result};
+use crate::key::NAME_PATTERN_REGEX;
 use crate::kv_backend::KvBackendRef;
 use crate::leadership_notifier::LeadershipChangeListener;
 use crate::wal_options_allocator::topic_creator::build_kafka_topic_creator;
 use crate::wal_options_allocator::topic_pool::KafkaTopicPool;
 
 /// Allocates wal options in region granularity.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub enum WalOptionsAllocator {
     #[default]
     RaftEngine,
@@ -113,6 +114,11 @@ pub async fn build_wal_options_allocator(
     match config {
         MetasrvWalConfig::RaftEngine => Ok(WalOptionsAllocator::RaftEngine),
         MetasrvWalConfig::Kafka(kafka_config) => {
+            let prefix = &kafka_config.kafka_topic.topic_name_prefix;
+            ensure!(
+                NAME_PATTERN_REGEX.is_match(prefix),
+                InvalidTopicNamePrefixSnafu { prefix }
+            );
             let topic_creator = build_kafka_topic_creator(kafka_config).await?;
             let topic_pool = KafkaTopicPool::new(kafka_config, kv_backend, topic_creator);
             Ok(WalOptionsAllocator::Kafka(topic_pool))
@@ -149,11 +155,14 @@ pub fn prepare_wal_options(
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
+
     use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
     use common_wal::config::kafka::MetasrvKafkaConfig;
     use common_wal::test_util::run_test_with_kafka_wal;
 
     use super::*;
+    use crate::error::Error;
     use crate::kv_backend::memory::MemoryKvBackend;
 
     // Tests that the wal options allocator could successfully allocate raft-engine wal options.
@@ -176,6 +185,22 @@ mod tests {
             .zip(vec![encoded_wal_options; num_regions as usize])
             .collect();
         assert_eq!(got, expected);
+    }
+
+    #[tokio::test]
+    async fn test_refuse_invalid_topic_name_prefix() {
+        let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
+        let wal_config = MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
+            kafka_topic: KafkaTopicConfig {
+                topic_name_prefix: "``````".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let got = build_wal_options_allocator(&wal_config, kv_backend)
+            .await
+            .unwrap_err();
+        assert_matches!(got, Error::InvalidTopicNamePrefix { .. });
     }
 
     // Tests that the wal options allocator could successfully allocate Kafka wal options.

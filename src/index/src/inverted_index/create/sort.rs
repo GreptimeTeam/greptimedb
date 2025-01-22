@@ -21,7 +21,7 @@ use common_base::BitVec;
 use futures::Stream;
 
 use crate::inverted_index::error::Result;
-use crate::inverted_index::{Bytes, BytesRef};
+use crate::{Bytes, BytesRef};
 
 /// A stream of sorted values along with their associated bitmap
 pub type SortedStream = Box<dyn Stream<Item = Result<(Bytes, BitVec)>> + Send + Unpin>;

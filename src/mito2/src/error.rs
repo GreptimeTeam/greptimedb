@@ -939,6 +939,9 @@ pub enum Error {
         column: String,
         default_value: String,
     },
+
+    #[snafu(display("Manual compaction is override by following operations."))]
+    ManualCompactionOverride {},
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1082,6 +1085,8 @@ impl ErrorExt for Error {
             PushBloomFilterValue { source, .. } | BloomFilterFinish { source, .. } => {
                 source.status_code()
             }
+
+            ManualCompactionOverride {} => StatusCode::Cancelled,
         }
     }
 

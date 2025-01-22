@@ -22,20 +22,21 @@ use crate::kv_backend::KvBackendRef;
 /// Responsible for:
 /// 1. Restores and persisting topics in kvbackend.
 /// 2. Clears topics in legacy format and restores them in the new format.
+/// 3. Stores and fetches topic-region mapping in kvbackend.
 pub struct KafkaTopicManager {
-    key_manager: TopicNameManager,
+    topic_name_manager: TopicNameManager,
 }
 
 impl KafkaTopicManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self {
-            key_manager: TopicNameManager::new(kv_backend),
+            topic_name_manager: TopicNameManager::new(kv_backend.clone()),
         }
     }
 
     async fn restore_topics(&self) -> Result<Vec<String>> {
-        self.key_manager.update_legacy_topics().await?;
-        let topics = self.key_manager.range().await?;
+        self.topic_name_manager.update_legacy_topics().await?;
+        let topics = self.topic_name_manager.range().await?;
         Ok(topics)
     }
 
@@ -57,7 +58,7 @@ impl KafkaTopicManager {
 
     /// Persists topics into the key-value backend.
     pub async fn persist_topics(&self, topics: &[String]) -> Result<()> {
-        self.key_manager
+        self.topic_name_manager
             .batch_put(
                 topics
                     .iter()

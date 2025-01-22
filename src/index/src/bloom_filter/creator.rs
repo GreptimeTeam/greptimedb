@@ -26,8 +26,9 @@ use prost::Message;
 use snafu::ResultExt;
 
 use crate::bloom_filter::error::{IoSnafu, Result};
-use crate::bloom_filter::{Bytes, SEED};
+use crate::bloom_filter::SEED;
 use crate::external_provider::ExternalTempFileProvider;
+use crate::Bytes;
 
 /// The false positive rate of the Bloom filter.
 pub const FALSE_POSITIVE_RATE: f64 = 0.01;

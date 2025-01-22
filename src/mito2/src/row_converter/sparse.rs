@@ -42,7 +42,9 @@ struct SparsePrimaryKeyCodecInner {
     // User defined label field
     label_field: SortField,
     // Columns in primary key
-    columns: HashSet<ColumnId>,
+    //
+    // None means all unknown columns is primary key(`Self::label_field`).
+    columns: Option<HashSet<ColumnId>>,
 }
 
 /// Sparse values representation.
@@ -85,18 +87,37 @@ impl SparsePrimaryKeyCodec {
                 table_id_field: SortField::new(ConcreteDataType::uint32_datatype()),
                 tsid_field: SortField::new(ConcreteDataType::uint64_datatype()),
                 label_field: SortField::new(ConcreteDataType::string_datatype()),
-                columns: region_metadata
-                    .primary_key_columns()
-                    .map(|c| c.column_id)
-                    .collect(),
+                columns: Some(
+                    region_metadata
+                        .primary_key_columns()
+                        .map(|c| c.column_id)
+                        .collect(),
+                ),
+            }),
+        }
+    }
+
+    /// Returns a new [`SparsePrimaryKeyCodec`] instance.
+    ///
+    /// It treats all unknown columns as primary key(label field).
+    pub fn schemaless() -> Self {
+        Self {
+            inner: Arc::new(SparsePrimaryKeyCodecInner {
+                table_id_field: SortField::new(ConcreteDataType::uint32_datatype()),
+                tsid_field: SortField::new(ConcreteDataType::uint64_datatype()),
+                label_field: SortField::new(ConcreteDataType::string_datatype()),
+                columns: None,
             }),
         }
     }
 
     /// Returns the field of the given column id.
     fn get_field(&self, column_id: ColumnId) -> Option<&SortField> {
-        if !self.inner.columns.contains(&column_id) {
-            return None;
+        // if the `columns` is not specified, all unknown columns is primary key(label field).
+        if let Some(columns) = &self.inner.columns {
+            if !columns.contains(&column_id) {
+                return None;
+            }
         }
 
         match column_id {
@@ -107,7 +128,7 @@ impl SparsePrimaryKeyCodec {
     }
 
     /// Encodes the given bytes into a [`SparseValues`].
-    pub(crate) fn encode_to_vec<'a, I>(&self, row: I, buffer: &mut Vec<u8>) -> Result<()>
+    pub fn encode_to_vec<'a, I>(&self, row: I, buffer: &mut Vec<u8>) -> Result<()>
     where
         I: Iterator<Item = (ColumnId, ValueRef<'a>)>,
     {

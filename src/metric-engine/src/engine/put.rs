@@ -12,15 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::hash::Hash;
-
-use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType};
+use api::v1::{Rows, WriteHint};
 use common_telemetry::{error, info};
 use snafu::{ensure, OptionExt};
-use store_api::metric_engine_consts::{
-    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
-};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::region_request::{AffectedRows, RegionPutRequest};
 use store_api::storage::{RegionId, TableId};
 
@@ -30,10 +25,8 @@ use crate::error::{
     PhysicalRegionNotFoundSnafu, Result,
 };
 use crate::metrics::{FORBIDDEN_OPERATION_COUNT, MITO_OPERATION_ELAPSED};
+use crate::row_modifier::RowsIter;
 use crate::utils::to_data_region_id;
-
-// A random number
-const TSID_HASH_SEED: u32 = 846793005;
 
 impl MetricEngineInner {
     /// Dispatch region put request
@@ -82,8 +75,21 @@ impl MetricEngineInner {
 
         // write to data region
 
+        // TODO(weny): retrieve the encoding from the metadata region.
+        let encoding = PrimaryKeyEncoding::Dense;
+
         // TODO: retrieve table name
-        self.modify_rows(logical_region_id.table_id(), &mut request.rows)?;
+        self.modify_rows(
+            physical_region_id,
+            logical_region_id.table_id(),
+            &mut request.rows,
+            encoding,
+        )?;
+        if encoding == PrimaryKeyEncoding::Sparse {
+            request.hint = Some(WriteHint {
+                primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
+            });
+        }
         self.data_region.write_data(data_region_id, request).await
     }
 
@@ -133,67 +139,28 @@ impl MetricEngineInner {
     /// Perform metric engine specific logic to incoming rows.
     /// - Add table_id column
     /// - Generate tsid
-    fn modify_rows(&self, table_id: TableId, rows: &mut Rows) -> Result<()> {
-        // gather tag column indices
-        let tag_col_indices = rows
-            .schema
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, col)| {
-                if col.semantic_type == SemanticType::Tag as i32 {
-                    Some((idx, col.column_name.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-
-        // add table_name column
-        rows.schema.push(ColumnSchema {
-            column_name: DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
-            datatype: ColumnDataType::Uint32 as i32,
-            semantic_type: SemanticType::Tag as _,
-            datatype_extension: None,
-            options: None,
-        });
-        // add tsid column
-        rows.schema.push(ColumnSchema {
-            column_name: DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
-            datatype: ColumnDataType::Uint64 as i32,
-            semantic_type: SemanticType::Tag as _,
-            datatype_extension: None,
-            options: None,
-        });
-
-        // fill internal columns
-        for row in &mut rows.rows {
-            Self::fill_internal_columns(table_id, &tag_col_indices, row);
-        }
-
-        Ok(())
-    }
-
-    /// Fills internal columns of a row with table name and a hash of tag values.
-    fn fill_internal_columns(
+    fn modify_rows(
+        &self,
+        physical_region_id: RegionId,
         table_id: TableId,
-        tag_col_indices: &[(usize, String)],
-        row: &mut Row,
-    ) {
-        let mut hasher = mur3::Hasher128::with_seed(TSID_HASH_SEED);
-        for (idx, name) in tag_col_indices {
-            let tag = row.values[*idx].clone();
-            name.hash(&mut hasher);
-            // The type is checked before. So only null is ignored.
-            if let Some(ValueData::StringValue(string)) = tag.value_data {
-                string.hash(&mut hasher);
-            }
-        }
-        // TSID is 64 bits, simply truncate the 128 bits hash
-        let (hash, _) = hasher.finish128();
-
-        // fill table id and tsid
-        row.values.push(ValueData::U32Value(table_id).into());
-        row.values.push(ValueData::U64Value(hash).into());
+        rows: &mut Rows,
+        encoding: PrimaryKeyEncoding,
+    ) -> Result<()> {
+        let input = std::mem::take(rows);
+        let iter = {
+            let state = self.state.read().unwrap();
+            let name_to_id = state
+                .physical_region_states()
+                .get(&physical_region_id)
+                .with_context(|| PhysicalRegionNotFoundSnafu {
+                    region_id: physical_region_id,
+                })?
+                .physical_columns();
+            RowsIter::new(input, name_to_id)
+        };
+        let output = self.row_modifier.modify_rows(iter, table_id, encoding)?;
+        *rows = output;
+        Ok(())
     }
 }
 
@@ -217,6 +184,7 @@ mod tests {
         let rows = test_util::build_rows(1, 5);
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
+            hint: None,
         });
 
         // write data
@@ -290,6 +258,7 @@ mod tests {
         let rows = test_util::build_rows(3, 100);
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
+            hint: None,
         });
 
         // write data
@@ -311,6 +280,7 @@ mod tests {
         let rows = test_util::build_rows(1, 100);
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
+            hint: None,
         });
 
         engine
@@ -330,6 +300,7 @@ mod tests {
         let rows = test_util::build_rows(1, 100);
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
+            hint: None,
         });
 
         engine

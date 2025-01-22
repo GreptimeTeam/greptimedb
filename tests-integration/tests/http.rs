@@ -519,7 +519,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(body.status, "success");
     assert_eq!(
         body.data,
-        serde_json::from_value::<PrometheusResponse>(json!(["__name__", "host", "number",]))
+        serde_json::from_value::<PrometheusResponse>(json!(["__name__", "host", "idc", "number",]))
             .unwrap()
     );
 
@@ -612,7 +612,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(body.status, "success");
     assert_eq!(
         body.data,
-        serde_json::from_value::<PrometheusResponse>(json!(["cpu", "memory"])).unwrap()
+        serde_json::from_value::<PrometheusResponse>(json!(["val"])).unwrap()
     );
 
     // query an empty database should return nothing
@@ -696,6 +696,31 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     let data = res.text().await;
     let expected = "{\"status\":\"error\",\"data\":{\"resultType\":\"\",\"result\":[]},\"error\":\"invalid promql query\",\"errorType\":\"InvalidArguments\"}";
     assert_eq!(expected, data);
+
+    // range_query with __name__ not-equal matcher
+    let res = client
+        .post("/v1/prometheus/api/v1/query_range?query=count by(__name__)({__name__=~'demo.*'})&start=1&end=100&step=5")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let data = res.text().await;
+    assert!(
+        data.contains("{\"__name__\":\"demo_metrics\"}")
+            && data.contains("{\"__name__\":\"demo\"}")
+    );
+
+    let res = client
+        .post("/v1/prometheus/api/v1/query_range?query=count by(__name__)({__name__=~'demo_metrics'})&start=1&end=100&step=5")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let data = res.text().await;
+    assert!(
+        data.contains("{\"__name__\":\"demo_metrics\"}")
+            && !data.contains("{\"__name__\":\"demo\"}")
+    );
 
     guard.remove_all().await;
 }

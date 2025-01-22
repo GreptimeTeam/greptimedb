@@ -33,7 +33,7 @@ use crate::inverted_index::create::sort::merge_stream::MergeSortedStream;
 use crate::inverted_index::create::sort::{SortOutput, SortedStream, Sorter};
 use crate::inverted_index::create::sort_create::SorterFactory;
 use crate::inverted_index::error::{IntermediateSnafu, Result};
-use crate::inverted_index::{Bytes, BytesRef};
+use crate::{Bytes, BytesRef};
 
 /// `ExternalSorter` manages the sorting of data using both in-memory structures and external files.
 /// It dumps data to external files when the in-memory buffer crosses a certain memory threshold.

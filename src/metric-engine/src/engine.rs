@@ -50,6 +50,7 @@ use crate::config::EngineConfig;
 use crate::data_region::DataRegion;
 use crate::error::{self, Result, UnsupportedRegionRequestSnafu};
 use crate::metadata_region::MetadataRegion;
+use crate::row_modifier::RowModifier;
 use crate::utils;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
@@ -267,6 +268,7 @@ impl MetricEngine {
                 data_region,
                 state: RwLock::default(),
                 config,
+                row_modifier: RowModifier::new(),
             }),
         }
     }
@@ -310,6 +312,7 @@ struct MetricEngineInner {
     /// TODO(weny): remove it after the config is used.
     #[allow(unused)]
     config: EngineConfig,
+    row_modifier: RowModifier,
 }
 
 #[cfg(test)]

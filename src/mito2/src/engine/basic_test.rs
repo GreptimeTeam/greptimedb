@@ -530,7 +530,10 @@ async fn test_absent_and_invalid_columns() {
         rows,
     };
     let err = engine
-        .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest { rows, hint: None }),
+        )
         .await
         .unwrap_err();
     assert_eq!(StatusCode::InvalidArguments, err.status_code());
