@@ -238,7 +238,7 @@ pub(crate) fn from_substrait_literal(lit: &Literal) -> Result<(Value, CDT), Erro
                 };
                 //  1 day in milliseconds = 24 * 60 * 60 * 1000 = 8.64e7 ms = 8.64e13 ns << 2^63
                 // so overflow is unexpected
-                compound
+                compound.nanoseconds = compound
                     .nanoseconds
                     .checked_add(day_time.milliseconds as i64 * 1_000_000)
                     .with_context(|| UnexpectedSnafu {
