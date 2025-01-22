@@ -97,6 +97,7 @@ impl PartitionTree {
     }
 
     fn verify_primary_key_length(&self, kv: &KeyValue) -> Result<()> {
+        // The sparse primary key codec does not have a fixed number of fields.
         if let Some(expected_num_fields) = self.row_codec.num_fields() {
             ensure!(
                 expected_num_fields == kv.num_primary_keys(),
@@ -106,6 +107,7 @@ impl PartitionTree {
                 }
             );
         }
+        // TODO(weny): verify the primary key length for sparse primary key codec.
         Ok(())
     }
 
