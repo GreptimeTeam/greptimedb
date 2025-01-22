@@ -9,7 +9,7 @@
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
+// See the License for the specific langucage governing permissions and
 // limitations under the License.
 
 mod buckets;
@@ -545,12 +545,12 @@ impl CompactionStatus {
             }));
         }
 
-        if let Some(mut pending_compaction) = self.pending_request
-            && let Some(waiter) = pending_compaction.waiter.take_inner()
-        {
-            waiter.send(Err(err.clone()).context(CompactRegionSnafu {
-                region_id: self.region_id,
-            }));
+        if let Some(pending_compaction) = self.pending_request {
+            pending_compaction
+                .waiter
+                .send(Err(err.clone()).context(CompactRegionSnafu {
+                    region_id: self.region_id,
+                }));
         }
     }
 
