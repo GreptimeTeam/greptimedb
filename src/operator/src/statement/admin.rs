@@ -55,7 +55,7 @@ impl StatementExecutor {
         let signature = admin_func.signature();
         let FunctionArguments::List(args) = &func.args else {
             return error::BuildAdminFunctionArgsSnafu {
-                msg: format!("unsupported function arg {}", func.args),
+                msg: format!("unsupported function args {}", func.args),
             }
             .fail();
         };
