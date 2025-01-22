@@ -713,9 +713,9 @@ mod tests {
                 10,
                 Some(serde_json::json!(
                     {
-                        "a.b.c": "[1,2,3]",
-                        "d": "[\"foo\",\"bar\"]",
-                        "e.f": "[7,8,9]",
+                        "a.b.c": [1,2,3],
+                        "d": ["foo","bar"],
+                        "e.f": [7,8,9],
                         "e.g.h": 123,
                         "e.g.i": "hello",
                         "e.g.j.k": true

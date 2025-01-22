@@ -91,6 +91,7 @@ macro_rules! http_tests {
                 test_test_pipeline_api,
                 test_plain_text_ingestion,
                 test_identify_pipeline,
+                test_identify_pipeline_with_flatten,
 
                 test_otlp_metrics,
                 test_otlp_traces,
@@ -1232,7 +1233,8 @@ transform:
 
 pub async fn test_identify_pipeline(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_pipeline_api").await;
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_identify_pipeline").await;
 
     // handshake
     let client = TestClient::new(app);
@@ -1281,6 +1283,55 @@ pub async fn test_identify_pipeline(store_type: StorageType) {
 
     let expected = r#"[["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"],["dongdongdong","String","","YES","","FIELD"],["hasagei","String","","YES","","FIELD"],["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"]]"#;
     validate_data("identity_schema", &client, "desc logs", expected).await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_identify_pipeline_with_flatten(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_identify_pipeline_with_flatten").await;
+
+    let client = TestClient::new(app);
+    let body = r#"{"__time__":1453809242,"__topic__":"","__source__":"10.170.***.***","ip":"10.200.**.***","time":"26/Jan/2016:19:54:02 +0800","url":"POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","status":"200","user-agent":"aliyun-sdk-java","custom_map":{"value_a":["a","b","c"],"value_b":"b"}}"#;
+
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/json"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-pipeline-params"),
+                HeaderValue::from_static("flatten_json_object=true"),
+            ),
+        ],
+        "/v1/events/logs?table=logs&pipeline_name=greptime_identity",
+        body.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+
+    assert_eq!(StatusCode::OK, res.status());
+
+    let expected = r#"[["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["custom_map.value_a","Json","","YES","","FIELD"],["custom_map.value_b","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"],["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"]]"#;
+    validate_data(
+        "test_identify_pipeline_with_flatten_desc_logs",
+        &client,
+        "desc logs",
+        expected,
+    )
+    .await;
+
+    let expected = "[[[\"a\",\"b\",\"c\"]]]";
+    validate_data(
+        "test_identify_pipeline_with_flatten_select_json",
+        &client,
+        "select `custom_map.value_a` from logs",
+        expected,
+    )
+    .await;
 
     guard.remove_all().await;
 }
