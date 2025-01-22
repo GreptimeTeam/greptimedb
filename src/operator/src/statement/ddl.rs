@@ -990,14 +990,6 @@ impl StatementExecutor {
                 table_name: format_full_table_name(&catalog_name, &schema_name, &table_name),
             })?;
 
-        // for issue #3235 early error if the table has interval column
-        // FIXME: drop the check when arrow support interval type
-        for field in table.schema().column_schemas() {
-            if matches!(field.data_type.clone(), ConcreteDataType::Interval(_)) {
-                return error::TableCanNotAlterSnafu { table_name }.fail();
-            }
-        }
-
         let table_id = table.table_info().ident.table_id;
         let need_alter = self.verify_alter(table_id, table.table_info(), expr.clone())?;
         if !need_alter {

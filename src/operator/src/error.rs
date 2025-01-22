@@ -223,13 +223,6 @@ pub enum Error {
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound { table_name: String },
 
-    #[snafu(display("Table: {} can not alter because it has interval datatype", table_name))]
-    TableCanNotAlter {
-        table_name: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Admin function not found: {}", name))]
     AdminFunctionNotFound { name: String },
 
@@ -814,7 +807,6 @@ impl ErrorExt for Error {
             | Error::SchemaNotFound { .. }
             | Error::SchemaExists { .. }
             | Error::SchemaInUse { .. }
-            | Error::TableCanNotAlter { .. }
             | Error::ColumnNotFound { .. }
             | Error::BuildRegex { .. }
             | Error::InvalidSchema { .. }

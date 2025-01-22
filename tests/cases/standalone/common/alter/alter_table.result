@@ -165,25 +165,11 @@ FROM
 | loc_1 | loc_2 | loc_3 | 2   | job1 | 1970-01-01T00:00:00 | 1.0 |
 +-------+-------+-------+-----+------+---------------------+-----+
 
--- issue #3235 can not alter when table has column with tyep interval
-create table t3(val interval, ts timestamp time index);
-
-Affected Rows: 0
-
--- should fail with error
-alter table t3 add column label varchar;
-
-Error: 1004(InvalidArguments), Table: t3 can not alter because it has interval datatype
-
 DROP TABLE t1;
 
 Affected Rows: 0
 
 DROP TABLE t2;
-
-Affected Rows: 0
-
-DROP TABLE t3;
 
 Affected Rows: 0
 
