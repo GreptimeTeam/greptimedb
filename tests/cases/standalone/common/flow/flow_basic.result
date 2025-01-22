@@ -428,7 +428,7 @@ create table out_num_cnt_basic (
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP TIME INDEX
 );
 
-Affected Rows: 0
+Error: 1004(InvalidArguments), Invalid SQL, error: column name `a` is interval type, which is not supported
 
 CREATE FLOW filter_numbers_basic SINK TO out_num_cnt_basic AS
 SELECT
@@ -454,20 +454,21 @@ SHOW CREATE FLOW filter_numbers_basic;
 
 SHOW CREATE TABLE out_num_cnt_basic;
 
-+-------------------+-----------------------------------------------------------+
-| Table             | Create Table                                              |
-+-------------------+-----------------------------------------------------------+
-| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" (          |
-|                   |   "a" INTERVAL NULL,                                      |
-|                   |   "b" INTERVAL NULL,                                      |
-|                   |   "c" INTERVAL NULL,                                      |
-|                   |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
-|                   |   TIME INDEX ("ts")                                       |
-|                   | )                                                         |
-|                   |                                                           |
-|                   | ENGINE=mito                                               |
-|                   |                                                           |
-+-------------------+-----------------------------------------------------------+
++-------------------+------------------------------------------------------------------------------+
+| Table             | Create Table                                                                 |
++-------------------+------------------------------------------------------------------------------+
+| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" (                             |
+|                   |   "IntervalMonthDayNano(""18446744074709551616"")" INTERVAL NULL,            |
+|                   |   "IntervalMonthDayNano(""79228162532711081668253501952"")" INTERVAL NULL,   |
+|                   |   "IntervalMonthDayNano(""1029966112685436388716071354368"")" INTERVAL NULL, |
+|                   |   "update_at" TIMESTAMP(3) NULL,                                             |
+|                   |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,                                  |
+|                   |   TIME INDEX ("__ts_placeholder")                                            |
+|                   | )                                                                            |
+|                   |                                                                              |
+|                   | ENGINE=mito                                                                  |
+|                   |                                                                              |
++-------------------+------------------------------------------------------------------------------+
 
 drop flow filter_numbers_basic;
 
