@@ -14,7 +14,7 @@
 
 use catalog::information_schema::TABLES;
 use client::OutputData;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, INFORMATION_SCHEMA_NAME};
+use common_catalog::consts::INFORMATION_SCHEMA_NAME;
 use common_recordbatch::util;
 use common_telemetry::tracing;
 use datatypes::prelude::Value;
@@ -44,7 +44,7 @@ impl Instance {
         let table = self
             .catalog_manager
             .table(
-                DEFAULT_CATALOG_NAME,
+                ctx.current_catalog(),
                 INFORMATION_SCHEMA_NAME,
                 TABLES,
                 Some(ctx),
