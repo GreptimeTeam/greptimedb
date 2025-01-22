@@ -32,23 +32,20 @@ use crate::metrics::{
 use crate::query_handler::PipelineHandlerRef;
 
 #[inline]
-pub(crate) fn pipeline_exec_with_intermediate_state(
+fn pipeline_exec_with_intermediate_state(
     pipeline: &Arc<Pipeline<GreptimeTransformer>>,
     intermediate_state: &mut Vec<pipeline::Value>,
     transformed: &mut Vec<Row>,
     dispatched: &mut BTreeMap<DispatchedTo, Vec<Vec<pipeline::Value>>>,
     db: &str,
     transform_timer: &Instant,
-    is_top_level: bool,
 ) -> Result<()> {
     let r = pipeline
         .exec_mut(intermediate_state)
         .inspect_err(|_| {
-            if is_top_level {
-                METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                    .with_label_values(&[db, METRIC_FAILURE_VALUE])
-                    .observe(transform_timer.elapsed().as_secs_f64());
-            }
+            METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                .with_label_values(&[db, METRIC_FAILURE_VALUE])
+                .observe(transform_timer.elapsed().as_secs_f64());
         })
         .context(PipelineTransformSnafu)
         .context(PipelineSnafu)?;
@@ -118,22 +115,20 @@ pub(crate) async fn run_pipeline(
         let pipeline = get_pipeline(pipeline_definition, state, query_ctx).await?;
 
         let transform_timer = std::time::Instant::now();
-        let mut intermediate_state = pipeline.init_intermediate_state();
 
         let mut transformed = Vec::with_capacity(values.len());
         let mut dispatched: BTreeMap<DispatchedTo, Vec<Vec<pipeline::Value>>> = BTreeMap::new();
 
         match values {
             PipelineExecInput::Original(array) => {
+                let mut intermediate_state = pipeline.init_intermediate_state();
                 for v in array {
                     pipeline
                         .prepare(v, &mut intermediate_state)
                         .inspect_err(|_| {
-                            if is_top_level {
-                                METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                                    .with_label_values(&[db, METRIC_FAILURE_VALUE])
-                                    .observe(transform_timer.elapsed().as_secs_f64());
-                            }
+                            METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                                .with_label_values(&[db, METRIC_FAILURE_VALUE])
+                                .observe(transform_timer.elapsed().as_secs_f64());
                         })
                         .context(PipelineTransformSnafu)
                         .context(PipelineSnafu)?;
@@ -145,7 +140,6 @@ pub(crate) async fn run_pipeline(
                         &mut dispatched,
                         db,
                         &transform_timer,
-                        is_top_level,
                     )?;
 
                     pipeline.reset_intermediate_state(&mut intermediate_state);
@@ -160,7 +154,6 @@ pub(crate) async fn run_pipeline(
                         &mut dispatched,
                         db,
                         &transform_timer,
-                        is_top_level,
                     )?;
                 }
             }
