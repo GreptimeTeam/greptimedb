@@ -38,8 +38,8 @@ use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transformer, Transforms};
 use crate::etl::value::{Timestamp, Value};
 
-/// The header key for the `greptime_identity` pipeline params.
-pub const GREPTIME_IDENTITY_PIPELINE_PARAMS_HEADER: &str = "x-greptime-identity-pipeline-params";
+/// The header key that contains the pipeline params.
+pub const GREPTIME_PIPELINE_PARAMS_HEADER: &str = "x-greptime-pipeline-params";
 
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
@@ -52,28 +52,34 @@ pub struct GreptimeTransformer {
     schema: Vec<ColumnSchema>,
 }
 
-/// Parameters that can be used to configure the `greptime_identity` pipeline.
+/// Parameters that can be used to configure the greptime pipelines.
 #[derive(Debug, Clone, Default)]
-pub struct GreptimeIdentityPipelineParams {
-    /// Whether to flatten the JSON object.
-    pub flatten_json_object: Option<bool>,
+pub struct GreptimePipelineParams {
+    /// The options for configuring the greptime pipelines.
+    pub options: HashMap<String, String>,
 }
 
-impl GreptimeIdentityPipelineParams {
-    /// Create a `GreptimeIdentityPipelineParams` from params string which is from the http header with key `x-greptime-identity-pipeline-params`
+impl GreptimePipelineParams {
+    /// Create a `GreptimePipelineParams` from params string which is from the http header with key `x-greptime-pipeline-params`
     /// The params is in the format of `key1=value1&key2=value2`,for example:
-    /// x-greptime-identity-pipeline-params: flatten_json_object=true
+    /// x-greptime-pipeline-params: flatten_json_object=true
     pub fn from_params(params: Option<&str>) -> Self {
-        let params = params
+        let options = params
             .unwrap_or_default()
             .split('&')
             .filter_map(|s| s.split_once('='))
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect::<HashMap<String, String>>();
 
-        Self {
-            flatten_json_object: params.get("flatten_json_object").map(|v| v == "true"),
-        }
+        Self { options }
+    }
+
+    /// Whether to flatten the JSON object.
+    pub fn flatten_json_object(&self) -> bool {
+        self.options
+            .get("flatten_json_object")
+            .map(|v| v == "true")
+            .unwrap_or(false)
     }
 }
 
@@ -395,13 +401,13 @@ fn json_value_to_row(
 fn identity_pipeline_inner<'a>(
     array: Vec<serde_json::Value>,
     tag_column_names: Option<impl Iterator<Item = &'a String>>,
-    params: &GreptimeIdentityPipelineParams,
+    params: &GreptimePipelineParams,
 ) -> Result<Rows> {
     let mut rows = Vec::with_capacity(array.len());
     let mut schema_info = SchemaInfo::default();
     for value in array {
         if let serde_json::Value::Object(map) = value {
-            let object = if let Some(true) = params.flatten_json_object {
+            let object = if params.flatten_json_object() {
                 flatten_json_object(map, DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING)?
             } else {
                 map
@@ -456,7 +462,7 @@ fn identity_pipeline_inner<'a>(
 pub fn identity_pipeline(
     array: Vec<serde_json::Value>,
     table: Option<Arc<table::Table>>,
-    params: &GreptimeIdentityPipelineParams,
+    params: &GreptimePipelineParams,
 ) -> Result<Rows> {
     match table {
         Some(table) => {
@@ -526,7 +532,7 @@ mod tests {
     use api::v1::SemanticType;
 
     use crate::etl::transform::transformer::greptime::{
-        flatten_json_object, identity_pipeline_inner, GreptimeIdentityPipelineParams,
+        flatten_json_object, identity_pipeline_inner, GreptimePipelineParams,
     };
     use crate::identity_pipeline;
 
@@ -553,7 +559,7 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let rows = identity_pipeline(array, None, GreptimeIdentityPipelineParams::default());
+            let rows = identity_pipeline(array, None, &GreptimePipelineParams::default());
             assert!(rows.is_err());
             assert_eq!(
                 rows.err().unwrap().to_string(),
@@ -581,7 +587,7 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let rows = identity_pipeline(array, None, GreptimeIdentityPipelineParams::default());
+            let rows = identity_pipeline(array, None, &GreptimePipelineParams::default());
             assert!(rows.is_err());
             assert_eq!(
                 rows.err().unwrap().to_string(),
@@ -609,7 +615,7 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let rows = identity_pipeline(array, None, GreptimeIdentityPipelineParams::default());
+            let rows = identity_pipeline(array, None, &GreptimePipelineParams::default());
             assert!(rows.is_ok());
             let rows = rows.unwrap();
             assert_eq!(rows.schema.len(), 8);
@@ -642,7 +648,7 @@ mod tests {
             let rows = identity_pipeline_inner(
                 array,
                 Some(tag_column_names.iter()),
-                GreptimeIdentityPipelineParams::default(),
+                &GreptimePipelineParams::default(),
             );
             assert!(rows.is_ok());
             let rows = rows.unwrap();
@@ -748,5 +754,16 @@ mod tests {
                 Err(_) => assert_eq!(None, expected),
             }
         }
+    }
+
+    #[test]
+    fn test_greptime_pipeline_params() {
+        let params = Some("flatten_json_object=true");
+        let pipeline_params = GreptimePipelineParams::from_params(params);
+        assert_eq!(pipeline_params.flatten_json_object(), true);
+
+        let params = None;
+        let pipeline_params = GreptimePipelineParams::from_params(params);
+        assert_eq!(pipeline_params.flatten_json_object(), false);
     }
 }

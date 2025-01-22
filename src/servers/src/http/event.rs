@@ -33,8 +33,7 @@ use lazy_static::lazy_static;
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
 use pipeline::{
-    GreptimeIdentityPipelineParams, GreptimeTransformer, PipelineVersion,
-    GREPTIME_IDENTITY_PIPELINE_PARAMS_HEADER,
+    GreptimePipelineParams, GreptimeTransformer, PipelineVersion, GREPTIME_PIPELINE_PARAMS_HEADER,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Map, Value};
@@ -569,9 +568,9 @@ pub(crate) async fn ingest_logs_inner(
 
     let mut insert_requests = Vec::with_capacity(log_ingest_requests.len());
 
-    let pipeline_params = GreptimeIdentityPipelineParams::from_params(
+    let pipeline_params = GreptimePipelineParams::from_params(
         headers
-            .get(GREPTIME_IDENTITY_PIPELINE_PARAMS_HEADER)
+            .get(GREPTIME_PIPELINE_PARAMS_HEADER)
             .and_then(|v| v.to_str().ok()),
     );
 
