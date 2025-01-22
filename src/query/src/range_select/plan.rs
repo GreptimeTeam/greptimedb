@@ -1177,8 +1177,8 @@ impl Stream for RangeSelectStream {
                         // new batch to aggregate
                         Some(Ok(batch)) => {
                             if let Err(e) = self.update_range_context(batch) {
-                                common_telemetry::error!(
-                                    e; "RangeSelectStream cannot update range context, schema: {:?}", self.schema
+                                common_telemetry::debug!(
+                                    "RangeSelectStream cannot update range context, schema: {:?}, err: {:?}", self.schema, e
                                 );
                                 return Poll::Ready(Some(Err(e)));
                             }
