@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::fmt::{self, Display};
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -22,7 +21,6 @@ use crate::error::{DecodeJsonSnafu, Error, InvalidMetadataSnafu, Result};
 use crate::key::{
     MetadataKey, KAFKA_TOPIC_KEY_PATTERN, KAFKA_TOPIC_KEY_PREFIX, LEGACY_TOPIC_KEY_PREFIX,
 };
-use crate::kv_backend::memory::MemoryKvBackend;
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::{BatchPutRequest, RangeRequest};
@@ -102,12 +100,6 @@ pub struct TopicNameManager {
     kv_backend: KvBackendRef,
 }
 
-impl Default for TopicNameManager {
-    fn default() -> Self {
-        Self::new(Arc::new(MemoryKvBackend::default()))
-    }
-}
-
 impl TopicNameManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
@@ -138,7 +130,7 @@ impl TopicNameManager {
     }
 
     /// Range query for topics.
-    /// Caution: this method returns keys as String instead of values of range query since the topics are stoired in keys.
+    /// Caution: this method returns keys as String instead of values of range query since the topics are stored in keys.
     pub async fn range(&self) -> Result<Vec<String>> {
         let prefix = TopicNameKey::range_start_key();
         let raw_prefix = prefix.as_bytes();

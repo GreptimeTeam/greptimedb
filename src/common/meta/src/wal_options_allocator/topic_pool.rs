@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::{self, Formatter};
 use std::sync::Arc;
 
 use common_wal::config::kafka::MetasrvKafkaConfig;
@@ -37,6 +38,15 @@ pub struct KafkaTopicPool {
     topic_creator: KafkaTopicCreator,
     pub(crate) selector: TopicSelectorRef,
     auto_create_topics: bool,
+}
+
+impl fmt::Debug for KafkaTopicPool {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KafkaTopicPool")
+            .field("topics", &self.topics)
+            .field("auto_create_topics", &self.auto_create_topics)
+            .finish()
+    }
 }
 
 impl KafkaTopicPool {

@@ -703,6 +703,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid topic name prefix: {}", prefix))]
+    InvalidTopicNamePrefix {
+        prefix: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -770,7 +777,8 @@ impl ErrorExt for Error {
             | MismatchPrefix { .. }
             | TlsConfig { .. }
             | InvalidSetDatabaseOption { .. }
-            | InvalidUnsetDatabaseOption { .. } => StatusCode::InvalidArguments,
+            | InvalidUnsetDatabaseOption { .. }
+            | InvalidTopicNamePrefix { .. } => StatusCode::InvalidArguments,
 
             FlowNotFound { .. } => StatusCode::FlowNotFound,
             FlowRouteNotFound { .. } => StatusCode::Unexpected,
