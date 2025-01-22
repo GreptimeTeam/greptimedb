@@ -8072,7 +8072,6 @@ dependencies = [
  "api",
  "arrow",
  "async-trait",
- "axum",
  "catalog",
  "chrono",
  "chrono-tz 0.9.0",
