@@ -108,7 +108,10 @@ impl BloomFilterIndexer {
             return Ok(None);
         }
 
-        let codec = IndexValuesCodec::from_tag_columns(metadata.primary_key_columns());
+        let codec = IndexValuesCodec::from_tag_columns(
+            metadata.primary_key_encoding,
+            metadata.primary_key_columns(),
+        );
         let indexer = Self {
             creators,
             temp_file_provider,

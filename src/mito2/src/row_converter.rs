@@ -111,7 +111,7 @@ pub trait PrimaryKeyCodec: Send + Sync + Debug {
     ) -> Result<()>;
 
     /// Returns the number of fields in the primary key.
-    fn num_fields(&self) -> usize;
+    fn num_fields(&self) -> Option<usize>;
 
     /// Returns a primary key filter factory.
     fn primary_key_filter(

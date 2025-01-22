@@ -51,7 +51,7 @@ use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::dedup::LastNonNullIter;
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::region::options::MergeMode;
-use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt};
+use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
 
 /// Initial vector builder capacity.
 const INITIAL_BUILDER_CAPACITY: usize = 0;
@@ -146,12 +146,13 @@ impl TimeSeriesMemtable {
 
     fn write_key_value(&self, kv: KeyValue, stats: &mut WriteMetrics) -> Result<()> {
         ensure!(
-            kv.num_primary_keys() == self.row_codec.num_fields(),
+            self.row_codec.num_fields() == kv.num_primary_keys(),
             PrimaryKeyLengthMismatchSnafu {
                 expect: self.row_codec.num_fields(),
-                actual: kv.num_primary_keys()
+                actual: kv.num_primary_keys(),
             }
         );
+
         let primary_key_encoded = self.row_codec.encode(kv.primary_keys())?;
         let fields = kv.fields().collect::<Vec<_>>();
 

@@ -26,7 +26,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::ColumnId;
 
-use crate::error::{DeserializeFieldSnafu, Result, SerializeFieldSnafu};
+use crate::error::{DeserializeFieldSnafu, Result, SerializeFieldSnafu, UnsupportedOperationSnafu};
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::SparsePrimaryKeyFilter;
 use crate::row_converter::dense::SortField;
@@ -247,7 +247,10 @@ impl SparsePrimaryKeyCodec {
 
 impl PrimaryKeyCodec for SparsePrimaryKeyCodec {
     fn encode_key_value(&self, _key_value: &KeyValue, _buffer: &mut Vec<u8>) -> Result<()> {
-        todo!()
+        UnsupportedOperationSnafu {
+            err_msg: "The encode_key_value method is not supported in SparsePrimaryKeyCodec.",
+        }
+        .fail()
     }
 
     fn encode_values(&self, values: &[(ColumnId, Value)], buffer: &mut Vec<u8>) -> Result<()> {
@@ -266,8 +269,8 @@ impl PrimaryKeyCodec for SparsePrimaryKeyCodec {
         None
     }
 
-    fn num_fields(&self) -> usize {
-        todo!()
+    fn num_fields(&self) -> Option<usize> {
+        None
     }
 
     fn encoding(&self) -> PrimaryKeyEncoding {

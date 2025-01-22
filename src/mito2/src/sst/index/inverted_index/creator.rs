@@ -101,7 +101,10 @@ impl InvertedIndexer {
         );
         let index_creator = Box::new(SortIndexCreator::new(sorter, segment_row_count));
 
-        let codec = IndexValuesCodec::from_tag_columns(metadata.primary_key_columns());
+        let codec = IndexValuesCodec::from_tag_columns(
+            metadata.primary_key_encoding,
+            metadata.primary_key_columns(),
+        );
         Self {
             codec,
             index_creator,

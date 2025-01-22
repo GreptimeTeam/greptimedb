@@ -324,21 +324,17 @@ pub struct DensePrimaryKeyCodec {
 
 impl DensePrimaryKeyCodec {
     pub fn new(metadata: &RegionMetadata) -> Self {
-        let ordered_primary_key_columns = Arc::new(
-            metadata
-                .primary_key_columns()
-                .map(|c| {
-                    (
-                        c.column_id,
-                        SortField::new(c.column_schema.data_type.clone()),
-                    )
-                })
-                .collect::<Vec<_>>(),
-        );
+        let ordered_primary_key_columns = metadata
+            .primary_key_columns()
+            .map(|c| {
+                (
+                    c.column_id,
+                    SortField::new(c.column_schema.data_type.clone()),
+                )
+            })
+            .collect::<Vec<_>>();
 
-        Self {
-            ordered_primary_key_columns,
-        }
+        Self::with_fields(ordered_primary_key_columns)
     }
 
     pub fn with_fields(fields: Vec<(ColumnId, SortField)>) -> Self {
@@ -444,6 +440,10 @@ impl DensePrimaryKeyCodec {
             .map(|(_, f)| f.estimated_size())
             .sum()
     }
+
+    pub fn num_fields(&self) -> usize {
+        self.ordered_primary_key_columns.len()
+    }
 }
 
 impl PrimaryKeyCodec for DensePrimaryKeyCodec {
@@ -468,8 +468,8 @@ impl PrimaryKeyCodec for DensePrimaryKeyCodec {
         Some(self.estimated_size())
     }
 
-    fn num_fields(&self) -> usize {
-        self.ordered_primary_key_columns.len()
+    fn num_fields(&self) -> Option<usize> {
+        Some(self.num_fields())
     }
 
     fn encoding(&self) -> PrimaryKeyEncoding {

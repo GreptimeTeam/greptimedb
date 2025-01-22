@@ -13,16 +13,20 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::ValueRef;
 use memcomparable::Serializer;
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::ColumnMetadata;
 use store_api::storage::ColumnId;
 
 use crate::error::{FieldTypeMismatchSnafu, IndexEncodeNullSnafu, Result};
-use crate::row_converter::{CompositeValues, DensePrimaryKeyCodec, PrimaryKeyCodec, SortField};
+use crate::row_converter::{
+    build_primary_key_codec_with_fields, CompositeValues, PrimaryKeyCodec, SortField,
+};
 
 /// Encodes index values according to their data types for sorting and storage use.
 pub struct IndexValueCodec;
@@ -68,12 +72,15 @@ pub struct IndexValuesCodec {
     /// The data types of tag columns.
     fields: Vec<(ColumnId, SortField)>,
     /// The decoder for the primary key.
-    decoder: DensePrimaryKeyCodec,
+    decoder: Arc<dyn PrimaryKeyCodec>,
 }
 
 impl IndexValuesCodec {
     /// Creates a new `IndexValuesCodec` from a list of `ColumnMetadata` of tag columns.
-    pub fn from_tag_columns<'a>(tag_columns: impl Iterator<Item = &'a ColumnMetadata>) -> Self {
+    pub fn from_tag_columns<'a>(
+        primary_key_encoding: PrimaryKeyEncoding,
+        tag_columns: impl Iterator<Item = &'a ColumnMetadata>,
+    ) -> Self {
         let (column_ids, fields): (Vec<_>, Vec<_>) = tag_columns
             .map(|column| {
                 (
@@ -87,8 +94,9 @@ impl IndexValuesCodec {
             .unzip();
 
         let column_ids = column_ids.into_iter().collect();
+        let decoder =
+            build_primary_key_codec_with_fields(primary_key_encoding, fields.clone().into_iter());
 
-        let decoder = DensePrimaryKeyCodec::with_fields(fields.clone());
         Self {
             column_ids,
             fields,
@@ -115,10 +123,13 @@ impl IndexValuesCodec {
 #[cfg(test)]
 mod tests {
     use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use datatypes::value::Value;
+    use store_api::metadata::ColumnMetadata;
 
     use super::*;
     use crate::error::Error;
-    use crate::row_converter::SortField;
+    use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
 
     #[test]
     fn test_encode_value_basic() {
@@ -152,42 +163,32 @@ mod tests {
 
     #[test]
     fn test_decode_primary_key_basic() {
-        // TODO(weny, zhenchi): rewrite the test.
-        // let tag_columns = vec![
-        //     ColumnMetadata {
-        //         column_schema: ColumnSchema::new("tag0", ConcreteDataType::string_datatype(), true),
-        //         semantic_type: api::v1::SemanticType::Tag,
-        //         column_id: 1,
-        //     },
-        //     ColumnMetadata {
-        //         column_schema: ColumnSchema::new("tag1", ConcreteDataType::int64_datatype(), false),
-        //         semantic_type: api::v1::SemanticType::Tag,
-        //         column_id: 2,
-        //     },
-        // ];
+        let tag_columns = vec![
+            ColumnMetadata {
+                column_schema: ColumnSchema::new("tag0", ConcreteDataType::string_datatype(), true),
+                semantic_type: api::v1::SemanticType::Tag,
+                column_id: 1,
+            },
+            ColumnMetadata {
+                column_schema: ColumnSchema::new("tag1", ConcreteDataType::int64_datatype(), false),
+                semantic_type: api::v1::SemanticType::Tag,
+                column_id: 2,
+            },
+        ];
 
-        // let primary_key = DensePrimaryKeyCodec::with_fields(vec![
-        //     (0, SortField::new(ConcreteDataType::string_datatype())),
-        //     (1, SortField::new(ConcreteDataType::int64_datatype())),
-        // ])
-        // .encode([ValueRef::Null, ValueRef::Int64(10)].into_iter())
-        // .unwrap();
+        let primary_key = DensePrimaryKeyCodec::with_fields(vec![
+            (0, SortField::new(ConcreteDataType::string_datatype())),
+            (1, SortField::new(ConcreteDataType::int64_datatype())),
+        ])
+        .encode([ValueRef::Null, ValueRef::Int64(10)].into_iter())
+        .unwrap();
 
-        // let codec = IndexValuesCodec::from_tag_columns(tag_columns.iter());
-        // let mut iter = codec.decode(&primary_key).unwrap();
+        let codec =
+            IndexValuesCodec::from_tag_columns(PrimaryKeyEncoding::Dense, tag_columns.iter());
+        let values = codec.decode(&primary_key).unwrap().into_dense();
 
-        // let ((column_id, col_id_str), field, value) = iter.next().unwrap();
-        // assert_eq!(*column_id, 1);
-        // assert_eq!(col_id_str, "1");
-        // assert_eq!(field, &SortField::new(ConcreteDataType::string_datatype()));
-        // assert_eq!(value, None);
-
-        // let ((column_id, col_id_str), field, value) = iter.next().unwrap();
-        // assert_eq!(*column_id, 2);
-        // assert_eq!(col_id_str, "2");
-        // assert_eq!(field, &SortField::new(ConcreteDataType::int64_datatype()));
-        // assert_eq!(value, Some(Value::Int64(10)));
-
-        // assert!(iter.next().is_none());
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0], Value::Null);
+        assert_eq!(values[1], Value::Int64(10));
     }
 }

@@ -41,7 +41,6 @@ use datatypes::vectors::{Helper, Vector};
 use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::statistics::Statistics;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::storage::{ColumnId, SequenceNumber};
 
@@ -308,9 +307,8 @@ impl ReadFormat {
         column_id: ColumnId,
     ) -> Option<ArrayRef> {
         let column = self.metadata.column_by_id(column_id)?;
-        let primary_key_encoding = self.metadata.primary_key_encoding;
         match column.semantic_type {
-            SemanticType::Tag => self.tag_values(row_groups, column, true, primary_key_encoding),
+            SemanticType::Tag => self.tag_values(row_groups, column, true),
             SemanticType::Field => {
                 let index = self.field_id_to_index.get(&column_id)?;
                 Self::column_values(row_groups, column, *index, true)
@@ -329,9 +327,8 @@ impl ReadFormat {
         column_id: ColumnId,
     ) -> Option<ArrayRef> {
         let column = self.metadata.column_by_id(column_id)?;
-        let primary_key_encoding = self.metadata.primary_key_encoding;
         match column.semantic_type {
-            SemanticType::Tag => self.tag_values(row_groups, column, false, primary_key_encoding),
+            SemanticType::Tag => self.tag_values(row_groups, column, false),
             SemanticType::Field => {
                 let index = self.field_id_to_index.get(&column_id)?;
                 Self::column_values(row_groups, column, *index, false)
@@ -393,8 +390,8 @@ impl ReadFormat {
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column: &ColumnMetadata,
         is_min: bool,
-        primary_key_encoding: PrimaryKeyEncoding,
     ) -> Option<ArrayRef> {
+        let primary_key_encoding = self.metadata.primary_key_encoding;
         let is_first_tag = self
             .metadata
             .primary_key
