@@ -17,6 +17,7 @@ use std::hash::Hash;
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
+use common_telemetry::info;
 use datatypes::value::ValueRef;
 use mito2::row_converter::SparsePrimaryKeyCodec;
 use smallvec::SmallVec;

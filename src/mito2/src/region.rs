@@ -26,6 +26,7 @@ use std::sync::{Arc, RwLock};
 use common_telemetry::{error, info, warn};
 use crossbeam_utils::atomic::AtomicCell;
 use snafu::{ensure, OptionExt};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
 use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
@@ -144,6 +145,12 @@ impl MitoRegion {
     pub(crate) fn metadata(&self) -> RegionMetadataRef {
         let version_data = self.version_control.current();
         version_data.version.metadata.clone()
+    }
+
+    /// Returns primary key encoding of the region.
+    pub(crate) fn primary_key_encoding(&self) -> PrimaryKeyEncoding {
+        let version_data = self.version_control.current();
+        version_data.version.metadata.primary_key_encoding
     }
 
     /// Returns current version of the region.

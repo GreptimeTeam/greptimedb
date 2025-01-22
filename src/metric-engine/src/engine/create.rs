@@ -32,7 +32,9 @@ use store_api::metric_engine_consts::{
     METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX, METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
     METADATA_SCHEMA_VALUE_COLUMN_INDEX, METADATA_SCHEMA_VALUE_COLUMN_NAME,
 };
-use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
+use store_api::mito_engine_options::{
+    APPEND_MODE_KEY, MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, TTL_KEY,
+};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionCreateRequest, RegionRequest};
 use store_api::storage::consts::ReservedColumnId;
@@ -122,14 +124,20 @@ impl MetricEngineInner {
             .with_context(|_| CreateMitoRegionSnafu {
                 region_type: DATA_REGION_SUBDIR,
             })?;
+        let primary_key_encoding = self.mito.get_primary_key_encoding(data_region_id).context(
+            PhysicalRegionNotFoundSnafu {
+                region_id: data_region_id,
+            },
+        )?;
 
-        info!("Created physical metric region {region_id}");
+        info!("Created physical metric region {region_id}, primary key encoding={primary_key_encoding}");
         PHYSICAL_REGION_COUNT.inc();
 
         // remember this table
         self.state.write().unwrap().add_physical_region(
             data_region_id,
             physical_columns,
+            primary_key_encoding,
             physical_region_options,
         );
 
@@ -555,6 +563,8 @@ pub(crate) fn region_options_for_metadata_region(
 ) -> HashMap<String, String> {
     // TODO(ruihang, weny): add whitelist for metric engine options.
     original.remove(APPEND_MODE_KEY);
+    // Don't allow to set primary key encoding for metadata region.
+    original.remove(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING);
     original.insert(TTL_KEY.to_string(), FOREVER.to_string());
     original
 }

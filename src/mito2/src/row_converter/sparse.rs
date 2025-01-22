@@ -87,7 +87,7 @@ const RESERVED_COLUMN_ID_TSID: ColumnId = ReservedColumnId::tsid();
 /// The column id of the table id.
 const RESERVED_COLUMN_ID_TABLE_ID: ColumnId = ReservedColumnId::table_id();
 /// The size of the column id in the encoded sparse row.
-const COLUMN_ID_ENCODE_SIZE: usize = 4;
+pub const COLUMN_ID_ENCODE_SIZE: usize = 4;
 
 impl SparsePrimaryKeyCodec {
     /// Creates a new [`SparsePrimaryKeyCodec`] instance.

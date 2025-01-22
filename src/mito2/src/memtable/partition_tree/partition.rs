@@ -101,8 +101,14 @@ impl Partition {
                     inner.pk_to_pk_id.insert(sparse_key, pk_id);
                 }
                 PrimaryKeyEncoding::Sparse => {
-                    // TODO(weny): support sparse primary key.
-                    todo!()
+                    let sparse_key = primary_key.clone();
+                    let pk_id = inner.shard_builder.write_with_key(
+                        primary_key,
+                        Some(&sparse_key),
+                        &key_value,
+                        metrics,
+                    );
+                    inner.pk_to_pk_id.insert(sparse_key, pk_id);
                 }
             }
         } else {
@@ -287,11 +293,7 @@ impl Partition {
             return PartitionKey::default();
         }
 
-        let Some(value) = key_value.primary_keys().next() else {
-            return PartitionKey::default();
-        };
-
-        value.as_u32().unwrap().unwrap()
+        key_value.partition_key()
     }
 
     /// Returns true if the region can be partitioned.
