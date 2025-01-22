@@ -236,7 +236,17 @@ pub(crate) fn from_substrait_literal(lit: &Literal) -> Result<(Value, CDT), Erro
                     }
                     .fail()?
                 };
-                compound.nanoseconds += day_time.milliseconds as i64 * 1_000_000;
+                //  1 day in milliseconds = 24 * 60 * 60 * 1000 = 8.64e7 ms = 8.64e13 ns << 2^63
+                // so overflow is unexpected
+                compound
+                    .nanoseconds
+                    .checked_add(day_time.milliseconds as i64 * 1_000_000)
+                    .with_context(|| UnexpectedSnafu {
+                        reason: format!(
+                            "Overflow when converting interval: {:?}",
+                            interval_compound
+                        ),
+                    })?;
                 compound.days += day_time.days;
             }
 
