@@ -606,7 +606,14 @@ pub(crate) fn parquet_row_group_time_range(
         | Statistics::Float(_)
         | Statistics::Double(_)
         | Statistics::ByteArray(_)
-        | Statistics::FixedLenByteArray(_) => return None,
+        | Statistics::FixedLenByteArray(_) => {
+            common_telemetry::warn!(
+                "Invalid statistics {:?} for time index in parquet in {}",
+                stats,
+                file_meta.file_id
+            );
+            return None;
+        }
     };
 
     debug_assert!(min >= file_meta.time_range.0.value() && min <= file_meta.time_range.1.value());
