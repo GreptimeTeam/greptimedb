@@ -22,6 +22,7 @@ use datafusion_common::ScalarValue;
 use datatypes::data_type::ConcreteDataType as CDT;
 use datatypes::value::Value;
 use num_traits::FromBytes;
+use snafu::OptionExt;
 use substrait::variation_const::{
     DATE_32_TYPE_VARIATION_REF, DATE_64_TYPE_VARIATION_REF, DEFAULT_TYPE_VARIATION_REF,
     UNSIGNED_INTEGER_TYPE_VARIATION_REF,
@@ -230,9 +231,25 @@ fn from_interval_day_sec(
         match prec {
             PrecisionMode::Precision(e) => {
                 if e >= 3 {
-                    subseconds / 10_i64.pow((e - 3) as _)
+                    subseconds
+                        / 10_i64
+                            .checked_pow((e - 3) as _)
+                            .with_context(|| UnexpectedSnafu {
+                                reason: format!(
+                                    "Overflow when converting interval: {:?}",
+                                    interval
+                                ),
+                            })?
                 } else {
-                    subseconds * 10_i64.pow((3 - e) as _)
+                    subseconds
+                        * 10_i64
+                            .checked_pow((3 - e) as _)
+                            .with_context(|| UnexpectedSnafu {
+                                reason: format!(
+                                    "Overflow when converting interval: {:?}",
+                                    interval
+                                ),
+                            })?
                 }
             }
             PrecisionMode::Microseconds(_) => subseconds / 1000,
