@@ -468,9 +468,9 @@ pub fn identity_pipeline(
         Some(table) => {
             let table_info = table.table_info();
             let tag_column_names = table_info.meta.row_key_column_names();
-            identity_pipeline_inner(array, Some(tag_column_names), &params)
+            identity_pipeline_inner(array, Some(tag_column_names), params)
         }
-        None => identity_pipeline_inner(array, None::<std::iter::Empty<&String>>, &params),
+        None => identity_pipeline_inner(array, None::<std::iter::Empty<&String>>, params),
     }
 }
 
@@ -760,10 +760,10 @@ mod tests {
     fn test_greptime_pipeline_params() {
         let params = Some("flatten_json_object=true");
         let pipeline_params = GreptimePipelineParams::from_params(params);
-        assert_eq!(pipeline_params.flatten_json_object(), true);
+        assert!(pipeline_params.flatten_json_object());
 
         let params = None;
         let pipeline_params = GreptimePipelineParams::from_params(params);
-        assert_eq!(pipeline_params.flatten_json_object(), false);
+        assert!(!pipeline_params.flatten_json_object());
     }
 }
