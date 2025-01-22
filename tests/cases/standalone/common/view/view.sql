@@ -9,24 +9,23 @@ FROM t1 WHERE i < 43;
 
 SELECT * FROM v1;
 
--- FIXME(dennis): Substrait doesn't support alias in projection --
--- https://github.com/apache/datafusion/issues/6489 --
 SELECT j FROM v1 WHERE j > 41;
 
 SELECT x FROM v1 t1(x) WHERE x > 41;
 
--- FIXME(dennis): DROP VIEW not supported yet--
--- DROP VIEW v1 --
-
--- substrait can't process such query currently
--- CREATE VIEW v1 AS SELECT 'whatever';--
--- SELECT * FROM v1; --
-
--- substrait can't process such query currently
---CREATE OR REPLACE VIEW v1 AS SELECT 42;--
---SELECT * FROM v1;--
-
 INSERT INTO v1 VALUES (1);
+
+-- FIXME(dennis): DROP VIEW not supported yet--
+DROP VIEW v1;
+
+-- substrait can't process such query currently
+-- CREATE VIEW v1 AS SELECT 'whatever';
+-- SELECT * FROM v1;
+
+-- substrait can't process such query currently
+-- CREATE OR REPLACE VIEW v1 AS SELECT 42;
+-- SELECT * FROM v1;
+
 
 CREATE VIEW v1 AS SELECT * FROM dontexist;
 
