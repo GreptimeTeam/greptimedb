@@ -97,6 +97,8 @@ async-stream = "0.3"
 async-trait = "0.1"
 # Remember to update axum-extra, axum-macros when updating axum
 axum = "0.8"
+axum-extra = "0.10"
+axum-macros = "0.4"
 backon = "1"
 base64 = "0.21"
 bigdecimal = "0.4.2"
