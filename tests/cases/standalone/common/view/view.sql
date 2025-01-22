@@ -15,7 +15,6 @@ SELECT x FROM v1 t1(x) WHERE x > 41;
 
 INSERT INTO v1 VALUES (1);
 
--- FIXME(dennis): DROP VIEW not supported yet--
 DROP VIEW v1;
 
 -- substrait can't process such query currently
