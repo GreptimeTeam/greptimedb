@@ -82,8 +82,15 @@ SELECT
 FROM
     t2;
 
+-- issue #3235 can not alter when table has column with tyep interval
+create table t3(val interval, ts timestamp time index);
+-- should fail with error
+alter table t3 add column label varchar;
+
 DROP TABLE t1;
 
 DROP TABLE t2;
+
+DROP TABLE t3;
 
 DROP TABLE phy;
