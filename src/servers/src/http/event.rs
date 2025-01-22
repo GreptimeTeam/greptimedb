@@ -32,7 +32,10 @@ use datatypes::value::column_data_to_json;
 use lazy_static::lazy_static;
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
-use pipeline::{GreptimeIdentityPipelineParams, GreptimeTransformer, PipelineVersion};
+use pipeline::{
+    GreptimeIdentityPipelineParams, GreptimeTransformer, PipelineVersion,
+    GREPTIME_IDENTITY_PIPELINE_PARAMS_HEADER,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Map, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -566,19 +569,21 @@ pub(crate) async fn ingest_logs_inner(
 
     let mut insert_requests = Vec::with_capacity(log_ingest_requests.len());
 
+    let pipeline_params = GreptimeIdentityPipelineParams::from_params(
+        headers
+            .get(GREPTIME_IDENTITY_PIPELINE_PARAMS_HEADER)
+            .and_then(|v| v.to_str().ok()),
+    );
+
     for request in log_ingest_requests {
         let transformed_data: Rows = if pipeline_name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME {
             let table = state
                 .get_table(&request.table, &query_ctx)
                 .await
                 .context(CatalogSnafu)?;
-            pipeline::identity_pipeline(
-                request.values,
-                table,
-                GreptimeIdentityPipelineParams::from_headers(&headers),
-            )
-            .context(PipelineTransformSnafu)
-            .context(PipelineSnafu)?
+            pipeline::identity_pipeline(request.values, table, &pipeline_params)
+                .context(PipelineTransformSnafu)
+                .context(PipelineSnafu)?
         } else {
             let pipeline = state
                 .get_pipeline(&pipeline_name, version, query_ctx.clone())

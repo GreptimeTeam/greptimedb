@@ -22,16 +22,14 @@ use api::helper::proto_value_type;
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnDataTypeExtension, JsonTypeExtension, SemanticType};
-use axum::headers::HeaderMap;
 use coerce::{coerce_columns, coerce_value};
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
 use serde_json::{Map, Number, Value as JsonValue};
-use snafu::ResultExt;
 
 use crate::etl::error::{
     IdentifyPipelineColumnTypeMismatchSnafu, ReachedMaxNestedLevelsSnafu, Result,
-    SerializeToJsonSnafu, TransformColumnNameMustBeUniqueSnafu, TransformEmptySnafu,
+    TransformColumnNameMustBeUniqueSnafu, TransformEmptySnafu,
     TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu,
     UnsupportedNumberTypeSnafu,
 };
@@ -40,9 +38,11 @@ use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transformer, Transforms};
 use crate::etl::value::{Timestamp, Value};
 
+/// The header key for the `greptime_identity` pipeline params.
+pub const GREPTIME_IDENTITY_PIPELINE_PARAMS_HEADER: &str = "x-greptime-identity-pipeline-params";
+
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
-const GREPTIME_IDENTITY_PIPELINE_PARAMS_HEADER: &str = "x-greptime-identity-pipeline-params";
 
 /// fields not in the columns will be discarded
 /// to prevent automatic column creation in GreptimeDB
@@ -60,25 +60,20 @@ pub struct GreptimeIdentityPipelineParams {
 }
 
 impl GreptimeIdentityPipelineParams {
-    /// Create a `GreptimeIdentityPipelineParams` from the HTTP headers.
+    /// Create a `GreptimeIdentityPipelineParams` from params string which is from the http header with key `x-greptime-identity-pipeline-params`
     /// The params is in the format of `key1=value1&key2=value2`,for example:
     /// x-greptime-identity-pipeline-params: flatten_json_object=true
-    pub fn from_headers(headers: &HeaderMap) -> Self {
-        headers
-            .get(GREPTIME_IDENTITY_PIPELINE_PARAMS_HEADER)
-            .and_then(|v| v.to_str().ok())
-            .map(|params| {
-                let params = params
-                    .split('&')
-                    .filter_map(|s| s.split_once('='))
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect::<HashMap<String, String>>();
-
-                Self {
-                    flatten_json_object: params.get("flatten_json_object").map(|v| v == "true"),
-                }
-            })
+    pub fn from_params(params: Option<&str>) -> Self {
+        let params = params
             .unwrap_or_default()
+            .split('&')
+            .filter_map(|s| s.split_once('='))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect::<HashMap<String, String>>();
+
+        Self {
+            flatten_json_object: params.get("flatten_json_object").map(|v| v == "true"),
+        }
     }
 }
 
@@ -400,7 +395,7 @@ fn json_value_to_row(
 fn identity_pipeline_inner<'a>(
     array: Vec<serde_json::Value>,
     tag_column_names: Option<impl Iterator<Item = &'a String>>,
-    params: GreptimeIdentityPipelineParams,
+    params: &GreptimeIdentityPipelineParams,
 ) -> Result<Rows> {
     let mut rows = Vec::with_capacity(array.len());
     let mut schema_info = SchemaInfo::default();
@@ -461,15 +456,15 @@ fn identity_pipeline_inner<'a>(
 pub fn identity_pipeline(
     array: Vec<serde_json::Value>,
     table: Option<Arc<table::Table>>,
-    params: GreptimeIdentityPipelineParams,
+    params: &GreptimeIdentityPipelineParams,
 ) -> Result<Rows> {
     match table {
         Some(table) => {
             let table_info = table.table_info();
             let tag_column_names = table_info.meta.row_key_column_names();
-            identity_pipeline_inner(array, Some(tag_column_names), params)
+            identity_pipeline_inner(array, Some(tag_column_names), &params)
         }
-        None => identity_pipeline_inner(array, None::<std::iter::Empty<&String>>, params),
+        None => identity_pipeline_inner(array, None::<std::iter::Empty<&String>>, &params),
     }
 }
 
@@ -516,13 +511,7 @@ fn do_flatten_json_object(
                     max_nested_levels,
                 )?;
             }
-            // To simplify the process of logs collection scenario, we will convert the array into a string that can be easily handled by full-text search.
-            JsonValue::Array(array) => {
-                let array_str = serde_json::to_string(&array).context(SerializeToJsonSnafu {
-                    input: format!("{array:?}"),
-                })?;
-                dest.insert(new_key, JsonValue::String(array_str));
-            }
+            // For other types, we will directly insert them into as JSON type.
             _ => {
                 dest.insert(new_key, value);
             }

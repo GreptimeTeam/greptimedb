@@ -602,14 +602,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("Failed to serialize to json: {}", input))]
-    SerializeToJson {
-        input: String,
-        #[snafu(source)]
-        error: serde_json::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
