@@ -124,7 +124,7 @@ impl SparsePrimaryKeyCodec {
     pub fn with_fields(fields: Vec<(ColumnId, SortField)>) -> Self {
         Self {
             inner: Arc::new(SparsePrimaryKeyCodecInner {
-                columns: fields.iter().map(|f| f.0).collect(),
+                columns: Some(fields.iter().map(|f| f.0).collect()),
                 table_id_field: SortField::new(ConcreteDataType::uint32_datatype()),
                 tsid_field: SortField::new(ConcreteDataType::uint64_datatype()),
                 label_field: SortField::new(ConcreteDataType::string_datatype()),
