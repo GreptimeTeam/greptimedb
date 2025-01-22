@@ -35,6 +35,48 @@ use substrait_proto::proto::r#type::Kind;
 use crate::error::{Error, NotImplementedSnafu, PlanSnafu, UnexpectedSnafu};
 use crate::transform::substrait_proto;
 
+#[derive(Debug)]
+enum TimestampPrecision {
+    Second = 0,
+    Millisecond = 3,
+    Microsecond = 6,
+    Nanosecond = 9,
+}
+
+impl TryFrom<i32> for TimestampPrecision {
+    type Error = Error;
+
+    fn try_from(prec: i32) -> Result<Self, Self::Error> {
+        match prec {
+            0 => Ok(Self::Second),
+            3 => Ok(Self::Millisecond),
+            6 => Ok(Self::Microsecond),
+            9 => Ok(Self::Nanosecond),
+            _ => not_impl_err!("Unsupported precision: {prec}"),
+        }
+    }
+}
+
+impl TimestampPrecision {
+    fn to_time_unit(&self) -> TimeUnit {
+        match self {
+            Self::Second => TimeUnit::Second,
+            Self::Millisecond => TimeUnit::Millisecond,
+            Self::Microsecond => TimeUnit::Microsecond,
+            Self::Nanosecond => TimeUnit::Nanosecond,
+        }
+    }
+
+    fn to_cdt(&self) -> CDT {
+        match self {
+            Self::Second => CDT::timestamp_second_datatype(),
+            Self::Millisecond => CDT::timestamp_millisecond_datatype(),
+            Self::Microsecond => CDT::timestamp_microsecond_datatype(),
+            Self::Nanosecond => CDT::timestamp_nanosecond_datatype(),
+        }
+    }
+}
+
 /// TODO(discord9): this is copy from datafusion-substrait since the original function is not public, will be replace once is exported
 pub(crate) fn to_substrait_literal(value: &ScalarValue) -> Result<Literal, Error> {
     if value.is_null() {
@@ -68,28 +110,28 @@ pub(crate) fn to_substrait_literal(value: &ScalarValue) -> Result<Literal, Error
         ScalarValue::TimestampSecond(Some(t), _) => (
             LiteralType::PrecisionTimestamp(PrecisionTimestamp {
                 value: *t,
-                precision: 0,
+                precision: TimestampPrecision::Second as i32,
             }),
             DEFAULT_TYPE_VARIATION_REF,
         ),
         ScalarValue::TimestampMillisecond(Some(t), _) => (
             LiteralType::PrecisionTimestamp(PrecisionTimestamp {
                 value: *t,
-                precision: 3,
+                precision: TimestampPrecision::Millisecond as i32,
             }),
             DEFAULT_TYPE_VARIATION_REF,
         ),
         ScalarValue::TimestampMicrosecond(Some(t), _) => (
             LiteralType::PrecisionTimestamp(PrecisionTimestamp {
                 value: *t,
-                precision: 6,
+                precision: TimestampPrecision::Microsecond as i32,
             }),
             DEFAULT_TYPE_VARIATION_REF,
         ),
         ScalarValue::TimestampNanosecond(Some(t), _) => (
             LiteralType::PrecisionTimestamp(PrecisionTimestamp {
                 value: *t,
-                precision: 9,
+                precision: TimestampPrecision::Nanosecond as i32,
             }),
             DEFAULT_TYPE_VARIATION_REF,
         ),
@@ -139,13 +181,9 @@ pub(crate) fn from_substrait_literal(lit: &Literal) -> Result<(Value, CDT), Erro
         ),
         Some(LiteralType::PrecisionTimestamp(prec_ts)) => {
             let (prec, val) = (prec_ts.precision, prec_ts.value);
-            let (unit, typ) = match prec {
-                0 => (TimeUnit::Second, CDT::timestamp_second_datatype()),
-                3 => (TimeUnit::Millisecond, CDT::timestamp_millisecond_datatype()),
-                6 => (TimeUnit::Microsecond, CDT::timestamp_microsecond_datatype()),
-                9 => (TimeUnit::Nanosecond, CDT::timestamp_nanosecond_datatype()),
-                _ => not_impl_err!("Unsupported precision: {prec}")?,
-            };
+            let prec = TimestampPrecision::try_from(prec)?;
+            let unit = prec.to_time_unit();
+            let typ = prec.to_cdt();
             (Value::from(Timestamp::new(val, unit)), typ)
         }
         Some(LiteralType::Date(d)) => (Value::from(Date::new(*d)), CDT::date_datatype()),
@@ -326,13 +364,9 @@ pub fn from_substrait_type(null_type: &substrait_proto::proto::Type) -> Result<C
             },
             Kind::Fp32(_) => Ok(CDT::float32_datatype()),
             Kind::Fp64(_) => Ok(CDT::float64_datatype()),
-            Kind::PrecisionTimestamp(ts) => Ok(match ts.precision {
-                0 => CDT::timestamp_second_datatype(),
-                3 => CDT::timestamp_millisecond_datatype(),
-                6 => CDT::timestamp_microsecond_datatype(),
-                9 => CDT::timestamp_nanosecond_datatype(),
-                _ => not_impl_err!("Unsupported precision: {}", ts.precision)?,
-            }),
+            Kind::PrecisionTimestamp(ts) => {
+                Ok(TimestampPrecision::try_from(ts.precision)?.to_cdt())
+            }
             Kind::Date(date) => match date.type_variation_reference {
                 DATE_32_TYPE_VARIATION_REF | DATE_64_TYPE_VARIATION_REF => Ok(CDT::date_datatype()),
                 v => not_impl_err!("Unsupported Substrait type variation {v} of type {kind:?}"),
