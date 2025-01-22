@@ -311,6 +311,23 @@ tql eval (3000, 3000, '1s') http_requests AND IGNORING (g, instance, job) vector
 | 1970-01-01T00:50:00 | app | 1        | production | 600.0          |
 +---------------------+-----+----------+------------+----------------+
 
+-- https://github.com/GreptimeTeam/greptimedb/issues/5392
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') vector(1) * http_requests;
+
++-----+----------+------------+---------------------+------------------------------------------------+
+| job | instance | g          | ts                  | .greptime_value * http_requests.greptime_value |
++-----+----------+------------+---------------------+------------------------------------------------+
+| api | 0        | canary     | 1970-01-01T00:50:00 | 300.0                                          |
+| api | 0        | production | 1970-01-01T00:50:00 | 100.0                                          |
+| api | 1        | canary     | 1970-01-01T00:50:00 | 400.0                                          |
+| api | 1        | production | 1970-01-01T00:50:00 | 200.0                                          |
+| app | 0        | canary     | 1970-01-01T00:50:00 | 700.0                                          |
+| app | 0        | production | 1970-01-01T00:50:00 | 500.0                                          |
+| app | 1        | canary     | 1970-01-01T00:50:00 | 800.0                                          |
+| app | 1        | production | 1970-01-01T00:50:00 | 600.0                                          |
++-----+----------+------------+---------------------+------------------------------------------------+
+
 drop table http_requests;
 
 Affected Rows: 0
