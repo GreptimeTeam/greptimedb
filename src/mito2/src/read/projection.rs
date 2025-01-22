@@ -55,13 +55,15 @@ pub struct ProjectionMapper {
     column_ids: Vec<ColumnId>,
     /// Ids and DataTypes of field columns in the [Batch].
     batch_fields: Vec<(ColumnId, ConcreteDataType)>,
-    /// If the original projection is empty.
+    /// `true` If the original projection is empty.
     is_empty_projection: bool,
 }
 
 impl ProjectionMapper {
     /// Returns a new mapper with projection.
     /// If `projection` is empty, it outputs [RecordBatch] without any column but only a row count.
+    /// `SELECT COUNT(*) FROM table` is an example that uses an empty projection. DataFusion accepts
+    /// empty `RecordBatch` and only use its row count in this query.
     pub fn new(
         metadata: &RegionMetadataRef,
         projection: impl Iterator<Item = usize>,
