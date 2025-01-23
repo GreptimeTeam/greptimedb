@@ -172,7 +172,13 @@ async fn main() {
             store,
         ),
     );
-    runner.run().await.unwrap();
+    match runner.run().await {
+        Ok(_) => println!("\x1b[32mAll sqlness tests passed!\x1b[0m"),
+        Err(e) => {
+            println!("\x1b[31mTest failed: {}\x1b[0m", e);
+            std::process::exit(1);
+        }
+    }
 
     // clean up and exit
     if !args.preserve_state {

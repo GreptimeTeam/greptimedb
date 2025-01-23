@@ -73,6 +73,10 @@ impl DisplayAs for MockInputExec {
 }
 
 impl ExecutionPlan for MockInputExec {
+    fn name(&self) -> &str {
+        "MockInputExec"
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

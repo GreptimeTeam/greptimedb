@@ -22,7 +22,7 @@ use pin_project::pin_project;
 
 use crate::inverted_index::create::sort::SortedStream;
 use crate::inverted_index::error::Result;
-use crate::inverted_index::Bytes;
+use crate::Bytes;
 
 /// A [`Stream`] implementation that merges two sorted streams into a single sorted stream
 #[pin_project]

@@ -28,7 +28,7 @@ pub mod set_variables;
 pub mod show;
 pub mod statement;
 pub mod tql;
-mod transform;
+pub(crate) mod transform;
 pub mod truncate;
 
 use std::str::FromStr;
@@ -61,7 +61,7 @@ use crate::error::{
 };
 use crate::statements::create::Column;
 pub use crate::statements::option_map::OptionMap;
-pub use crate::statements::transform::{get_data_type_by_alias_name, transform_statements};
+pub(crate) use crate::statements::transform::transform_statements;
 
 const VECTOR_TYPE_NAME: &str = "VECTOR";
 
@@ -497,7 +497,7 @@ pub fn column_to_schema(
                 column_schema.insert_inverted_index_placeholder();
             }
         } else if inverted_index_cols.contains(&column.name().value) {
-            column_schema.with_inverted_index(true);
+            column_schema.set_inverted_index(true);
         }
     }
 

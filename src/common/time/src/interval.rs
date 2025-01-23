@@ -184,6 +184,24 @@ impl From<IntervalDayTime> for serde_json::Value {
     }
 }
 
+impl From<arrow::datatypes::IntervalDayTime> for IntervalDayTime {
+    fn from(value: arrow::datatypes::IntervalDayTime) -> Self {
+        Self {
+            days: value.days,
+            milliseconds: value.milliseconds,
+        }
+    }
+}
+
+impl From<IntervalDayTime> for arrow::datatypes::IntervalDayTime {
+    fn from(value: IntervalDayTime) -> Self {
+        Self {
+            days: value.days,
+            milliseconds: value.milliseconds,
+        }
+    }
+}
+
 // Millisecond convert to other time unit
 pub const MS_PER_SEC: i64 = 1_000;
 pub const MS_PER_MINUTE: i64 = 60 * MS_PER_SEC;
@@ -280,6 +298,26 @@ impl From<IntervalMonthDayNano> for i128 {
 impl From<IntervalMonthDayNano> for serde_json::Value {
     fn from(v: IntervalMonthDayNano) -> Self {
         serde_json::Value::from(v.to_i128().to_string())
+    }
+}
+
+impl From<arrow::datatypes::IntervalMonthDayNano> for IntervalMonthDayNano {
+    fn from(value: arrow::datatypes::IntervalMonthDayNano) -> Self {
+        Self {
+            months: value.months,
+            days: value.days,
+            nanoseconds: value.nanoseconds,
+        }
+    }
+}
+
+impl From<IntervalMonthDayNano> for arrow::datatypes::IntervalMonthDayNano {
+    fn from(value: IntervalMonthDayNano) -> Self {
+        Self {
+            months: value.months,
+            days: value.days,
+            nanoseconds: value.nanoseconds,
+        }
     }
 }
 

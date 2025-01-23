@@ -172,6 +172,25 @@ impl UserDefinedLogicalNodeCore for EmptyMetric {
     }
 }
 
+impl PartialOrd for EmptyMetric {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // Compare fields in order excluding schema fields
+        match self.start.partial_cmp(&other.start) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.end.partial_cmp(&other.end) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.interval.partial_cmp(&other.interval) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        self.expr.partial_cmp(&other.expr)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EmptyMetricExec {
     start: Millisecond,
@@ -246,6 +265,10 @@ impl ExecutionPlan for EmptyMetricExec {
             total_byte_size: Precision::Inexact(total_byte_size.floor() as _),
             column_statistics: Statistics::unknown_column(&self.schema()),
         })
+    }
+
+    fn name(&self) -> &str {
+        "EmptyMetricExec"
     }
 }
 

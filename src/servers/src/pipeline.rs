@@ -19,8 +19,8 @@ use std::time::Instant;
 use api::v1::{Row, RowInsertRequest, Rows};
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::{
-    DispatchedTo, GreptimeTransformer, Pipeline, PipelineDefinition, PipelineExecInput,
-    PipelineExecOutput, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
+    DispatchedTo, GreptimePipelineParams, GreptimeTransformer, Pipeline, PipelineDefinition,
+    PipelineExecInput, PipelineExecOutput, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -88,6 +88,7 @@ pub async fn get_pipeline(
 pub(crate) async fn run_pipeline(
     state: &PipelineHandlerRef,
     pipeline_definition: PipelineDefinition,
+    pipeline_parameters: &GreptimePipelineParams,
     values: PipelineExecInput,
     table_name: String,
     query_ctx: &QueryContextRef,
@@ -102,7 +103,7 @@ pub(crate) async fn run_pipeline(
             .get_table(&table_name, query_ctx)
             .await
             .context(CatalogSnafu)?;
-        pipeline::identity_pipeline(values, table)
+        pipeline::identity_pipeline(values, table, pipeline_parameters)
             .map(|rows| {
                 vec![RowInsertRequest {
                     rows: Some(rows),
@@ -190,6 +191,7 @@ pub(crate) async fn run_pipeline(
             let requests = Box::pin(run_pipeline(
                 state,
                 PipelineDefinition::from_name(next_pipeline_name, None),
+                pipeline_parameters,
                 PipelineExecInput::Intermediate {
                     array: values,
                     // FIXME(sunng87): this intermediate_keys is incorrect. what

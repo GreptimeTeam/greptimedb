@@ -12,5 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod topic_manager;
-pub mod topic_selector;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EngineConfig {
+    pub experimental_sparse_primary_key_encoding: bool,
+}

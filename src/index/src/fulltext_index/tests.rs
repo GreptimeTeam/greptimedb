@@ -13,17 +13,37 @@
 // limitations under the License.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
+use puffin::puffin_manager::file_accessor::MockFileAccessor;
+use puffin::puffin_manager::fs_puffin_manager::FsPuffinManager;
+use puffin::puffin_manager::stager::BoundedStager;
+use puffin::puffin_manager::{DirGuard, PuffinManager, PuffinReader, PuffinWriter, PutOptions};
 
 use crate::fulltext_index::create::{FulltextIndexCreator, TantivyFulltextIndexCreator};
 use crate::fulltext_index::search::{FulltextIndexSearcher, RowId, TantivyFulltextIndexSearcher};
 use crate::fulltext_index::{Analyzer, Config};
 
-async fn create_index(prefix: &str, texts: Vec<&str>, config: Config) -> TempDir {
-    let tempdir = create_temp_dir(prefix);
+async fn new_bounded_stager(prefix: &str) -> (TempDir, Arc<BoundedStager>) {
+    let staging_dir = create_temp_dir(prefix);
+    let path = staging_dir.path().to_path_buf();
+    (
+        staging_dir,
+        Arc::new(BoundedStager::new(path, 102400).await.unwrap()),
+    )
+}
 
-    let mut creator = TantivyFulltextIndexCreator::new(tempdir.path(), config, 1024 * 1024)
+async fn create_index(
+    prefix: &str,
+    puffin_writer: &mut (impl PuffinWriter + Send),
+    blob_key: &str,
+    texts: Vec<&str>,
+    config: Config,
+) {
+    let tantivy_path = create_temp_dir(prefix);
+
+    let mut creator = TantivyFulltextIndexCreator::new(tantivy_path.path(), config, 1024 * 1024)
         .await
         .unwrap();
 
@@ -31,8 +51,10 @@ async fn create_index(prefix: &str, texts: Vec<&str>, config: Config) -> TempDir
         creator.push_text(text).await.unwrap();
     }
 
-    creator.finish().await.unwrap();
-    tempdir
+    creator
+        .finish(puffin_writer, blob_key, PutOptions::default())
+        .await
+        .unwrap();
 }
 
 async fn test_search(
@@ -42,9 +64,18 @@ async fn test_search(
     query: &str,
     expected: impl IntoIterator<Item = RowId>,
 ) {
-    let index_path = create_index(prefix, texts, config).await;
+    let (_staging_dir, stager) = new_bounded_stager(prefix).await;
+    let file_accessor = Arc::new(MockFileAccessor::new(prefix));
+    let puffin_manager = FsPuffinManager::new(stager, file_accessor);
 
-    let searcher = TantivyFulltextIndexSearcher::new(index_path.path()).unwrap();
+    let file_name = "fulltext_index";
+    let blob_key = "fulltext_index";
+    let mut writer = puffin_manager.writer(file_name).await.unwrap();
+    create_index(prefix, &mut writer, blob_key, texts, config).await;
+
+    let reader = puffin_manager.reader(file_name).await.unwrap();
+    let index_dir = reader.dir(blob_key).await.unwrap();
+    let searcher = TantivyFulltextIndexSearcher::new(index_dir.path()).unwrap();
     let results = searcher.search(query).await.unwrap();
 
     let expected = expected.into_iter().collect::<BTreeSet<_>>();

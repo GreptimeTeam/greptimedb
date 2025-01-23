@@ -55,6 +55,15 @@ pub(super) struct PGDatabase {
     namespace_oid_map: PGNamespaceOidMapRef,
 }
 
+impl std::fmt::Debug for PGDatabase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PGDatabase")
+            .field("schema", &self.schema)
+            .field("catalog_name", &self.catalog_name)
+            .finish()
+    }
+}
+
 impl PGDatabase {
     pub(super) fn new(
         catalog_name: String,

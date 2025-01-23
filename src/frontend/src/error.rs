@@ -169,6 +169,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to collect recordbatch"))]
+    CollectRecordbatch {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_recordbatch::error::Error,
+    },
+
     #[snafu(display("Failed to plan statement"))]
     PlanStatement {
         #[snafu(implicit)]
@@ -219,6 +226,13 @@ pub enum Error {
 
     #[snafu(display("Failed to create logical plan for prometheus query"))]
     PromStoreRemoteQueryPlan {
+        #[snafu(implicit)]
+        location: Location,
+        source: servers::error::Error,
+    },
+
+    #[snafu(display("Failed to create logical plan for prometheus metric names query"))]
+    PrometheusMetricNamesQueryPlan {
         #[snafu(implicit)]
         location: Location,
         source: servers::error::Error,
@@ -349,7 +363,10 @@ impl ErrorExt for Error {
             Error::HandleHeartbeatResponse { source, .. } => source.status_code(),
 
             Error::PromStoreRemoteQueryPlan { source, .. }
+            | Error::PrometheusMetricNamesQueryPlan { source, .. }
             | Error::ExecutePromql { source, .. } => source.status_code(),
+
+            Error::CollectRecordbatch { .. } => StatusCode::EngineExecuteQuery,
 
             Error::SqlExecIntercepted { source, .. } => source.status_code(),
             Error::StartServer { source, .. } => source.status_code(),

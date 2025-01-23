@@ -25,7 +25,7 @@ use jsonb::{Number as JsonbNumber, Value as JsonbValue};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue};
 use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
-use pipeline::{PipelineExecInput, PipelineWay, SchemaInfo, SelectInfo};
+use pipeline::{GreptimePipelineParams, PipelineExecInput, PipelineWay, SchemaInfo, SelectInfo};
 use serde_json::{Map, Value};
 use session::context::QueryContextRef;
 use snafu::ensure;
@@ -72,9 +72,12 @@ pub async fn to_grpc_insert_requests(
 
             let db_string = query_ctx.get_db_string();
 
+            let pipeline_params = GreptimePipelineParams::default();
+
             let inserts = run_pipeline(
                 &pipeline_handler,
                 pipeline_def,
+                &pipeline_params,
                 PipelineExecInput::Original(data),
                 table_name,
                 query_ctx,

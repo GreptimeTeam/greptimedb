@@ -25,12 +25,12 @@ use api::v1::{ColumnDataType, ColumnDataTypeExtension, JsonTypeExtension, Semant
 use coerce::{coerce_columns, coerce_value};
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
-use serde_json::{Map, Number};
+use serde_json::{Map, Number, Value as JsonValue};
 use snafu::ensure;
 
 use crate::etl::error::{
-    IdentifyPipelineColumnTypeMismatchSnafu, KeyValueLengthMismatchSnafu, Result,
-    TransformColumnNameMustBeUniqueSnafu, TransformEmptySnafu,
+    IdentifyPipelineColumnTypeMismatchSnafu, KeyValueLengthMismatchSnafu,
+    ReachedMaxNestedLevelsSnafu, Result, TransformColumnNameMustBeUniqueSnafu, TransformEmptySnafu,
     TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu,
     UnsupportedNumberTypeSnafu,
 };
@@ -39,7 +39,11 @@ use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transformer, Transforms};
 use crate::etl::value::{Timestamp, Value};
 
+/// The header key that contains the pipeline params.
+pub const GREPTIME_PIPELINE_PARAMS_HEADER: &str = "x-greptime-pipeline-params";
+
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
+const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
 
 /// fields not in the columns will be discarded
 /// to prevent automatic column creation in GreptimeDB
@@ -47,6 +51,37 @@ const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 pub struct GreptimeTransformer {
     transforms: Transforms,
     schema: Vec<ColumnSchema>,
+}
+
+/// Parameters that can be used to configure the greptime pipelines.
+#[derive(Debug, Clone, Default)]
+pub struct GreptimePipelineParams {
+    /// The options for configuring the greptime pipelines.
+    pub options: HashMap<String, String>,
+}
+
+impl GreptimePipelineParams {
+    /// Create a `GreptimePipelineParams` from params string which is from the http header with key `x-greptime-pipeline-params`
+    /// The params is in the format of `key1=value1&key2=value2`,for example:
+    /// x-greptime-pipeline-params: flatten_json_object=true
+    pub fn from_params(params: Option<&str>) -> Self {
+        let options = params
+            .unwrap_or_default()
+            .split('&')
+            .filter_map(|s| s.split_once('='))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect::<HashMap<String, String>>();
+
+        Self { options }
+    }
+
+    /// Whether to flatten the JSON object.
+    pub fn flatten_json_object(&self) -> bool {
+        self.options
+            .get("flatten_json_object")
+            .map(|v| v == "true")
+            .unwrap_or(false)
+    }
 }
 
 impl GreptimeTransformer {
@@ -562,6 +597,7 @@ fn json_value_to_row(
 fn identity_pipeline_inner<'a>(
     array: PipelineExecInput,
     tag_column_names: Option<impl Iterator<Item = &'a String>>,
+    params: &GreptimePipelineParams,
 ) -> Result<Rows> {
     let mut rows = Vec::with_capacity(array.len());
     let mut schema_info = SchemaInfo::default();
@@ -570,7 +606,13 @@ fn identity_pipeline_inner<'a>(
         PipelineExecInput::Original(array) => {
             for value in array {
                 if let serde_json::Value::Object(map) = value {
-                    let row = json_value_to_row(&mut schema_info, map)?;
+                    let object = if params.flatten_json_object() {
+                        flatten_json_object(map, DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING)?
+                    } else {
+                        map
+                    };
+
+                    let row = json_value_to_row(&mut schema_info, object)?;
                     rows.push(row);
                 }
             }
@@ -659,23 +701,79 @@ impl PipelineExecInput {
 pub fn identity_pipeline(
     array: PipelineExecInput,
     table: Option<Arc<table::Table>>,
+    params: &GreptimePipelineParams,
 ) -> Result<Rows> {
     match table {
         Some(table) => {
             let table_info = table.table_info();
             let tag_column_names = table_info.meta.row_key_column_names();
-            identity_pipeline_inner(array, Some(tag_column_names))
+            identity_pipeline_inner(array, Some(tag_column_names), params)
         }
-        None => identity_pipeline_inner(array, None::<std::iter::Empty<&String>>),
+        None => identity_pipeline_inner(array, None::<std::iter::Empty<&String>>, params),
     }
+}
+
+/// Consumes the JSON object and consumes it into a single-level object.
+///
+/// The `max_nested_levels` parameter is used to limit the nested levels of the JSON object.
+/// The error will be returned if the nested levels is greater than the `max_nested_levels`.
+pub fn flatten_json_object(
+    object: Map<String, JsonValue>,
+    max_nested_levels: usize,
+) -> Result<Map<String, JsonValue>> {
+    let mut flattened = Map::new();
+
+    if !object.is_empty() {
+        // it will use recursion to flatten the object.
+        do_flatten_json_object(&mut flattened, None, object, 1, max_nested_levels)?;
+    }
+
+    Ok(flattened)
+}
+
+fn do_flatten_json_object(
+    dest: &mut Map<String, JsonValue>,
+    base: Option<&str>,
+    object: Map<String, JsonValue>,
+    current_level: usize,
+    max_nested_levels: usize,
+) -> Result<()> {
+    // For safety, we do not allow the depth to be greater than the max_object_depth.
+    if current_level > max_nested_levels {
+        return ReachedMaxNestedLevelsSnafu { max_nested_levels }.fail();
+    }
+
+    for (key, value) in object {
+        let new_key = base.map_or_else(|| key.clone(), |base_key| format!("{base_key}.{key}"));
+
+        match value {
+            JsonValue::Object(object) => {
+                do_flatten_json_object(
+                    dest,
+                    Some(&new_key),
+                    object,
+                    current_level + 1,
+                    max_nested_levels,
+                )?;
+            }
+            // For other types, we will directly insert them into as JSON type.
+            _ => {
+                dest.insert(new_key, value);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use api::v1::SemanticType;
 
-    use crate::etl::transform::transformer::greptime::identity_pipeline_inner;
-    use crate::{identity_pipeline, PipelineExecInput};
+    use crate::etl::transform::transformer::greptime::{
+        flatten_json_object, identity_pipeline_inner, GreptimePipelineParams, PipelineExecInput,
+    };
+    use crate::identity_pipeline;
 
     #[test]
     fn test_identify_pipeline() {
@@ -700,7 +798,11 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let rows = identity_pipeline(PipelineExecInput::Original(array), None);
+            let rows = identity_pipeline(
+                PipelineExecInput::Original(array),
+                None,
+                &GreptimePipelineParams::default(),
+            );
             assert!(rows.is_err());
             assert_eq!(
                 rows.err().unwrap().to_string(),
@@ -728,7 +830,11 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let rows = identity_pipeline(PipelineExecInput::Original(array), None);
+            let rows = identity_pipeline(
+                PipelineExecInput::Original(array),
+                None,
+                &GreptimePipelineParams::default(),
+            );
             assert!(rows.is_err());
             assert_eq!(
                 rows.err().unwrap().to_string(),
@@ -756,7 +862,11 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let rows = identity_pipeline(PipelineExecInput::Original(array), None);
+            let rows = identity_pipeline(
+                PipelineExecInput::Original(array),
+                None,
+                &GreptimePipelineParams::default(),
+            );
             assert!(rows.is_ok());
             let rows = rows.unwrap();
             assert_eq!(rows.schema.len(), 8);
@@ -789,6 +899,7 @@ mod tests {
             let rows = identity_pipeline_inner(
                 PipelineExecInput::Original(array),
                 Some(tag_column_names.iter()),
+                &GreptimePipelineParams::default(),
             );
             assert!(rows.is_ok());
             let rows = rows.unwrap();
@@ -820,5 +931,90 @@ mod tests {
                 2
             );
         }
+    }
+
+    #[test]
+    fn test_flatten() {
+        let test_cases = vec![
+            // Basic case.
+            (
+                serde_json::json!(
+                    {
+                        "a": {
+                            "b": {
+                                "c": [1, 2, 3]
+                            }
+                        },
+                        "d": [
+                            "foo",
+                            "bar"
+                        ],
+                        "e": {
+                            "f": [7, 8, 9],
+                            "g": {
+                                "h": 123,
+                                "i": "hello",
+                                "j": {
+                                    "k": true
+                                }
+                            }
+                        }
+                    }
+                ),
+                10,
+                Some(serde_json::json!(
+                    {
+                        "a.b.c": [1,2,3],
+                        "d": ["foo","bar"],
+                        "e.f": [7,8,9],
+                        "e.g.h": 123,
+                        "e.g.i": "hello",
+                        "e.g.j.k": true
+                    }
+                )),
+            ),
+            // Test the case where the object has more than 3 nested levels.
+            (
+                serde_json::json!(
+                    {
+                        "a": {
+                            "b": {
+                                "c": {
+                                    "d": [1, 2, 3]
+                                }
+                            }
+                        },
+                        "e": [
+                            "foo",
+                            "bar"
+                        ]
+                    }
+                ),
+                3,
+                None,
+            ),
+        ];
+
+        for (input, max_depth, expected) in test_cases {
+            let flattened_object =
+                flatten_json_object(input.as_object().unwrap().clone(), max_depth);
+            match flattened_object {
+                Ok(flattened_object) => {
+                    assert_eq!(&flattened_object, expected.unwrap().as_object().unwrap())
+                }
+                Err(_) => assert_eq!(None, expected),
+            }
+        }
+    }
+
+    #[test]
+    fn test_greptime_pipeline_params() {
+        let params = Some("flatten_json_object=true");
+        let pipeline_params = GreptimePipelineParams::from_params(params);
+        assert!(pipeline_params.flatten_json_object());
+
+        let params = None;
+        let pipeline_params = GreptimePipelineParams::from_params(params);
+        assert!(!pipeline_params.flatten_json_object());
     }
 }

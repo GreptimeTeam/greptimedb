@@ -59,7 +59,7 @@ const INIT_CAPACITY: usize = 42;
 /// - `is_leader`: whether the peer is the leader
 /// - `status`: the region status, `ALIVE` or `DOWNGRADED`.
 /// - `down_seconds`: the duration of being offline, in seconds.
-///
+#[derive(Debug)]
 pub(super) struct InformationSchemaRegionPeers {
     schema: SchemaRef,
     catalog_name: String,

@@ -71,6 +71,27 @@ DESC TABLE phy;
 | job        | String               | PRI | YES  |         | TAG           |
 +------------+----------------------+-----+------+---------+---------------+
 
+SHOW CREATE TABLE phy;
+
++-------+------------------------------------+
+| Table | Create Table                       |
++-------+------------------------------------+
+| phy   | CREATE TABLE IF NOT EXISTS "phy" ( |
+|       |   "ts" TIMESTAMP(3) NOT NULL,      |
+|       |   "val" DOUBLE NULL,               |
+|       |   "host" STRING NULL,              |
+|       |   "job" STRING NULL,               |
+|       |   TIME INDEX ("ts"),               |
+|       |   PRIMARY KEY ("host", "job"),     |
+|       |   INVERTED INDEX ("host", "job")   |
+|       | )                                  |
+|       |                                    |
+|       | ENGINE=metric                      |
+|       | WITH(                              |
+|       |   physical_metric_table = ''       |
+|       | )                                  |
++-------+------------------------------------+
+
 DESC TABLE t1;
 
 +--------+----------------------+-----+------+---------+---------------+
@@ -218,4 +239,75 @@ Error: 4001(TableNotFound), Table not found: t1
 DROP TABLE phy;
 
 Affected Rows: 0
+
+CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "", "index.type" = "skipping", "index.granularity" = "8192");
+
+Affected Rows: 0
+
+SHOW CREATE TABLE phy;
+
++-------+------------------------------------+
+| Table | Create Table                       |
++-------+------------------------------------+
+| phy   | CREATE TABLE IF NOT EXISTS "phy" ( |
+|       |   "ts" TIMESTAMP(3) NOT NULL,      |
+|       |   "val" DOUBLE NULL,               |
+|       |   TIME INDEX ("ts")                |
+|       | )                                  |
+|       |                                    |
+|       | ENGINE=metric                      |
+|       | WITH(                              |
+|       |   'index.granularity' = '8192',    |
+|       |   'index.type' = 'skipping',       |
+|       |   physical_metric_table = ''       |
+|       | )                                  |
++-------+------------------------------------+
+
+CREATE TABLE t1 (ts timestamp time index, val double, host string primary key) engine=metric with ("on_physical_table" = "phy");
+
+Affected Rows: 0
+
+SHOW CREATE TABLE phy;
+
++-------+---------------------------------------------------------------------------------+
+| Table | Create Table                                                                    |
++-------+---------------------------------------------------------------------------------+
+| phy   | CREATE TABLE IF NOT EXISTS "phy" (                                              |
+|       |   "ts" TIMESTAMP(3) NOT NULL,                                                   |
+|       |   "val" DOUBLE NULL,                                                            |
+|       |   "host" STRING NULL SKIPPING INDEX WITH(granularity = '8192', type = 'BLOOM'), |
+|       |   TIME INDEX ("ts"),                                                            |
+|       |   PRIMARY KEY ("host")                                                          |
+|       | )                                                                               |
+|       |                                                                                 |
+|       | ENGINE=metric                                                                   |
+|       | WITH(                                                                           |
+|       |   'index.granularity' = '8192',                                                 |
+|       |   'index.type' = 'skipping',                                                    |
+|       |   physical_metric_table = ''                                                    |
+|       | )                                                                               |
++-------+---------------------------------------------------------------------------------+
+
+SHOW INDEX FROM phy;
+
++-------+------------+-------------------------+--------------+-------------+-----------+-------------+----------+--------+------+-----------------------------------------------------+---------+---------------+---------+------------+
+| Table | Non_unique | Key_name                | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                                          | Comment | Index_comment | Visible | Expression |
++-------+------------+-------------------------+--------------+-------------+-----------+-------------+----------+--------+------+-----------------------------------------------------+---------+---------------+---------+------------+
+| phy   | 1          | PRIMARY, INVERTED INDEX | 3            | __table_id  | A         |             |          |        | YES  | greptime-primary-key-v1, greptime-inverted-index-v1 |         |               | YES     |            |
+| phy   | 1          | PRIMARY                 | 4            | __tsid      | A         |             |          |        | YES  | greptime-primary-key-v1                             |         |               | YES     |            |
+| phy   | 1          | PRIMARY, SKIPPING INDEX | 5            | host        | A         |             |          |        | YES  | greptime-primary-key-v1, greptime-bloom-filter-v1   |         |               | YES     |            |
+| phy   | 1          | TIME INDEX              | 1            | ts          | A         |             |          |        | NO   |                                                     |         |               | YES     |            |
++-------+------------+-------------------------+--------------+-------------+-----------+-------------+----------+--------+------+-----------------------------------------------------+---------+---------------+---------+------------+
+
+DROP TABLE t1;
+
+Affected Rows: 0
+
+DROP TABLE phy;
+
+Affected Rows: 0
+
+CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "", "index.type" = "hihi", "index.granularity" = "8192");
+
+Error: 1004(InvalidArguments), Failed to parse region options: Invalid index type: hihi
 

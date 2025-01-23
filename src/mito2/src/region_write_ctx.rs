@@ -137,6 +137,7 @@ impl RegionWriteCtx {
             op_type,
             sequence: self.next_sequence,
             rows,
+            write_hint: None,
         });
 
         let notify = WriteNotify::new(tx, num_rows);

@@ -64,25 +64,21 @@ macro_rules! impl_min_max_values {
             .iter()
             .map(|meta| {
                 let stats = meta.column(column_index).statistics()?;
-                if !stats.has_min_max_set() {
-                    return None;
-                }
-                match stats {
-                    ParquetStats::Boolean(s) => Some(ScalarValue::Boolean(Some(*s.$min_max()))),
-                    ParquetStats::Int32(s) => Some(ScalarValue::Int32(Some(*s.$min_max()))),
-                    ParquetStats::Int64(s) => Some(ScalarValue::Int64(Some(*s.$min_max()))),
+                paste! {
+                    match stats {
+                        ParquetStats::Boolean(s) => Some(ScalarValue::Boolean(Some(*s.[<$min_max _opt>]()?))),
+                        ParquetStats::Int32(s) => Some(ScalarValue::Int32(Some(*s.[<$min_max _opt>]()?))),
+                        ParquetStats::Int64(s) => Some(ScalarValue::Int64(Some(*s.[<$min_max _opt>]()?))),
 
-                    ParquetStats::Int96(_) => None,
-                    ParquetStats::Float(s) => Some(ScalarValue::Float32(Some(*s.$min_max()))),
-                    ParquetStats::Double(s) => Some(ScalarValue::Float64(Some(*s.$min_max()))),
-                    ParquetStats::ByteArray(s) => {
-                        paste! {
-                            let s = String::from_utf8(s.[<$min_max _bytes>]().to_owned()).ok();
+                        ParquetStats::Int96(_) => None,
+                        ParquetStats::Float(s) => Some(ScalarValue::Float32(Some(*s.[<$min_max _opt>]()?))),
+                        ParquetStats::Double(s) => Some(ScalarValue::Float64(Some(*s.[<$min_max _opt>]()?))),
+                        ParquetStats::ByteArray(s) => {
+                            let s = String::from_utf8(s.[<$min_max _bytes_opt>]()?.to_owned()).ok();
+                            Some(ScalarValue::Utf8(s))
                         }
-                        Some(ScalarValue::Utf8(s))
+                        ParquetStats::FixedLenByteArray(_) => None,
                     }
-
-                    ParquetStats::FixedLenByteArray(_) => None,
                 }
             })
             .map(|maybe_scalar| maybe_scalar.unwrap_or_else(|| null_scalar.clone()))
@@ -111,7 +107,7 @@ impl PruningStatistics for RowGroupPruningStatistics<'_> {
         for m in self.meta_data {
             let col = m.column(idx);
             let stat = col.statistics()?;
-            let bs = stat.null_count();
+            let bs = stat.null_count_opt()?;
             values.push(Some(bs));
         }
         Some(Arc::new(UInt64Array::from(values)))

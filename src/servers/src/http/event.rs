@@ -12,26 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::result::Result as StdResult;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
 use api::v1::RowInsertRequests;
-use axum::body::HttpBody;
-use axum::extract::{FromRequest, Multipart, Path, Query, State};
-use axum::headers::ContentType;
+use async_trait::async_trait;
+use axum::extract::{FromRequest, Multipart, Path, Query, Request, State};
 use axum::http::header::CONTENT_TYPE;
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::{async_trait, BoxError, Extension, Json, TypedHeader};
+use axum::{Extension, Json};
+use axum_extra::TypedHeader;
 use common_error::ext::ErrorExt;
 use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
 use datatypes::value::column_data_to_json;
+use headers::ContentType;
 use lazy_static::lazy_static;
 use pipeline::util::to_pipeline_version;
-use pipeline::{GreptimeTransformer, PipelineDefinition, PipelineExecInput, PipelineVersion};
+use pipeline::{
+    GreptimePipelineParams, GreptimeTransformer, PipelineDefinition, PipelineExecInput,
+    PipelineVersion, GREPTIME_PIPELINE_PARAMS_HEADER,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Map, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -95,18 +98,13 @@ pub(crate) struct LogIngestRequest {
 
 pub struct PipelineContent(String);
 
-#[async_trait]
-impl<S, B> FromRequest<S, B> for PipelineContent
+impl<S> FromRequest<S> for PipelineContent
 where
-    B: HttpBody + Send + 'static,
-    B::Data: Send,
-    bytes::Bytes: std::convert::From<<B as HttpBody>::Data>,
-    B::Error: Into<BoxError>,
     S: Send + Sync,
 {
     type Rejection = Response;
 
-    async fn from_request(req: Request<B>, state: &S) -> StdResult<Self, Self::Rejection> {
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         let content_type_header = req.headers().get(CONTENT_TYPE);
         let content_type = content_type_header.and_then(|value| value.to_str().ok());
         if let Some(content_type) = content_type {
@@ -236,7 +234,7 @@ pub async fn delete_pipeline(
 /// Transform NDJSON array into a single array
 /// always return an array
 fn transform_ndjson_array_factory(
-    values: impl IntoIterator<Item = StdResult<Value, serde_json::Error>>,
+    values: impl IntoIterator<Item = Result<Value, serde_json::Error>>,
     ignore_error: bool,
 ) -> Result<Vec<Value>> {
     values
@@ -278,10 +276,12 @@ async fn dryrun_pipeline_inner(
     query_ctx: &QueryContextRef,
 ) -> Result<Response> {
     let db = query_ctx.get_db_string();
+    let params = GreptimePipelineParams::default();
 
     let results = run_pipeline(
         &pipeline_handler,
         PipelineDefinition::Resolved(pipeline),
+        &params,
         PipelineExecInput::Original(value),
         "dry_run".to_owned(),
         query_ctx,
@@ -511,6 +511,7 @@ pub async fn log_ingester(
     Query(query_params): Query<LogIngesterQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
     TypedHeader(content_type): TypedHeader<ContentType>,
+    headers: HeaderMap,
     payload: String,
 ) -> Result<HttpResponse> {
     // validate source and payload
@@ -555,6 +556,7 @@ pub async fn log_ingester(
             values: value,
         }],
         query_ctx,
+        headers,
     )
     .await
 }
@@ -584,16 +586,24 @@ pub(crate) async fn ingest_logs_inner(
     version: PipelineVersion,
     log_ingest_requests: Vec<LogIngestRequest>,
     query_ctx: QueryContextRef,
+    headers: HeaderMap,
 ) -> Result<HttpResponse> {
     let db = query_ctx.get_db_string();
     let exec_timer = std::time::Instant::now();
 
     let mut insert_requests = Vec::with_capacity(log_ingest_requests.len());
 
+    let pipeline_params = GreptimePipelineParams::from_params(
+        headers
+            .get(GREPTIME_PIPELINE_PARAMS_HEADER)
+            .and_then(|v| v.to_str().ok()),
+    );
+
     for request in log_ingest_requests {
         let requests = run_pipeline(
             &state,
             PipelineDefinition::from_name(&pipeline_name, version),
+            &pipeline_params,
             PipelineExecInput::Original(request.values),
             request.table,
             &query_ctx,

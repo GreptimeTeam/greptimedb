@@ -150,7 +150,7 @@ async fn test_prometheus_remote_write_read() {
     let (tx, mut rx) = mpsc::channel(100);
 
     let app = make_test_app(tx);
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     let write_request = WriteRequest {
         timeseries: prom_store::mock_timeseries(),

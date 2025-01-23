@@ -91,9 +91,23 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to parse region options: {}", reason))]
+    ParseRegionOptions {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Mito read operation fails"))]
     MitoReadOperation {
         source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to encode primary key"))]
+    EncodePrimaryKey {
+        source: mito2::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -225,6 +239,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to set SKIPPING index option"))]
+    SetSkippingIndexOption {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -241,7 +262,8 @@ impl ErrorExt for Error {
             | PhysicalRegionBusy { .. }
             | MultipleFieldColumn { .. }
             | NoFieldColumn { .. }
-            | AddingFieldColumn { .. } => StatusCode::InvalidArguments,
+            | AddingFieldColumn { .. }
+            | ParseRegionOptions { .. } => StatusCode::InvalidArguments,
 
             ForbiddenPhysicalAlter { .. } | UnsupportedRegionRequest { .. } => {
                 StatusCode::Unsupported
@@ -251,7 +273,8 @@ impl ErrorExt for Error {
             | SerializeColumnMetadata { .. }
             | DecodeColumnValue { .. }
             | ParseRegionId { .. }
-            | InvalidMetadata { .. } => StatusCode::Unexpected,
+            | InvalidMetadata { .. }
+            | SetSkippingIndexOption { .. } => StatusCode::Unexpected,
 
             PhysicalRegionNotFound { .. } | LogicalRegionNotFound { .. } => {
                 StatusCode::RegionNotFound
@@ -266,6 +289,8 @@ impl ErrorExt for Error {
             | MitoWriteOperation { source, .. }
             | MitoCatchupOperation { source, .. }
             | MitoFlushOperation { source, .. } => source.status_code(),
+
+            EncodePrimaryKey { source, .. } => source.status_code(),
 
             CollectRecordBatchStream { source, .. } => source.status_code(),
 

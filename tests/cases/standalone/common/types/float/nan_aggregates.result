@@ -3,7 +3,7 @@
 SELECT SUM('inf'::FLOAT), SUM('-inf'::FLOAT), SUM('nan'::FLOAT);
 
 +------------------+-------------------+------------------+
-| SUM(Utf8("inf")) | SUM(Utf8("-inf")) | SUM(Utf8("nan")) |
+| sum(Utf8("inf")) | sum(Utf8("-inf")) | sum(Utf8("nan")) |
 +------------------+-------------------+------------------+
 | inf              | -inf              | NaN              |
 +------------------+-------------------+------------------+
@@ -11,7 +11,7 @@ SELECT SUM('inf'::FLOAT), SUM('-inf'::FLOAT), SUM('nan'::FLOAT);
 SELECT MIN('inf'::FLOAT), MIN('-inf'::FLOAT), MIN('nan'::FLOAT);
 
 +------------------+-------------------+------------------+
-| MIN(Utf8("inf")) | MIN(Utf8("-inf")) | MIN(Utf8("nan")) |
+| min(Utf8("inf")) | min(Utf8("-inf")) | min(Utf8("nan")) |
 +------------------+-------------------+------------------+
 | inf              | -inf              | NaN              |
 +------------------+-------------------+------------------+
@@ -19,7 +19,7 @@ SELECT MIN('inf'::FLOAT), MIN('-inf'::FLOAT), MIN('nan'::FLOAT);
 SELECT MAX('inf'::FLOAT), MAX('-inf'::FLOAT), MAX('nan'::FLOAT);
 
 +------------------+-------------------+------------------+
-| MAX(Utf8("inf")) | MAX(Utf8("-inf")) | MAX(Utf8("nan")) |
+| max(Utf8("inf")) | max(Utf8("-inf")) | max(Utf8("nan")) |
 +------------------+-------------------+------------------+
 | inf              | -inf              | NaN              |
 +------------------+-------------------+------------------+
@@ -35,7 +35,7 @@ Affected Rows: 3
 SELECT MIN(f), MAX(f) FROM floats;
 
 +---------------+---------------+
-| MIN(floats.f) | MAX(floats.f) |
+| min(floats.f) | max(floats.f) |
 +---------------+---------------+
 | -inf          | NaN           |
 +---------------+---------------+
@@ -48,7 +48,7 @@ Affected Rows: 0
 SELECT SUM('inf'::DOUBLE), SUM('-inf'::DOUBLE), SUM('nan'::DOUBLE);
 
 +------------------+-------------------+------------------+
-| SUM(Utf8("inf")) | SUM(Utf8("-inf")) | SUM(Utf8("nan")) |
+| sum(Utf8("inf")) | sum(Utf8("-inf")) | sum(Utf8("nan")) |
 +------------------+-------------------+------------------+
 | inf              | -inf              | NaN              |
 +------------------+-------------------+------------------+
@@ -56,7 +56,7 @@ SELECT SUM('inf'::DOUBLE), SUM('-inf'::DOUBLE), SUM('nan'::DOUBLE);
 SELECT MIN('inf'::DOUBLE), MIN('-inf'::DOUBLE), MIN('nan'::DOUBLE);
 
 +------------------+-------------------+------------------+
-| MIN(Utf8("inf")) | MIN(Utf8("-inf")) | MIN(Utf8("nan")) |
+| min(Utf8("inf")) | min(Utf8("-inf")) | min(Utf8("nan")) |
 +------------------+-------------------+------------------+
 | inf              | -inf              | NaN              |
 +------------------+-------------------+------------------+
@@ -64,7 +64,7 @@ SELECT MIN('inf'::DOUBLE), MIN('-inf'::DOUBLE), MIN('nan'::DOUBLE);
 SELECT MAX('inf'::DOUBLE), MAX('-inf'::DOUBLE), MAX('nan'::DOUBLE);
 
 +------------------+-------------------+------------------+
-| MAX(Utf8("inf")) | MAX(Utf8("-inf")) | MAX(Utf8("nan")) |
+| max(Utf8("inf")) | max(Utf8("-inf")) | max(Utf8("nan")) |
 +------------------+-------------------+------------------+
 | inf              | -inf              | NaN              |
 +------------------+-------------------+------------------+
@@ -80,7 +80,7 @@ Affected Rows: 3
 SELECT MIN(f), MAX(f) FROM doubles;
 
 +----------------+----------------+
-| MIN(doubles.f) | MAX(doubles.f) |
+| min(doubles.f) | max(doubles.f) |
 +----------------+----------------+
 | -inf           | NaN            |
 +----------------+----------------+

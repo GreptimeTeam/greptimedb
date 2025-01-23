@@ -108,11 +108,6 @@ impl Time {
         self.as_formatted_string("%H:%M:%S%.f%z", None)
     }
 
-    /// Format Time for system timeszone.
-    pub fn to_system_tz_string(&self) -> String {
-        self.as_formatted_string("%H:%M:%S%.f", None)
-    }
-
     /// Format Time for given timezone.
     /// When timezone is None, using system timezone by default.
     pub fn to_timezone_aware_string(&self, tz: Option<&Timezone>) -> String {

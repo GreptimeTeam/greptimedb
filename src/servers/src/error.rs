@@ -39,7 +39,7 @@ pub enum Error {
     AddressBind {
         addr: SocketAddr,
         #[snafu(source)]
-        error: hyper::Error,
+        error: std::io::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -201,12 +201,6 @@ pub enum Error {
         name: String,
         #[snafu(implicit)]
         location: Location,
-    },
-
-    #[snafu(display("Hyper error"))]
-    Hyper {
-        #[snafu(source)]
-        error: hyper::Error,
     },
 
     #[snafu(display("Invalid OpenTSDB Json request"))]
@@ -589,7 +583,7 @@ pub enum Error {
     },
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
@@ -661,7 +655,6 @@ impl ErrorExt for Error {
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),
 
-            Hyper { .. } => StatusCode::Unknown,
             TlsRequired { .. } => StatusCode::Unknown,
             Auth { source, .. } => source.status_code(),
             DescribeStatement { source } => source.status_code(),

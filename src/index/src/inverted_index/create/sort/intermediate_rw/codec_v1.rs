@@ -20,7 +20,7 @@ use common_base::BitVec;
 use snafu::ResultExt;
 
 use crate::inverted_index::error::{CommonIoSnafu, Error, Result};
-use crate::inverted_index::Bytes;
+use crate::Bytes;
 
 const U64_LENGTH: usize = std::mem::size_of::<u64>();
 

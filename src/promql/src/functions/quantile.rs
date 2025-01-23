@@ -50,7 +50,7 @@ impl QuantileOverTime {
         create_udf(
             Self::name(),
             input_types,
-            Arc::new(DataType::Float64),
+            DataType::Float64,
             Volatility::Immutable,
             Arc::new(move |input: &_| Self::new(quantile).quantile_over_time(input)) as _,
         )

@@ -36,14 +36,14 @@ impl MetricEngineInner {
 
         // enclose the guard in a block to prevent the guard from polluting the async context
         let (is_physical_region, is_physical_region_busy) = {
-            if let Some(logical_regions) = self
+            if let Some(state) = self
                 .state
                 .read()
                 .unwrap()
-                .physical_regions()
+                .physical_region_states()
                 .get(&data_region_id)
             {
-                (true, !logical_regions.is_empty())
+                (true, !state.logical_regions().is_empty())
             } else {
                 // the second argument is not used, just pass in a dummy value
                 (false, true)

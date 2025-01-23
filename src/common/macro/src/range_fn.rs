@@ -138,7 +138,7 @@ fn build_struct(
                 datafusion_expr::create_udf(
                     Self::name(),
                     Self::input_type(),
-                    Arc::new(Self::return_type()),
+                    Self::return_type(),
                     Volatility::Immutable,
                     Arc::new(Self::calc) as _,
                 )

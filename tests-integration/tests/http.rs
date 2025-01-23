@@ -27,7 +27,6 @@ use loki_api::prost_types::Timestamp;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use opentelemetry_proto::tonic::metrics::v1::ResourceMetrics;
 use prost::Message;
 use serde_json::{json, Value};
 use servers::http::handler::HealthResponse;
@@ -91,6 +90,7 @@ macro_rules! http_tests {
                 test_test_pipeline_api,
                 test_plain_text_ingestion,
                 test_identify_pipeline,
+                test_identify_pipeline_with_flatten,
 
                 test_otlp_metrics,
                 test_otlp_traces,
@@ -118,7 +118,7 @@ pub async fn test_http_auth(store_type: StorageType) {
         Some(user_provider),
     )
     .await;
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // 1. no auth
     let res = client
@@ -150,7 +150,7 @@ pub async fn test_http_auth(store_type: StorageType) {
 
 pub async fn test_sql_api(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
     let res = client.get("/v1/sql").send().await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
@@ -413,7 +413,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
 pub async fn test_prometheus_promql_api(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     let res = client
         .get("/v1/promql?query=abs(demo{host=\"Hangzhou\"})&start=0&end=100&step=5s")
@@ -428,7 +428,7 @@ pub async fn test_prometheus_promql_api(store_type: StorageType) {
 pub async fn test_prom_http_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) = setup_test_prom_app_with_frontend(store_type, "promql_api").await;
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // format_query
     let res = client
@@ -520,7 +520,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(body.status, "success");
     assert_eq!(
         body.data,
-        serde_json::from_value::<PrometheusResponse>(json!(["__name__", "host", "number",]))
+        serde_json::from_value::<PrometheusResponse>(json!(["__name__", "host", "idc", "number",]))
             .unwrap()
     );
 
@@ -613,7 +613,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(body.status, "success");
     assert_eq!(
         body.data,
-        serde_json::from_value::<PrometheusResponse>(json!(["cpu", "memory"])).unwrap()
+        serde_json::from_value::<PrometheusResponse>(json!(["val"])).unwrap()
     );
 
     // query an empty database should return nothing
@@ -698,13 +698,38 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     let expected = "{\"status\":\"error\",\"data\":{\"resultType\":\"\",\"result\":[]},\"error\":\"invalid promql query\",\"errorType\":\"InvalidArguments\"}";
     assert_eq!(expected, data);
 
+    // range_query with __name__ not-equal matcher
+    let res = client
+        .post("/v1/prometheus/api/v1/query_range?query=count by(__name__)({__name__=~'demo.*'})&start=1&end=100&step=5")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let data = res.text().await;
+    assert!(
+        data.contains("{\"__name__\":\"demo_metrics\"}")
+            && data.contains("{\"__name__\":\"demo\"}")
+    );
+
+    let res = client
+        .post("/v1/prometheus/api/v1/query_range?query=count by(__name__)({__name__=~'demo_metrics'})&start=1&end=100&step=5")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let data = res.text().await;
+    assert!(
+        data.contains("{\"__name__\":\"demo_metrics\"}")
+            && !data.contains("{\"__name__\":\"demo\"}")
+    );
+
     guard.remove_all().await;
 }
 
 pub async fn test_metrics_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) = setup_test_http_app(store_type, "metrics_api").await;
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // Send a sql
     let res = client
@@ -725,7 +750,7 @@ pub async fn test_metrics_api(store_type: StorageType) {
 pub async fn test_health_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, _guard) = setup_test_http_app_with_frontend(store_type, "health_api").await;
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     async fn health_api(client: &TestClient, endpoint: &str) {
         // we can call health api with both `GET` and `POST` method.
@@ -752,7 +777,7 @@ pub async fn test_health_api(store_type: StorageType) {
 pub async fn test_status_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, _guard) = setup_test_http_app_with_frontend(store_type, "status_api").await;
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     let res_get = client.get("/status").send().await;
     assert_eq!(res_get.status(), StatusCode::OK);
@@ -769,7 +794,7 @@ pub async fn test_status_api(store_type: StorageType) {
 pub async fn test_config_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, _guard) = setup_test_http_app_with_frontend(store_type, "config_api").await;
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     let res_get = client.get("/config").send().await;
     assert_eq!(res_get.status(), StatusCode::OK);
@@ -997,7 +1022,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
 pub async fn test_dashboard_path(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, _guard) = setup_test_http_app_with_frontend(store_type, "dashboard_path").await;
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     let res_get = client.get("/dashboard").send().await;
     assert_eq!(res_get.status(), StatusCode::PERMANENT_REDIRECT);
@@ -1018,7 +1043,7 @@ pub async fn test_prometheus_remote_write(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
         setup_test_prom_app_with_frontend(store_type, "prometheus_remote_write").await;
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // write snappy encoded data
     let write_request = WriteRequest {
@@ -1046,7 +1071,7 @@ pub async fn test_vm_proto_remote_write(store_type: StorageType) {
         setup_test_prom_app_with_frontend(store_type, "vm_proto_remote_write").await;
 
     // handshake
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
     let res = client
         .post("/v1/prometheus/write?get_vm_proto_version=1")
         .send()
@@ -1104,7 +1129,7 @@ pub async fn test_pipeline_api(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_pipeline_api").await;
 
     // handshake
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     let body = r#"
 processors:
@@ -1232,10 +1257,11 @@ transform:
 
 pub async fn test_identify_pipeline(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_pipeline_api").await;
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_identify_pipeline").await;
 
     // handshake
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
     let body = r#"{"__time__":1453809242,"__topic__":"","__source__":"10.170.***.***","ip":"10.200.**.***","time":"26/Jan/2016:19:54:02 +0800","url":"POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","status":"200","user-agent":"aliyun-sdk-java"}
 {"__time__":1453809242,"__topic__":"","__source__":"10.170.***.***","ip":"10.200.**.***","time":"26/Jan/2016:19:54:02 +0800","url":"POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","status":"200","user-agent":"aliyun-sdk-java","hasagei":"hasagei","dongdongdong":"guaguagua"}"#;
     let res = client
@@ -1285,12 +1311,61 @@ pub async fn test_identify_pipeline(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_identify_pipeline_with_flatten(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_identify_pipeline_with_flatten").await;
+
+    let client = TestClient::new(app).await;
+    let body = r#"{"__time__":1453809242,"__topic__":"","__source__":"10.170.***.***","ip":"10.200.**.***","time":"26/Jan/2016:19:54:02 +0800","url":"POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","status":"200","user-agent":"aliyun-sdk-java","custom_map":{"value_a":["a","b","c"],"value_b":"b"}}"#;
+
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/json"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-pipeline-params"),
+                HeaderValue::from_static("flatten_json_object=true"),
+            ),
+        ],
+        "/v1/events/logs?table=logs&pipeline_name=greptime_identity",
+        body.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+
+    assert_eq!(StatusCode::OK, res.status());
+
+    let expected = r#"[["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["custom_map.value_a","Json","","YES","","FIELD"],["custom_map.value_b","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"],["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"]]"#;
+    validate_data(
+        "test_identify_pipeline_with_flatten_desc_logs",
+        &client,
+        "desc logs",
+        expected,
+    )
+    .await;
+
+    let expected = "[[[\"a\",\"b\",\"c\"]]]";
+    validate_data(
+        "test_identify_pipeline_with_flatten_select_json",
+        &client,
+        "select `custom_map.value_a` from logs",
+        expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
 pub async fn test_test_pipeline_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_pipeline_api").await;
 
     // handshake
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     let pipeline_content = r#"
 processors:
@@ -1534,7 +1609,7 @@ pub async fn test_plain_text_ingestion(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_pipeline_api").await;
 
     // handshake
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     let body = r#"
 processors:
@@ -1623,17 +1698,14 @@ pub async fn test_otlp_metrics(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_otlp_metrics").await;
 
     let content = r#"
-{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeMetrics":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"metrics":[{"name":"gen","description":"","unit":"","data":{"gauge":{"dataPoints":[{"attributes":[],"startTimeUnixNano":0,"timeUnixNano":1726053452870391000,"exemplars":[],"flags":0,"value":{"asInt":9471}}]}}}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.13.0"}
+{"resourceMetrics":[{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeMetrics":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"metrics":[{"name":"gen","description":"","unit":"","metadata":[],"gauge":{"dataPoints":[{"attributes":[],"startTimeUnixNano":"0","timeUnixNano":"1736489291872539000","exemplars":[],"flags":0,"asInt":0}]}}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.13.0"},{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeMetrics":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"metrics":[{"name":"gen","description":"","unit":"","metadata":[],"gauge":{"dataPoints":[{"attributes":[],"startTimeUnixNano":"0","timeUnixNano":"1736489291919917000","exemplars":[],"flags":0,"asInt":1}]}}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.13.0"}]}
     "#;
 
-    let metrics: ResourceMetrics = serde_json::from_str(content).unwrap();
-    let req = ExportMetricsServiceRequest {
-        resource_metrics: vec![metrics],
-    };
+    let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
     let body = req.encode_to_vec();
 
     // handshake
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // write metrics data
     let res = send_req(
@@ -1650,7 +1722,7 @@ pub async fn test_otlp_metrics(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // select metrics data
-    let expected = r#"[[1726053452870391000,9471.0]]"#;
+    let expected = "[[1736489291872539000,0.0],[1736489291919917000,1.0]]";
     validate_data("otlp_metrics", &client, "select * from gen;", expected).await;
 
     // drop table
@@ -1689,14 +1761,14 @@ pub async fn test_otlp_traces(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_otlp_traces").await;
 
     let content = r#"
-{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"telemetrygen"}}],"droppedAttributesCount":0},"scopeSpans":[{"scope":{"name":"telemetrygen","version":"","attributes":[],"droppedAttributesCount":0},"spans":[{"traceId":"b5e5fb572cf0a3335dd194a14145fef5","spanId":"74c82efa6f628e80","traceState":"","parentSpanId":"3364d2da58c9fd2b","flags":0,"name":"okey-dokey-0","kind":2,"startTimeUnixNano":1726631197820927000,"endTimeUnixNano":1726631197821050000,"attributes":[{"key":"net.peer.ip","value":{"stringValue":"1.2.3.4"}},{"key":"peer.service","value":{"stringValue":"telemetrygen-client"}}],"droppedAttributesCount":0,"events":[],"droppedEventsCount":0,"links":[],"droppedLinksCount":0,"status":{"message":"","code":0}},{"traceId":"b5e5fb572cf0a3335dd194a14145fef5","spanId":"3364d2da58c9fd2b","traceState":"","parentSpanId":"","flags":0,"name":"lets-go","kind":3,"startTimeUnixNano":1726631197820927000,"endTimeUnixNano":1726631197821050000,"attributes":[{"key":"net.peer.ip","value":{"stringValue":"1.2.3.4"}},{"key":"peer.service","value":{"stringValue":"telemetrygen-server"}}],"droppedAttributesCount":0,"events":[],"droppedEventsCount":0,"links":[],"droppedLinksCount":0,"status":{"message":"","code":0}}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.4.0"}]}
-    "#;
+{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"telemetrygen"}}],"droppedAttributesCount":0},"scopeSpans":[{"scope":{"name":"telemetrygen","version":"","attributes":[],"droppedAttributesCount":0},"spans":[{"traceId":"c05d7a4ec8e1f231f02ed6e8da8655b4","spanId":"9630f2916e2f7909","traceState":"","parentSpanId":"d24f921c75f68e23","flags":256,"name":"okey-dokey-0","kind":2,"startTimeUnixNano":"1736480942444376000","endTimeUnixNano":"1736480942444499000","attributes":[{"key":"net.peer.ip","value":{"stringValue":"1.2.3.4"}},{"key":"peer.service","value":{"stringValue":"telemetrygen-client"}}],"droppedAttributesCount":0,"events":[],"droppedEventsCount":0,"links":[],"droppedLinksCount":0,"status":{"message":"","code":0}},{"traceId":"c05d7a4ec8e1f231f02ed6e8da8655b4","spanId":"d24f921c75f68e23","traceState":"","parentSpanId":"","flags":256,"name":"lets-go","kind":3,"startTimeUnixNano":"1736480942444376000","endTimeUnixNano":"1736480942444499000","attributes":[{"key":"net.peer.ip","value":{"stringValue":"1.2.3.4"}},{"key":"peer.service","value":{"stringValue":"telemetrygen-server"}}],"droppedAttributesCount":0,"events":[],"droppedEventsCount":0,"links":[],"droppedLinksCount":0,"status":{"message":"","code":0}},{"traceId":"cc9e0991a2e63d274984bd44ee669203","spanId":"8f847259b0f6e1ab","traceState":"","parentSpanId":"eba7be77e3558179","flags":256,"name":"okey-dokey-0","kind":2,"startTimeUnixNano":"1736480942444589000","endTimeUnixNano":"1736480942444712000","attributes":[{"key":"net.peer.ip","value":{"stringValue":"1.2.3.4"}},{"key":"peer.service","value":{"stringValue":"telemetrygen-client"}}],"droppedAttributesCount":0,"events":[],"droppedEventsCount":0,"links":[],"droppedLinksCount":0,"status":{"message":"","code":0}},{"traceId":"cc9e0991a2e63d274984bd44ee669203","spanId":"eba7be77e3558179","traceState":"","parentSpanId":"","flags":256,"name":"lets-go","kind":3,"startTimeUnixNano":"1736480942444589000","endTimeUnixNano":"1736480942444712000","attributes":[{"key":"net.peer.ip","value":{"stringValue":"1.2.3.4"}},{"key":"peer.service","value":{"stringValue":"telemetrygen-server"}}],"droppedAttributesCount":0,"events":[],"droppedEventsCount":0,"links":[],"droppedLinksCount":0,"status":{"message":"","code":0}}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.4.0"}]}
+"#;
 
     let req: ExportTraceServiceRequest = serde_json::from_str(content).unwrap();
     let body = req.encode_to_vec();
 
     // handshake
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // write traces data
     let res = send_req(
@@ -1713,7 +1785,7 @@ pub async fn test_otlp_traces(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // select traces data
-    let expected = r#"[[1726631197820927000,1726631197821050000,123000,"b5e5fb572cf0a3335dd194a14145fef5","3364d2da58c9fd2b","","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-server"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1726631197820927000,1726631197821050000,123000,"b5e5fb572cf0a3335dd194a14145fef5","74c82efa6f628e80","3364d2da58c9fd2b","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-client"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}]]"#;
+    let expected = r#"[[1736480942444376000,1736480942444499000,123000,"telemetrygen","c05d7a4ec8e1f231f02ed6e8da8655b4","9630f2916e2f7909","d24f921c75f68e23","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-client"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1736480942444376000,1736480942444499000,123000,"telemetrygen","c05d7a4ec8e1f231f02ed6e8da8655b4","d24f921c75f68e23","","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-server"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1736480942444589000,1736480942444712000,123000,"telemetrygen","cc9e0991a2e63d274984bd44ee669203","8f847259b0f6e1ab","eba7be77e3558179","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-client"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1736480942444589000,1736480942444712000,123000,"telemetrygen","cc9e0991a2e63d274984bd44ee669203","eba7be77e3558179","","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-server"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}]]"#;
     validate_data(
         "otlp_traces",
         &client,
@@ -1759,9 +1831,9 @@ pub async fn test_otlp_logs(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_otlp_logs").await;
 
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
     let content = r#"
-{"resourceLogs":[{"resource":{"attributes":[{"key":"resource-attr","value":{"stringValue":"resource-attr-val-1"}}]},"schemaUrl":"https://opentelemetry.io/schemas/1.0.0/resourceLogs","scopeLogs":[{"scope":{},"schemaUrl":"https://opentelemetry.io/schemas/1.0.0/scopeLogs","logRecords":[{"flags":1,"timeUnixNano":1581452773000009875,"observedTimeUnixNano":1581452773000009875,"severityNumber":9,"severityText":"Info","body":{"value":{"stringValue":"This is a log message"}},"attributes":[{"key":"app","value":{"stringValue":"server"}},{"key":"instance_num","value":{"intValue":1}}],"droppedAttributesCount":1,"traceId":[48,56,48,52,48,50,48,49,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48,48],"spanId":[48,49,48,50,48,52,48,56,48,48,48,48,48,48,48,48]},{"flags":1,"timeUnixNano":1581452773000000789,"observedTimeUnixNano":1581452773000000789,"severityNumber":9,"severityText":"Info","body":{"value":{"stringValue":"something happened"}},"attributes":[{"key":"customer","value":{"stringValue":"acme"}},{"key":"env","value":{"stringValue":"dev"}}],"droppedAttributesCount":1,"traceId":[48],"spanId":[48]}]}]}]}
+{"resourceLogs":[{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeLogs":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"logRecords":[{"timeUnixNano":"1736413568497632000","observedTimeUnixNano":"0","severityNumber":9,"severityText":"Info","body":{"stringValue":"the message line one"},"attributes":[{"key":"app","value":{"stringValue":"server"}}],"droppedAttributesCount":0,"flags":0,"traceId":"f665100a612542b69cc362fe2ae9d3bf","spanId":"e58f01c4c69f4488"}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.4.0"},{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeLogs":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"logRecords":[{"timeUnixNano":"1736413568538897000","observedTimeUnixNano":"0","severityNumber":9,"severityText":"Info","body":{"stringValue":"the message line two"},"attributes":[{"key":"app","value":{"stringValue":"server"}}],"droppedAttributesCount":0,"flags":0,"traceId":"f665100a612542b69cc362fe2ae9d3bf","spanId":"e58f01c4c69f4488"}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.4.0"}]}
 "#;
 
     let req: ExportLogsServiceRequest = serde_json::from_str(content).unwrap();
@@ -1787,7 +1859,7 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         )
         .await;
         assert_eq!(StatusCode::OK, res.status());
-        let expected = r#"[[1581452773000000789,"30","30","Info",9,"something happened",{"customer":"acme","env":"dev"},1,"","",{},"https://opentelemetry.io/schemas/1.0.0/scopeLogs",{"resource-attr":"resource-attr-val-1"},"https://opentelemetry.io/schemas/1.0.0/resourceLogs"],[1581452773000009875,"3038303430323031303030303030303030303030303030303030303030303030","30313032303430383030303030303030","Info",9,"This is a log message",{"app":"server","instance_num":1},1,"","",{},"https://opentelemetry.io/schemas/1.0.0/scopeLogs",{"resource-attr":"resource-attr-val-1"},"https://opentelemetry.io/schemas/1.0.0/resourceLogs"]]"#;
+        let expected = "[[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server\"},0,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\"],[1736413568538897000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line two\",{\"app\":\"server\"},0,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\"]]";
         validate_data("otlp_logs", &client, "select * from logs1;", expected).await;
     }
 
@@ -1816,7 +1888,7 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         .await;
         assert_eq!(StatusCode::OK, res.status());
 
-        let expected = r#"[[1581452773000000789,"30","30","Info",9,"something happened",{"customer":"acme","env":"dev"},1,"","",{},"https://opentelemetry.io/schemas/1.0.0/scopeLogs",{"resource-attr":"resource-attr-val-1"},"https://opentelemetry.io/schemas/1.0.0/resourceLogs",null,null,"resource-attr-val-1"],[1581452773000009875,"3038303430323031303030303030303030303030303030303030303030303030","30313032303430383030303030303030","Info",9,"This is a log message",{"app":"server","instance_num":1},1,"","",{},"https://opentelemetry.io/schemas/1.0.0/scopeLogs",{"resource-attr":"resource-attr-val-1"},"https://opentelemetry.io/schemas/1.0.0/resourceLogs","server",1,"resource-attr-val-1"]]"#;
+        let expected = "[[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server\"},0,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",\"server\"],[1736413568538897000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line two\",{\"app\":\"server\"},0,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",\"server\"]]";
         validate_data(
             "otlp_logs_with_selector",
             &client,
@@ -1833,7 +1905,7 @@ pub async fn test_loki_pb_logs(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_loki_pb_logs").await;
 
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // init loki request
     let req: PushRequest = PushRequest {
@@ -1911,7 +1983,7 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
     let (app, mut guard) =
         setup_test_http_app_with_frontend(store_type, "test_loki_json_logs").await;
 
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     let body = r#"
 {
@@ -1980,7 +2052,7 @@ pub async fn test_elasticsearch_logs(store_type: StorageType) {
     let (app, mut guard) =
         setup_test_http_app_with_frontend(store_type, "test_elasticsearch_logs").await;
 
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     let body = r#"
         {"create":{"_index":"test","_id":"1"}}
@@ -2021,7 +2093,7 @@ pub async fn test_elasticsearch_logs_with_index(store_type: StorageType) {
     let (app, mut guard) =
         setup_test_http_app_with_frontend(store_type, "test_elasticsearch_logs_with_index").await;
 
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // It will write to test_index1 and test_index2(specified in the path).
     let body = r#"
@@ -2078,7 +2150,7 @@ async fn validate_data(test_name: &str, client: &TestClient, sql: &str, expected
     let v = get_rows_from_output(&resp);
 
     assert_eq!(
-        v, expected,
+        expected, v,
         "validate {test_name} fail, expected: {expected}, actual: {v}"
     );
 }

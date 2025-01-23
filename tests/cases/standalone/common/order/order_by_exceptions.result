@@ -89,7 +89,7 @@ EXPLAIN SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY 
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k FROM test ORDER BY -1;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Union queries must have the same number of columns, (left is 2, right is 1)
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: UNION queries have different number of columns: left has 2 columns whereas right has 1 columns
 
 DROP TABLE test;
 

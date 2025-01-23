@@ -43,7 +43,7 @@ use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::Peer;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
-use common_meta::wal_options_allocator::{WalOptionsAllocator, WalOptionsAllocatorRef};
+use common_meta::wal_options_allocator::{build_wal_options_allocator, WalOptionsAllocatorRef};
 use common_procedure::{ProcedureInfo, ProcedureManagerRef};
 use common_telemetry::info;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
@@ -76,10 +76,10 @@ use tokio::sync::{broadcast, RwLock};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
-    BuildCacheRegistrySnafu, CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu,
-    InitMetadataSnafu, InitTimezoneSnafu, LoadLayeredConfigSnafu, OtherSnafu, Result,
-    ShutdownDatanodeSnafu, ShutdownFlownodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu,
-    StartFlownodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
+    BuildCacheRegistrySnafu, BuildWalOptionsAllocatorSnafu, CreateDirSnafu, IllegalConfigSnafu,
+    InitDdlManagerSnafu, InitMetadataSnafu, InitTimezoneSnafu, LoadLayeredConfigSnafu, OtherSnafu,
+    Result, ShutdownDatanodeSnafu, ShutdownFlownodeSnafu, ShutdownFrontendSnafu,
+    StartDatanodeSnafu, StartFlownodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
     StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
@@ -569,10 +569,11 @@ impl StartCommand {
                 .step(10)
                 .build(),
         );
-        let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
-            opts.wal.clone().into(),
-            kv_backend.clone(),
-        ));
+        let kafka_options = opts.wal.clone().into();
+        let wal_options_allocator = build_wal_options_allocator(&kafka_options, kv_backend.clone())
+            .await
+            .context(BuildWalOptionsAllocatorSnafu)?;
+        let wal_options_allocator = Arc::new(wal_options_allocator);
         let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_sequence,
             wal_options_allocator.clone(),

@@ -289,6 +289,7 @@ pub(crate) fn build_key_values_with_ts_seq_values(
             schema: column_schema,
             rows,
         }),
+        write_hint: None,
     };
     KeyValues::new(metadata.as_ref(), mutation).unwrap()
 }
@@ -325,8 +326,8 @@ pub(crate) fn encode_keys(
 /// Encode one key.
 pub(crate) fn encode_key_by_kv(key_value: &KeyValue) -> Vec<u8> {
     let row_codec = DensePrimaryKeyCodec::with_fields(vec![
-        SortField::new(ConcreteDataType::string_datatype()),
-        SortField::new(ConcreteDataType::uint32_datatype()),
+        (0, SortField::new(ConcreteDataType::string_datatype())),
+        (1, SortField::new(ConcreteDataType::uint32_datatype())),
     ]);
     row_codec.encode(key_value.primary_keys()).unwrap()
 }

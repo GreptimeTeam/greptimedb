@@ -148,7 +148,7 @@ SELECT b, a FROM test WHERE a < 13 ORDER BY b DESC;
 SELECT b % 2 AS f, SUM(a) FROM test GROUP BY f ORDER BY b % 2;
 
 +---+-------------+
-| f | SUM(test.a) |
+| f | sum(test.a) |
 +---+-------------+
 | 0 | 24          |
 | 1 | 12          |
@@ -167,7 +167,7 @@ SELECT b % 2 AS f, a FROM test ORDER BY b % 2, a;
 SELECT b % 2 AS f, SUM(a) FROM test GROUP BY f ORDER BY f;
 
 +---+-------------+
-| f | SUM(test.a) |
+| f | sum(test.a) |
 +---+-------------+
 | 0 | 24          |
 | 1 | 12          |
@@ -176,7 +176,7 @@ SELECT b % 2 AS f, SUM(a) FROM test GROUP BY f ORDER BY f;
 SELECT b % 2 AS f, SUM(a) FROM test GROUP BY f ORDER BY 1;
 
 +---+-------------+
-| f | SUM(test.a) |
+| f | sum(test.a) |
 +---+-------------+
 | 0 | 24          |
 | 1 | 12          |
@@ -292,26 +292,21 @@ explain analyze select tag from t where num > 6 order by ts desc limit 2;
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_GlobalLimitExec: skip=0, fetch=2 REDACTED
-|_|_|_SortPreservingMergeExec: [ts@1 DESC] REDACTED
-|_|_|_SortExec: expr=[ts@1 DESC], preserve_partitioning=[true] REDACTED
+| 0_| 0_|_SortPreservingMergeExec: [ts@1 DESC], fetch=2 REDACTED
+|_|_|_SortExec: TopK(fetch=2), expr=[ts@1 DESC], preserve_partitioning=[true] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_GlobalLimitExec: skip=0, fetch=2 REDACTED
-|_|_|_SortPreservingMergeExec: [ts@1 DESC] REDACTED
+| 1_| 0_|_SortPreservingMergeExec: [ts@1 DESC], fetch=2 REDACTED
 |_|_|_SortExec: TopK(fetch=2), expr=[ts@1 DESC], preserve_partitioning=[true] REDACTED
-|_|_|_ProjectionExec: expr=[tag@0 as tag, ts@1 as ts] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: num@2 > 6 REDACTED
+|_|_|_FilterExec: num@2 > 6, projection=[tag@0, ts@1] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
 |_|_|_|
-| 1_| 1_|_GlobalLimitExec: skip=0, fetch=2 REDACTED
-|_|_|_SortPreservingMergeExec: [ts@1 DESC] REDACTED
+| 1_| 1_|_SortPreservingMergeExec: [ts@1 DESC], fetch=2 REDACTED
 |_|_|_SortExec: TopK(fetch=2), expr=[ts@1 DESC], preserve_partitioning=[true] REDACTED
-|_|_|_ProjectionExec: expr=[tag@0 as tag, ts@1 as ts] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: num@2 > 6 REDACTED
+|_|_|_FilterExec: num@2 > 6, projection=[tag@0, ts@1] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
 |_|_|_|

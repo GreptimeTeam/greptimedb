@@ -86,7 +86,7 @@ impl ColumnDataTypeWrapper {
 
     /// Get a tuple of ColumnDataType and ColumnDataTypeExtension.
     pub fn to_parts(&self) -> (ColumnDataType, Option<ColumnDataTypeExtension>) {
-        (self.datatype, self.datatype_ext.clone())
+        (self.datatype, self.datatype_ext)
     }
 }
 
@@ -685,14 +685,18 @@ pub fn pb_values_to_vector_ref(data_type: &ConcreteDataType, values: Values) -> 
             IntervalType::YearMonth(_) => Arc::new(IntervalYearMonthVector::from_vec(
                 values.interval_year_month_values,
             )),
-            IntervalType::DayTime(_) => Arc::new(IntervalDayTimeVector::from_vec(
-                values.interval_day_time_values,
+            IntervalType::DayTime(_) => Arc::new(IntervalDayTimeVector::from_iter_values(
+                values
+                    .interval_day_time_values
+                    .iter()
+                    .map(|x| IntervalDayTime::from_i64(*x).into()),
             )),
             IntervalType::MonthDayNano(_) => {
                 Arc::new(IntervalMonthDayNanoVector::from_iter_values(
-                    values.interval_month_day_nano_values.iter().map(|x| {
-                        IntervalMonthDayNano::new(x.months, x.days, x.nanoseconds).to_i128()
-                    }),
+                    values
+                        .interval_month_day_nano_values
+                        .iter()
+                        .map(|x| IntervalMonthDayNano::new(x.months, x.days, x.nanoseconds).into()),
                 ))
             }
         },
@@ -1495,14 +1499,22 @@ mod tests {
             column.values.as_ref().unwrap().interval_year_month_values
         );
 
-        let vector = Arc::new(IntervalDayTimeVector::from_vec(vec![4, 5, 6]));
+        let vector = Arc::new(IntervalDayTimeVector::from_vec(vec![
+            IntervalDayTime::new(0, 4).into(),
+            IntervalDayTime::new(0, 5).into(),
+            IntervalDayTime::new(0, 6).into(),
+        ]));
         push_vals(&mut column, 3, vector);
         assert_eq!(
             vec![4, 5, 6],
             column.values.as_ref().unwrap().interval_day_time_values
         );
 
-        let vector = Arc::new(IntervalMonthDayNanoVector::from_vec(vec![7, 8, 9]));
+        let vector = Arc::new(IntervalMonthDayNanoVector::from_vec(vec![
+            IntervalMonthDayNano::new(0, 0, 7).into(),
+            IntervalMonthDayNano::new(0, 0, 8).into(),
+            IntervalMonthDayNano::new(0, 0, 9).into(),
+        ]));
         let len = vector.len();
         push_vals(&mut column, 3, vector);
         (0..len).for_each(|i| {

@@ -16,12 +16,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::{Path, Query, State};
-use axum::headers::ContentType;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
-use axum::{Extension, TypedHeader};
+use axum::Extension;
+use axum_extra::TypedHeader;
 use common_error::ext::ErrorExt;
 use common_telemetry::{debug, error};
+use headers::ContentType;
 use once_cell::sync::Lazy;
 use pipeline::GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME;
 use serde_json::{json, Deserializer, Value};
@@ -88,9 +89,10 @@ pub async fn handle_bulk_api(
     Query(params): Query<LogIngesterQueryParams>,
     Extension(query_ctx): Extension<QueryContext>,
     TypedHeader(_content_type): TypedHeader<ContentType>,
+    headers: HeaderMap,
     payload: String,
 ) -> impl IntoResponse {
-    do_handle_bulk_api(log_state, None, params, query_ctx, payload).await
+    do_handle_bulk_api(log_state, None, params, query_ctx, headers, payload).await
 }
 
 /// Process `/${index}/_bulk` API requests. Only support to create logs.
@@ -102,9 +104,10 @@ pub async fn handle_bulk_api_with_index(
     Query(params): Query<LogIngesterQueryParams>,
     Extension(query_ctx): Extension<QueryContext>,
     TypedHeader(_content_type): TypedHeader<ContentType>,
+    headers: HeaderMap,
     payload: String,
 ) -> impl IntoResponse {
-    do_handle_bulk_api(log_state, Some(index), params, query_ctx, payload).await
+    do_handle_bulk_api(log_state, Some(index), params, query_ctx, headers, payload).await
 }
 
 async fn do_handle_bulk_api(
@@ -112,6 +115,7 @@ async fn do_handle_bulk_api(
     index: Option<String>,
     params: LogIngesterQueryParams,
     mut query_ctx: QueryContext,
+    headers: HeaderMap,
     payload: String,
 ) -> impl IntoResponse {
     let start = Instant::now();
@@ -161,6 +165,7 @@ async fn do_handle_bulk_api(
         None,
         requests,
         Arc::new(query_ctx),
+        headers,
     )
     .await
     {

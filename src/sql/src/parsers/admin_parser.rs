@@ -46,6 +46,8 @@ impl ParserContext<'_> {
 
 #[cfg(test)]
 mod tests {
+    use sqlparser::ast::FunctionArguments;
+
     use super::*;
     use crate::ast::{Expr, Function, FunctionArg, FunctionArgExpr, Value};
     use crate::dialect::GreptimeDbDialect;
@@ -62,9 +64,12 @@ mod tests {
         let stmt = result.remove(0);
         match &stmt {
             Statement::Admin(Admin::Func(Function { name, args, .. })) => {
+                let FunctionArguments::List(arg_list) = args else {
+                    unreachable!()
+                };
                 assert_eq!("flush_table", name.to_string());
-                assert_eq!(args.len(), 1);
-                assert!(matches!(&args[0],
+                assert_eq!(arg_list.args.len(), 1);
+                assert!(matches!(&arg_list.args[0],
                                  FunctionArg::Unnamed(FunctionArgExpr::Expr(
                                      Expr::Value(Value::SingleQuotedString(s))
                                  )) if s == "test"));
@@ -86,8 +91,11 @@ mod tests {
         let stmt = result.remove(0);
         match &stmt {
             Statement::Admin(Admin::Func(Function { name, args, .. })) => {
+                let FunctionArguments::List(arg_list) = args else {
+                    unreachable!()
+                };
                 assert_eq!("test", name.to_string());
-                assert_eq!(args.len(), 0);
+                assert_eq!(arg_list.args.len(), 0);
             }
             _ => unreachable!(),
         }

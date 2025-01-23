@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use serde::Serialize;
-use sqlparser::ast::{ObjectName, Query, SetExpr, Statement, UnaryOperator, Values};
+use sqlparser::ast::{
+    Insert as SpInsert, ObjectName, Query, SetExpr, Statement, UnaryOperator, Values,
+};
 use sqlparser::parser::ParserError;
 use sqlparser_derive::{Visit, VisitMut};
 
@@ -39,14 +41,14 @@ macro_rules! parse_fail {
 impl Insert {
     pub fn table_name(&self) -> &ObjectName {
         match &self.inner {
-            Statement::Insert { table_name, .. } => table_name,
+            Statement::Insert(insert) => &insert.table_name,
             _ => unreachable!(),
         }
     }
 
     pub fn columns(&self) -> Vec<&String> {
         match &self.inner {
-            Statement::Insert { columns, .. } => columns.iter().map(|ident| &ident.value).collect(),
+            Statement::Insert(insert) => insert.columns.iter().map(|ident| &ident.value).collect(),
             _ => unreachable!(),
         }
     }
@@ -54,14 +56,14 @@ impl Insert {
     /// Extracts the literal insert statement body if possible
     pub fn values_body(&self) -> Result<Vec<Vec<Value>>> {
         match &self.inner {
-            Statement::Insert {
+            Statement::Insert(SpInsert {
                 source:
                     Some(box Query {
                         body: box SetExpr::Values(Values { rows, .. }),
                         ..
                     }),
                 ..
-            } => sql_exprs_to_values(rows),
+            }) => sql_exprs_to_values(rows),
             _ => unreachable!(),
         }
     }
@@ -70,14 +72,14 @@ impl Insert {
     /// The rules is the same as function `values_body()`.
     pub fn can_extract_values(&self) -> bool {
         match &self.inner {
-            Statement::Insert {
+            Statement::Insert(SpInsert {
                 source:
                     Some(box Query {
                         body: box SetExpr::Values(Values { rows, .. }),
                         ..
                     }),
                 ..
-            } => rows.iter().all(|es| {
+            }) => rows.iter().all(|es| {
                 es.iter().all(|expr| match expr {
                     Expr::Value(_) => true,
                     Expr::Identifier(ident) => {
@@ -100,10 +102,10 @@ impl Insert {
 
     pub fn query_body(&self) -> Result<Option<GtQuery>> {
         Ok(match &self.inner {
-            Statement::Insert {
+            Statement::Insert(SpInsert {
                 source: Some(box query),
                 ..
-            } => Some(query.clone().try_into()?),
+            }) => Some(query.clone().try_into()?),
             _ => None,
         })
     }

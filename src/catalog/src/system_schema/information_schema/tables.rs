@@ -71,6 +71,7 @@ const TABLE_ID: &str = "table_id";
 pub const ENGINE: &str = "engine";
 const INIT_CAPACITY: usize = 42;
 
+#[derive(Debug)]
 pub(super) struct InformationSchemaTables {
     schema: SchemaRef,
     catalog_name: String,

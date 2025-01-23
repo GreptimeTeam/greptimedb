@@ -42,7 +42,7 @@ Affected Rows: 0
 SELECT COUNT(distinct region_id) FROM region_peers;
 
 +----------------------------------------+
-| COUNT(DISTINCT region_peers.region_id) |
+| count(DISTINCT region_peers.region_id) |
 +----------------------------------------+
 | 6                                      |
 +----------------------------------------+

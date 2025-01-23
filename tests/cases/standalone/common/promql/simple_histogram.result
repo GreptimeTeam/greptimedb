@@ -275,7 +275,7 @@ Affected Rows: 12
 tql eval (3000, 3005, '3s') histogram_quantile(0.5, sum by(le, s) (rate(histogram3_bucket[5m])));
 
 +---+---------------------+---------------------------------+
-| s | ts                  | SUM(prom_rate(ts_range,val,ts)) |
+| s | ts                  | sum(prom_rate(ts_range,val,ts)) |
 +---+---------------------+---------------------------------+
 | a | 1970-01-01T00:50:00 | 0.55                            |
 | a | 1970-01-01T00:50:03 | 0.5500000000000002              |

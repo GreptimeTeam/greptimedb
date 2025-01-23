@@ -103,7 +103,7 @@ mod tests {
 
     use super::*;
     use crate::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
-    use crate::inverted_index::Bytes;
+    use crate::Bytes;
 
     fn unpack(fst_value: u64) -> [u32; 2] {
         bytemuck::cast::<u64, [u32; 2]>(fst_value)

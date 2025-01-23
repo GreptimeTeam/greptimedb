@@ -29,7 +29,7 @@ use datafusion::common::{ColumnStatistics, DFSchema, DFSchemaRef, Statistics};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::{EquivalenceProperties, PhysicalSortRequirement};
+use datafusion::physical_expr::{EquivalenceProperties, LexRequirement, PhysicalSortRequirement};
 use datafusion::physical_plan::expressions::{CastExpr as PhyCast, Column as PhyColumn};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
@@ -218,6 +218,29 @@ impl HistogramFold {
     }
 }
 
+impl PartialOrd for HistogramFold {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // Compare fields in order excluding output_schema
+        match self.le_column.partial_cmp(&other.le_column) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.ts_column.partial_cmp(&other.ts_column) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.input.partial_cmp(&other.input) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.field_column.partial_cmp(&other.field_column) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        self.quantile.partial_cmp(&other.quantile)
+    }
+}
+
 #[derive(Debug)]
 pub struct HistogramFoldExec {
     /// Index for `le` column in the schema of input.
@@ -241,7 +264,7 @@ impl ExecutionPlan for HistogramFoldExec {
         &self.properties
     }
 
-    fn required_input_ordering(&self) -> Vec<Option<Vec<PhysicalSortRequirement>>> {
+    fn required_input_ordering(&self) -> Vec<Option<LexRequirement>> {
         let mut cols = self
             .tag_col_exprs()
             .into_iter()
@@ -274,7 +297,7 @@ impl ExecutionPlan for HistogramFoldExec {
             }),
         });
 
-        vec![Some(cols)]
+        vec![Some(LexRequirement::new(cols))]
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
@@ -352,9 +375,13 @@ impl ExecutionPlan for HistogramFoldExec {
             column_statistics: vec![
                 ColumnStatistics::new_unknown();
                 // plus one more for the removed column by function `convert_schema`
-                self.schema().all_fields().len() + 1
+                self.schema().flattened_fields().len() + 1
             ],
         })
+    }
+
+    fn name(&self) -> &str {
+        "HistogramFoldExec"
     }
 }
 

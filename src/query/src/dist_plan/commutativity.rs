@@ -15,7 +15,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use datafusion_expr::utils::exprlist_to_columns;
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
@@ -74,7 +73,6 @@ impl Categorizer {
                 Commutativity::ConditionalCommutative(Some(Arc::new(merge_sort_transformer)))
             }
             LogicalPlan::Join(_) => Commutativity::NonCommutative,
-            LogicalPlan::CrossJoin(_) => Commutativity::NonCommutative,
             LogicalPlan::Repartition(_) => {
                 // unsupported? or non-commutative
                 Commutativity::Unimplemented
@@ -89,7 +87,7 @@ impl Categorizer {
                 // wait for https://github.com/apache/arrow-datafusion/pull/7669
                 if partition_cols.is_empty() && limit.fetch.is_some() {
                     Commutativity::Commutative
-                } else if limit.skip == 0 && limit.fetch.is_some() {
+                } else if limit.skip.is_none() && limit.fetch.is_some() {
                     Commutativity::PartialCommutative
                 } else {
                     Commutativity::Unimplemented
@@ -104,7 +102,6 @@ impl Categorizer {
             LogicalPlan::Values(_) => Commutativity::Unsupported,
             LogicalPlan::Explain(_) => Commutativity::Unsupported,
             LogicalPlan::Analyze(_) => Commutativity::Unsupported,
-            LogicalPlan::Prepare(_) => Commutativity::Unsupported,
             LogicalPlan::DescribeTable(_) => Commutativity::Unsupported,
             LogicalPlan::Dml(_) => Commutativity::Unsupported,
             LogicalPlan::Ddl(_) => Commutativity::Unsupported,
@@ -144,7 +141,6 @@ impl Categorizer {
             | Expr::IsNotFalse(_)
             | Expr::Negative(_)
             | Expr::Between(_)
-            | Expr::Sort(_)
             | Expr::Exists(_)
             | Expr::InList(_)
             | Expr::ScalarFunction(_) => Commutativity::Commutative,
@@ -174,8 +170,8 @@ impl Categorizer {
     /// In this case the plan can be treated as fully commutative.
     fn check_partition(exprs: &[Expr], partition_cols: &[String]) -> bool {
         let mut ref_cols = HashSet::new();
-        if exprlist_to_columns(exprs, &mut ref_cols).is_err() {
-            return false;
+        for expr in exprs {
+            expr.add_column_refs(&mut ref_cols);
         }
         let ref_cols = ref_cols
             .into_iter()

@@ -938,7 +938,7 @@ pub(super) fn parameters_to_scalar_values(
                                             i.days,
                                             (i.microseconds / 1000) as i32,
                                         )
-                                        .to_i64())
+                                        .into())
                                     }
                                 })
                                 .transpose()?,
@@ -946,7 +946,7 @@ pub(super) fn parameters_to_scalar_values(
                         }
                         ConcreteDataType::Interval(IntervalType::MonthDayNano(_)) => {
                             ScalarValue::IntervalMonthDayNano(
-                                data.map(|i| IntervalMonthDayNano::from(i).to_i128()),
+                                data.map(|i| IntervalMonthDayNano::from(i).into()),
                             )
                         }
                         _ => {
@@ -958,7 +958,7 @@ pub(super) fn parameters_to_scalar_values(
                     }
                 } else {
                     ScalarValue::IntervalMonthDayNano(
-                        data.map(|i| IntervalMonthDayNano::from(i).to_i128()),
+                        data.map(|i| IntervalMonthDayNano::from(i).into()),
                     )
                 }
             }
@@ -1003,7 +1003,7 @@ pub(super) fn parameters_to_scalar_values(
                 let data = portal.parameter::<Vec<i16>>(idx, &client_type)?;
                 if let Some(data) = data {
                     let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
-                    ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Int16))
+                    ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Int16, true))
                 } else {
                     ScalarValue::Null
                 }
@@ -1012,7 +1012,7 @@ pub(super) fn parameters_to_scalar_values(
                 let data = portal.parameter::<Vec<i32>>(idx, &client_type)?;
                 if let Some(data) = data {
                     let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
-                    ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Int32))
+                    ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Int32, true))
                 } else {
                     ScalarValue::Null
                 }
@@ -1021,7 +1021,7 @@ pub(super) fn parameters_to_scalar_values(
                 let data = portal.parameter::<Vec<i64>>(idx, &client_type)?;
                 if let Some(data) = data {
                     let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
-                    ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Int64))
+                    ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Int64, true))
                 } else {
                     ScalarValue::Null
                 }
@@ -1030,7 +1030,7 @@ pub(super) fn parameters_to_scalar_values(
                 let data = portal.parameter::<Vec<String>>(idx, &client_type)?;
                 if let Some(data) = data {
                     let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
-                    ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Utf8))
+                    ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Utf8, true))
                 } else {
                     ScalarValue::Null
                 }

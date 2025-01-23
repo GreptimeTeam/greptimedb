@@ -1,10 +1,10 @@
 CREATE TABLE IF NOT EXIST t();
 
-Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement, expected: 'EXISTS', found: EXIST: sql parser error: Expected EXISTS, found: EXIST at Line: 1, Column 21
+Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement, expected: 'EXISTS', found: EXIST: sql parser error: Expected: EXISTS, found: EXIST at Line: 1, Column: 21
 
 CREATE TABLE IF NOT t();
 
-Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement, expected: 'EXISTS', found: t: sql parser error: Expected EXISTS, found: t at Line: 1, Column 21
+Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement, expected: 'EXISTS', found: t: sql parser error: Expected: EXISTS, found: t at Line: 1, Column: 21
 
 CREATE TABLE IF EXISTS t();
 

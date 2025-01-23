@@ -24,7 +24,7 @@ use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::Result as DataFusionResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::PhysicalSortRequirement;
+use datafusion::physical_expr::{LexRequirement, PhysicalSortRequirement};
 use datafusion::physical_plan::expressions::Column as ColumnExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
@@ -40,7 +40,7 @@ use snafu::ResultExt;
 use crate::error::{DeserializeSnafu, Result};
 use crate::metrics::PROMQL_SERIES_COUNT;
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
 pub struct SeriesDivide {
     tag_columns: Vec<String>,
     input: LogicalPlan,
@@ -146,7 +146,7 @@ impl ExecutionPlan for SeriesDivideExec {
         vec![Distribution::SinglePartition]
     }
 
-    fn required_input_ordering(&self) -> Vec<Option<Vec<PhysicalSortRequirement>>> {
+    fn required_input_ordering(&self) -> Vec<Option<LexRequirement>> {
         let input_schema = self.input.schema();
         let exprs: Vec<PhysicalSortRequirement> = self
             .tag_columns
@@ -158,7 +158,7 @@ impl ExecutionPlan for SeriesDivideExec {
             })
             .collect();
         if !exprs.is_empty() {
-            vec![Some(exprs)]
+            vec![Some(LexRequirement::new(exprs))]
         } else {
             vec![None]
         }
@@ -216,6 +216,10 @@ impl ExecutionPlan for SeriesDivideExec {
 
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metric.clone_inner())
+    }
+
+    fn name(&self) -> &str {
+        "SeriesDivideExec"
     }
 }
 

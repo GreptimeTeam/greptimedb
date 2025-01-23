@@ -18,24 +18,60 @@ use std::collections::{HashMap, HashSet};
 
 use snafu::OptionExt;
 use store_api::metadata::ColumnMetadata;
-use store_api::storage::RegionId;
+use store_api::storage::{ColumnId, RegionId};
 
+use crate::engine::options::PhysicalRegionOptions;
 use crate::error::{PhysicalRegionNotFoundSnafu, Result};
 use crate::metrics::LOGICAL_REGION_COUNT;
 use crate::utils::to_data_region_id;
 
+pub struct PhysicalRegionState {
+    logical_regions: HashSet<RegionId>,
+    physical_columns: HashMap<String, ColumnId>,
+    options: PhysicalRegionOptions,
+}
+
+impl PhysicalRegionState {
+    pub fn new(
+        physical_columns: HashMap<String, ColumnId>,
+        options: PhysicalRegionOptions,
+    ) -> Self {
+        Self {
+            logical_regions: HashSet::new(),
+            physical_columns,
+            options,
+        }
+    }
+
+    /// Returns a reference to the logical region ids.
+    pub fn logical_regions(&self) -> &HashSet<RegionId> {
+        &self.logical_regions
+    }
+
+    /// Returns a reference to the physical columns.
+    pub fn physical_columns(&self) -> &HashMap<String, ColumnId> {
+        &self.physical_columns
+    }
+
+    /// Returns a reference to the physical region options.
+    pub fn options(&self) -> &PhysicalRegionOptions {
+        &self.options
+    }
+
+    /// Removes a logical region id from the physical region state.
+    /// Returns true if the logical region id was present.
+    pub fn remove_logical_region(&mut self, logical_region_id: RegionId) -> bool {
+        self.logical_regions.remove(&logical_region_id)
+    }
+}
+
 /// Internal states of metric engine
 #[derive(Default)]
 pub(crate) struct MetricEngineState {
-    /// Mapping from physical region id to its logical region ids
-    /// `logical_regions` records a reverse mapping from logical region id to
-    /// physical region id
-    physical_regions: HashMap<RegionId, HashSet<RegionId>>,
+    /// Physical regions states.
+    physical_regions: HashMap<RegionId, PhysicalRegionState>,
     /// Mapping from logical region id to physical region id.
     logical_regions: HashMap<RegionId, RegionId>,
-    /// Cache for the columns of physical regions.
-    /// The region id in key is the data region id.
-    physical_columns: HashMap<RegionId, HashSet<String>>,
     /// Cache for the column metadata of logical regions.
     /// The column order is the same with the order in the metadata, which is
     /// alphabetically ordered on column name.
@@ -46,13 +82,14 @@ impl MetricEngineState {
     pub fn add_physical_region(
         &mut self,
         physical_region_id: RegionId,
-        physical_columns: HashSet<String>,
+        physical_columns: HashMap<String, ColumnId>,
+        options: PhysicalRegionOptions,
     ) {
         let physical_region_id = to_data_region_id(physical_region_id);
-        self.physical_regions
-            .insert(physical_region_id, HashSet::new());
-        self.physical_columns
-            .insert(physical_region_id, physical_columns);
+        self.physical_regions.insert(
+            physical_region_id,
+            PhysicalRegionState::new(physical_columns, options),
+        );
     }
 
     /// # Panic
@@ -60,12 +97,12 @@ impl MetricEngineState {
     pub fn add_physical_columns(
         &mut self,
         physical_region_id: RegionId,
-        physical_columns: impl IntoIterator<Item = String>,
+        physical_columns: impl IntoIterator<Item = (String, ColumnId)>,
     ) {
         let physical_region_id = to_data_region_id(physical_region_id);
-        let columns = self.physical_columns.get_mut(&physical_region_id).unwrap();
-        for col in physical_columns {
-            columns.insert(col);
+        let state = self.physical_regions.get_mut(&physical_region_id).unwrap();
+        for (col, id) in physical_columns {
+            state.physical_columns.insert(col, id);
         }
     }
 
@@ -80,6 +117,7 @@ impl MetricEngineState {
         self.physical_regions
             .get_mut(&physical_region_id)
             .unwrap()
+            .logical_regions
             .insert(logical_region_id);
         self.logical_regions
             .insert(logical_region_id, physical_region_id);
@@ -98,16 +136,16 @@ impl MetricEngineState {
         self.logical_regions.get(&logical_region_id).copied()
     }
 
-    pub fn physical_columns(&self) -> &HashMap<RegionId, HashSet<String>> {
-        &self.physical_columns
-    }
-
     pub fn logical_columns(&self) -> &HashMap<RegionId, Vec<ColumnMetadata>> {
         &self.logical_columns
     }
 
-    pub fn physical_regions(&self) -> &HashMap<RegionId, HashSet<RegionId>> {
+    pub fn physical_region_states(&self) -> &HashMap<RegionId, PhysicalRegionState> {
         &self.physical_regions
+    }
+
+    pub fn exist_physical_region(&self, physical_region_id: RegionId) -> bool {
+        self.physical_regions.contains_key(&physical_region_id)
     }
 
     pub fn logical_regions(&self) -> &HashMap<RegionId, RegionId> {
@@ -118,11 +156,13 @@ impl MetricEngineState {
     pub fn remove_physical_region(&mut self, physical_region_id: RegionId) -> Result<()> {
         let physical_region_id = to_data_region_id(physical_region_id);
 
-        let logical_regions = self.physical_regions.get(&physical_region_id).context(
-            PhysicalRegionNotFoundSnafu {
+        let logical_regions = &self
+            .physical_regions
+            .get(&physical_region_id)
+            .context(PhysicalRegionNotFoundSnafu {
                 region_id: physical_region_id,
-            },
-        )?;
+            })?
+            .logical_regions;
 
         LOGICAL_REGION_COUNT.sub(logical_regions.len() as i64);
 
@@ -130,7 +170,6 @@ impl MetricEngineState {
             self.logical_regions.remove(logical_region);
         }
         self.physical_regions.remove(&physical_region_id);
-        self.physical_columns.remove(&physical_region_id);
         Ok(())
     }
 
@@ -145,7 +184,7 @@ impl MetricEngineState {
         self.physical_regions
             .get_mut(&physical_region_id)
             .unwrap() // Safety: physical_region_id is got from physical_regions
-            .remove(&logical_region_id);
+            .remove_logical_region(logical_region_id);
 
         self.logical_columns.remove(&logical_region_id);
 

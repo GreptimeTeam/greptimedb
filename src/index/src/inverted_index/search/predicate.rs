@@ -14,7 +14,7 @@
 
 use std::collections::HashSet;
 
-use crate::inverted_index::Bytes;
+use crate::Bytes;
 
 /// Enumerates types of predicates for value filtering.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -24,7 +24,7 @@ use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::Trac
 use snafu::ResultExt;
 use tokio::sync::Mutex;
 use tonic::codec::CompressionEncoding;
-use tonic::transport::server::RoutesBuilder;
+use tonic::service::RoutesBuilder;
 use tonic::transport::{Identity, ServerTlsConfig};
 use tower::ServiceBuilder;
 

@@ -24,7 +24,7 @@ Affected Rows: 10
 SELECT ts, host, min(val) RANGE '5s' FROM host_sec ALIGN '5s' ORDER BY host, ts;
 
 +---------------------+-------+----------------------------+
-| ts                  | host  | MIN(host_sec.val) RANGE 5s |
+| ts                  | host  | min(host_sec.val) RANGE 5s |
 +---------------------+-------+----------------------------+
 | 1970-01-01T00:00:00 | host1 | 0.0                        |
 | 1970-01-01T00:00:05 | host1 |                            |
