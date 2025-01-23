@@ -2146,7 +2146,7 @@ mod tests {
         let table_id = 1025;
         let table_name = "foo";
         let task = test_create_table_task(table_name, table_id);
-        let options = [(0, "test".to_string())].into();
+        let options = create_mock_region_wal_options();
         table_metadata_manager
             .create_table_metadata(
                 task.table_info,
