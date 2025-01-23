@@ -425,6 +425,7 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
 
     http_server = http_server
         .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()))
+        .with_log_ingest_handler(instance.instance.clone(), None, None)
         .with_logs_handler(instance.instance.clone())
         .with_otlp_handler(instance.instance.clone())
         .with_greptime_config_options(instance.opts.to_toml().unwrap());
