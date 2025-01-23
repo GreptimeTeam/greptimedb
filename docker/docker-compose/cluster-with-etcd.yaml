@@ -48,7 +48,7 @@ services:
       - --store-addrs=etcd0:2379
       - --http-addr=0.0.0.0:3000
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://metasrv:3002/health" ]
+      test: [ "CMD", "curl", "-f", "http://metasrv:3000/health" ]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -75,10 +75,10 @@ services:
     volumes:
       - /tmp/greptimedb-cluster-docker-compose/datanode0:/tmp/greptimedb
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://datanode0:5000/health" ]
+      test: [ "CMD", "curl", "-fv", "http://datanode0:5000/health" ]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 10
     depends_on:
       metasrv:
         condition: service_healthy
@@ -129,6 +129,11 @@ services:
     depends_on:
       frontend0:
         condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://flownode0:4005/health" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     networks:
       - greptimedb
 
