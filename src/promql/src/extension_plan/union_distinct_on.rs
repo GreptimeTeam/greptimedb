@@ -110,6 +110,25 @@ impl UnionDistinctOn {
     }
 }
 
+impl PartialOrd for UnionDistinctOn {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // Compare fields in order excluding output_schema
+        match self.left.partial_cmp(&other.left) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.right.partial_cmp(&other.right) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.compare_keys.partial_cmp(&other.compare_keys) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        self.ts_col.partial_cmp(&other.ts_col)
+    }
+}
+
 impl UserDefinedLogicalNodeCore for UnionDistinctOn {
     fn name(&self) -> &str {
         Self::name()
@@ -261,6 +280,10 @@ impl ExecutionPlan for UnionDistinctOnExec {
 
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metric.clone_inner())
+    }
+
+    fn name(&self) -> &str {
+        "UnionDistinctOnExec"
     }
 }
 

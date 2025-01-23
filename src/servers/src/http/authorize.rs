@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use ::auth::UserProviderRef;
-use axum::extract::State;
-use axum::http::{self, Request, StatusCode};
+use axum::extract::{Request, State};
+use axum::http::{self, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use base64::prelude::BASE64_STANDARD;
@@ -30,14 +30,13 @@ use headers::Header;
 use session::context::QueryContextBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
 
-use super::header::{GreptimeDbName, GREPTIME_TIMEZONE_HEADER_NAME};
-use super::{AUTHORIZATION_HEADER, PUBLIC_APIS};
 use crate::error::{
     self, InvalidAuthHeaderInvisibleASCIISnafu, InvalidAuthHeaderSnafu, InvalidParameterSnafu,
     NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu, UrlDecodeSnafu,
 };
+use crate::http::header::{GreptimeDbName, GREPTIME_TIMEZONE_HEADER_NAME};
 use crate::http::result::error_result::ErrorResponse;
-use crate::http::HTTP_API_PREFIX;
+use crate::http::{AUTHORIZATION_HEADER, HTTP_API_PREFIX, PUBLIC_APIS};
 use crate::influxdb::{is_influxdb_request, is_influxdb_v2_request};
 
 /// AuthState is a holder state for [`UserProviderRef`]
@@ -115,10 +114,10 @@ pub async fn inner_auth<B>(
     }
 }
 
-pub async fn check_http_auth<B>(
+pub async fn check_http_auth(
     State(auth_state): State<AuthState>,
-    req: Request<B>,
-    next: Next<B>,
+    req: Request,
+    next: Next,
 ) -> Response {
     match inner_auth(auth_state.user_provider, req).await {
         Ok(req) => next.run(req).await,

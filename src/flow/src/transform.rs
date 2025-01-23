@@ -13,10 +13,11 @@
 // limitations under the License.
 
 //! Transform Substrait into execution plan
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use common_error::ext::BoxedError;
+use datafusion_substrait::extensions::Extensions;
 use datatypes::data_type::ConcreteDataType as CDT;
 use query::QueryEngine;
 use serde::{Deserialize, Serialize};
@@ -92,8 +93,15 @@ impl FunctionExtensions {
         self.anchor_to_name.get(anchor)
     }
 
-    pub fn inner_ref(&self) -> HashMap<u32, &String> {
-        self.anchor_to_name.iter().map(|(k, v)| (*k, v)).collect()
+    pub fn to_extensions(&self) -> Extensions {
+        Extensions {
+            functions: self
+                .anchor_to_name
+                .iter()
+                .map(|(k, v)| (*k, v.clone()))
+                .collect(),
+            ..Default::default()
+        }
     }
 }
 
@@ -179,6 +187,7 @@ mod test {
 
     pub fn create_test_ctx() -> FlownodeContext {
         let mut tri_map = IdToNameMap::new();
+        // FIXME(discord9): deprecated, use `numbers_with_ts` instead since this table has no timestamp column
         {
             let gid = GlobalId::User(0);
             let name = [

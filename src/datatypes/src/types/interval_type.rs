@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use arrow::datatypes::{
-    DataType as ArrowDataType, IntervalDayTimeType as ArrowIntervalDayTimeType,
+    DataType as ArrowDataType, IntervalDayTime as ArrowIntervalDayTime,
+    IntervalDayTimeType as ArrowIntervalDayTimeType,
+    IntervalMonthDayNano as ArrowIntervalMonthDayNano,
     IntervalMonthDayNanoType as ArrowIntervalMonthDayNanoType, IntervalUnit as ArrowIntervalUnit,
     IntervalYearMonthType as ArrowIntervalYearMonthType,
 };
@@ -137,8 +139,8 @@ macro_rules! impl_data_type_for_interval {
 }
 
 impl_data_type_for_interval!(YearMonth, i32);
-impl_data_type_for_interval!(DayTime, i64);
-impl_data_type_for_interval!(MonthDayNano, i128);
+impl_data_type_for_interval!(DayTime, ArrowIntervalDayTime);
+impl_data_type_for_interval!(MonthDayNano, ArrowIntervalMonthDayNano);
 
 #[cfg(test)]
 mod tests {

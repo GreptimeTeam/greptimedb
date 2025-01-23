@@ -16,10 +16,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
-use datafusion::catalog::CatalogProviderList;
 use datafusion::execution::context::SessionState;
 use datafusion::execution::runtime_env::RuntimeEnv;
-use datafusion::prelude::{SessionConfig, SessionContext};
+use datafusion::execution::SessionStateBuilder;
+use datafusion::prelude::SessionConfig;
 use datafusion_expr::LogicalPlan;
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
 use datafusion_substrait::logical_plan::producer::to_substrait_plan;
@@ -41,13 +41,10 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
     async fn decode<B: Buf + Send>(
         &self,
         message: B,
-        catalog_list: Arc<dyn CatalogProviderList>,
         state: SessionState,
     ) -> Result<Self::Plan, Self::Error> {
-        let mut context = SessionContext::new_with_state(state);
-        context.register_catalog_list(catalog_list);
         let plan = Plan::decode(message).context(DecodeRelSnafu)?;
-        let df_plan = from_substrait_plan(&context, &plan)
+        let df_plan = from_substrait_plan(&state, &plan)
             .await
             .context(DecodeDfPlanSnafu)?;
         Ok(df_plan)
@@ -72,11 +69,12 @@ impl DFLogicalSubstraitConvertor {
         plan: &LogicalPlan,
         serializer: impl SerializerRegistry + 'static,
     ) -> Result<Box<Plan>, Error> {
-        let session_state =
-            SessionState::new_with_config_rt(SessionConfig::new(), Arc::new(RuntimeEnv::default()))
-                .with_serializer_registry(Arc::new(serializer));
-        let context = SessionContext::new_with_state(session_state);
-
-        to_substrait_plan(plan, &context).context(EncodeDfPlanSnafu)
+        let state = SessionStateBuilder::new()
+            .with_config(SessionConfig::new())
+            .with_runtime_env(Arc::new(RuntimeEnv::default()))
+            .with_default_features()
+            .with_serializer_registry(Arc::new(serializer))
+            .build();
+        to_substrait_plan(plan, &state).context(EncodeDfPlanSnafu)
     }
 }

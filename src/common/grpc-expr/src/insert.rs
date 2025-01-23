@@ -255,7 +255,7 @@ mod tests {
             ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(
                     decimal_column.data_type,
-                    decimal_column.datatype_extension.clone(),
+                    decimal_column.datatype_extension,
                 )
                 .unwrap()
             )
@@ -351,7 +351,6 @@ mod tests {
                         .as_ref()
                         .unwrap()
                         .datatype_extension
-                        .clone()
                 )
                 .unwrap()
             )

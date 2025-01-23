@@ -215,22 +215,18 @@ impl FileRangeContext {
         let stats = column_metadata.statistics().context(StatsNotPresentSnafu {
             file_path: self.reader_builder.file_path(),
         })?;
-        if stats.has_min_max_set() {
-            stats
-                .min_bytes()
-                .try_into()
-                .map(i32::from_le_bytes)
-                .map(|min_op_type| min_op_type == OpType::Delete as i32)
-                .ok()
-                .context(DecodeStatsSnafu {
-                    file_path: self.reader_builder.file_path(),
-                })
-        } else {
-            DecodeStatsSnafu {
+        stats
+            .min_bytes_opt()
+            .context(StatsNotPresentSnafu {
                 file_path: self.reader_builder.file_path(),
-            }
-            .fail()
-        }
+            })?
+            .try_into()
+            .map(i32::from_le_bytes)
+            .map(|min_op_type| min_op_type == OpType::Delete as i32)
+            .ok()
+            .context(DecodeStatsSnafu {
+                file_path: self.reader_builder.file_path(),
+            })
     }
 }
 

@@ -19,7 +19,8 @@ common-telemetry.workspace = true
 common-time.workspace = true
 dashmap.workspace = true
 datatypes.workspace = true
-flatbuffers = "23.1"
+flatbuffers = "24"
+hyper.workspace = true
 lazy_static.workspace = true
 prost.workspace = true
 snafu.workspace = true
@@ -29,6 +30,7 @@ tower.workspace = true
 
 [dev-dependencies]
 criterion = "0.4"
+hyper-util = { workspace = true, features = ["tokio"] }
 rand.workspace = true
 
 [[bench]]

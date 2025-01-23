@@ -47,7 +47,7 @@ SELECT DISTINCT b FROM test ORDER BY b;
 SELECT DISTINCT a, SUM(B) FROM test GROUP BY a ORDER BY a;
 
 +----+-------------+
-| a  | SUM(test.b) |
+| a  | sum(test.b) |
 +----+-------------+
 | 11 | 65          |
 | 13 | 22          |
@@ -56,7 +56,7 @@ SELECT DISTINCT a, SUM(B) FROM test GROUP BY a ORDER BY a;
 SELECT DISTINCT MAX(b) FROM test GROUP BY a;
 
 +-------------+
-| MAX(test.b) |
+| max(test.b) |
 +-------------+
 | 22          |
 +-------------+

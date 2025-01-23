@@ -9,7 +9,7 @@ Affected Rows: 1050
 SELECT COUNT(*) FROM integers;
 
 +----------+
-| COUNT(*) |
+| count(*) |
 +----------+
 | 10       |
 +----------+

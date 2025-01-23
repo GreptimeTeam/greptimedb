@@ -24,7 +24,7 @@ Affected Rows: 10
 SELECT ts, length(host), max(val) RANGE '5s' FROM host ALIGN '20s' BY (length(host)) ORDER BY ts;
 
 +---------------------+-----------------------------+------------------------+
-| ts                  | character_length(host.host) | MAX(host.val) RANGE 5s |
+| ts                  | character_length(host.host) | max(host.val) RANGE 5s |
 +---------------------+-----------------------------+------------------------+
 | 1970-01-01T00:00:00 | 5                           | 3                      |
 | 1970-01-01T00:00:20 | 5                           | 5                      |
@@ -33,7 +33,7 @@ SELECT ts, length(host), max(val) RANGE '5s' FROM host ALIGN '20s' BY (length(ho
 SELECT ts, max(val) RANGE '5s' FROM host ALIGN '20s' BY (2) ORDER BY ts;
 
 +---------------------+------------------------+
-| ts                  | MAX(host.val) RANGE 5s |
+| ts                  | max(host.val) RANGE 5s |
 +---------------------+------------------------+
 | 1970-01-01T00:00:00 | 3                      |
 | 1970-01-01T00:00:20 | 5                      |
@@ -44,7 +44,7 @@ SELECT ts, max(val) RANGE '5s' FROM host ALIGN '20s' BY (2) ORDER BY ts;
 SELECT ts, max(val) RANGE '5s' FROM host ALIGN '20s' BY () ORDER BY ts;
 
 +---------------------+------------------------+
-| ts                  | MAX(host.val) RANGE 5s |
+| ts                  | max(host.val) RANGE 5s |
 +---------------------+------------------------+
 | 1970-01-01T00:00:00 | 3                      |
 | 1970-01-01T00:00:20 | 5                      |
@@ -53,7 +53,7 @@ SELECT ts, max(val) RANGE '5s' FROM host ALIGN '20s' BY () ORDER BY ts;
 SELECT ts, length(host)::INT64 + 2, max(val) RANGE '5s' FROM host ALIGN '20s' BY (length(host)::INT64 + 2) ORDER BY ts;
 
 +---------------------+------------------------------------------------------------------+------------------------+
-| ts                  | arrow_cast(character_length(host.host),Utf8("Int64")) + Int64(2) | MAX(host.val) RANGE 5s |
+| ts                  | arrow_cast(character_length(host.host),Utf8("Int64")) + Int64(2) | max(host.val) RANGE 5s |
 +---------------------+------------------------------------------------------------------+------------------------+
 | 1970-01-01T00:00:00 | 7                                                                | 3                      |
 | 1970-01-01T00:00:20 | 7                                                                | 5                      |
@@ -63,7 +63,7 @@ SELECT ts, length(host)::INT64 + 2, max(val) RANGE '5s' FROM host ALIGN '20s' BY
 -- project non-aggregation key
 SELECT ts, host, max(val) RANGE '5s' FROM host ALIGN '20s' BY () ORDER BY ts;
 
-Error: 3001(EngineExecuteQuery), DataFusion error: No field named host.host. Valid fields are "MAX(host.val) RANGE 5s", host.ts, "Int64(1)".
+Error: 3001(EngineExecuteQuery), DataFusion error: No field named host.host. Valid fields are "max(host.val) RANGE 5s", host.ts, "Int64(1)".
 
 DROP TABLE host;
 
@@ -95,7 +95,7 @@ Affected Rows: 10
 SELECT ts, max(val) RANGE '5s' FROM host ALIGN '20s' ORDER BY ts;
 
 +---------------------+------------------------+
-| ts                  | MAX(host.val) RANGE 5s |
+| ts                  | max(host.val) RANGE 5s |
 +---------------------+------------------------+
 | 1970-01-01T00:00:00 | 3                      |
 | 1970-01-01T00:00:20 | 5                      |

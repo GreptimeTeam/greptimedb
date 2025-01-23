@@ -17,7 +17,7 @@ use std::fmt::{Display, Formatter};
 
 use sqlparser::ast::{Expr, ObjectName, Query, SetExpr, SqlOption, TableFactor, Value};
 
-use crate::error::{InvalidTableOptionValueSnafu, Result};
+use crate::error::{InvalidSqlSnafu, InvalidTableOptionValueSnafu, Result};
 
 /// Format an [ObjectName] without any quote of its idents.
 pub fn format_raw_object_name(name: &ObjectName) -> String {
@@ -41,7 +41,12 @@ pub fn format_raw_object_name(name: &ObjectName) -> String {
 }
 
 pub fn parse_option_string(option: SqlOption) -> Result<(String, String)> {
-    let (key, value) = (option.name, option.value);
+    let SqlOption::KeyValue { key, value } = option else {
+        return InvalidSqlSnafu {
+            msg: "Expecting a key-value pair in the option",
+        }
+        .fail();
+    };
     let v = match value {
         Expr::Value(Value::SingleQuotedString(v)) | Expr::Value(Value::DoubleQuotedString(v)) => v,
         Expr::Identifier(v) => v.value,

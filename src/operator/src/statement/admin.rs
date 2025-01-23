@@ -28,7 +28,7 @@ use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::ast::{Expr, FunctionArg, FunctionArgExpr, Value as SqlValue};
+use sql::ast::{Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Value as SqlValue};
 use sql::statements::admin::Admin;
 use sql::statements::sql_value_to_value;
 
@@ -53,7 +53,13 @@ impl StatementExecutor {
             .context(error::AdminFunctionNotFoundSnafu { name: func_name })?;
 
         let signature = admin_func.signature();
-        let arg_values = func
+        let FunctionArguments::List(args) = &func.args else {
+            return error::BuildAdminFunctionArgsSnafu {
+                msg: format!("unsupported function args {}", func.args),
+            }
+            .fail();
+        };
+        let arg_values = args
             .args
             .iter()
             .map(|arg| {
@@ -165,6 +171,8 @@ fn args_to_vector(
             }
             .fail()
         }
+
+        TypeSignature::NullAry => Ok(vec![]),
     }
 }
 

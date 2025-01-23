@@ -29,6 +29,7 @@ use datafusion::scalar::ScalarValue;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
 use datafusion_common::{DFSchema, DataFusionError, Result as DFResult};
 use datafusion_expr::execution_props::ExecutionProps;
+use datafusion_expr::expr::WildcardOptions;
 use datafusion_expr::simplify::SimplifyContext;
 use datafusion_expr::{
     Aggregate, Analyze, Explain, Expr, ExprSchemable, Extension, LogicalPlan, LogicalPlanBuilder,
@@ -46,6 +47,7 @@ use crate::error::{
     CatalogSnafu, DataFusionSnafu, RangeQuerySnafu, Result, TimeIndexNotFoundSnafu,
     UnknownTableSnafu,
 };
+use crate::plan::ExtractExpr;
 use crate::range_select::plan::{RangeFn, RangeSelect};
 
 /// `RangeExprRewriter` will recursively search certain `Expr`, find all `range_fn` scalar udf contained in `Expr`,
@@ -87,7 +89,7 @@ fn dispose_parse_error(expr: Option<&Expr>) -> DataFusionError {
         expr.map(|x| {
             format!(
                 "Illegal argument `{}` in range select query",
-                x.display_name().unwrap_or_default()
+                x.schema_name()
             )
         })
         .unwrap_or("Missing argument in range select query".into()),
@@ -104,7 +106,7 @@ fn parse_str_expr(args: &[Expr], i: usize) -> DFResult<&str> {
 fn parse_expr_to_string(args: &[Expr], i: usize) -> DFResult<String> {
     match args.get(i) {
         Some(Expr::Literal(ScalarValue::Utf8(Some(str)))) => Ok(str.to_string()),
-        Some(expr) => Ok(expr.display_name().unwrap_or_default()),
+        Some(expr) => Ok(expr.schema_name().to_string()),
         None => Err(dispose_parse_error(None)),
     }
 }
@@ -166,7 +168,7 @@ fn evaluate_expr_to_millisecond(args: &[Expr], i: usize, interval_only: bool) ->
                 if interval.months != 0 {
                     return Err(DataFusionError::Plan(format!(
                         "Year or month interval is not allowed in range query: {}",
-                        expr.display_name().unwrap_or_default()
+                        expr.schema_name()
                     )));
                 }
 
@@ -174,16 +176,16 @@ fn evaluate_expr_to_millisecond(args: &[Expr], i: usize, interval_only: bool) ->
             })
             .transpose()?,
         Expr::Literal(ScalarValue::IntervalDayTime(interval)) => interval.map(|v| {
-            let interval = IntervalDayTime::from_i64(v);
+            let interval = IntervalDayTime::from(v);
             interval.as_millis()
         }),
         Expr::Literal(ScalarValue::IntervalMonthDayNano(interval)) => interval
             .map(|v| {
-                let interval = IntervalMonthDayNano::from_i128(v);
+                let interval = IntervalMonthDayNano::from(v);
                 if interval.months != 0 {
                     return Err(DataFusionError::Plan(format!(
                         "Year or month interval is not allowed in range query: {}",
-                        expr.display_name().unwrap_or_default()
+                        expr.schema_name()
                     )));
                 }
 
@@ -195,7 +197,7 @@ fn evaluate_expr_to_millisecond(args: &[Expr], i: usize, interval_only: bool) ->
     .ok_or_else(|| {
         DataFusionError::Plan(format!(
             "{} is not a expr can be evaluate and use in range query",
-            expr.display_name().unwrap_or_default()
+            expr.schema_name()
         ))
     })
 }
@@ -293,14 +295,14 @@ impl TreeNodeRewriter for RangeExprRewriter<'_> {
                     name: if let Some(fill) = &fill {
                         format!(
                             "{} RANGE {} FILL {}",
-                            range_expr.display_name()?,
+                            range_expr.schema_name(),
                             parse_expr_to_string(&func.args, 1)?,
                             fill
                         )
                     } else {
                         format!(
                             "{} RANGE {}",
-                            range_expr.display_name()?,
+                            range_expr.schema_name(),
                             parse_expr_to_string(&func.args, 1)?,
                         )
                     },
@@ -451,7 +453,7 @@ impl RangePlanRewriter {
                                 .context(DataFusionSnafu)?
                                 .build()
                         }
-                        _ => plan.with_new_exprs(plan.expressions(), inputs),
+                        _ => plan.with_new_exprs(plan.expressions_consider_join(), inputs),
                     }
                     .context(DataFusionSnafu)?;
                     Ok(Some(plan))
@@ -467,7 +469,10 @@ impl RangePlanRewriter {
     /// If the user does not explicitly use the `by` keyword to indicate time series,
     /// `[row_columns]` will be use as default time series
     async fn get_index_by(&mut self, schema: &Arc<DFSchema>) -> Result<(Expr, Vec<Expr>)> {
-        let mut time_index_expr = Expr::Wildcard { qualifier: None };
+        let mut time_index_expr = Expr::Wildcard {
+            qualifier: None,
+            options: WildcardOptions::default(),
+        };
         let mut default_by = vec![];
         for i in 0..schema.fields().len() {
             let (qualifier, _) = schema.qualified_field(i);
@@ -646,7 +651,7 @@ mod test {
     async fn range_no_project() {
         let query = r#"SELECT timestamp, tag_0, tag_1, avg(field_0 + field_1) RANGE '5m' FROM test ALIGN '1h' by (tag_0,tag_1);"#;
         let expected = String::from(
-            "RangeSelect: range_exprs=[AVG(test.field_0 + test.field_1) RANGE 5m], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8, AVG(test.field_0 + test.field_1) RANGE 5m:Float64;N]\
+            "RangeSelect: range_exprs=[avg(test.field_0 + test.field_1) RANGE 5m], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8, avg(test.field_0 + test.field_1) RANGE 5m:Float64;N]\
             \n  TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]"
         );
         query_plan_compare(query, expected).await;
@@ -656,8 +661,8 @@ mod test {
     async fn range_expr_calculation() {
         let query = r#"SELECT (avg(field_0 + field_1)/4) RANGE '5m' FROM test ALIGN '1h' by (tag_0,tag_1);"#;
         let expected = String::from(
-            "Projection: AVG(test.field_0 + test.field_1) RANGE 5m / Int64(4) [AVG(test.field_0 + test.field_1) RANGE 5m / Int64(4):Float64;N]\
-            \n  RangeSelect: range_exprs=[AVG(test.field_0 + test.field_1) RANGE 5m], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [AVG(test.field_0 + test.field_1) RANGE 5m:Float64;N, timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8]\
+            "Projection: avg(test.field_0 + test.field_1) RANGE 5m / Int64(4) [avg(test.field_0 + test.field_1) RANGE 5m / Int64(4):Float64;N]\
+            \n  RangeSelect: range_exprs=[avg(test.field_0 + test.field_1) RANGE 5m], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [avg(test.field_0 + test.field_1) RANGE 5m:Float64;N, timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8]\
             \n    TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]"
         );
         query_plan_compare(query, expected).await;
@@ -679,8 +684,8 @@ mod test {
     async fn range_calculation() {
         let query = r#"SELECT ((avg(field_0)+sum(field_1))/4) RANGE '5m' FROM test ALIGN '1h' by (tag_0,tag_1) FILL NULL;"#;
         let expected = String::from(
-            "Projection: (AVG(test.field_0) RANGE 5m FILL NULL + SUM(test.field_1) RANGE 5m FILL NULL) / Int64(4) [AVG(test.field_0) RANGE 5m FILL NULL + SUM(test.field_1) RANGE 5m FILL NULL / Int64(4):Float64;N]\
-            \n  RangeSelect: range_exprs=[AVG(test.field_0) RANGE 5m FILL NULL, SUM(test.field_1) RANGE 5m FILL NULL], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [AVG(test.field_0) RANGE 5m FILL NULL:Float64;N, SUM(test.field_1) RANGE 5m FILL NULL:Float64;N, timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8]\
+            "Projection: (avg(test.field_0) RANGE 5m FILL NULL + sum(test.field_1) RANGE 5m FILL NULL) / Int64(4) [avg(test.field_0) RANGE 5m FILL NULL + sum(test.field_1) RANGE 5m FILL NULL / Int64(4):Float64;N]\
+            \n  RangeSelect: range_exprs=[avg(test.field_0) RANGE 5m FILL NULL, sum(test.field_1) RANGE 5m FILL NULL], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [avg(test.field_0) RANGE 5m FILL NULL:Float64;N, sum(test.field_1) RANGE 5m FILL NULL:Float64;N, timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8]\
             \n    TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]"
         );
         query_plan_compare(query, expected).await;
@@ -692,8 +697,8 @@ mod test {
         let expected = String::from(
             "Projection: foo + Int64(1) [foo + Int64(1):Float64;N]\
             \n  Filter: foo > Int64(1) [foo:Float64;N]\
-            \n    Projection: (AVG(test.field_0) RANGE 5m FILL NULL + SUM(test.field_1) RANGE 5m FILL NULL) / Int64(4) AS foo [foo:Float64;N]\
-            \n      RangeSelect: range_exprs=[AVG(test.field_0) RANGE 5m FILL NULL, SUM(test.field_1) RANGE 5m FILL NULL], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [AVG(test.field_0) RANGE 5m FILL NULL:Float64;N, SUM(test.field_1) RANGE 5m FILL NULL:Float64;N, timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8]\
+            \n    Projection: (avg(test.field_0) RANGE 5m FILL NULL + sum(test.field_1) RANGE 5m FILL NULL) / Int64(4) AS foo [foo:Float64;N]\
+            \n      RangeSelect: range_exprs=[avg(test.field_0) RANGE 5m FILL NULL, sum(test.field_1) RANGE 5m FILL NULL], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [avg(test.field_0) RANGE 5m FILL NULL:Float64;N, sum(test.field_1) RANGE 5m FILL NULL:Float64;N, timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8]\
             \n        TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]"
         );
         query_plan_compare(query, expected).await;
@@ -703,8 +708,8 @@ mod test {
     async fn range_from_nest_query() {
         let query = r#"SELECT ((avg(a)+sum(b))/4) RANGE '5m' FROM (SELECT field_0 as a, field_1 as b, tag_0 as c, tag_1 as d, timestamp from test where field_0 > 1.0) ALIGN '1h' by (c, d) FILL NULL;"#;
         let expected = String::from(
-            "Projection: (AVG(a) RANGE 5m FILL NULL + SUM(b) RANGE 5m FILL NULL) / Int64(4) [AVG(a) RANGE 5m FILL NULL + SUM(b) RANGE 5m FILL NULL / Int64(4):Float64;N]\
-            \n  RangeSelect: range_exprs=[AVG(a) RANGE 5m FILL NULL, SUM(b) RANGE 5m FILL NULL], align=3600000ms, align_to=0ms, align_by=[c, d], time_index=timestamp [AVG(a) RANGE 5m FILL NULL:Float64;N, SUM(b) RANGE 5m FILL NULL:Float64;N, timestamp:Timestamp(Millisecond, None), c:Utf8, d:Utf8]\
+            "Projection: (avg(a) RANGE 5m FILL NULL + sum(b) RANGE 5m FILL NULL) / Int64(4) [avg(a) RANGE 5m FILL NULL + sum(b) RANGE 5m FILL NULL / Int64(4):Float64;N]\
+            \n  RangeSelect: range_exprs=[avg(a) RANGE 5m FILL NULL, sum(b) RANGE 5m FILL NULL], align=3600000ms, align_to=0ms, align_by=[c, d], time_index=timestamp [avg(a) RANGE 5m FILL NULL:Float64;N, sum(b) RANGE 5m FILL NULL:Float64;N, timestamp:Timestamp(Millisecond, None), c:Utf8, d:Utf8]\
             \n    Projection: test.field_0 AS a, test.field_1 AS b, test.tag_0 AS c, test.tag_1 AS d, test.timestamp [a:Float64;N, b:Float64;N, c:Utf8, d:Utf8, timestamp:Timestamp(Millisecond, None)]\
             \n      Filter: test.field_0 > Float64(1) [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]\
             \n        TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]"
@@ -716,8 +721,8 @@ mod test {
     async fn range_in_expr() {
         let query = r#"SELECT sin(avg(field_0 + field_1) RANGE '5m' + 1) FROM test ALIGN '1h' by (tag_0,tag_1);"#;
         let expected = String::from(
-            "Projection: sin(AVG(test.field_0 + test.field_1) RANGE 5m + Int64(1)) [sin(AVG(test.field_0 + test.field_1) RANGE 5m + Int64(1)):Float64;N]\
-            \n  RangeSelect: range_exprs=[AVG(test.field_0 + test.field_1) RANGE 5m], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [AVG(test.field_0 + test.field_1) RANGE 5m:Float64;N, timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8]\
+            "Projection: sin(avg(test.field_0 + test.field_1) RANGE 5m + Int64(1)) [sin(avg(test.field_0 + test.field_1) RANGE 5m + Int64(1)):Float64;N]\
+            \n  RangeSelect: range_exprs=[avg(test.field_0 + test.field_1) RANGE 5m], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [avg(test.field_0 + test.field_1) RANGE 5m:Float64;N, timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8]\
             \n    TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]"
         );
         query_plan_compare(query, expected).await;
@@ -727,8 +732,8 @@ mod test {
     async fn duplicate_range_expr() {
         let query = r#"SELECT avg(field_0) RANGE '5m' FILL 6.0 + avg(field_0) RANGE '5m' FILL 6.0 FROM test ALIGN '1h' by (tag_0,tag_1);"#;
         let expected = String::from(
-            "Projection: AVG(test.field_0) RANGE 5m FILL 6 + AVG(test.field_0) RANGE 5m FILL 6 [AVG(test.field_0) RANGE 5m FILL 6 + AVG(test.field_0) RANGE 5m FILL 6:Float64]\
-            \n  RangeSelect: range_exprs=[AVG(test.field_0) RANGE 5m FILL 6], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [AVG(test.field_0) RANGE 5m FILL 6:Float64, timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8]\
+            "Projection: avg(test.field_0) RANGE 5m FILL 6 + avg(test.field_0) RANGE 5m FILL 6 [avg(test.field_0) RANGE 5m FILL 6 + avg(test.field_0) RANGE 5m FILL 6:Float64]\
+            \n  RangeSelect: range_exprs=[avg(test.field_0) RANGE 5m FILL 6], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [avg(test.field_0) RANGE 5m FILL 6:Float64, timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8]\
             \n    TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]"
         );
         query_plan_compare(query, expected).await;
@@ -738,8 +743,8 @@ mod test {
     async fn deep_nest_range_expr() {
         let query = r#"SELECT round(sin(avg(field_0 + field_1) RANGE '5m' + 1)) FROM test ALIGN '1h' by (tag_0,tag_1);"#;
         let expected = String::from(
-            "Projection: round(sin(AVG(test.field_0 + test.field_1) RANGE 5m + Int64(1))) [round(sin(AVG(test.field_0 + test.field_1) RANGE 5m + Int64(1))):Float64;N]\
-            \n  RangeSelect: range_exprs=[AVG(test.field_0 + test.field_1) RANGE 5m], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [AVG(test.field_0 + test.field_1) RANGE 5m:Float64;N, timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8]\
+            "Projection: round(sin(avg(test.field_0 + test.field_1) RANGE 5m + Int64(1))) [round(sin(avg(test.field_0 + test.field_1) RANGE 5m + Int64(1))):Float64;N]\
+            \n  RangeSelect: range_exprs=[avg(test.field_0 + test.field_1) RANGE 5m], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [avg(test.field_0 + test.field_1) RANGE 5m:Float64;N, timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8]\
             \n    TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]"
         );
         query_plan_compare(query, expected).await;
@@ -749,8 +754,8 @@ mod test {
     async fn complex_range_expr() {
         let query = r#"SELECT gcd(CAST(max(field_0 + 1) Range '5m' FILL NULL AS Int64), CAST(tag_0 AS Int64)) + round(max(field_2+1) Range '6m' FILL NULL + 1) + max(field_2+3) Range '10m' FILL NULL * CAST(tag_1 AS Float64) + 1 FROM test ALIGN '1h' by (tag_0, tag_1);"#;
         let expected = String::from(
-            "Projection: gcd(arrow_cast(MAX(test.field_0 + Int64(1)) RANGE 5m FILL NULL, Utf8(\"Int64\")), arrow_cast(test.tag_0, Utf8(\"Int64\"))) + round(MAX(test.field_2 + Int64(1)) RANGE 6m FILL NULL + Int64(1)) + MAX(test.field_2 + Int64(3)) RANGE 10m FILL NULL * arrow_cast(test.tag_1, Utf8(\"Float64\")) + Int64(1) [gcd(arrow_cast(MAX(test.field_0 + Int64(1)) RANGE 5m FILL NULL,Utf8(\"Int64\")),arrow_cast(test.tag_0,Utf8(\"Int64\"))) + round(MAX(test.field_2 + Int64(1)) RANGE 6m FILL NULL + Int64(1)) + MAX(test.field_2 + Int64(3)) RANGE 10m FILL NULL * arrow_cast(test.tag_1,Utf8(\"Float64\")) + Int64(1):Float64;N]\
-            \n  RangeSelect: range_exprs=[MAX(test.field_0 + Int64(1)) RANGE 5m FILL NULL, MAX(test.field_2 + Int64(1)) RANGE 6m FILL NULL, MAX(test.field_2 + Int64(3)) RANGE 10m FILL NULL], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [MAX(test.field_0 + Int64(1)) RANGE 5m FILL NULL:Float64;N, MAX(test.field_2 + Int64(1)) RANGE 6m FILL NULL:Float64;N, MAX(test.field_2 + Int64(3)) RANGE 10m FILL NULL:Float64;N, timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8]\
+            "Projection: gcd(arrow_cast(max(test.field_0 + Int64(1)) RANGE 5m FILL NULL, Utf8(\"Int64\")), arrow_cast(test.tag_0, Utf8(\"Int64\"))) + round(max(test.field_2 + Int64(1)) RANGE 6m FILL NULL + Int64(1)) + max(test.field_2 + Int64(3)) RANGE 10m FILL NULL * arrow_cast(test.tag_1, Utf8(\"Float64\")) + Int64(1) [gcd(arrow_cast(max(test.field_0 + Int64(1)) RANGE 5m FILL NULL,Utf8(\"Int64\")),arrow_cast(test.tag_0,Utf8(\"Int64\"))) + round(max(test.field_2 + Int64(1)) RANGE 6m FILL NULL + Int64(1)) + max(test.field_2 + Int64(3)) RANGE 10m FILL NULL * arrow_cast(test.tag_1,Utf8(\"Float64\")) + Int64(1):Float64;N]\
+            \n  RangeSelect: range_exprs=[max(test.field_0 + Int64(1)) RANGE 5m FILL NULL, max(test.field_2 + Int64(1)) RANGE 6m FILL NULL, max(test.field_2 + Int64(3)) RANGE 10m FILL NULL], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [max(test.field_0 + Int64(1)) RANGE 5m FILL NULL:Float64;N, max(test.field_2 + Int64(1)) RANGE 6m FILL NULL:Float64;N, max(test.field_2 + Int64(3)) RANGE 10m FILL NULL:Float64;N, timestamp:Timestamp(Millisecond, None), tag_0:Utf8, tag_1:Utf8]\
             \n    TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]"
         );
         query_plan_compare(query, expected).await;
@@ -760,7 +765,7 @@ mod test {
     async fn range_linear_on_integer() {
         let query = r#"SELECT min(CAST(field_0 AS Int64) + CAST(field_1 AS Int64)) RANGE '5m' FILL LINEAR FROM test ALIGN '1h' by (tag_0,tag_1);"#;
         let expected = String::from(
-            "RangeSelect: range_exprs=[MIN(arrow_cast(test.field_0,Utf8(\"Int64\")) + arrow_cast(test.field_1,Utf8(\"Int64\"))) RANGE 5m FILL LINEAR], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [MIN(arrow_cast(test.field_0,Utf8(\"Int64\")) + arrow_cast(test.field_1,Utf8(\"Int64\"))) RANGE 5m FILL LINEAR:Float64;N]\
+            "RangeSelect: range_exprs=[min(arrow_cast(test.field_0,Utf8(\"Int64\")) + arrow_cast(test.field_1,Utf8(\"Int64\"))) RANGE 5m FILL LINEAR], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [min(arrow_cast(test.field_0,Utf8(\"Int64\")) + arrow_cast(test.field_1,Utf8(\"Int64\"))) RANGE 5m FILL LINEAR:Float64;N]\
             \n  TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]"
         );
         query_plan_compare(query, expected).await;
@@ -818,7 +823,7 @@ mod test {
         // test IntervalDayTime
         let interval = IntervalDayTime::new(10, 10);
         let args = vec![Expr::Literal(ScalarValue::IntervalDayTime(Some(
-            interval.to_i64(),
+            interval.into(),
         )))];
         assert_eq!(
             parse_duration_expr(&args, 0).unwrap().as_millis() as i64,
@@ -827,7 +832,7 @@ mod test {
         // test IntervalMonthDayNano
         let interval = IntervalMonthDayNano::new(0, 10, 10);
         let args = vec![Expr::Literal(ScalarValue::IntervalMonthDayNano(Some(
-            interval.to_i128(),
+            interval.into(),
         )))];
         assert_eq!(
             parse_duration_expr(&args, 0).unwrap().as_millis() as i64,
@@ -844,11 +849,11 @@ mod test {
         // test evaluate expr
         let args = vec![Expr::BinaryExpr(BinaryExpr {
             left: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
-                IntervalDayTime::new(0, 10).to_i64(),
+                IntervalDayTime::new(0, 10).into(),
             )))),
             op: Operator::Plus,
             right: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
-                IntervalDayTime::new(0, 10).to_i64(),
+                IntervalDayTime::new(0, 10).into(),
             )))),
         })];
         assert_eq!(
@@ -857,11 +862,11 @@ mod test {
         );
         let args = vec![Expr::BinaryExpr(BinaryExpr {
             left: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
-                IntervalDayTime::new(0, 10).to_i64(),
+                IntervalDayTime::new(0, 10).into(),
             )))),
             op: Operator::Minus,
             right: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
-                IntervalDayTime::new(0, 10).to_i64(),
+                IntervalDayTime::new(0, 10).into(),
             )))),
         })];
         // test zero interval error
@@ -923,11 +928,11 @@ mod test {
         // test evaluate expr
         let args = vec![Expr::BinaryExpr(BinaryExpr {
             left: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
-                IntervalDayTime::new(0, 10).to_i64(),
+                IntervalDayTime::new(0, 10).into(),
             )))),
             op: Operator::Plus,
             right: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
-                IntervalDayTime::new(0, 10).to_i64(),
+                IntervalDayTime::new(0, 10).into(),
             )))),
         })];
         assert_eq!(parse_align_to(&args, 0, None).unwrap(), 20);
@@ -939,17 +944,17 @@ mod test {
             left: Box::new(Expr::Literal(ScalarValue::DurationMillisecond(Some(20)))),
             op: Operator::Minus,
             right: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
-                IntervalDayTime::new(10, 0).to_i64(),
+                IntervalDayTime::new(10, 0).into(),
             )))),
         });
         assert!(!interval_only_in_expr(&expr));
         let expr = Expr::BinaryExpr(BinaryExpr {
             left: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
-                IntervalDayTime::new(10, 0).to_i64(),
+                IntervalDayTime::new(10, 0).into(),
             )))),
             op: Operator::Minus,
             right: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
-                IntervalDayTime::new(10, 0).to_i64(),
+                IntervalDayTime::new(10, 0).into(),
             )))),
         });
         assert!(interval_only_in_expr(&expr));

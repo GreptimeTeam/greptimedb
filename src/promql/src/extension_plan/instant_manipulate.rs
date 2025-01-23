@@ -46,7 +46,7 @@ use crate::extension_plan::Millisecond;
 /// This plan will try to align the input time series, for every timestamp between
 /// `start` and `end` with step `interval`. Find in the `lookback` range if data
 /// is missing at the given timestamp.
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
 pub struct InstantManipulate {
     start: Millisecond,
     end: Millisecond,
@@ -290,9 +290,13 @@ impl ExecutionPlan for InstantManipulateExec {
             // TODO(ruihang): support this column statistics
             column_statistics: vec![
                 ColumnStatistics::new_unknown();
-                self.schema().all_fields().len()
+                self.schema().flattened_fields().len()
             ],
         })
+    }
+
+    fn name(&self) -> &str {
+        "InstantManipulateExec"
     }
 }
 

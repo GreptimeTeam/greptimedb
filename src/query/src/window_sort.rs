@@ -33,13 +33,13 @@ use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool};
 use datafusion::execution::{RecordBatchStream, TaskContext};
 use datafusion::physical_plan::memory::MemoryStream;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
-use datafusion::physical_plan::sorts::streaming_merge::streaming_merge;
+use datafusion::physical_plan::sorts::streaming_merge::StreamingMergeBuilder;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
 };
 use datafusion_common::utils::bisect;
 use datafusion_common::{internal_err, DataFusionError};
-use datafusion_physical_expr::PhysicalSortExpr;
+use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
 use datatypes::value::Value;
 use futures::Stream;
 use itertools::Itertools;
@@ -52,7 +52,7 @@ use crate::error::{QueryExecutionSnafu, Result};
 /// merge sort them whenever possible, and emit the sorted result as soon as possible.
 /// This sorting plan only accept sort by ts and will not sort by other fields.
 ///
-/// internally, it call [`streaming_merge`] multiple times to merge multiple sorted "working ranges"
+/// internally, it call [`StreamingMergeBuilder`] multiple times to merge multiple sorted "working ranges"
 ///
 /// # Invariant Promise on Input Stream
 /// 1. The input stream must be sorted by timestamp and
@@ -121,7 +121,7 @@ impl WindowedSortExec {
             input
                 .equivalence_properties()
                 .clone()
-                .with_reorder(vec![expression.clone()]),
+                .with_reorder(LexOrdering::new(vec![expression.clone()])),
             input.output_partitioning().clone(),
             input.execution_mode(),
         );
@@ -236,6 +236,10 @@ impl ExecutionPlan for WindowedSortExec {
     /// distribution / partition.
     fn benefits_from_input_partitioning(&self) -> Vec<bool> {
         vec![false; self.ranges.len()]
+    }
+
+    fn name(&self) -> &str {
+        "WindowedSortExec"
     }
 }
 
@@ -635,16 +639,17 @@ impl WindowedSortStream {
         let reservation = MemoryConsumer::new(format!("WindowedSortStream[{}]", self.merge_count))
             .register(&self.memory_pool);
         self.merge_count += 1;
+        let lex_ordering = LexOrdering::new(vec![self.expression.clone()]);
 
-        let resulting_stream = streaming_merge(
-            streams,
-            self.schema(),
-            &[self.expression.clone()],
-            self.metrics.clone(),
-            self.batch_size,
-            fetch,
-            reservation,
-        )?;
+        let resulting_stream = StreamingMergeBuilder::new()
+            .with_streams(streams)
+            .with_schema(self.schema())
+            .with_expressions(&lex_ordering)
+            .with_metrics(self.metrics.clone())
+            .with_batch_size(self.batch_size)
+            .with_fetch(fetch)
+            .with_reservation(reservation)
+            .build()?;
         self.merge_stream.push_back(resulting_stream);
         // this working range is done, move to next working range
         Ok(())
@@ -3184,8 +3189,8 @@ mod test {
                         .unwrap_or_else(|| rng.i64(..));
                     bound_val = Some(end);
                     let start = end - rng.i64(1..range_size_bound);
-                    let start = Timestamp::new(start, unit.clone().into());
-                    let end = Timestamp::new(end, unit.clone().into());
+                    let start = Timestamp::new(start, unit.into());
+                    let end = Timestamp::new(end, unit.into());
                     (start, end)
                 } else {
                     let start = bound_val
@@ -3193,8 +3198,8 @@ mod test {
                         .unwrap_or_else(|| rng.i64(..));
                     bound_val = Some(start);
                     let end = start + rng.i64(1..range_size_bound);
-                    let start = Timestamp::new(start, unit.clone().into());
-                    let end = Timestamp::new(end, unit.clone().into());
+                    let start = Timestamp::new(start, unit.into());
+                    let end = Timestamp::new(end, unit.into());
                     (start, end)
                 };
 
@@ -3204,7 +3209,7 @@ mod test {
                     .sorted_by(ret_cmp_fn(descending))
                     .collect_vec();
                 output_data.extend(data_gen.clone());
-                let arr = new_ts_array(unit.clone(), data_gen);
+                let arr = new_ts_array(unit, data_gen);
                 let range = PartitionRange {
                     start,
                     end,
@@ -3218,7 +3223,7 @@ mod test {
             if let Some(fetch) = fetch {
                 output_data.truncate(fetch);
             }
-            let output_arr = new_ts_array(unit.clone(), output_data);
+            let output_arr = new_ts_array(unit, output_data);
 
             let test_stream = TestStream::new(
                 Column::new("ts", 0),
@@ -3227,11 +3232,7 @@ mod test {
                     nulls_first: true,
                 },
                 fetch,
-                vec![Field::new(
-                    "ts",
-                    DataType::Timestamp(unit.clone(), None),
-                    false,
-                )],
+                vec![Field::new("ts", DataType::Timestamp(unit, None), false)],
                 input_ranged_data.clone(),
                 vec![vec![output_arr]],
             );

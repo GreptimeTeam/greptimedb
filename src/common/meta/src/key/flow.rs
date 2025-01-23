@@ -378,6 +378,12 @@ impl FlowMetadataManager {
     }
 }
 
+impl std::fmt::Debug for FlowMetadataManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlowMetadataManager").finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;

@@ -64,6 +64,7 @@ const INIT_CAPACITY: usize = 42;
 /// - `uptime`: the uptime of the peer.
 /// - `active_time`: the time since the last activity of the peer.
 ///
+#[derive(Debug)]
 pub(super) struct InformationSchemaClusterInfo {
     schema: SchemaRef,
     catalog_manager: Weak<dyn CatalogManager>,

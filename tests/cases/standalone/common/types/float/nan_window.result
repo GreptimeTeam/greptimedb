@@ -11,7 +11,7 @@ Affected Rows: 6
 SELECT f, SUM(i) OVER (PARTITION BY f) FROM floats ORDER BY f;
 
 +------+------------------------------------------------------------------------------------------------+
-| f    | SUM(floats.i) PARTITION BY [floats.f] ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING |
+| f    | sum(floats.i) PARTITION BY [floats.f] ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING |
 +------+------------------------------------------------------------------------------------------------+
 | -inf | 5                                                                                              |
 | -inf | 5                                                                                              |
@@ -24,7 +24,7 @@ SELECT f, SUM(i) OVER (PARTITION BY f) FROM floats ORDER BY f;
 SELECT f, i, SUM(i) OVER (ORDER BY f, i) FROM floats ORDER BY f, i;
 
 +------+----+-----------------------------------------------------------------------------------------------------------------------------+
-| f    | i  | SUM(floats.i) ORDER BY [floats.f ASC NULLS LAST, floats.i ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
+| f    | i  | sum(floats.i) ORDER BY [floats.f ASC NULLS LAST, floats.i ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
 +------+----+-----------------------------------------------------------------------------------------------------------------------------+
 | -inf | 2  | 2                                                                                                                           |
 | -inf | 3  | 5                                                                                                                           |
@@ -37,7 +37,7 @@ SELECT f, i, SUM(i) OVER (ORDER BY f, i) FROM floats ORDER BY f, i;
 SELECT f, i, SUM(i) OVER (PARTITION BY f ORDER BY f, i) FROM floats ORDER BY f, i;
 
 +------+----+-----------------------------------------------------------------------------------------------------------------------------------------------------+
-| f    | i  | SUM(floats.i) PARTITION BY [floats.f] ORDER BY [floats.f ASC NULLS LAST, floats.i ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
+| f    | i  | sum(floats.i) PARTITION BY [floats.f] ORDER BY [floats.f ASC NULLS LAST, floats.i ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
 +------+----+-----------------------------------------------------------------------------------------------------------------------------------------------------+
 | -inf | 2  | 2                                                                                                                                                   |
 | -inf | 3  | 5                                                                                                                                                   |
@@ -50,7 +50,7 @@ SELECT f, i, SUM(i) OVER (PARTITION BY f ORDER BY f, i) FROM floats ORDER BY f, 
 SELECT i, f, SUM(i) OVER (ORDER BY i, f) FROM floats ORDER BY i, f;
 
 +----+------+-----------------------------------------------------------------------------------------------------------------------------+
-| i  | f    | SUM(floats.i) ORDER BY [floats.i ASC NULLS LAST, floats.f ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
+| i  | f    | sum(floats.i) ORDER BY [floats.i ASC NULLS LAST, floats.f ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
 +----+------+-----------------------------------------------------------------------------------------------------------------------------+
 | 1  | inf  | 1                                                                                                                           |
 | 2  | -inf | 3                                                                                                                           |
@@ -76,7 +76,7 @@ Affected Rows: 6
 SELECT f, SUM(i) OVER (PARTITION BY f) FROM doubles ORDER BY f;
 
 +------+--------------------------------------------------------------------------------------------------+
-| f    | SUM(doubles.i) PARTITION BY [doubles.f] ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING |
+| f    | sum(doubles.i) PARTITION BY [doubles.f] ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING |
 +------+--------------------------------------------------------------------------------------------------+
 | -inf | 5                                                                                                |
 | -inf | 5                                                                                                |
@@ -89,7 +89,7 @@ SELECT f, SUM(i) OVER (PARTITION BY f) FROM doubles ORDER BY f;
 SELECT f, i, SUM(i) OVER (ORDER BY f, i) FROM doubles ORDER BY f, i;
 
 +------+----+--------------------------------------------------------------------------------------------------------------------------------+
-| f    | i  | SUM(doubles.i) ORDER BY [doubles.f ASC NULLS LAST, doubles.i ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
+| f    | i  | sum(doubles.i) ORDER BY [doubles.f ASC NULLS LAST, doubles.i ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
 +------+----+--------------------------------------------------------------------------------------------------------------------------------+
 | -inf | 2  | 2                                                                                                                              |
 | -inf | 3  | 5                                                                                                                              |
@@ -102,7 +102,7 @@ SELECT f, i, SUM(i) OVER (ORDER BY f, i) FROM doubles ORDER BY f, i;
 SELECT f, i, SUM(i) OVER (PARTITION BY f ORDER BY f, i) FROM doubles ORDER BY f, i;
 
 +------+----+---------------------------------------------------------------------------------------------------------------------------------------------------------+
-| f    | i  | SUM(doubles.i) PARTITION BY [doubles.f] ORDER BY [doubles.f ASC NULLS LAST, doubles.i ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
+| f    | i  | sum(doubles.i) PARTITION BY [doubles.f] ORDER BY [doubles.f ASC NULLS LAST, doubles.i ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
 +------+----+---------------------------------------------------------------------------------------------------------------------------------------------------------+
 | -inf | 2  | 2                                                                                                                                                       |
 | -inf | 3  | 5                                                                                                                                                       |
@@ -115,7 +115,7 @@ SELECT f, i, SUM(i) OVER (PARTITION BY f ORDER BY f, i) FROM doubles ORDER BY f,
 SELECT i, f, SUM(i) OVER (ORDER BY i, f) FROM doubles ORDER BY i, f;
 
 +----+------+--------------------------------------------------------------------------------------------------------------------------------+
-| i  | f    | SUM(doubles.i) ORDER BY [doubles.i ASC NULLS LAST, doubles.f ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
+| i  | f    | sum(doubles.i) ORDER BY [doubles.i ASC NULLS LAST, doubles.f ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
 +----+------+--------------------------------------------------------------------------------------------------------------------------------+
 | 1  | inf  | 1                                                                                                                              |
 | 2  | -inf | 3                                                                                                                              |

@@ -49,6 +49,7 @@ pub const SCHEMA_OPTS: &str = "options";
 const INIT_CAPACITY: usize = 42;
 
 /// The `information_schema.schemata` table implementation.
+#[derive(Debug)]
 pub(super) struct InformationSchemaSchemata {
     schema: SchemaRef,
     catalog_name: String,

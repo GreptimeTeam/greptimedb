@@ -11,7 +11,7 @@ Affected Rows: 2
 SELECT i, j FROM (SELECT COLUMNS(*)::VARCHAR FROM integers);
 
 Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Invalid function 'columns'.
-Did you mean 'COUNT'?
+Did you mean 'count'?
 
 SELECT i, j FROM (SELECT * FROM integers);
 

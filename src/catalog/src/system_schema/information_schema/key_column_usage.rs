@@ -62,6 +62,7 @@ pub(crate) const FULLTEXT_INDEX_CONSTRAINT_NAME: &str = "FULLTEXT INDEX";
 pub(crate) const SKIPPING_INDEX_CONSTRAINT_NAME: &str = "SKIPPING INDEX";
 
 /// The virtual table implementation for `information_schema.KEY_COLUMN_USAGE`.
+#[derive(Debug)]
 pub(super) struct InformationSchemaKeyColumnUsage {
     schema: SchemaRef,
     catalog_name: String,

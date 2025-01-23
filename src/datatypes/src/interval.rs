@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use arrow::datatypes::{
+    IntervalDayTime as ArrowIntervalDayTime, IntervalMonthDayNano as ArrowIntervalMonthDayNano,
+};
 use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use paste::paste;
 
@@ -53,11 +56,11 @@ macro_rules! define_interval_with_unit {
                 type Native = $native_ty;
 
                 fn from_native(value: Self::Native) -> Self {
-                    Self::[<from_ $native_ty>](value)
+                    Self::from(value)
                 }
 
                 fn into_native(self) -> Self::Native {
-                    self.[<to_ $native_ty>]()
+                    self.into()
                 }
             }
         }
@@ -65,8 +68,8 @@ macro_rules! define_interval_with_unit {
 }
 
 define_interval_with_unit!(YearMonth, i32);
-define_interval_with_unit!(DayTime, i64);
-define_interval_with_unit!(MonthDayNano, i128);
+define_interval_with_unit!(DayTime, ArrowIntervalDayTime);
+define_interval_with_unit!(MonthDayNano, ArrowIntervalMonthDayNano);
 
 #[cfg(test)]
 mod tests {
@@ -82,12 +85,15 @@ mod tests {
         let interval = IntervalDayTime::from(1000);
         assert_eq!(interval, interval.as_scalar_ref());
         assert_eq!(interval, interval.to_owned_scalar());
-        assert_eq!(1000, interval.into_native());
+        assert_eq!(ArrowIntervalDayTime::from(interval), interval.into_native());
 
         let interval = IntervalMonthDayNano::from(1000);
         assert_eq!(interval, interval.as_scalar_ref());
         assert_eq!(interval, interval.to_owned_scalar());
-        assert_eq!(1000, interval.into_native());
+        assert_eq!(
+            ArrowIntervalMonthDayNano::from(interval),
+            interval.into_native()
+        );
     }
 
     #[test]

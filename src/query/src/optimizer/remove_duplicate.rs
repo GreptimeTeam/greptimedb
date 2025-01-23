@@ -27,6 +27,7 @@ use datafusion_common::Result as DfResult;
 /// if one runs right after another.
 ///
 /// This rule is expected to be run in the final stage of the optimization process.
+#[derive(Debug)]
 pub struct RemoveDuplicate;
 
 impl PhysicalOptimizerRule for RemoveDuplicate {

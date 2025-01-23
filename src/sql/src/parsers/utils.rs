@@ -18,6 +18,7 @@ use chrono::Utc;
 use datafusion::config::ConfigOptions;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::SessionState;
+use datafusion::execution::SessionStateBuilder;
 use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion_common::{DFSchema, ScalarValue};
 use datafusion_expr::execution_props::ExecutionProps;
@@ -72,7 +73,11 @@ struct StubContextProvider {
 impl Default for StubContextProvider {
     fn default() -> Self {
         Self {
-            state: SessionState::new_with_config_rt(Default::default(), Default::default()),
+            state: SessionStateBuilder::new()
+                .with_config(Default::default())
+                .with_runtime_env(Default::default())
+                .with_default_features()
+                .build(),
         }
     }
 }

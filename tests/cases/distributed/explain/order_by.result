@@ -61,8 +61,8 @@ EXPLAIN SELECT DISTINCT a, b FROM test ORDER BY a, b;
 | logical_plan_| Sort: test.a ASC NULLS LAST, test.b ASC NULLS LAST_|
 |_|_Aggregate: groupBy=[[test.a, test.b]], aggr=[[]]_|
 |_|_MergeScan [is_placeholder=false]_|
-| physical_plan | SortPreservingMergeExec: [a@0 ASC NULLS LAST,b@1 ASC NULLS LAST]_|
-|_|_SortExec: expr=[a@0 ASC NULLS LAST,b@1 ASC NULLS LAST], preserve_partitioning=[true] |
+| physical_plan | SortPreservingMergeExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST]_|
+|_|_SortExec: expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], preserve_partitioning=[true] |
 |_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[]_|
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED

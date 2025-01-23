@@ -96,12 +96,12 @@ SELECT INTERVAL '2h' + INTERVAL 'P3Y3M700DT133H17M36.789S';
 
 
 -- Interval type does not support aggregation functions.
-SELECT MIN(interval_value) from intervals;
+SELECT min(interval_value) from intervals;
 
-SELECT MAX(interval_value) from intervals;
+SELECT max(interval_value) from intervals;
 
-SELECT SUM(interval_value) from intervals;
+SELECT sum(interval_value) from intervals;
 
-SELECT AVG(interval_value) from intervals;
+SELECT avg(interval_value) from intervals;
 
 DROP TABLE intervals;

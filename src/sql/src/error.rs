@@ -72,7 +72,7 @@ pub enum Error {
     },
 
     // Syntax error from sql parser.
-    #[snafu(display(""))]
+    #[snafu(display("Invalid SQL syntax"))]
     Syntax {
         #[snafu(source)]
         error: ParserError,
@@ -81,7 +81,7 @@ pub enum Error {
     },
 
     // Syntax error from tql parser.
-    #[snafu(display(""))]
+    #[snafu(display("Invalid TQL syntax"))]
     TQLSyntax {
         #[snafu(source)]
         error: TQLError,
