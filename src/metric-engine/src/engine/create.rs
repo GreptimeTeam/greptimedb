@@ -130,7 +130,7 @@ impl MetricEngineInner {
             },
         )?;
 
-        info!("Created physical metric region {region_id}, primary key encoding={primary_key_encoding}");
+        info!("Created physical metric region {region_id}, physical_region_options={physical_region_options:?}");
         PHYSICAL_REGION_COUNT.inc();
 
         // remember this table
@@ -524,7 +524,10 @@ impl MetricEngineInner {
         data_region_request.primary_key = primary_key;
 
         // set data region options
-        set_data_region_options(&mut data_region_request.options);
+        set_data_region_options(
+            &mut data_region_request.options,
+            self.config.experimental_sparse_primary_key_encoding,
+        );
 
         data_region_request
     }

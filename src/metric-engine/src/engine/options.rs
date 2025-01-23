@@ -20,6 +20,7 @@ use store_api::metric_engine_consts::{
     METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION,
     METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION_DEFAULT, METRIC_ENGINE_INDEX_TYPE_OPTION,
 };
+use store_api::mito_engine_options::MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING;
 
 use crate::error::{Error, ParseRegionOptionsSnafu, Result};
 
@@ -46,7 +47,10 @@ pub enum IndexOptions {
 }
 
 /// Sets data region specific options.
-pub fn set_data_region_options(options: &mut HashMap<String, String>) {
+pub fn set_data_region_options(
+    options: &mut HashMap<String, String>,
+    sparse_primary_key_encoding: bool,
+) {
     options.remove(METRIC_ENGINE_INDEX_TYPE_OPTION);
     options.remove(METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION);
     options.insert(
@@ -55,6 +59,14 @@ pub fn set_data_region_options(options: &mut HashMap<String, String>) {
     );
     // Set memtable options for the data region.
     options.insert("memtable.type".to_string(), "partition_tree".to_string());
+    if sparse_primary_key_encoding
+        && !options.contains_key(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING)
+    {
+        options.insert(
+            MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING.to_string(),
+            "sparse".to_string(),
+        );
+    }
 }
 
 impl TryFrom<&HashMap<String, String>> for PhysicalRegionOptions {
@@ -108,7 +120,7 @@ mod tests {
             METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION.to_string(),
             "102400".to_string(),
         );
-        set_data_region_options(&mut options);
+        set_data_region_options(&mut options, false);
 
         for key in [
             METRIC_ENGINE_INDEX_TYPE_OPTION,
