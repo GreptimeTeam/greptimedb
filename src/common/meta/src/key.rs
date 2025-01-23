@@ -131,12 +131,12 @@ pub use schema_metadata_manager::{SchemaMetadataManager, SchemaMetadataManagerRe
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::storage::{RegionId, RegionNumber};
+use store_api::storage::RegionNumber;
 use table::metadata::{RawTableInfo, TableId};
 use table::table_name::TableName;
 use table_info::{TableInfoKey, TableInfoManager, TableInfoValue};
 use table_name::{TableNameKey, TableNameManager, TableNameValue};
-use topic_region::{TopicRegionKey, TopicRegionManager};
+use topic_region::TopicRegionManager;
 use view_info::{ViewInfoKey, ViewInfoManager, ViewInfoValue};
 
 use self::catalog_name::{CatalogManager, CatalogNameKey, CatalogNameValue};
@@ -651,10 +651,9 @@ impl TableMetadataManager {
             .table_route_storage()
             .build_create_txn(table_id, &table_route_value)?;
 
-        let topic_region_keys = self.topic_region_keys(table_id, &region_wal_options);
         let create_topic_region_txns = self
             .topic_region_manager
-            .build_create_txn(topic_region_keys);
+            .build_create_txn(table_id, &region_wal_options);
 
         let mut txn = Txn::merge_all(vec![
             create_table_name_txn,
@@ -852,10 +851,9 @@ impl TableMetadataManager {
             .tombstone_manager
             .build_delete_txn(&table_metadata_keys)?;
 
-        let topic_region_keys = self.topic_region_keys(table_id, region_wal_options);
         let topic_region_txn = self
             .topic_region_manager
-            .build_delete_txn(topic_region_keys)?;
+            .build_delete_txn(table_id, region_wal_options)?;
         let txn = tombstone_txn.merge(topic_region_txn);
 
         // Always success.
@@ -888,10 +886,9 @@ impl TableMetadataManager {
         let operations = keys.into_iter().map(TxnOp::Delete).collect::<Vec<_>>();
         let txn = Txn::new().and_then(operations);
 
-        let topic_region_keys = self.topic_region_keys(table_id, region_wal_options);
         let topic_region_txn = self
             .topic_region_manager
-            .build_delete_txn(topic_region_keys)?;
+            .build_delete_txn(table_id, region_wal_options)?;
         let txn = txn.merge(topic_region_txn);
 
         // Always success.
@@ -1244,23 +1241,6 @@ impl TableMetadataManager {
 
         Ok(())
     }
-
-    pub fn topic_region_keys<'a>(
-        &self,
-        table_id: TableId,
-        region_wal_options: &'a HashMap<RegionNumber, String>,
-    ) -> Vec<TopicRegionKey<'a>> {
-        let region_ids = region_wal_options
-            .keys()
-            .map(|region_number| RegionId::new(table_id, *region_number))
-            .collect::<Vec<_>>();
-        let keys = region_ids
-            .into_iter()
-            .zip(region_wal_options.values())
-            .map(|(region_id, topic)| TopicRegionKey::new(region_id, topic))
-            .collect::<Vec<_>>();
-        keys
-    }
 }
 
 #[macro_export]
@@ -1357,6 +1337,7 @@ mod tests {
     use bytes::Bytes;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_time::util::current_time_millis;
+    use common_wal::options::{KafkaWalOptions, WalOptions};
     use futures::TryStreamExt;
     use store_api::storage::{RegionId, RegionNumber};
     use table::metadata::{RawTableInfo, TableInfo};
@@ -1457,6 +1438,26 @@ mod tests {
             .await
     }
 
+    fn create_mock_region_wal_options() -> HashMap<RegionNumber, String> {
+        let topics = (0..16)
+            .map(|i| format!("greptimedb_topic{}", i))
+            .collect::<Vec<_>>();
+        let options_batch = topics
+            .iter()
+            .map(|topic| {
+                WalOptions::Kafka(KafkaWalOptions {
+                    topic: topic.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let wal_options = options_batch
+            .into_iter()
+            .map(|wal_options| serde_json::to_string(&wal_options).unwrap())
+            .collect::<Vec<_>>();
+
+        (0..16).zip(wal_options).collect()
+    }
+
     #[tokio::test]
     async fn test_create_table_metadata() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
@@ -1465,7 +1466,8 @@ mod tests {
         let region_routes = &vec![region_route.clone()];
         let table_info: RawTableInfo =
             new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
-        let region_wal_options = HashMap::from_iter(vec![(10, "topic1".to_string())]);
+        let region_wal_options = create_mock_region_wal_options();
+
         // creates metadata.
         create_physical_table_metadata(
             &table_metadata_manager,
@@ -1516,13 +1518,18 @@ mod tests {
             region_routes
         );
 
-        let regions = table_metadata_manager
-            .topic_region_manager
-            .regions("topic1")
-            .await
-            .unwrap();
-        assert_eq!(regions.len(), 1);
-        assert_eq!(regions[0], RegionId::new(table_info.ident.table_id, 10));
+        for i in 0..16 {
+            let region_number = i as u32;
+            let region_id = RegionId::new(table_info.ident.table_id, region_number);
+            let topic = format!("greptimedb_topic{}", i);
+            let regions = table_metadata_manager
+                .topic_region_manager
+                .regions(&topic)
+                .await
+                .unwrap();
+            assert_eq!(regions.len(), 1);
+            assert_eq!(regions[0], region_id);
+        }
     }
 
     #[tokio::test]
@@ -1679,6 +1686,14 @@ mod tests {
             .await
             .unwrap();
         assert!(table_route.is_none());
+        // Logical delete does not remove the topic region mapping.
+        let regions = table_metadata_manager
+            .topic_region_manager
+            .regions("topic1")
+            .await
+            .unwrap();
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0], RegionId::new(table_id, 10));
     }
 
     #[tokio::test]
@@ -2046,7 +2061,7 @@ mod tests {
         let table_id = 1025;
         let table_name = "foo";
         let task = test_create_table_task(table_name, table_id);
-        let options: HashMap<RegionNumber, String> = [(0, "test".to_string())].into();
+        let options = create_mock_region_wal_options();
         table_metadata_manager
             .create_table_metadata(
                 task.table_info,
