@@ -38,7 +38,8 @@ use snafu::{ensure, OptionExt, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::Mutex;
-use tonic::transport::server::{Routes, TcpIncoming};
+use tonic::service::Routes;
+use tonic::transport::server::TcpIncoming;
 use tonic::transport::ServerTlsConfig;
 use tonic::{Request, Response, Status};
 use tonic_reflection::server::{ServerReflection, ServerReflectionServer};
@@ -169,7 +170,10 @@ impl GrpcServer {
             .with_service_name("greptime.v1.GreptimeDatabase")
             .with_service_name("greptime.v1.HealthCheck")
             .with_service_name("greptime.v1.RegionServer")
-            .build()
+            .build_v1()
+            .inspect_err(|e| {
+                common_telemetry::error!(e; "Failed to build gRPC reflection server");
+            })
             .unwrap()
     }
 

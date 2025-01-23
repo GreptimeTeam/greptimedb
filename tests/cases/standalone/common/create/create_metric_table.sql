@@ -24,6 +24,8 @@ SELECT table_catalog, table_schema, table_name, table_type, engine FROM informat
 
 DESC TABLE phy;
 
+SHOW CREATE TABLE phy;
+
 DESC TABLE t1;
 
 DESC TABLE t2;
@@ -86,3 +88,19 @@ DROP TABLE t1;
 DESC TABLE t1;
 
 DROP TABLE phy;
+
+CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "", "index.type" = "skipping", "index.granularity" = "8192");
+
+SHOW CREATE TABLE phy;
+
+CREATE TABLE t1 (ts timestamp time index, val double, host string primary key) engine=metric with ("on_physical_table" = "phy");
+
+SHOW CREATE TABLE phy;
+
+SHOW INDEX FROM phy;
+
+DROP TABLE t1;
+
+DROP TABLE phy;
+
+CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "", "index.type" = "hihi", "index.granularity" = "8192");

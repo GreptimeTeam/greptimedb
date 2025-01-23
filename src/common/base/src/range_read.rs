@@ -223,7 +223,6 @@ impl FileReader {
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
 impl SizeAwareRangeReader for FileReader {
     fn with_file_size_hint(&mut self, _file_size_hint: u64) {
         // do nothing

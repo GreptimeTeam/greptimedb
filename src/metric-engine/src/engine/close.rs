@@ -36,8 +36,7 @@ impl MetricEngineInner {
             .state
             .read()
             .unwrap()
-            .physical_regions()
-            .contains_key(&data_region_id)
+            .exist_physical_region(data_region_id)
         {
             self.close_physical_region(data_region_id).await?;
             self.state

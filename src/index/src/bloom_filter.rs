@@ -17,8 +17,5 @@ pub mod creator;
 pub mod error;
 pub mod reader;
 
-pub type Bytes = Vec<u8>;
-pub type BytesRef<'a> = &'a [u8];
-
 /// The seed used for the Bloom filter.
 pub const SEED: u128 = 42;

@@ -17,6 +17,7 @@
 
 pub(super) mod oid_map;
 
+use std::fmt;
 use std::sync::{Arc, Weak};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
@@ -84,6 +85,15 @@ impl PGNamespace {
             self.catalog_manager.clone(),
             self.oid_map.clone(),
         )
+    }
+}
+
+impl fmt::Debug for PGNamespace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PGNamespace")
+            .field("schema", &self.schema)
+            .field("catalog_name", &self.catalog_name)
+            .finish()
     }
 }
 

@@ -142,16 +142,25 @@ impl Builder {
 
 impl BuilderBuild<DefaultRuntime> for Builder {
     fn build(&mut self) -> Result<DefaultRuntime> {
-        let runtime = self
+        let builder = self
             .builder
             .enable_all()
             .thread_name(self.thread_name.clone())
             .on_thread_start(on_thread_start(self.thread_name.clone()))
             .on_thread_stop(on_thread_stop(self.thread_name.clone()))
             .on_thread_park(on_thread_park(self.thread_name.clone()))
-            .on_thread_unpark(on_thread_unpark(self.thread_name.clone()))
-            .build()
-            .context(BuildRuntimeSnafu)?;
+            .on_thread_unpark(on_thread_unpark(self.thread_name.clone()));
+        let runtime = if cfg!(debug_assertions) {
+            // Set the stack size to 8MB for the thread so it wouldn't overflow on large stack usage in debug mode
+            // This is necessary to avoid stack overflow while running sqlness.
+            // https://github.com/rust-lang/rust/issues/34283
+            builder
+                .thread_stack_size(8 * 1024 * 1024)
+                .build()
+                .context(BuildRuntimeSnafu)?
+        } else {
+            builder.build().context(BuildRuntimeSnafu)?
+        };
 
         let name = self.runtime_name.clone();
         let handle = runtime.handle().clone();

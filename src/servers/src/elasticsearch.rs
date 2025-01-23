@@ -16,12 +16,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::{Path, Query, State};
-use axum::headers::ContentType;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
-use axum::{Extension, TypedHeader};
+use axum::Extension;
+use axum_extra::TypedHeader;
 use common_error::ext::ErrorExt;
 use common_telemetry::{debug, error};
+use headers::ContentType;
 use once_cell::sync::Lazy;
 use serde_json::{json, Deserializer, Value};
 use session::context::{Channel, QueryContext};

@@ -68,12 +68,13 @@ mod tests {
                     with_hints: vec![],
                     partitions: vec![],
                     version: None,
+                    with_ordinality: false,
                 },
                 joins: vec![],
             }],
             lateral_views: vec![],
             selection: None,
-            group_by: GroupByExpr::Expressions(vec![]),
+            group_by: GroupByExpr::Expressions(vec![], vec![]),
             cluster_by: vec![],
             distribute_by: vec![],
             sort_by: vec![],
@@ -81,18 +82,24 @@ mod tests {
             qualify: None,
             named_window: vec![],
             value_table_mode: None,
+            top_before_distinct: false,
+            prewhere: None,
+            window_before_qualify: false,
+            connect_by: None,
         };
 
         let sp_statement = SpStatement::Query(Box::new(SpQuery {
             with: None,
             body: Box::new(sqlparser::ast::SetExpr::Select(Box::new(select))),
-            order_by: vec![],
+            order_by: None,
             limit: None,
             limit_by: vec![],
             offset: None,
             fetch: None,
             locks: vec![],
             for_clause: None,
+            settings: None,
+            format_clause: None,
         }));
 
         let explain = Explain::try_from(SpStatement::Explain {
@@ -101,6 +108,8 @@ mod tests {
             verbose: false,
             statement: Box::new(sp_statement),
             format: None,
+            query_plan: false,
+            options: None,
         })
         .unwrap();
 

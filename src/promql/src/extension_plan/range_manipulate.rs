@@ -206,6 +206,37 @@ impl RangeManipulate {
     }
 }
 
+impl PartialOrd for RangeManipulate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // Compare fields in order excluding output_schema
+        match self.start.partial_cmp(&other.start) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.end.partial_cmp(&other.end) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.interval.partial_cmp(&other.interval) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.range.partial_cmp(&other.range) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.time_index.partial_cmp(&other.time_index) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.field_columns.partial_cmp(&other.field_columns) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        self.input.partial_cmp(&other.input)
+    }
+}
+
 impl UserDefinedLogicalNodeCore for RangeManipulate {
     fn name(&self) -> &str {
         Self::name()
@@ -384,6 +415,10 @@ impl ExecutionPlan for RangeManipulateExec {
             // TODO(ruihang): support this column statistics
             column_statistics: Statistics::unknown_column(&self.schema()),
         })
+    }
+
+    fn name(&self) -> &str {
+        "RangeManipulateExec"
     }
 }
 

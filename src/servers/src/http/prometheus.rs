@@ -24,14 +24,15 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
-use common_telemetry::tracing;
+use common_telemetry::{debug, tracing};
 use common_time::util::{current_time_rfc3339, yesterday_rfc3339};
 use common_version::OwnedBuildInfo;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{Float64Vector, StringVector};
+use futures::future::join_all;
 use futures::StreamExt;
-use promql_parser::label::METRIC_NAME;
+use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, MatrixSelector, ParenExpr, SubqueryExpr,
@@ -41,8 +42,11 @@ use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use session::context::QueryContext;
+use session::context::{QueryContext, QueryContextRef};
 use snafu::{Location, OptionExt, ResultExt};
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+};
 
 pub use super::result::prometheus_resp::PrometheusJsonResponse;
 use crate::error::{
@@ -104,6 +108,44 @@ pub enum PrometheusResponse {
     ParseResult(promql_parser::parser::Expr),
 }
 
+impl PrometheusResponse {
+    /// Append the other [`PrometheusResponse]`.
+    /// # NOTE
+    ///   Only append matrix and vector results, otherwise just ignore the other response.
+    fn append(&mut self, other: PrometheusResponse) {
+        match (self, other) {
+            (
+                PrometheusResponse::PromData(PromData {
+                    result: PromQueryResult::Matrix(lhs),
+                    ..
+                }),
+                PrometheusResponse::PromData(PromData {
+                    result: PromQueryResult::Matrix(rhs),
+                    ..
+                }),
+            ) => {
+                lhs.extend(rhs);
+            }
+
+            (
+                PrometheusResponse::PromData(PromData {
+                    result: PromQueryResult::Vector(lhs),
+                    ..
+                }),
+                PrometheusResponse::PromData(PromData {
+                    result: PromQueryResult::Vector(rhs),
+                    ..
+                }),
+            ) => {
+                lhs.extend(rhs);
+            }
+            _ => {
+                // TODO(dennis): process other cases?
+            }
+        }
+    }
+}
+
 impl Default for PrometheusResponse {
     fn default() -> Self {
         PrometheusResponse::PromData(Default::default())
@@ -161,6 +203,20 @@ pub struct InstantQuery {
     db: Option<String>,
 }
 
+/// Helper macro which try to evaluate the expression and return its results.
+/// If the evaluation fails, return a `PrometheusJsonResponse` early.
+macro_rules! try_call_return_response {
+    ($handle: expr) => {
+        match $handle {
+            Ok(res) => res,
+            Err(err) => {
+                let msg = err.to_string();
+                return PrometheusJsonResponse::error(StatusCode::InvalidArguments, msg);
+            }
+        }
+    };
+}
+
 #[axum_macros::debug_handler]
 #[tracing::instrument(
     skip_all,
@@ -188,6 +244,8 @@ pub async fn instant_query(
             .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
     };
 
+    let promql_expr = try_call_return_response!(promql_parser::parser::parse(&prom_query.query));
+
     // update catalog and schema in query context if necessary
     if let Some(db) = &params.db {
         let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
@@ -199,7 +257,64 @@ pub async fn instant_query(
         .with_label_values(&[query_ctx.get_db_string().as_str(), "instant_query"])
         .start_timer();
 
-    let result = handler.do_query(&prom_query, query_ctx).await;
+    if let Some(name_matchers) = find_metric_name_not_equal_matchers(&promql_expr)
+        && !name_matchers.is_empty()
+    {
+        debug!("Find metric name matchers: {:?}", name_matchers);
+
+        let metric_names =
+            try_call_return_response!(handler.query_metric_names(name_matchers, &query_ctx).await);
+
+        debug!("Find metric names: {:?}", metric_names);
+
+        if metric_names.is_empty() {
+            let result_type = promql_expr.value_type();
+
+            return PrometheusJsonResponse::success(PrometheusResponse::PromData(PromData {
+                result_type: result_type.to_string(),
+                ..Default::default()
+            }));
+        }
+
+        let responses = join_all(metric_names.into_iter().map(|metric| {
+            let mut prom_query = prom_query.clone();
+            let mut promql_expr = promql_expr.clone();
+            let query_ctx = query_ctx.clone();
+            let handler = handler.clone();
+
+            async move {
+                update_metric_name_matcher(&mut promql_expr, &metric);
+                let new_query = promql_expr.to_string();
+                debug!(
+                    "Updated promql, before: {}, after: {}",
+                    &prom_query.query, new_query
+                );
+                prom_query.query = new_query;
+
+                do_instant_query(&handler, &prom_query, query_ctx).await
+            }
+        }))
+        .await;
+
+        responses
+            .into_iter()
+            .reduce(|mut acc, resp| {
+                acc.data.append(resp.data);
+                acc
+            })
+            .unwrap()
+    } else {
+        do_instant_query(&handler, &prom_query, query_ctx).await
+    }
+}
+
+/// Executes a single instant query and returns response
+async fn do_instant_query(
+    handler: &PrometheusHandlerRef,
+    prom_query: &PromQuery,
+    query_ctx: QueryContextRef,
+) -> PrometheusJsonResponse {
+    let result = handler.do_query(prom_query, query_ctx).await;
     let (metric_name, result_type) = match retrieve_metric_name_and_result_type(&prom_query.query) {
         Ok((metric_name, result_type)) => (metric_name.unwrap_or_default(), result_type),
         Err(err) => return PrometheusJsonResponse::error(err.status_code(), err.output_msg()),
@@ -240,18 +355,75 @@ pub async fn range_query(
             .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
     };
 
+    let promql_expr = try_call_return_response!(promql_parser::parser::parse(&prom_query.query));
+
     // update catalog and schema in query context if necessary
     if let Some(db) = &params.db {
         let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
         try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
     }
     let query_ctx = Arc::new(query_ctx);
-
     let _timer = crate::metrics::METRIC_HTTP_PROMETHEUS_PROMQL_ELAPSED
         .with_label_values(&[query_ctx.get_db_string().as_str(), "range_query"])
         .start_timer();
 
-    let result = handler.do_query(&prom_query, query_ctx).await;
+    if let Some(name_matchers) = find_metric_name_not_equal_matchers(&promql_expr)
+        && !name_matchers.is_empty()
+    {
+        debug!("Find metric name matchers: {:?}", name_matchers);
+
+        let metric_names =
+            try_call_return_response!(handler.query_metric_names(name_matchers, &query_ctx).await);
+
+        debug!("Find metric names: {:?}", metric_names);
+
+        if metric_names.is_empty() {
+            return PrometheusJsonResponse::success(PrometheusResponse::PromData(PromData {
+                result_type: ValueType::Matrix.to_string(),
+                ..Default::default()
+            }));
+        }
+
+        let responses = join_all(metric_names.into_iter().map(|metric| {
+            let mut prom_query = prom_query.clone();
+            let mut promql_expr = promql_expr.clone();
+            let query_ctx = query_ctx.clone();
+            let handler = handler.clone();
+
+            async move {
+                update_metric_name_matcher(&mut promql_expr, &metric);
+                let new_query = promql_expr.to_string();
+                debug!(
+                    "Updated promql, before: {}, after: {}",
+                    &prom_query.query, new_query
+                );
+                prom_query.query = new_query;
+
+                do_range_query(&handler, &prom_query, query_ctx).await
+            }
+        }))
+        .await;
+
+        // Safety: at least one responses, checked above
+        responses
+            .into_iter()
+            .reduce(|mut acc, resp| {
+                acc.data.append(resp.data);
+                acc
+            })
+            .unwrap()
+    } else {
+        do_range_query(&handler, &prom_query, query_ctx).await
+    }
+}
+
+/// Executes a single range query and returns response
+async fn do_range_query(
+    handler: &PrometheusHandlerRef,
+    prom_query: &PromQuery,
+    query_ctx: QueryContextRef,
+) -> PrometheusJsonResponse {
+    let result = handler.do_query(prom_query, query_ctx).await;
     let metric_name = match retrieve_metric_name_and_result_type(&prom_query.query) {
         Err(err) => return PrometheusJsonResponse::error(err.status_code(), err.output_msg()),
         Ok((metric_name, _)) => metric_name.unwrap_or_default(),
@@ -414,7 +586,11 @@ async fn get_all_column_names(
             continue;
         };
         for column in table.primary_key_columns() {
-            labels.insert(column.name);
+            if column.name != DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+                && column.name != DATA_SCHEMA_TSID_COLUMN_NAME
+            {
+                labels.insert(column.name);
+            }
         }
     }
 
@@ -629,35 +805,109 @@ pub(crate) fn try_update_catalog_schema(ctx: &mut QueryContext, catalog: &str, s
 }
 
 fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
+    find_metric_name_and_matchers(expr, |name, matchers| {
+        name.clone().or(matchers
+            .find_matchers(METRIC_NAME)
+            .into_iter()
+            .next()
+            .map(|m| m.value))
+    })
+}
+
+fn find_metric_name_and_matchers<E, F>(expr: &PromqlExpr, f: F) -> Option<E>
+where
+    F: Fn(&Option<String>, &Matchers) -> Option<E> + Clone,
+{
     match expr {
-        PromqlExpr::Aggregate(AggregateExpr { expr, .. }) => promql_expr_to_metric_name(expr),
-        PromqlExpr::Unary(UnaryExpr { expr }) => promql_expr_to_metric_name(expr),
+        PromqlExpr::Aggregate(AggregateExpr { expr, .. }) => find_metric_name_and_matchers(expr, f),
+        PromqlExpr::Unary(UnaryExpr { expr }) => find_metric_name_and_matchers(expr, f),
         PromqlExpr::Binary(BinaryExpr { lhs, rhs, .. }) => {
-            promql_expr_to_metric_name(lhs).or(promql_expr_to_metric_name(rhs))
+            find_metric_name_and_matchers(lhs, f.clone()).or(find_metric_name_and_matchers(rhs, f))
         }
-        PromqlExpr::Paren(ParenExpr { expr }) => promql_expr_to_metric_name(expr),
-        PromqlExpr::Subquery(SubqueryExpr { expr, .. }) => promql_expr_to_metric_name(expr),
-        PromqlExpr::NumberLiteral(_) => Some(String::new()),
-        PromqlExpr::StringLiteral(_) => Some(String::new()),
+        PromqlExpr::Paren(ParenExpr { expr }) => find_metric_name_and_matchers(expr, f),
+        PromqlExpr::Subquery(SubqueryExpr { expr, .. }) => find_metric_name_and_matchers(expr, f),
+        PromqlExpr::NumberLiteral(_) => None,
+        PromqlExpr::StringLiteral(_) => None,
         PromqlExpr::Extension(_) => None,
+        PromqlExpr::VectorSelector(VectorSelector { name, matchers, .. }) => f(name, matchers),
+        PromqlExpr::MatrixSelector(MatrixSelector { vs, .. }) => {
+            let VectorSelector { name, matchers, .. } = vs;
+
+            f(name, matchers)
+        }
+        PromqlExpr::Call(Call { args, .. }) => args
+            .args
+            .iter()
+            .find_map(|e| find_metric_name_and_matchers(e, f.clone())),
+    }
+}
+
+/// Try to find the `__name__` matchers which op is not `MatchOp::Equal`.
+fn find_metric_name_not_equal_matchers(expr: &PromqlExpr) -> Option<Vec<Matcher>> {
+    find_metric_name_and_matchers(expr, |name, matchers| {
+        // Has name, ignore the matchers
+        if name.is_some() {
+            return None;
+        }
+
+        // FIXME(dennis): we don't consider the nested and `or` matchers yet.
+        Some(matchers.find_matchers(METRIC_NAME))
+    })
+    .map(|matchers| {
+        matchers
+            .into_iter()
+            .filter(|m| !matches!(m.op, MatchOp::Equal))
+            .collect::<Vec<_>>()
+    })
+}
+
+/// Update the `__name__` matchers in expression into special value
+/// Returns the updated expression.
+fn update_metric_name_matcher(expr: &mut PromqlExpr, metric_name: &str) {
+    match expr {
+        PromqlExpr::Aggregate(AggregateExpr { expr, .. }) => {
+            update_metric_name_matcher(expr, metric_name)
+        }
+        PromqlExpr::Unary(UnaryExpr { expr }) => update_metric_name_matcher(expr, metric_name),
+        PromqlExpr::Binary(BinaryExpr { lhs, rhs, .. }) => {
+            update_metric_name_matcher(lhs, metric_name);
+            update_metric_name_matcher(rhs, metric_name);
+        }
+        PromqlExpr::Paren(ParenExpr { expr }) => update_metric_name_matcher(expr, metric_name),
+        PromqlExpr::Subquery(SubqueryExpr { expr, .. }) => {
+            update_metric_name_matcher(expr, metric_name)
+        }
         PromqlExpr::VectorSelector(VectorSelector { name, matchers, .. }) => {
-            name.clone().or(matchers
-                .find_matchers(METRIC_NAME)
-                .into_iter()
-                .next()
-                .map(|m| m.value))
+            if name.is_some() {
+                return;
+            }
+
+            for m in &mut matchers.matchers {
+                if m.name == METRIC_NAME {
+                    m.op = MatchOp::Equal;
+                    m.value = metric_name.to_string();
+                }
+            }
         }
         PromqlExpr::MatrixSelector(MatrixSelector { vs, .. }) => {
             let VectorSelector { name, matchers, .. } = vs;
-            name.clone().or(matchers
-                .find_matchers(METRIC_NAME)
-                .into_iter()
-                .next()
-                .map(|m| m.value))
+            if name.is_some() {
+                return;
+            }
+
+            for m in &mut matchers.matchers {
+                if m.name == METRIC_NAME {
+                    m.op = MatchOp::Equal;
+                    m.value = metric_name.to_string();
+                }
+            }
         }
         PromqlExpr::Call(Call { args, .. }) => {
-            args.args.iter().find_map(|e| promql_expr_to_metric_name(e))
+            args.args.iter_mut().for_each(|e| {
+                update_metric_name_matcher(e, metric_name);
+            });
         }
+        PromqlExpr::NumberLiteral(_) | PromqlExpr::StringLiteral(_) | PromqlExpr::Extension(_) => {}
     }
 }
 
@@ -880,7 +1130,6 @@ async fn retrieve_label_values_from_record_batch(
 /// Returns the metric name if a single metric is referenced, otherwise None.
 fn retrieve_metric_name_from_promql(query: &str) -> Option<String> {
     let promql_expr = promql_parser::parser::parse(query).ok()?;
-    // promql_expr_to_metric_name(&promql_expr)
 
     struct MetricNameVisitor {
         metric_name: Option<String>,
@@ -1034,13 +1283,8 @@ pub async fn parse_query(
     Form(form_params): Form<ParseQuery>,
 ) -> PrometheusJsonResponse {
     if let Some(query) = params.query.or(form_params.query) {
-        match promql_parser::parser::parse(&query) {
-            Ok(ast) => PrometheusJsonResponse::success(PrometheusResponse::ParseResult(ast)),
-            Err(err) => {
-                let msg = err.to_string();
-                PrometheusJsonResponse::error(StatusCode::InvalidArguments, msg)
-            }
-        }
+        let ast = try_call_return_response!(promql_parser::parser::parse(&query));
+        PrometheusJsonResponse::success(PrometheusResponse::ParseResult(ast))
     } else {
         PrometheusJsonResponse::error(StatusCode::InvalidArguments, "query is required")
     }

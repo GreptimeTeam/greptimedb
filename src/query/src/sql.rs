@@ -41,7 +41,8 @@ use common_time::timezone::get_timezone;
 use common_time::Timestamp;
 use datafusion::common::ScalarValue;
 use datafusion::prelude::{concat_ws, SessionContext};
-use datafusion_expr::{case, col, lit, Expr};
+use datafusion_expr::expr::WildcardOptions;
+use datafusion_expr::{case, col, lit, Expr, SortExpr};
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema, Schema};
 use datatypes::vectors::StringVector;
@@ -227,7 +228,7 @@ async fn query_from_information_schema_table(
     projects: Vec<(&str, &str)>,
     filters: Vec<Expr>,
     like_field: Option<&str>,
-    sort: Vec<Expr>,
+    sort: Vec<SortExpr>,
     kind: ShowKind,
 ) -> Result<Output> {
     let table = catalog_manager
@@ -450,7 +451,10 @@ pub async fn show_index(
         lit("").alias(INDEX_COMMENT_COLUMN),
         lit(YES_STR).alias(INDEX_VISIBLE_COLUMN),
         null().alias(INDEX_EXPRESSION_COLUMN),
-        Expr::Wildcard { qualifier: None },
+        Expr::Wildcard {
+            qualifier: None,
+            options: WildcardOptions::default(),
+        },
     ];
 
     let projects = vec![

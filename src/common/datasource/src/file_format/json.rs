@@ -20,8 +20,7 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use arrow::json::reader::{infer_json_schema_from_iterator, ValueIter};
 use arrow::json::writer::LineDelimited;
-#[allow(deprecated)]
-use arrow::json::{self, RawReaderBuilder};
+use arrow::json::{self, ReaderBuilder};
 use arrow::record_batch::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
@@ -140,7 +139,6 @@ impl JsonOpener {
     }
 }
 
-#[allow(deprecated)]
 impl FileOpener for JsonOpener {
     fn open(&self, meta: FileMeta) -> DataFusionResult<FileOpenFuture> {
         open_with_decoder(
@@ -148,7 +146,7 @@ impl FileOpener for JsonOpener {
             meta.location().to_string(),
             self.compression_type,
             || {
-                RawReaderBuilder::new(self.projected_schema.clone())
+                ReaderBuilder::new(self.projected_schema.clone())
                     .with_batch_size(self.batch_size)
                     .build_decoder()
                     .map_err(DataFusionError::from)

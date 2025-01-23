@@ -17,11 +17,9 @@
 mod df_substrait;
 pub mod error;
 pub mod extension_serializer;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
-use datafusion::catalog::CatalogProviderList;
 use datafusion::execution::context::SessionState;
 pub use datafusion::execution::registry::SerializerRegistry;
 /// Re-export the Substrait module of datafusion,
@@ -40,7 +38,6 @@ pub trait SubstraitPlan {
     async fn decode<B: Buf + Send>(
         &self,
         message: B,
-        catalog_list: Arc<dyn CatalogProviderList>,
         state: SessionState,
     ) -> Result<Self::Plan, Self::Error>;
 

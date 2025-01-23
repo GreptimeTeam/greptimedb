@@ -47,7 +47,7 @@ use crate::extension_plan::Millisecond;
 /// - bias sample's timestamp by offset
 /// - sort the record batch based on timestamp column
 /// - remove NaN values (optional)
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
 pub struct SeriesNormalize {
     offset: Millisecond,
     time_index_column_name: String,
@@ -228,6 +228,10 @@ impl ExecutionPlan for SeriesNormalizeExec {
 
     fn statistics(&self) -> DataFusionResult<Statistics> {
         self.input.statistics()
+    }
+
+    fn name(&self) -> &str {
+        "SeriesNormalizeExec"
     }
 }
 

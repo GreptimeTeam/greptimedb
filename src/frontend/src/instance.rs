@@ -20,6 +20,7 @@ mod logs;
 mod opentsdb;
 mod otlp;
 mod prom_store;
+mod promql;
 mod region_query;
 pub mod standalone;
 
@@ -47,6 +48,7 @@ use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
 use pipeline::pipeline_operator::PipelineOperator;
 use prometheus::HistogramTimer;
+use promql_parser::label::Matcher;
 use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
@@ -448,6 +450,17 @@ impl PrometheusHandler for Instance {
             .context(ExecuteQuerySnafu)?;
 
         Ok(interceptor.post_execute(output, query_ctx)?)
+    }
+
+    async fn query_metric_names(
+        &self,
+        matchers: Vec<Matcher>,
+        ctx: &QueryContextRef,
+    ) -> server_error::Result<Vec<String>> {
+        self.handle_query_metric_names(matchers, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)
     }
 
     fn catalog_manager(&self) -> CatalogManagerRef {

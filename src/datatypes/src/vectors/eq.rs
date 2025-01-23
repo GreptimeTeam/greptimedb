@@ -159,6 +159,8 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use arrow::datatypes::{IntervalDayTime, IntervalMonthDayNano};
+
     use super::*;
     use crate::vectors::{
         list, DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
@@ -236,10 +238,16 @@ mod tests {
             1000, 2000, 3000, 4000,
         ])));
         assert_vector_ref_eq(Arc::new(IntervalDayTimeVector::from_values([
-            1000, 2000, 3000, 4000,
+            IntervalDayTime::new(1, 1000),
+            IntervalDayTime::new(1, 2000),
+            IntervalDayTime::new(1, 3000),
+            IntervalDayTime::new(1, 4000),
         ])));
         assert_vector_ref_eq(Arc::new(IntervalMonthDayNanoVector::from_values([
-            1000, 2000, 3000, 4000,
+            IntervalMonthDayNano::new(1, 1, 1000),
+            IntervalMonthDayNano::new(1, 1, 2000),
+            IntervalMonthDayNano::new(1, 1, 3000),
+            IntervalMonthDayNano::new(1, 1, 4000),
         ])));
         assert_vector_ref_eq(Arc::new(DurationSecondVector::from_values([300, 310])));
         assert_vector_ref_eq(Arc::new(DurationMillisecondVector::from_values([300, 310])));
@@ -302,12 +310,24 @@ mod tests {
         );
 
         assert_vector_ref_ne(
-            Arc::new(IntervalDayTimeVector::from_values([1000, 2000])),
-            Arc::new(IntervalDayTimeVector::from_values([2100, 1200])),
+            Arc::new(IntervalDayTimeVector::from_values([
+                IntervalDayTime::new(1, 1000),
+                IntervalDayTime::new(1, 2000),
+            ])),
+            Arc::new(IntervalDayTimeVector::from_values([
+                IntervalDayTime::new(1, 2100),
+                IntervalDayTime::new(1, 1200),
+            ])),
         );
         assert_vector_ref_ne(
-            Arc::new(IntervalMonthDayNanoVector::from_values([1000, 2000])),
-            Arc::new(IntervalMonthDayNanoVector::from_values([2100, 1200])),
+            Arc::new(IntervalMonthDayNanoVector::from_values([
+                IntervalMonthDayNano::new(1, 1, 1000),
+                IntervalMonthDayNano::new(1, 1, 2000),
+            ])),
+            Arc::new(IntervalMonthDayNanoVector::from_values([
+                IntervalMonthDayNano::new(1, 1, 2100),
+                IntervalMonthDayNano::new(1, 1, 1200),
+            ])),
         );
         assert_vector_ref_ne(
             Arc::new(IntervalYearMonthVector::from_values([1000, 2000])),

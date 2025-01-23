@@ -63,7 +63,7 @@ const INIT_CAPACITY: usize = 42;
 /// - `index_size`: The sst index files size in bytes.
 /// - `engine`: The engine type.
 /// - `region_role`: The region role.
-///
+#[derive(Debug)]
 pub(super) struct InformationSchemaRegionStatistics {
     schema: SchemaRef,
     catalog_manager: Weak<dyn CatalogManager>,

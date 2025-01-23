@@ -22,13 +22,14 @@ use api::v1::{
     Value as GreptimeValue,
 };
 use axum::extract::State;
-use axum::headers::ContentType;
-use axum::{Extension, TypedHeader};
+use axum::Extension;
+use axum_extra::TypedHeader;
 use bytes::Bytes;
 use common_query::prelude::GREPTIME_TIMESTAMP;
 use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
 use hashbrown::HashMap;
+use headers::ContentType;
 use lazy_static::lazy_static;
 use loki_api::prost_types::Timestamp;
 use prost::Message;

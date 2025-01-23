@@ -116,7 +116,7 @@ Affected Rows: 12
 tql eval (0, 30, '10s') (sum by(host) (irate(host_cpu_seconds_total{mode!="idle"}[1m0s])) / sum by (host)((irate(host_cpu_seconds_total[1m0s])))) * 100;
 
 +-------+---------------------+--------------------------------------------------------------------------------------+
-| host  | ts                  | lhs.SUM(prom_irate(ts_range,val)) / rhs.SUM(prom_irate(ts_range,val)) * Float64(100) |
+| host  | ts                  | lhs.sum(prom_irate(ts_range,val)) / rhs.sum(prom_irate(ts_range,val)) * Float64(100) |
 +-------+---------------------+--------------------------------------------------------------------------------------+
 | host1 | 1970-01-01T00:00:10 | 66.66666666666666                                                                    |
 | host1 | 1970-01-01T00:00:20 | 77.77777777777779                                                                    |

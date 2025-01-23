@@ -341,6 +341,7 @@ fn parse_string_options(parser: &mut Parser) -> std::result::Result<(String, Str
 fn parse_add_columns(parser: &mut Parser) -> std::result::Result<AddColumn, ParserError> {
     parser.expect_keyword(Keyword::ADD)?;
     let _ = parser.parse_keyword(Keyword::COLUMN);
+    let add_if_not_exists = parser.parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
     let mut column_def = parser.parse_column_def()?;
     column_def.name = ParserContext::canonicalize_identifier(column_def.name);
     let location = if parser.parse_keyword(Keyword::FIRST) {
@@ -362,6 +363,7 @@ fn parse_add_columns(parser: &mut Parser) -> std::result::Result<AddColumn, Pars
     Ok(AddColumn {
         column_def,
         location,
+        add_if_not_exists,
     })
 }
 
@@ -573,6 +575,67 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_add_column_if_not_exists() {
+        let sql = "ALTER TABLE test ADD COLUMN IF NOT EXISTS a INTEGER, ADD COLUMN b STRING, ADD COLUMN IF NOT EXISTS c INT;";
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(result.len(), 1);
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::AlterTable { .. });
+        match statement {
+            Statement::AlterTable(alter) => {
+                assert_eq!(alter.table_name.0[0].value, "test");
+                assert_matches!(
+                    alter.alter_operation,
+                    AlterTableOperation::AddColumns { .. }
+                );
+                match alter.alter_operation {
+                    AlterTableOperation::AddColumns { add_columns } => {
+                        let expected = vec![
+                            AddColumn {
+                                column_def: ColumnDef {
+                                    name: Ident::new("a"),
+                                    data_type: DataType::Integer(None),
+                                    collation: None,
+                                    options: vec![],
+                                },
+                                location: None,
+                                add_if_not_exists: true,
+                            },
+                            AddColumn {
+                                column_def: ColumnDef {
+                                    name: Ident::new("b"),
+                                    data_type: DataType::String(None),
+                                    collation: None,
+                                    options: vec![],
+                                },
+                                location: None,
+                                add_if_not_exists: false,
+                            },
+                            AddColumn {
+                                column_def: ColumnDef {
+                                    name: Ident::new("c"),
+                                    data_type: DataType::Int(None),
+                                    collation: None,
+                                    options: vec![],
+                                },
+                                location: None,
+                                add_if_not_exists: true,
+                            },
+                        ];
+                        for (idx, add_column) in add_columns.into_iter().enumerate() {
+                            assert_eq!(add_column, expected[idx]);
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
     fn test_parse_alter_drop_column() {
         let sql = "ALTER TABLE my_metric_1 DROP a";
         let result =
@@ -581,7 +644,7 @@ mod tests {
         let err = result.output_msg();
         assert_eq!(
             err,
-            "sql parser error: Expected COLUMN, found: a at Line: 1, Column 30"
+            "Invalid SQL syntax: sql parser error: Expected: COLUMN, found: a at Line: 1, Column: 30"
         );
 
         let sql = "ALTER TABLE my_metric_1 DROP COLUMN a";
@@ -727,7 +790,7 @@ mod tests {
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap_err();
         let err = result.output_msg();
-        assert_eq!(err, "sql parser error: Expected ADD or DROP or MODIFY or RENAME or SET after ALTER TABLE, found: table_t");
+        assert_eq!(err, "Invalid SQL syntax: sql parser error: Expected ADD or DROP or MODIFY or RENAME or SET after ALTER TABLE, found: table_t");
 
         let sql = "ALTER TABLE test_table RENAME table_t";
         let mut result =

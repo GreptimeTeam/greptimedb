@@ -118,6 +118,7 @@ pub enum UnsetIndexOperation {
 pub struct AddColumn {
     pub column_def: ColumnDef,
     pub location: Option<AddColumnLocation>,
+    pub add_if_not_exists: bool,
 }
 
 impl Display for AddColumn {

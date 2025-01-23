@@ -20,14 +20,14 @@ use std::fmt;
 use std::sync::Arc;
 
 use datafusion_common::{DataFusionError, Result};
-use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion_expr::{Extension, LogicalPlan, SortExpr, UserDefinedLogicalNodeCore};
 
 /// MergeSort Logical Plan, have same field as `Sort`, but indicate it is a merge sort,
 /// which assume each input partition is a sorted stream, and will use `SortPreserveingMergeExec`
 /// to merge them into a single sorted stream.
-#[derive(Hash, PartialEq, Eq, Clone)]
+#[derive(Hash, PartialOrd, PartialEq, Eq, Clone)]
 pub struct MergeSortLogicalPlan {
-    pub expr: Vec<Expr>,
+    pub expr: Vec<SortExpr>,
     pub input: Arc<LogicalPlan>,
     pub fetch: Option<usize>,
 }
@@ -39,7 +39,7 @@ impl fmt::Debug for MergeSortLogicalPlan {
 }
 
 impl MergeSortLogicalPlan {
-    pub fn new(input: Arc<LogicalPlan>, expr: Vec<Expr>, fetch: Option<usize>) -> Self {
+    pub fn new(input: Arc<LogicalPlan>, expr: Vec<SortExpr>, fetch: Option<usize>) -> Self {
         Self { input, expr, fetch }
     }
 
@@ -80,7 +80,7 @@ impl UserDefinedLogicalNodeCore for MergeSortLogicalPlan {
 
     // Allow further optimization
     fn expressions(&self) -> Vec<datafusion_expr::Expr> {
-        self.expr.clone()
+        self.expr.iter().map(|sort| sort.expr.clone()).collect()
     }
 
     fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -103,7 +103,12 @@ impl UserDefinedLogicalNodeCore for MergeSortLogicalPlan {
         mut inputs: Vec<LogicalPlan>,
     ) -> Result<Self> {
         let mut zelf = self.clone();
-        zelf.expr = exprs;
+        zelf.expr = zelf
+            .expr
+            .into_iter()
+            .zip(exprs)
+            .map(|(sort, expr)| sort.with_expr(expr))
+            .collect();
         zelf.input = Arc::new(inputs.pop().ok_or_else(|| {
             DataFusionError::Internal("Expected exactly one input with MergeSort".to_string())
         })?);

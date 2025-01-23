@@ -13,9 +13,7 @@
 // limitations under the License.
 
 use core::str;
-use std::result::Result as StdResult;
 
-use axum::async_trait;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
@@ -32,14 +30,13 @@ use crate::http::header::constants::{
 /// using [`GREPTIME_LOG_TABLE_NAME_HEADER_NAME`] as key.
 pub struct LogTableName(pub Option<String>);
 
-#[async_trait]
 impl<S> FromRequestParts<S> for LogTableName
 where
     S: Send + Sync,
 {
     type Rejection = (StatusCode, String);
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let headers = &parts.headers;
         string_value_from_header(headers, GREPTIME_LOG_TABLE_NAME_HEADER_NAME).map(LogTableName)
     }
@@ -49,14 +46,13 @@ where
 /// using [`GREPTIME_TRACE_TABLE_NAME_HEADER_NAME`] as key.
 pub struct TraceTableName(pub Option<String>);
 
-#[async_trait]
 impl<S> FromRequestParts<S> for TraceTableName
 where
     S: Send + Sync,
 {
     type Rejection = (StatusCode, String);
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let headers = &parts.headers;
         string_value_from_header(headers, GREPTIME_TRACE_TABLE_NAME_HEADER_NAME).map(TraceTableName)
     }
@@ -67,14 +63,13 @@ where
 /// See [`SelectInfo`] for more details.
 pub struct SelectInfoWrapper(pub SelectInfo);
 
-#[async_trait]
 impl<S> FromRequestParts<S> for SelectInfoWrapper
 where
     S: Send + Sync,
 {
     type Rejection = (StatusCode, String);
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let select =
             string_value_from_header(&parts.headers, GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME)?;
 
@@ -98,14 +93,13 @@ pub struct PipelineInfo {
     pub pipeline_version: Option<String>,
 }
 
-#[async_trait]
 impl<S> FromRequestParts<S> for PipelineInfo
 where
     S: Send + Sync,
 {
     type Rejection = (StatusCode, String);
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> StdResult<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let headers = &parts.headers;
         let pipeline_name =
             string_value_from_header(headers, GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME)?;
@@ -132,7 +126,7 @@ where
 fn string_value_from_header(
     headers: &HeaderMap,
     header_key: &str,
-) -> StdResult<Option<String>, (StatusCode, String)> {
+) -> Result<Option<String>, (StatusCode, String)> {
     headers
         .get(header_key)
         .map(|value| {

@@ -24,19 +24,18 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use arrow::array::ArrayRef;
-use arrow::compute::{concat, take_record_batch};
+use arrow::compute::{concat, concat_batches, take_record_batch};
 use arrow_schema::SchemaRef;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
 use datafusion::common::arrow::compute::sort_to_indices;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::execution::{RecordBatchStream, TaskContext};
-use datafusion::physical_plan::coalesce_batches::concat_batches;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties, TopK,
 };
 use datafusion_common::{internal_err, DataFusionError};
-use datafusion_physical_expr::PhysicalSortExpr;
+use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
 use futures::{Stream, StreamExt};
 use itertools::Itertools;
 use snafu::location;
@@ -130,6 +129,10 @@ impl DisplayAs for PartSortExec {
 }
 
 impl ExecutionPlan for PartSortExec {
+    fn name(&self) -> &str {
+        "PartSortExec"
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -237,12 +240,11 @@ impl PartSortStream {
                 TopK::try_new(
                     partition,
                     sort.schema().clone(),
-                    vec![sort.expression.clone()],
+                    LexOrdering::new(vec![sort.expression.clone()]),
                     limit,
                     context.session_config().batch_size(),
                     context.runtime_env(),
                     &sort.metrics,
-                    partition,
                 )?,
                 0,
             )
@@ -459,12 +461,7 @@ impl PartSortStream {
         let total_mem: usize = buffer.iter().map(|r| r.get_array_memory_size()).sum();
         self.reservation.try_grow(total_mem * 2)?;
 
-        let full_input = concat_batches(
-            &self.schema,
-            &buffer,
-            buffer.iter().map(|r| r.num_rows()).sum(),
-        )
-        .map_err(|e| {
+        let full_input = concat_batches(&self.schema, &buffer).map_err(|e| {
             DataFusionError::ArrowError(
                 e,
                 Some(format!(
@@ -496,12 +493,11 @@ impl PartSortStream {
         let new_top_buffer = TopK::try_new(
             self.partition,
             self.schema().clone(),
-            vec![self.expression.clone()],
+            LexOrdering::new(vec![self.expression.clone()]),
             self.limit.unwrap(),
             self.context.session_config().batch_size(),
             self.context.runtime_env(),
             &self.root_metrics,
-            self.partition,
         )?;
         let PartSortBuffer::Top(top_k, _) =
             std::mem::replace(&mut self.buffer, PartSortBuffer::Top(new_top_buffer, 0))
@@ -512,13 +508,11 @@ impl PartSortStream {
         let mut result_stream = top_k.emit()?;
         let mut placeholder_ctx = std::task::Context::from_waker(futures::task::noop_waker_ref());
         let mut results = vec![];
-        let mut row_count = 0;
         // according to the current implementation of `TopK`, the result stream will always be ready
         loop {
             match result_stream.poll_next_unpin(&mut placeholder_ctx) {
                 Poll::Ready(Some(batch)) => {
                     let batch = batch?;
-                    row_count += batch.num_rows();
                     results.push(batch);
                 }
                 Poll::Pending => {
@@ -531,7 +525,7 @@ impl PartSortStream {
             }
         }
 
-        let concat_batch = concat_batches(&self.schema, &results, row_count).map_err(|e| {
+        let concat_batch = concat_batches(&self.schema, &results).map_err(|e| {
             DataFusionError::ArrowError(
                 e,
                 Some(format!(
@@ -718,7 +712,7 @@ mod test {
 
             let schema = Schema::new(vec![Field::new(
                 "ts",
-                DataType::Timestamp(unit.clone(), None),
+                DataType::Timestamp(unit, None),
                 false,
             )]);
             let schema = Arc::new(schema);
@@ -739,8 +733,8 @@ mod test {
                         .unwrap_or_else(|| rng.i64(-100000000..100000000));
                     bound_val = Some(end);
                     let start = end - rng.i64(1..range_size_bound);
-                    let start = Timestamp::new(start, unit.clone().into());
-                    let end = Timestamp::new(end, unit.clone().into());
+                    let start = Timestamp::new(start, unit.into());
+                    let end = Timestamp::new(end, unit.into());
                     (start, end)
                 } else {
                     let start = bound_val
@@ -748,8 +742,8 @@ mod test {
                         .unwrap_or_else(|| rng.i64(..));
                     bound_val = Some(start);
                     let end = start + rng.i64(1..range_size_bound);
-                    let start = Timestamp::new(start, unit.clone().into());
-                    let end = Timestamp::new(end, unit.clone().into());
+                    let start = Timestamp::new(start, unit.into());
+                    let end = Timestamp::new(end, unit.into());
                     (start, end)
                 };
                 assert!(start < end);
@@ -769,7 +763,7 @@ mod test {
                     // mito always sort on ASC order
                     data_gen.sort();
                     per_part_sort_data.extend(data_gen.clone());
-                    let arr = new_ts_array(unit.clone(), data_gen.clone());
+                    let arr = new_ts_array(unit, data_gen.clone());
                     let batch = DfRecordBatch::try_new(schema.clone(), vec![arr]).unwrap();
                     batches.push(batch);
                 }
@@ -816,8 +810,7 @@ mod test {
             let expected_output = output_data
                 .into_iter()
                 .map(|a| {
-                    DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit.clone(), a)])
-                        .unwrap()
+                    DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, a)]).unwrap()
                 })
                 .map(|rb| {
                     // trim expected output with limit
@@ -954,7 +947,7 @@ mod test {
         {
             let schema = Schema::new(vec![Field::new(
                 "ts",
-                DataType::Timestamp(unit.clone(), None),
+                DataType::Timestamp(unit, None),
                 false,
             )]);
             let schema = Arc::new(schema);
@@ -967,8 +960,8 @@ mod test {
                 .into_iter()
                 .map(|(range, data)| {
                     let part = PartitionRange {
-                        start: Timestamp::new(range.0, unit.clone().into()),
-                        end: Timestamp::new(range.1, unit.clone().into()),
+                        start: Timestamp::new(range.0, unit.into()),
+                        end: Timestamp::new(range.1, unit.into()),
                         num_rows: data.iter().map(|b| b.len()).sum(),
                         identifier,
                     };
@@ -976,7 +969,7 @@ mod test {
                     let batches = data
                         .into_iter()
                         .map(|b| {
-                            let arr = new_ts_array(unit.clone(), b);
+                            let arr = new_ts_array(unit, b);
                             DfRecordBatch::try_new(schema.clone(), vec![arr]).unwrap()
                         })
                         .collect_vec();
@@ -987,8 +980,7 @@ mod test {
             let expected_output = expected_output
                 .into_iter()
                 .map(|a| {
-                    DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit.clone(), a)])
-                        .unwrap()
+                    DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, a)]).unwrap()
                 })
                 .collect_vec();
 

@@ -237,6 +237,15 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to register UDF: {}", name))]
+    RegisterUdf {
+        name: String,
+        #[snafu(source)]
+        error: DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -268,7 +277,8 @@ impl ErrorExt for Error {
 
             Error::MissingTableMutationHandler { .. }
             | Error::MissingProcedureServiceHandler { .. }
-            | Error::MissingFlowServiceHandler { .. } => StatusCode::Unexpected,
+            | Error::MissingFlowServiceHandler { .. }
+            | Error::RegisterUdf { .. } => StatusCode::Unexpected,
 
             Error::UnsupportedInputDataType { .. }
             | Error::TypeCast { .. }

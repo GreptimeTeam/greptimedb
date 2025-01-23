@@ -12,23 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::result::Result as StdResult;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
 use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
-use axum::body::HttpBody;
-use axum::extract::{FromRequest, Multipart, Path, Query, State};
-use axum::headers::{ContentType, HeaderMap};
+use async_trait::async_trait;
+use axum::extract::{FromRequest, Multipart, Path, Query, Request, State};
 use axum::http::header::CONTENT_TYPE;
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::{async_trait, BoxError, Extension, Json, TypedHeader};
+use axum::{Extension, Json};
+use axum_extra::TypedHeader;
 use common_error::ext::ErrorExt;
 use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
 use datatypes::value::column_data_to_json;
+use headers::ContentType;
 use lazy_static::lazy_static;
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
@@ -98,18 +98,13 @@ pub(crate) struct LogIngestRequest {
 
 pub struct PipelineContent(String);
 
-#[async_trait]
-impl<S, B> FromRequest<S, B> for PipelineContent
+impl<S> FromRequest<S> for PipelineContent
 where
-    B: HttpBody + Send + 'static,
-    B::Data: Send,
-    bytes::Bytes: std::convert::From<<B as HttpBody>::Data>,
-    B::Error: Into<BoxError>,
     S: Send + Sync,
 {
     type Rejection = Response;
 
-    async fn from_request(req: Request<B>, state: &S) -> StdResult<Self, Self::Rejection> {
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         let content_type_header = req.headers().get(CONTENT_TYPE);
         let content_type = content_type_header.and_then(|value| value.to_str().ok());
         if let Some(content_type) = content_type {
@@ -239,7 +234,7 @@ pub async fn delete_pipeline(
 /// Transform NDJSON array into a single array
 /// always return an array
 fn transform_ndjson_array_factory(
-    values: impl IntoIterator<Item = StdResult<Value, serde_json::Error>>,
+    values: impl IntoIterator<Item = Result<Value, serde_json::Error>>,
     ignore_error: bool,
 ) -> Result<Vec<Value>> {
     values

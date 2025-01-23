@@ -441,8 +441,9 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_bloom_filter_indexer() {
         let prefix = "test_bloom_filter_indexer_";
+        let tempdir = common_test_util::temp_dir::create_temp_dir(prefix);
         let object_store = mock_object_store();
-        let intm_mgr = new_intm_mgr(prefix).await;
+        let intm_mgr = new_intm_mgr(tempdir.path().to_string_lossy()).await;
         let region_metadata = mock_region_metadata();
         let memory_usage_threshold = Some(1024);
 

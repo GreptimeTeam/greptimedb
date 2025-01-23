@@ -98,6 +98,10 @@ impl DfLogicalPlanner {
         let parser_options = ParserOptions {
             enable_ident_normalization: config_options.sql_parser.enable_ident_normalization,
             parse_float_as_decimal: config_options.sql_parser.parse_float_as_decimal,
+            support_varchar_with_length: config_options.sql_parser.support_varchar_with_length,
+            enable_options_value_normalization: config_options
+                .sql_parser
+                .enable_options_value_normalization,
         };
 
         let sql_to_rel = SqlToRel::new_with_options(&context_provider, parser_options);
@@ -140,6 +144,10 @@ impl DfLogicalPlanner {
         let parser_options = ParserOptions {
             enable_ident_normalization: normalize_ident,
             parse_float_as_decimal: config_options.sql_parser.parse_float_as_decimal,
+            support_varchar_with_length: config_options.sql_parser.support_varchar_with_length,
+            enable_options_value_normalization: config_options
+                .sql_parser
+                .enable_options_value_normalization,
         };
 
         let sql_to_rel = SqlToRel::new_with_options(&context_provider, parser_options);

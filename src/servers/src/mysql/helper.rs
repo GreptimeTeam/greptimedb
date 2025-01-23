@@ -328,11 +328,11 @@ mod tests {
             delete.inner.to_string()
         );
 
-        let select = parse_sql("select from demo where host=? and idc in (select idc from idcs where name=?) and cpu>?");
+        let select = parse_sql("select * from demo where host=? and idc in (select idc from idcs where name=?) and cpu>?");
         let Statement::Query(select) = transform_placeholders(select) else {
             unreachable!()
         };
-        assert_eq!("SELECT from AS demo WHERE host = $1 AND idc IN (SELECT idc FROM idcs WHERE name = $2) AND cpu > $3", select.inner.to_string());
+        assert_eq!("SELECT * FROM demo WHERE host = $1 AND idc IN (SELECT idc FROM idcs WHERE name = $2) AND cpu > $3", select.inner.to_string());
     }
 
     #[test]

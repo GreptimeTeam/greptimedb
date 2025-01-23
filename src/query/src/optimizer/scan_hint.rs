@@ -19,7 +19,7 @@ use arrow_schema::SortOptions;
 use common_recordbatch::OrderOption;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeVisitor};
-use datafusion_common::{Column, Result as DataFusionResult};
+use datafusion_common::{Column, Result};
 use datafusion_expr::expr::Sort;
 use datafusion_expr::{utils, Expr, LogicalPlan};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
@@ -34,40 +34,36 @@ use crate::dummy_catalog::DummyTableProvider;
 ///   time series row selector hint.
 ///
 /// [`ScanRequest`]: store_api::storage::ScanRequest
+#[derive(Debug)]
 pub struct ScanHintRule;
 
 impl OptimizerRule for ScanHintRule {
-    fn try_optimize(
-        &self,
-        plan: &LogicalPlan,
-        _config: &dyn OptimizerConfig,
-    ) -> DataFusionResult<Option<LogicalPlan>> {
-        Self::optimize(plan).map(Some)
-    }
-
     fn name(&self) -> &str {
         "ScanHintRule"
+    }
+
+    fn rewrite(
+        &self,
+        plan: LogicalPlan,
+        _config: &dyn OptimizerConfig,
+    ) -> Result<Transformed<LogicalPlan>> {
+        Self::optimize(plan)
     }
 }
 
 impl ScanHintRule {
-    fn optimize(plan: &LogicalPlan) -> DataFusionResult<LogicalPlan> {
+    fn optimize(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
         let mut visitor = ScanHintVisitor::default();
         let _ = plan.visit(&mut visitor)?;
 
         if visitor.need_rewrite() {
-            plan.clone()
-                .transform_down(&|plan| Self::set_hints(plan, &visitor))
-                .map(|x| x.data)
+            plan.transform_down(&|plan| Self::set_hints(plan, &visitor))
         } else {
-            Ok(plan.clone())
+            Ok(Transformed::no(plan))
         }
     }
 
-    fn set_hints(
-        plan: LogicalPlan,
-        visitor: &ScanHintVisitor,
-    ) -> DataFusionResult<Transformed<LogicalPlan>> {
+    fn set_hints(plan: LogicalPlan, visitor: &ScanHintVisitor) -> Result<Transformed<LogicalPlan>> {
         match &plan {
             LogicalPlan::TableScan(table_scan) => {
                 let mut transformed = false;
@@ -175,16 +171,10 @@ struct ScanHintVisitor {
 impl TreeNodeVisitor<'_> for ScanHintVisitor {
     type Node = LogicalPlan;
 
-    fn f_down(&mut self, node: &Self::Node) -> DataFusionResult<TreeNodeRecursion> {
+    fn f_down(&mut self, node: &Self::Node) -> Result<TreeNodeRecursion> {
         // Get order requirement from sort plan
         if let LogicalPlan::Sort(sort) = node {
-            let mut exprs = vec![];
-            for expr in &sort.expr {
-                if let Expr::Sort(sort_expr) = expr {
-                    exprs.push(sort_expr.clone());
-                }
-            }
-            self.order_expr = Some(exprs);
+            self.order_expr = Some(sort.expr.clone());
         }
 
         // Get time series row selector from aggr plan
@@ -197,7 +187,7 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
                     is_all_last_value = false;
                     break;
                 };
-                if func.func_def.name() != "last_value" || func.filter.is_some() || func.distinct {
+                if func.func.name() != "last_value" || func.filter.is_some() || func.distinct {
                     is_all_last_value = false;
                     break;
                 }
@@ -211,10 +201,10 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
                             is_all_last_value = false;
                             break;
                         }
-                    } else if let Expr::Sort(sort_expr) = first_order_by {
+                    } else {
                         // only allow `order by xxx [ASC]`, xxx is a bare column reference so `last_value()` is the max
                         // value of the column.
-                        if !sort_expr.asc || !matches!(&*sort_expr.expr, Expr::Column(_)) {
+                        if !first_order_by.asc || !matches!(&first_order_by.expr, Expr::Column(_)) {
                             is_all_last_value = false;
                             break;
                         }
@@ -235,13 +225,8 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
                     }
                 }
                 // Safety: checked in the above loop
-                let Expr::Sort(Sort {
-                    expr: order_by_col, ..
-                }) = order_by_expr.unwrap()
-                else {
-                    unreachable!()
-                };
-                let Expr::Column(order_by_col) = *order_by_col else {
+                let order_by_expr = order_by_expr.unwrap();
+                let Expr::Column(order_by_col) = order_by_expr.expr else {
                     unreachable!()
                 };
                 if is_all_last_value {
@@ -282,10 +267,10 @@ impl ScanHintVisitor {
 mod test {
     use std::sync::Arc;
 
-    use datafusion_expr::expr::{AggregateFunction, AggregateFunctionDefinition};
+    use datafusion::functions_aggregate::first_last::last_value_udaf;
+    use datafusion_expr::expr::AggregateFunction;
     use datafusion_expr::{col, LogicalPlanBuilder};
     use datafusion_optimizer::OptimizerContext;
-    use datafusion_physical_expr::expressions::LastValue;
     use store_api::storage::RegionId;
 
     use super::*;
@@ -305,7 +290,8 @@ mod test {
             .unwrap();
 
         let context = OptimizerContext::default();
-        ScanHintRule.try_optimize(&plan, &context).unwrap();
+        assert!(ScanHintRule.supports_rewrite());
+        ScanHintRule.rewrite(plan, &context).unwrap();
 
         // should read the first (with `.sort(true, false)`) sort option
         let scan_req = provider.scan_request();
@@ -330,15 +316,15 @@ mod test {
             .aggregate(
                 vec![col("k0")],
                 vec![Expr::AggregateFunction(AggregateFunction {
-                    func_def: AggregateFunctionDefinition::UDF(Arc::new(LastValue::new().into())),
+                    func: last_value_udaf(),
                     args: vec![col("v0")],
                     distinct: false,
                     filter: None,
-                    order_by: Some(vec![Expr::Sort(Sort {
-                        expr: Box::new(col("ts")),
+                    order_by: Some(vec![Sort {
+                        expr: col("ts"),
                         asc: true,
                         nulls_first: true,
-                    })]),
+                    }]),
                     null_treatment: None,
                 })],
             )
@@ -347,7 +333,8 @@ mod test {
             .unwrap();
 
         let context = OptimizerContext::default();
-        ScanHintRule.try_optimize(&plan, &context).unwrap();
+        assert!(ScanHintRule.supports_rewrite());
+        ScanHintRule.rewrite(plan, &context).unwrap();
 
         let scan_req = provider.scan_request();
         let _ = scan_req.series_row_selector.unwrap();

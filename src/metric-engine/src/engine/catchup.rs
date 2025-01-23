@@ -13,13 +13,15 @@
 // limitations under the License.
 
 use common_telemetry::debug;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionCatchupRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use crate::engine::MetricEngineInner;
-use crate::error::{MitoCatchupOperationSnafu, Result, UnsupportedRegionRequestSnafu};
+use crate::error::{
+    MitoCatchupOperationSnafu, PhysicalRegionNotFoundSnafu, Result, UnsupportedRegionRequestSnafu,
+};
 use crate::utils;
 
 impl MetricEngineInner {
@@ -34,6 +36,18 @@ impl MetricEngineInner {
             }
             .fail();
         }
+        let data_region_id = utils::to_data_region_id(region_id);
+        let physical_region_options = *self
+            .state
+            .read()
+            .unwrap()
+            .physical_region_states()
+            .get(&data_region_id)
+            .context(PhysicalRegionNotFoundSnafu {
+                region_id: data_region_id,
+            })?
+            .options();
+
         let metadata_region_id = utils::to_metadata_region_id(region_id);
         // TODO(weny): improve the catchup, we can read the wal entries only once.
         debug!("Catchup metadata region {metadata_region_id}");
@@ -49,7 +63,6 @@ impl MetricEngineInner {
             .await
             .context(MitoCatchupOperationSnafu)?;
 
-        let data_region_id = utils::to_data_region_id(region_id);
         debug!("Catchup data region {data_region_id}");
         self.mito
             .handle_request(
@@ -64,7 +77,8 @@ impl MetricEngineInner {
             .context(MitoCatchupOperationSnafu)
             .map(|response| response.affected_rows)?;
 
-        self.recover_states(region_id).await?;
+        self.recover_states(region_id, physical_region_options)
+            .await?;
         Ok(0)
     }
 }

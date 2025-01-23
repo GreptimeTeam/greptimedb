@@ -37,6 +37,7 @@ datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion-physical-expr.workspace = true
+datafusion-substrait.workspace = true
 datatypes.workspace = true
 enum-as-inner = "0.6.0"
 enum_dispatch = "0.3"

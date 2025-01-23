@@ -371,6 +371,7 @@ mod tests {
             expr: single_quoted_string_expr("3y2mon".to_string()),
             data_type: DataType::Interval,
             format: None,
+            kind: sqlparser::ast::CastKind::Cast,
         };
 
         let control_flow = interval_transformation_rule.visit_expr(&mut cast_to_interval_expr);
@@ -393,6 +394,7 @@ mod tests {
             expr: single_quoted_string_expr("5".to_string()),
             data_type: DataType::Int64,
             format: None,
+            kind: sqlparser::ast::CastKind::Cast,
         };
         let control_flow = interval_transformation_rule.visit_expr(&mut cast_to_i64_expr);
         assert_eq!(control_flow, ControlFlow::Continue(()));
@@ -402,6 +404,7 @@ mod tests {
                 expr: single_quoted_string_expr("5".to_string()),
                 data_type: DataType::Int64,
                 format: None,
+                kind: sqlparser::ast::CastKind::Cast,
             }
         );
     }

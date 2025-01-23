@@ -34,6 +34,7 @@ use async_trait::async_trait;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use mito2::engine::MitoEngine;
+pub(crate) use options::IndexOptions;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
@@ -49,6 +50,7 @@ use crate::config::EngineConfig;
 use crate::data_region::DataRegion;
 use crate::error::{self, Result, UnsupportedRegionRequestSnafu};
 use crate::metadata_region::MetadataRegion;
+use crate::row_modifier::RowModifier;
 use crate::utils;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
@@ -266,6 +268,7 @@ impl MetricEngine {
                 data_region,
                 state: RwLock::default(),
                 config,
+                row_modifier: RowModifier::new(),
             }),
         }
     }
@@ -309,6 +312,7 @@ struct MetricEngineInner {
     /// TODO(weny): remove it after the config is used.
     #[allow(unused)]
     config: EngineConfig,
+    row_modifier: RowModifier,
 }
 
 #[cfg(test)]

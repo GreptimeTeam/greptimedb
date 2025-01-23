@@ -22,7 +22,9 @@ use store_api::region_request::{AffectedRows, AlterKind, RegionAlterRequest};
 use store_api::storage::RegionId;
 
 use crate::engine::MetricEngineInner;
-use crate::error::{LogicalRegionNotFoundSnafu, Result, SerializeColumnMetadataSnafu};
+use crate::error::{
+    LogicalRegionNotFoundSnafu, PhysicalRegionNotFoundSnafu, Result, SerializeColumnMetadataSnafu,
+};
 use crate::utils::{to_data_region_id, to_metadata_region_id};
 
 impl MetricEngineInner {
@@ -64,16 +66,27 @@ impl MetricEngineInner {
         logical_region_id: RegionId,
         request: RegionAlterRequest,
     ) -> Result<RegionId> {
-        let physical_region_id = {
+        let (physical_region_id, index_options) = {
             let state = &self.state.read().unwrap();
-            state
+            let physical_region_id = state
                 .get_physical_region_id(logical_region_id)
                 .with_context(|| {
                     error!("Trying to alter an nonexistent region {logical_region_id}");
                     LogicalRegionNotFoundSnafu {
                         region_id: logical_region_id,
                     }
+                })?;
+
+            let index_options = state
+                .physical_region_states()
+                .get(&physical_region_id)
+                .with_context(|| PhysicalRegionNotFoundSnafu {
+                    region_id: physical_region_id,
                 })?
+                .options()
+                .index;
+
+            (physical_region_id, index_options)
         };
 
         // only handle adding column
@@ -122,6 +135,7 @@ impl MetricEngineInner {
             data_region_id,
             logical_region_id,
             &mut columns_to_add,
+            index_options,
         )
         .await?;
 

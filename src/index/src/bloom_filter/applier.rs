@@ -20,7 +20,7 @@ use itertools::Itertools;
 
 use crate::bloom_filter::error::Result;
 use crate::bloom_filter::reader::BloomFilterReader;
-use crate::bloom_filter::Bytes;
+use crate::Bytes;
 
 pub struct BloomFilterApplier {
     reader: Box<dyn BloomFilterReader + Send>,
@@ -50,7 +50,7 @@ impl BloomFilterApplier {
         let deduped_locs = locs
             .iter()
             .dedup()
-            .map(|i| self.meta.bloom_filter_locs[*i as usize].clone())
+            .map(|i| self.meta.bloom_filter_locs[*i as usize])
             .collect::<Vec<_>>();
         let bfs = self.reader.bloom_filter_vec(&deduped_locs).await?;
 
