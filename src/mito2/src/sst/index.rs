@@ -117,7 +117,7 @@ pub struct Indexer {
 
 impl Indexer {
     /// Updates the index with the given batch.
-    pub async fn update(&mut self, batch: &Batch) {
+    pub async fn update(&mut self, batch: &mut Batch) {
         self.do_update(batch).await;
 
         self.flush_mem_metrics();
