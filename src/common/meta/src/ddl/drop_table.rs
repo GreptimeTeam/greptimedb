@@ -262,6 +262,7 @@ pub struct DropTableData {
     pub task: DropTableTask,
     pub physical_region_routes: Vec<RegionRoute>,
     pub physical_table_id: Option<TableId>,
+    #[serde(default)]
     pub region_wal_options: HashMap<u32, String>,
     #[serde(default)]
     pub allow_rollback: bool,
