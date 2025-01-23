@@ -54,3 +54,15 @@ SELECT INTERVAL '-P3Y3M700DT133H17M36.789S';
 SELECT 'P3Y3M700DT133H17M36.789S'::INTERVAL;
 
 SELECT INTERVAL '2h' + INTERVAL 'P3Y3M700DT133H17M36.789S';
+
+select '2022-01-01T00:00:01'::timestamp + '1 days'::interval;
+
+select '2022-01-01T00:00:01'::timestamp + '2 days'::interval;
+
+select '2022-01-01T00:00:01'::timestamp + '1 month'::interval;
+
+select '2022-01-01T00:00:01'::timestamp + '2 months'::interval;
+
+select '2022-01-01T00:00:01'::timestamp + '1 year'::interval;
+
+select '2023-01-01T00:00:01'::timestamp + '2 years'::interval;

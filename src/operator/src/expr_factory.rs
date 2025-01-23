@@ -283,7 +283,12 @@ pub fn validate_create_expr(create: &CreateTableExpr) -> Result<()> {
     }
     // verify do not contain interval type column issue #3235
     for column in &create.column_defs {
-        if matches!(column.data_type(), ColumnDataType::IntervalMonthDayNano) {
+        if matches!(
+            column.data_type(),
+            ColumnDataType::IntervalYearMonth
+                | ColumnDataType::IntervalDayTime
+                | ColumnDataType::IntervalMonthDayNano
+        ) {
             return InvalidSqlSnafu {
                 err_msg: format!(
                     "column name `{}` is interval type, which is not supported",
