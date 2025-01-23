@@ -38,7 +38,10 @@ use log_query::LogQuery;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use pipeline::{GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion, PipelineWay};
+use pipeline::{
+    GreptimePipelineParams, GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion,
+    PipelineWay,
+};
 use serde_json::Value;
 use session::context::{QueryContext, QueryContextRef};
 
@@ -113,6 +116,7 @@ pub trait OpenTelemetryProtocolHandler: PipelineHandler {
         pipeline_handler: PipelineHandlerRef,
         request: ExportLogsServiceRequest,
         pipeline: PipelineWay,
+        pipeline_params: GreptimePipelineParams,
         table_name: String,
         ctx: QueryContextRef,
     ) -> Result<Output>;

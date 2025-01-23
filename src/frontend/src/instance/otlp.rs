@@ -20,7 +20,7 @@ use common_telemetry::tracing;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use pipeline::PipelineWay;
+use pipeline::{GreptimePipelineParams, PipelineWay};
 use servers::error::{self, AuthSnafu, InFlightWriteBytesExceededSnafu, Result as ServerResult};
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
@@ -115,6 +115,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         pipeline_handler: PipelineHandlerRef,
         request: ExportLogsServiceRequest,
         pipeline: PipelineWay,
+        pipeline_params: GreptimePipelineParams,
         table_name: String,
         ctx: QueryContextRef,
     ) -> ServerResult<Output> {
@@ -132,6 +133,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         let (requests, rows) = otlp::logs::to_grpc_insert_requests(
             request,
             pipeline,
+            pipeline_params,
             table_name,
             &ctx,
             pipeline_handler,

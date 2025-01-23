@@ -48,6 +48,7 @@ pub const LOG_TABLE_NAME: &str = "opentelemetry_logs";
 pub async fn to_grpc_insert_requests(
     request: ExportLogsServiceRequest,
     pipeline: PipelineWay,
+    pipeline_params: GreptimePipelineParams,
     table_name: String,
     query_ctx: &QueryContextRef,
     pipeline_handler: PipelineHandlerRef,
@@ -69,19 +70,17 @@ pub async fn to_grpc_insert_requests(
         }
         PipelineWay::Pipeline(pipeline_def) => {
             let data = parse_export_logs_service_request(request);
+            let array = Pipeline::prepare(data)?;
 
             let db_string = query_ctx.get_db_string();
-
-            let pipeline_params = GreptimePipelineParams::default();
 
             let inserts = run_pipeline(
                 &pipeline_handler,
                 pipeline_def,
                 &pipeline_params,
-                PipelineExecInput::Original(data),
+                array,
                 table_name,
                 query_ctx,
-                db_string.as_ref(),
                 true,
             )
             .await?;

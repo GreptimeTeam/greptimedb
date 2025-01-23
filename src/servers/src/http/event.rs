@@ -282,10 +282,9 @@ async fn dryrun_pipeline_inner(
         &pipeline_handler,
         PipelineDefinition::Resolved(pipeline),
         &params,
-        PipelineExecInput::Original(value),
+        Pipeline::prepare(value)?,
         "dry_run".to_owned(),
         query_ctx,
-        db.as_ref(),
         true,
     )
     .await?;
@@ -604,10 +603,9 @@ pub(crate) async fn ingest_logs_inner(
             &state,
             PipelineDefinition::from_name(&pipeline_name, version),
             &pipeline_params,
-            PipelineExecInput::Original(request.values),
+            Pipeline::prepare(request.values),
             request.table,
             &query_ctx,
-            db.as_str(),
             true,
         )
         .await?;

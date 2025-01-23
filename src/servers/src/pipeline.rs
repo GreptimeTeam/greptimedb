@@ -31,41 +31,6 @@ use crate::metrics::{
 };
 use crate::query_handler::PipelineHandlerRef;
 
-#[inline]
-fn pipeline_exec_with_intermediate_state(
-    pipeline: &Arc<Pipeline<GreptimeTransformer>>,
-    intermediate_state: &mut Vec<pipeline::Value>,
-    transformed: &mut Vec<Row>,
-    dispatched: &mut BTreeMap<DispatchedTo, Vec<Vec<pipeline::Value>>>,
-    db: &str,
-    transform_timer: &Instant,
-) -> Result<()> {
-    let r = pipeline
-        .exec_mut(intermediate_state)
-        .inspect_err(|_| {
-            METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                .with_label_values(&[db, METRIC_FAILURE_VALUE])
-                .observe(transform_timer.elapsed().as_secs_f64());
-        })
-        .context(PipelineTransformSnafu)
-        .context(PipelineSnafu)?;
-
-    match r {
-        PipelineExecOutput::Transformed(row) => {
-            transformed.push(row);
-        }
-        PipelineExecOutput::DispatchedTo(dispatched_to) => {
-            if let Some(values) = dispatched.get_mut(&dispatched_to) {
-                values.push(intermediate_state.clone());
-            } else {
-                dispatched.insert(dispatched_to, vec![intermediate_state.clone()]);
-            }
-        }
-    }
-
-    Ok(())
-}
-
 /// Never call this on `GreptimeIdentityPipeline` because it's a real pipeline
 pub async fn get_pipeline(
     pipeline_def: PipelineDefinition,
@@ -89,12 +54,13 @@ pub(crate) async fn run_pipeline(
     state: &PipelineHandlerRef,
     pipeline_definition: PipelineDefinition,
     pipeline_parameters: &GreptimePipelineParams,
-    values: PipelineExecInput,
+    array: Vec<BTreeMap<String, pipeline::Value>>,
     table_name: String,
     query_ctx: &QueryContextRef,
-    db: &str,
     is_top_level: bool,
 ) -> Result<Vec<RowInsertRequest>> {
+    let db = query_ctx.get_db_string();
+
     if matches!(
         pipeline_definition,
         PipelineDefinition::GreptimeIdentityPipeline
@@ -103,7 +69,7 @@ pub(crate) async fn run_pipeline(
             .get_table(&table_name, query_ctx)
             .await
             .context(CatalogSnafu)?;
-        pipeline::identity_pipeline(values, table, pipeline_parameters)
+        pipeline::identity_pipeline(array, table, pipeline_parameters)
             .map(|rows| {
                 vec![RowInsertRequest {
                     rows: Some(rows),
@@ -118,44 +84,30 @@ pub(crate) async fn run_pipeline(
         let transform_timer = std::time::Instant::now();
 
         let mut transformed = Vec::with_capacity(values.len());
-        let mut dispatched: BTreeMap<DispatchedTo, Vec<Vec<pipeline::Value>>> = BTreeMap::new();
+        let mut dispatched: BTreeMap<DispatchedTo, Vec<BTreeMap<String, pipeline::Value>>> =
+            BTreeMap::new();
 
-        match values {
-            PipelineExecInput::Original(array) => {
-                let mut intermediate_state = pipeline.init_intermediate_state();
-                for v in array {
-                    pipeline
-                        .prepare(v, &mut intermediate_state)
-                        .inspect_err(|_| {
-                            METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                                .with_label_values(&[db, METRIC_FAILURE_VALUE])
-                                .observe(transform_timer.elapsed().as_secs_f64());
-                        })
-                        .context(PipelineTransformSnafu)
-                        .context(PipelineSnafu)?;
+        for mut values in array {
+            let r = pipeline
+                .exec_mut(&mut values)
+                .inspect_err(|_| {
+                    METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                        .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
+                        .observe(transform_timer.elapsed().as_secs_f64());
+                })
+                .context(PipelineTransformSnafu)
+                .context(PipelineSnafu)?;
 
-                    pipeline_exec_with_intermediate_state(
-                        &pipeline,
-                        &mut intermediate_state,
-                        &mut transformed,
-                        &mut dispatched,
-                        db,
-                        &transform_timer,
-                    )?;
-
-                    pipeline.reset_intermediate_state(&mut intermediate_state);
+            match r {
+                PipelineExecOutput::Transformed(row) => {
+                    transformed.push(row);
                 }
-            }
-            PipelineExecInput::Intermediate { array, .. } => {
-                for mut intermediate_state in array {
-                    pipeline_exec_with_intermediate_state(
-                        &pipeline,
-                        &mut intermediate_state,
-                        &mut transformed,
-                        &mut dispatched,
-                        db,
-                        &transform_timer,
-                    )?;
+                PipelineExecOutput::DispatchedTo(dispatched_to) => {
+                    if let Some(coll) = dispatched.get_mut(&dispatched_to) {
+                        coll.push(values);
+                    } else {
+                        dispatched.insert(dispatched_to, vec![values]);
+                    }
                 }
             }
         }
@@ -176,7 +128,7 @@ pub(crate) async fn run_pipeline(
 
         // if current pipeline contains dispatcher and has several rules, we may
         // already accumulated several dispatched rules and rows.
-        for (dispatched_to, values) in dispatched {
+        for (dispatched_to, coll) in dispatched {
             // we generate the new table name according to `table_part` and
             // current custom table name.
             let table_name = format!("{}_{}", &table_name, dispatched_to.table_part);
@@ -185,22 +137,14 @@ pub(crate) async fn run_pipeline(
                 .as_deref()
                 .unwrap_or(GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME);
 
-            // run pipeline recursively. Note that the values we are going to
-            // process is now intermediate version. It's in form of
-            // `Vec<Vec<pipeline::Value>>`.
+            // run pipeline recursively.
             let requests = Box::pin(run_pipeline(
                 state,
                 PipelineDefinition::from_name(next_pipeline_name, None),
                 pipeline_parameters,
-                PipelineExecInput::Intermediate {
-                    array: values,
-                    // FIXME(sunng87): this intermediate_keys is incorrect. what
-                    // we will need is the keys that generated after processors
-                    keys: pipeline.intermediate_keys().clone(),
-                },
+                coll,
                 table_name,
                 query_ctx,
-                db,
                 false,
             ))
             .await?;
@@ -210,7 +154,7 @@ pub(crate) async fn run_pipeline(
 
         if is_top_level {
             METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                .with_label_values(&[db, METRIC_SUCCESS_VALUE])
+                .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
                 .observe(transform_timer.elapsed().as_secs_f64());
         }
 

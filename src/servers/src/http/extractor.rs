@@ -18,7 +18,7 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use http::HeaderMap;
-use pipeline::SelectInfo;
+use pipeline::{GreptimePipelineParams, SelectInfo};
 
 use crate::http::header::constants::{
     GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME, GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,
@@ -91,6 +91,7 @@ where
 pub struct PipelineInfo {
     pub pipeline_name: Option<String>,
     pub pipeline_version: Option<String>,
+    pub pipeline_params: Option<GreptimePipelineParams>,
 }
 
 impl<S> FromRequestParts<S> for PipelineInfo
@@ -105,20 +106,14 @@ where
             string_value_from_header(headers, GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME)?;
         let pipeline_version =
             string_value_from_header(headers, GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME)?;
-        match (pipeline_name, pipeline_version) {
-            (Some(name), Some(version)) => Ok(PipelineInfo {
-                pipeline_name: Some(name),
-                pipeline_version: Some(version),
-            }),
-            (None, _) => Ok(PipelineInfo {
-                pipeline_name: None,
-                pipeline_version: None,
-            }),
-            (Some(name), None) => Ok(PipelineInfo {
-                pipeline_name: Some(name),
-                pipeline_version: None,
-            }),
-        }
+        let pipeline_parameters =
+            string_value_from_header(headers, GREPTIME_PIPELINE_PARAMS_HEADER)?;
+
+        Ok(PipelineInfo {
+            pipeline_name,
+            pipeline_version,
+            pipeline_params: pipeline_parameters.map(|v| GreptimePipelineParams::from_params(v)),
+        })
     }
 }
 
