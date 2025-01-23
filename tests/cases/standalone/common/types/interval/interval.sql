@@ -59,6 +59,10 @@ select '2022-01-01T00:00:01'::timestamp + '1 days'::interval;
 
 select '2022-01-01T00:00:01'::timestamp + '2 days'::interval;
 
+select '2022-01-01T00:00:01'::timestamp - '1 days'::interval;
+
+select '2022-01-01T00:00:01'::timestamp - '2 days'::interval;
+
 select '2022-01-01T00:00:01'::timestamp + '1 month'::interval;
 
 select '2022-01-01T00:00:01'::timestamp + '2 months'::interval;
@@ -66,3 +70,17 @@ select '2022-01-01T00:00:01'::timestamp + '2 months'::interval;
 select '2022-01-01T00:00:01'::timestamp + '1 year'::interval;
 
 select '2023-01-01T00:00:01'::timestamp + '2 years'::interval;
+
+-- DATE + INTERVAL
+SELECT DATE '2000-10-30' + '1 days'::interval;
+
+SELECT DATE '2000-10-30' + '2 months'::interval;
+
+SELECT DATE '2000-10-30' + '2 years'::interval;
+
+-- DATE - INTERVAL
+SELECT DATE '2000-10-30' - '1 days'::interval;
+
+SELECT DATE '2000-10-30' - '2 months'::interval;
+
+SELECT DATE '2000-10-30' - '2 years'::interval;

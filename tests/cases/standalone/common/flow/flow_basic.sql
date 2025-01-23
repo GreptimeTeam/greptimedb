@@ -199,8 +199,6 @@ where
 
 SHOW CREATE FLOW filter_numbers_basic;
 
-SHOW CREATE TABLE out_num_cnt_basic;
-
 drop flow filter_numbers_basic;
 
 drop table out_num_cnt_basic;
