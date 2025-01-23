@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+
 use common_telemetry::debug;
 use snafu::OptionExt;
 use yaml_rust::Yaml;
@@ -109,22 +111,17 @@ impl TryFrom<&Yaml> for Dispatcher {
 
 impl Dispatcher {
     /// execute dispatcher and returns matched rule if any
-    pub(crate) fn exec(&self, keys: &Vec<String>, val: &Vec<Value>) -> Option<&Rule> {
-        if let Some(index) = keys.iter().position(|key| key == &self.field) {
-            if let Some(value) = val.get(index) {
-                for rule in &self.rules {
-                    if rule.value == *value {
-                        return Some(rule);
-                    }
+    pub(crate) fn exec(&self, data: &BTreeMap<String, Value>) -> Option<&Rule> {
+        if let Some(value) = data.get(&self.field) {
+            for rule in &self.rules {
+                if rule.value == *value {
+                    return Some(rule);
                 }
-
-                None
-            } else {
-                debug!("value at index {} is not found in {:?}", &index, val);
-                None
             }
+
+            None
         } else {
-            debug!("field {} not found in keys {:?}", &self.field, keys);
+            debug!("field {} not found in keys {:?}", &self.field, data.keys());
             None
         }
     }
