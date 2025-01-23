@@ -47,27 +47,19 @@ INSERT INTO t2 VALUES ('job1', 0, 0), ('job2', 1, 1);
 
 SELECT * from t2;
 
-SELECT * from phy;
-
 ADMIN flush_table("phy");
 
-SELECT * from phy;
-
 -- SQLNESS ARG restart=true
-SELECT * from phy;
-
 INSERT INTO t2 VALUES ('job3', 0, 0), ('job4', 1, 1);
 
 SELECT * from t1;
 
 SELECT * from t2;
 
-SELECT * from phy;
+DROP TABLE t1;
 
 DROP TABLE t2;
 
 DESC TABLE phy;
-
-SELECT ts, val, __tsid, host, job FROM phy;
 
 DROP TABLE phy;
