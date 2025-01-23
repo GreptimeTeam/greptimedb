@@ -1,7 +1,7 @@
 create table
     skipping_table (
         ts timestamp time index,
-        id string skipping index,
+        `id` string skipping index,
         `name` string skipping index
         with
             (granularity = 8192),
@@ -59,7 +59,6 @@ EXPLAIN ANALYZE SELECT * FROM skipping_table WHERE id = 'id2' ORDER BY `name`;
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [name@2 ASC NULLS LAST] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_SortExec: expr=[name@2 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: id@1 = id2 REDACTED
@@ -83,7 +82,6 @@ EXPLAIN ANALYZE SELECT * FROM skipping_table WHERE id = 'id5' ORDER BY `name`;
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [name@2 ASC NULLS LAST] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_SortExec: expr=[name@2 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: id@1 = id5 REDACTED

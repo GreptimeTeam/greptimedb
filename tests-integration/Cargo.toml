@@ -45,7 +45,8 @@ flow.workspace = true
 frontend = { workspace = true, features = ["testing"] }
 futures.workspace = true
 futures-util.workspace = true
-loki-api = "0.1"
+hyper-util = { workspace = true, features = ["tokio"] }
+loki-api.workspace = true
 meta-client.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
 moka.workspace = true

@@ -1,6 +1,6 @@
 -- from:
 -- https://github.com/duckdb/duckdb/blob/74687ec572e9e6ccf34f9b15daa62998b34a3e13/test/sql/subquery/test_neumann.test
-CREATE TABLE students(ts TIMESTAMP TIME INDEX, id INTEGER, n VARCHAR, major VARCHAR, y INTEGER);
+CREATE TABLE students(ts TIMESTAMP TIME INDEX, `id` INTEGER, n VARCHAR, major VARCHAR, y INTEGER);
 
 CREATE TABLE exams(ts TIMESTAMP TIME INDEX, sid INTEGER, course VARCHAR, curriculum VARCHAR, grade INTEGER, y INTEGER);
 
@@ -16,15 +16,15 @@ INSERT INTO exams VALUES (3, 2, 'Database Systems', 'CS', 7, 2015);
 
 INSERT INTO exams VALUES (4, 2, 'Graphics', 'CS', 7, 2016);
 
-SELECT s.n, e.course, e.grade FROM students s, exams e WHERE s.id=e.sid AND e.grade=(SELECT MAX(e2.grade) FROM exams e2 WHERE s.id=e2.sid) ORDER BY n, course;
+SELECT s.n, e.course, e.grade FROM students s, exams e WHERE s.`id`=e.sid AND e.grade=(SELECT MAX(e2.grade) FROM exams e2 WHERE s.`id`=e2.sid) ORDER BY n, course;
 
 -- skipped, unsupported feature: correlated column in predicate, see also:
 -- https://github.com/GreptimeTeam/greptimedb/issues/5012
--- SELECT s.n, e.course, e.grade FROM students s, exams e WHERE s.id=e.sid AND (s.major = 'CS' OR s.major = 'Games Eng') AND e.grade <= (SELECT AVG(e2.grade) - 1 FROM exams e2 WHERE s.id=e2.sid OR (e2.curriculum=s.major AND s.y>=e2.y)) ORDER BY n, course;
+-- SELECT s.n, e.course, e.grade FROM students s, exams e WHERE s.`id`=e.sid AND (s.major = 'CS' OR s.major = 'Games Eng') AND e.grade <= (SELECT AVG(e2.grade) - 1 FROM exams e2 WHERE s.`id`=e2.sid OR (e2.curriculum=s.major AND s.y>=e2.y)) ORDER BY n, course;
 
 -- skipped, unsupported feature: exists, see also:
 -- https://github.com/GreptimeTeam/greptimedb/issues/5012
--- SELECT n, major FROM students s WHERE EXISTS(SELECT * FROM exams e WHERE e.sid=s.id AND grade=10) OR s.n='Dirk' ORDER BY n;
+-- SELECT n, major FROM students s WHERE EXISTS(SELECT * FROM exams e WHERE e.sid=s.`id` AND grade=10) OR s.n='Dirk' ORDER BY n;
 
 DROP TABLE students;
 

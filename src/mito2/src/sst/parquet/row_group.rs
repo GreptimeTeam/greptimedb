@@ -24,10 +24,10 @@ use parquet::arrow::ProjectionMask;
 use parquet::column::page::{PageIterator, PageReader};
 use parquet::errors::{ParquetError, Result};
 use parquet::file::metadata::{ColumnChunkMetaData, ParquetMetaData, RowGroupMetaData};
+use parquet::file::page_index::offset_index::OffsetIndexMetaData;
 use parquet::file::properties::DEFAULT_PAGE_SIZE;
 use parquet::file::reader::{ChunkReader, Length};
 use parquet::file::serialized_reader::SerializedPageReader;
-use parquet::format::PageLocation;
 use store_api::storage::RegionId;
 use tokio::task::yield_now;
 
@@ -39,31 +39,33 @@ use crate::sst::parquet::helper::fetch_byte_ranges;
 use crate::sst::parquet::page_reader::RowGroupCachedReader;
 
 pub(crate) struct RowGroupBase<'a> {
-    pub(crate) metadata: &'a RowGroupMetaData,
-    pub(crate) page_locations: Option<&'a [Vec<PageLocation>]>,
+    metadata: &'a RowGroupMetaData,
+    pub(crate) offset_index: Option<&'a [OffsetIndexMetaData]>,
     /// Compressed page of each column.
-    pub(crate) column_chunks: Vec<Option<Arc<ColumnChunkData>>>,
+    column_chunks: Vec<Option<Arc<ColumnChunkData>>>,
     pub(crate) row_count: usize,
     /// Row group level cached pages for each column.
     ///
     /// These pages are uncompressed pages of a row group.
     /// `column_uncompressed_pages.len()` equals to `column_chunks.len()`.
-    pub(crate) column_uncompressed_pages: Vec<Option<Arc<PageValue>>>,
+    column_uncompressed_pages: Vec<Option<Arc<PageValue>>>,
 }
 
 impl<'a> RowGroupBase<'a> {
     pub(crate) fn new(parquet_meta: &'a ParquetMetaData, row_group_idx: usize) -> Self {
         let metadata = parquet_meta.row_group(row_group_idx);
-        // `page_locations` is always `None` if we don't set
+        // `offset_index` is always `None` if we don't set
         // [with_page_index()](https://docs.rs/parquet/latest/parquet/arrow/arrow_reader/struct.ArrowReaderOptions.html#method.with_page_index)
         // to `true`.
-        let page_locations = parquet_meta
+        let offset_index = parquet_meta
             .offset_index()
+            // filter out empty offset indexes (old versions specified Some(vec![]) when no present)
+            .filter(|index| !index.is_empty())
             .map(|x| x[row_group_idx].as_slice());
 
         Self {
             metadata,
-            page_locations,
+            offset_index,
             column_chunks: vec![None; metadata.columns().len()],
             row_count: metadata.num_rows() as usize,
             column_uncompressed_pages: vec![None; metadata.columns().len()],
@@ -73,7 +75,7 @@ impl<'a> RowGroupBase<'a> {
     pub(crate) fn calc_sparse_read_ranges(
         &self,
         projection: &ProjectionMask,
-        page_locations: &[Vec<PageLocation>],
+        offset_index: &[OffsetIndexMetaData],
         selection: &RowSelection,
     ) -> (Vec<Range<u64>>, Vec<Vec<usize>>) {
         // If we have a `RowSelection` and an `OffsetIndex` then only fetch pages required for the
@@ -90,7 +92,7 @@ impl<'a> RowGroupBase<'a> {
                 // then we need to also fetch a dictionary page.
                 let mut ranges = vec![];
                 let (start, _len) = chunk_meta.byte_range();
-                match page_locations[idx].first() {
+                match offset_index[idx].page_locations.first() {
                     Some(first) if first.offset as u64 != start => {
                         ranges.push(start..first.offset as u64);
                     }
@@ -99,7 +101,7 @@ impl<'a> RowGroupBase<'a> {
 
                 ranges.extend(
                     selection
-                        .scan_ranges(&page_locations[idx])
+                        .scan_ranges(&offset_index[idx].page_locations)
                         .iter()
                         .map(|range| range.start as u64..range.end as u64),
                 );
@@ -203,7 +205,11 @@ impl<'a> RowGroupBase<'a> {
                 )))
             }
             Some(data) => {
-                let page_locations = self.page_locations.map(|index| index[col_idx].clone());
+                let page_locations = self
+                    .offset_index
+                    // filter out empty offset indexes (old versions specified Some(vec![]) when no present)
+                    .filter(|index| !index.is_empty())
+                    .map(|index| index[col_idx].page_locations.clone());
                 SerializedPageReader::new(
                     data.clone(),
                     self.metadata.column(col_idx),
@@ -245,13 +251,13 @@ impl<'a> InMemoryRowGroup<'a> {
         object_store: ObjectStore,
     ) -> Self {
         Self {
-            base: RowGroupBase::new(parquet_meta, row_group_idx),
             region_id,
             file_id,
             row_group_idx,
             cache_strategy,
             file_path,
             object_store,
+            base: RowGroupBase::new(parquet_meta, row_group_idx),
         }
     }
 
@@ -261,10 +267,10 @@ impl<'a> InMemoryRowGroup<'a> {
         projection: &ProjectionMask,
         selection: Option<&RowSelection>,
     ) -> Result<()> {
-        if let Some((selection, page_locations)) = selection.zip(self.base.page_locations) {
+        if let Some((selection, offset_index)) = selection.zip(self.base.offset_index) {
             let (fetch_ranges, page_start_offsets) =
                 self.base
-                    .calc_sparse_read_ranges(projection, page_locations, selection);
+                    .calc_sparse_read_ranges(projection, offset_index, selection);
 
             let chunk_data = self.fetch_bytes(&fetch_ranges).await?;
             // Assign sparse chunk data to base.

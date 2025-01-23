@@ -23,7 +23,7 @@ SHOW CREATE TABLE out_num_cnt_basic;
 | Table             | Create Table                                     |
 +-------------------+--------------------------------------------------+
 | out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
-|                   |   "SUM(numbers_input_basic.number)" BIGINT NULL, |
+|                   |   "sum(numbers_input_basic.number)" BIGINT NULL, |
 |                   |   "window_start" TIMESTAMP(3) NOT NULL,          |
 |                   |   "window_end" TIMESTAMP(3) NULL,                |
 |                   |   "update_at" TIMESTAMP(3) NULL,                 |
@@ -51,7 +51,7 @@ SHOW CREATE TABLE out_num_cnt_basic;
 | Table             | Create Table                                     |
 +-------------------+--------------------------------------------------+
 | out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
-|                   |   "SUM(numbers_input_basic.number)" BIGINT NULL, |
+|                   |   "sum(numbers_input_basic.number)" BIGINT NULL, |
 |                   |   "window_start" TIMESTAMP(3) NOT NULL,          |
 |                   |   "window_end" TIMESTAMP(3) NULL,                |
 |                   |   "update_at" TIMESTAMP(3) NULL,                 |

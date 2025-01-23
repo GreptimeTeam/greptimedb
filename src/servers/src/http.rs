@@ -20,14 +20,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use auth::UserProviderRef;
-use axum::error_handling::HandleErrorLayer;
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode as HttpStatusCode;
-use axum::response::{IntoResponse, Json, Response};
-use axum::{middleware, routing, BoxError, Router};
+use axum::response::{IntoResponse, Response};
+use axum::serve::ListenerExt;
+use axum::{middleware, routing, Router};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
-use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatch;
 use common_telemetry::{error, info};
 use common_time::timestamp::TimeUnit;
@@ -50,7 +49,9 @@ use self::authorize::AuthState;
 use self::result::table_result::TableResponse;
 use crate::configurator::ConfiguratorRef;
 use crate::elasticsearch;
-use crate::error::{AddressBindSnafu, AlreadyStartedSnafu, Error, HyperSnafu, Result, ToJsonSnafu};
+use crate::error::{
+    AddressBindSnafu, AlreadyStartedSnafu, Error, InternalIoSnafu, Result, ToJsonSnafu,
+};
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::prometheus::{
     build_info_query, format_query, instant_query, label_values_query, labels_query, parse_query,
@@ -579,7 +580,7 @@ impl HttpServerBuilder {
 
     pub fn with_metrics_handler(self, handler: MetricsHandler) -> Self {
         Self {
-            router: self.router.nest("", HttpServer::route_metrics(handler)),
+            router: self.router.merge(HttpServer::route_metrics(handler)),
             ..self
         }
     }
@@ -630,14 +631,14 @@ impl HttpServerBuilder {
         });
 
         Self {
-            router: self.router.nest("", config_router),
+            router: self.router.merge(config_router),
             ..self
         }
     }
 
     pub fn with_extra_router(self, router: Router) -> Self {
         Self {
-            router: self.router.nest("", router),
+            router: self.router.merge(router),
             ..self
         }
     }
@@ -654,6 +655,7 @@ impl HttpServerBuilder {
 }
 
 impl HttpServer {
+    /// Gets the router and adds necessary root routes (health, status, dashboard).
     pub fn make_app(&self) -> Router {
         let mut router = {
             let router = self.router.lock().unwrap();
@@ -689,7 +691,7 @@ impl HttpServer {
                 );
 
                 // "/dashboard" and "/dashboard/" are two different paths in Axum.
-                // We cannot nest "/dashboard/", because we already mapping "/dashboard/*x" while nesting "/dashboard".
+                // We cannot nest "/dashboard/", because we already mapping "/dashboard/{*x}" while nesting "/dashboard".
                 // So we explicitly route "/dashboard/" here.
                 router = router
                     .route(
@@ -697,7 +699,7 @@ impl HttpServer {
                         routing::get(dashboard::static_handler).post(dashboard::static_handler),
                     )
                     .route(
-                        "/dashboard/*x",
+                        "/dashboard/{*x}",
                         routing::get(dashboard::static_handler).post(dashboard::static_handler),
                     );
             }
@@ -709,6 +711,8 @@ impl HttpServer {
         router
     }
 
+    /// Attaches middlewares and debug routes to the router.
+    /// Callers should call this method after [HttpServer::make_app()].
     pub fn build(&self, router: Router) -> Router {
         let timeout_layer = if self.options.timeout != Duration::default() {
             Some(ServiceBuilder::new().layer(DynamicTimeoutLayer::new(self.options.timeout)))
@@ -730,7 +734,6 @@ impl HttpServer {
             // middlewares
             .layer(
                 ServiceBuilder::new()
-                    .layer(HandleErrorLayer::new(handle_error))
                     // disable on failure tracing. because printing out isn't very helpful,
                     // and we have impl IntoResponse for Error. It will print out more detailed error messages
                     .layer(TraceLayer::new_for_http().on_failure(()))
@@ -769,7 +772,6 @@ impl HttpServer {
             .route("/api/v1/push", routing::post(loki::loki_ingest))
             .layer(
                 ServiceBuilder::new()
-                    .layer(HandleErrorLayer::new(handle_error))
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
             .with_state(log_state)
@@ -788,12 +790,12 @@ impl HttpServer {
             .route("/_license", routing::get(elasticsearch::handle_get_license))
             .route("/_bulk", routing::post(elasticsearch::handle_bulk_api))
             .route(
-                "/:index/_bulk",
+                "/{index}/_bulk",
                 routing::post(elasticsearch::handle_bulk_api_with_index),
             )
             // Return fake response for Elasticsearch ilm request.
             .route(
-                "/_ilm/policy/*path",
+                "/_ilm/policy/{*path}",
                 routing::any((
                     HttpStatusCode::OK,
                     elasticsearch::elasticsearch_headers(),
@@ -802,7 +804,7 @@ impl HttpServer {
             )
             // Return fake response for Elasticsearch index template request.
             .route(
-                "/_index_template/*path",
+                "/_index_template/{*path}",
                 routing::any((
                     HttpStatusCode::OK,
                     elasticsearch::elasticsearch_headers(),
@@ -812,7 +814,7 @@ impl HttpServer {
             // Return fake response for Elasticsearch ingest pipeline request.
             // See: https://www.elastic.co/guide/en/elasticsearch/reference/8.8/put-pipeline-api.html.
             .route(
-                "/_ingest/*path",
+                "/_ingest/{*path}",
                 routing::any((
                     HttpStatusCode::OK,
                     elasticsearch::elasticsearch_headers(),
@@ -822,7 +824,7 @@ impl HttpServer {
             // Return fake response for Elasticsearch nodes discovery request.
             // See: https://www.elastic.co/guide/en/elasticsearch/reference/8.8/cluster.html.
             .route(
-                "/_nodes/*path",
+                "/_nodes/{*path}",
                 routing::any((
                     HttpStatusCode::OK,
                     elasticsearch::elasticsearch_headers(),
@@ -832,7 +834,7 @@ impl HttpServer {
             // Return fake response for Logstash APIs requests.
             // See: https://www.elastic.co/guide/en/elasticsearch/reference/8.8/logstash-apis.html
             .route(
-                "/logstash/*path",
+                "/logstash/{*path}",
                 routing::any((
                     HttpStatusCode::OK,
                     elasticsearch::elasticsearch_headers(),
@@ -840,18 +842,14 @@ impl HttpServer {
                 )),
             )
             .route(
-                "/_logstash/*path",
+                "/_logstash/{*path}",
                 routing::any((
                     HttpStatusCode::OK,
                     elasticsearch::elasticsearch_headers(),
                     axum::Json(serde_json::json!({})),
                 )),
             )
-            .layer(
-                ServiceBuilder::new()
-                    .layer(HandleErrorLayer::new(handle_error))
-                    .layer(RequestDecompressionLayer::new()),
-            )
+            .layer(ServiceBuilder::new().layer(RequestDecompressionLayer::new()))
             .with_state(log_state)
     }
 
@@ -859,17 +857,16 @@ impl HttpServer {
         Router::new()
             .route("/logs", routing::post(event::log_ingester))
             .route(
-                "/pipelines/:pipeline_name",
+                "/pipelines/{pipeline_name}",
                 routing::post(event::add_pipeline),
             )
             .route(
-                "/pipelines/:pipeline_name",
+                "/pipelines/{pipeline_name}",
                 routing::delete(event::delete_pipeline),
             )
             .route("/pipelines/dryrun", routing::post(event::pipeline_dryrun))
             .layer(
                 ServiceBuilder::new()
-                    .layer(HandleErrorLayer::new(handle_error))
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
             .with_state(log_state)
@@ -911,7 +908,7 @@ impl HttpServer {
             .route("/series", routing::post(series_query).get(series_query))
             .route("/parse_query", routing::post(parse_query).get(parse_query))
             .route(
-                "/label/:label_name/values",
+                "/label/{label_name}/values",
                 routing::get(label_values_query),
             )
             .with_state(prometheus_handler)
@@ -960,7 +957,6 @@ impl HttpServer {
             .route("/api/v2/write", routing::post(influxdb_write_v2))
             .layer(
                 ServiceBuilder::new()
-                    .layer(HandleErrorLayer::new(handle_error))
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
             .route("/ping", routing::get(influxdb_ping))
@@ -981,7 +977,6 @@ impl HttpServer {
             .route("/v1/logs", routing::post(otlp::logs))
             .layer(
                 ServiceBuilder::new()
-                    .layer(HandleErrorLayer::new(handle_error))
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
             .with_state(otlp_handler)
@@ -1012,7 +1007,7 @@ impl Server for HttpServer {
 
     async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
         let (tx, rx) = oneshot::channel();
-        let server = {
+        let serve = {
             let mut shutdown_tx = self.shutdown_tx.lock().await;
             ensure!(
                 shutdown_tx.is_none(),
@@ -1024,30 +1019,44 @@ impl Server for HttpServer {
                 app = configurator.config_http(app);
             }
             let app = self.build(app);
-            let server = axum::Server::try_bind(&listening)
-                .with_context(|_| AddressBindSnafu { addr: listening })?
-                .tcp_nodelay(true)
-                // Enable TCP keepalive to close the dangling established connections.
-                // It's configured to let the keepalive probes first send after the connection sits
-                // idle for 59 minutes, and then send every 10 seconds for 6 times.
-                // So the connection will be closed after roughly 1 hour.
-                .tcp_keepalive(Some(Duration::from_secs(59 * 60)))
-                .tcp_keepalive_interval(Some(Duration::from_secs(10)))
-                .tcp_keepalive_retries(Some(6))
-                .serve(app.into_make_service());
+            let listener = tokio::net::TcpListener::bind(listening)
+                .await
+                .context(AddressBindSnafu { addr: listening })?
+                .tap_io(|tcp_stream| {
+                    if let Err(e) = tcp_stream.set_nodelay(true) {
+                        error!(e; "Failed to set TCP_NODELAY on incoming connection");
+                    }
+                });
+            let serve = axum::serve(listener, app.into_make_service());
+
+            // FIXME(yingwen): Support keepalive.
+            // See:
+            // - https://github.com/tokio-rs/axum/discussions/2939
+            // - https://stackoverflow.com/questions/73069718/how-do-i-keep-alive-tokiotcpstream-in-rust
+            // let server = axum::Server::try_bind(&listening)
+            //     .with_context(|_| AddressBindSnafu { addr: listening })?
+            //     .tcp_nodelay(true)
+            //     // Enable TCP keepalive to close the dangling established connections.
+            //     // It's configured to let the keepalive probes first send after the connection sits
+            //     // idle for 59 minutes, and then send every 10 seconds for 6 times.
+            //     // So the connection will be closed after roughly 1 hour.
+            //     .tcp_keepalive(Some(Duration::from_secs(59 * 60)))
+            //     .tcp_keepalive_interval(Some(Duration::from_secs(10)))
+            //     .tcp_keepalive_retries(Some(6))
+            //     .serve(app.into_make_service());
 
             *shutdown_tx = Some(tx);
 
-            server
+            serve
         };
-        let listening = server.local_addr();
+        let listening = serve.local_addr().context(InternalIoSnafu)?;
         info!("HTTP server is bound to {}", listening);
 
         common_runtime::spawn_global(async move {
-            if let Err(e) = server
+            if let Err(e) = serve
                 .with_graceful_shutdown(rx.map(drop))
                 .await
-                .context(HyperSnafu)
+                .context(InternalIoSnafu)
             {
                 error!(e; "Failed to shutdown http server");
             }
@@ -1058,15 +1067,6 @@ impl Server for HttpServer {
     fn name(&self) -> &str {
         HTTP_SERVER
     }
-}
-
-/// handle error middleware
-async fn handle_error(err: BoxError) -> Json<HttpResponse> {
-    error!(err; "Unhandled internal error: {}", err.to_string());
-    Json(HttpResponse::Error(ErrorResponse::from_error_message(
-        StatusCode::Unexpected,
-        format!("Unhandled internal error: {err}"),
-    )))
 }
 
 #[cfg(test)]
@@ -1170,13 +1170,7 @@ mod test {
             .build();
         server.build(server.make_app()).route(
             "/test/timeout",
-            get(forever.layer(
-                ServiceBuilder::new()
-                    .layer(HandleErrorLayer::new(|_: BoxError| async {
-                        StatusCode::REQUEST_TIMEOUT
-                    }))
-                    .layer(timeout()),
-            )),
+            get(forever.layer(ServiceBuilder::new().layer(timeout()))),
         )
     }
 
@@ -1189,9 +1183,11 @@ mod test {
 
     #[tokio::test]
     async fn test_http_server_request_timeout() {
+        common_telemetry::init_default_ut_logging();
+
         let (tx, _rx) = mpsc::channel(100);
         let app = make_test_app(tx);
-        let client = TestClient::new(app);
+        let client = TestClient::new(app).await;
         let res = client.get("/test/timeout").send().await;
         assert_eq!(res.status(), StatusCode::REQUEST_TIMEOUT);
 

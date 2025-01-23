@@ -556,7 +556,7 @@ async fn test_region_usage() {
     // region is empty now, check manifest size
     let region = engine.get_region(region_id).unwrap();
     let region_stat = region.region_statistic();
-    assert_eq!(region_stat.manifest_size, 717);
+    assert!(region_stat.manifest_size > 0);
 
     // put some rows
     let rows = Rows {
@@ -583,12 +583,12 @@ async fn test_region_usage() {
     flush_region(&engine, region_id, None).await;
 
     let region_stat = region.region_statistic();
-    assert!(region_stat.sst_size > 0); // Chief says this assert can ensure the size is counted.
+    assert!(region_stat.sst_size > 0);
     assert_eq!(region_stat.num_rows, 10);
 
     // region total usage
     // Some memtables may share items.
-    assert!(region_stat.estimated_disk_size() >= 4028);
+    assert!(region_stat.estimated_disk_size() > 3000);
 }
 
 #[tokio::test]

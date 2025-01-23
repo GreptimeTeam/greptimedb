@@ -34,10 +34,8 @@ const SKIPPING_INDEX_GRPC_KEY: &str = "skipping_index";
 
 /// Tries to construct a `ColumnSchema` from the given  `ColumnDef`.
 pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
-    let data_type = ColumnDataTypeWrapper::try_new(
-        column_def.data_type,
-        column_def.datatype_extension.clone(),
-    )?;
+    let data_type =
+        ColumnDataTypeWrapper::try_new(column_def.data_type, column_def.datatype_extension)?;
 
     let constraint = if column_def.default_constraint.is_empty() {
         None

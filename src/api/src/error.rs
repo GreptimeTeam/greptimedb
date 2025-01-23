@@ -33,7 +33,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
-        error: prost::DecodeError,
+        error: prost::UnknownEnumValue,
     },
 
     #[snafu(display("Failed to create column datatype from {:?}", from))]

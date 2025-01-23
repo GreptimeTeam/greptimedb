@@ -120,7 +120,8 @@ fn parquet_offset_index_heap_size(offset_index: &ParquetOffsetIndex) -> usize {
             row_group
                 .iter()
                 .map(|column| {
-                    column.len() * mem::size_of::<PageLocation>() + mem::size_of_val(column)
+                    column.page_locations.len() * mem::size_of::<PageLocation>()
+                        + mem::size_of_val(column)
                 })
                 .sum::<usize>()
                 + mem::size_of_val(row_group)

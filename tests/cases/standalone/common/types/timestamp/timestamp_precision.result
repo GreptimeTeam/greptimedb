@@ -1,6 +1,6 @@
 -- description: Test timestamp precision
 CREATE TABLE ts_precision(
-    sec TIMESTAMP,
+    sec TIMESTAMP(0),
     msec TIMESTAMP(3),
     micros TIMESTAMP(6),
     nanos TIMESTAMP (9) TIME INDEX
@@ -15,15 +15,19 @@ Affected Rows: 1
 -- FIXME: nano seconds do not render correctly
 SELECT CAST(sec AS VARCHAR), CAST(msec AS VARCHAR), CAST(micros AS VARCHAR), CAST(nanos AS VARCHAR) FROM ts_precision;
 
-+-------------------------+-------------------------+----------------------------+-------------------------------+
-| ts_precision.sec        | ts_precision.msec       | ts_precision.micros        | ts_precision.nanos            |
-+-------------------------+-------------------------+----------------------------+-------------------------------+
-| 2020-01-01T01:23:45.123 | 2020-01-01T01:23:45.123 | 2020-01-01T01:23:45.123456 | 2020-01-01T01:23:45.123456789 |
-+-------------------------+-------------------------+----------------------------+-------------------------------+
++---------------------+-------------------------+----------------------------+-------------------------------+
+| ts_precision.sec    | ts_precision.msec       | ts_precision.micros        | ts_precision.nanos            |
++---------------------+-------------------------+----------------------------+-------------------------------+
+| 2020-01-01T01:23:45 | 2020-01-01T01:23:45.123 | 2020-01-01T01:23:45.123456 | 2020-01-01T01:23:45.123456789 |
++---------------------+-------------------------+----------------------------+-------------------------------+
 
 SELECT EXTRACT(MICROSECONDS FROM sec), EXTRACT(MICROSECONDS FROM msec), EXTRACT(MICROSECONDS FROM micros), EXTRACT(MICROSECONDS FROM nanos) FROM ts_precision;
 
-Error: 3001(EngineExecuteQuery), Execution error: Date part 'MICROSECONDS' not supported
++--------------------------------------------------+---------------------------------------------------+-----------------------------------------------------+----------------------------------------------------+
+| date_part(Utf8("MICROSECONDS"),ts_precision.sec) | date_part(Utf8("MICROSECONDS"),ts_precision.msec) | date_part(Utf8("MICROSECONDS"),ts_precision.micros) | date_part(Utf8("MICROSECONDS"),ts_precision.nanos) |
++--------------------------------------------------+---------------------------------------------------+-----------------------------------------------------+----------------------------------------------------+
+| 45000000                                         | 45123000                                          | 45123456                                            | 45123456                                           |
++--------------------------------------------------+---------------------------------------------------+-----------------------------------------------------+----------------------------------------------------+
 
 -- we only support precisions 0, 3, 6, and 9
 -- any other precision is rounded up (e.g. 1/2 -> 3, 4/5 -> 6, 7/8 -> 9)

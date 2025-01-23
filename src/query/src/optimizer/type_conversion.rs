@@ -26,6 +26,7 @@ use datatypes::arrow::datatypes::DataType;
 use session::context::QueryContextRef;
 
 use crate::optimizer::ExtensionAnalyzerRule;
+use crate::plan::ExtractExpr;
 use crate::QueryEngineContext;
 
 /// TypeConversionRule converts some literal values in logical plan to other types according
@@ -88,7 +89,6 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
             | LogicalPlan::Limit { .. }
             | LogicalPlan::Union { .. }
             | LogicalPlan::Join { .. }
-            | LogicalPlan::CrossJoin { .. }
             | LogicalPlan::Distinct { .. }
             | LogicalPlan::Values { .. }
             | LogicalPlan::Analyze { .. } => {
@@ -98,7 +98,7 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
                 };
                 let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
                 let expr = plan
-                    .expressions()
+                    .expressions_consider_join()
                     .into_iter()
                     .map(|e| e.rewrite(&mut converter).map(|x| x.data))
                     .collect::<Result<Vec<_>>>()?;
@@ -110,7 +110,6 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
             | LogicalPlan::Explain { .. }
             | LogicalPlan::SubqueryAlias { .. }
             | LogicalPlan::EmptyRelation(_)
-            | LogicalPlan::Prepare(_)
             | LogicalPlan::Dml(_)
             | LogicalPlan::DescribeTable(_)
             | LogicalPlan::Unnest(_)
@@ -307,11 +306,9 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use datafusion::logical_expr::expr::AggregateFunction as AggrExpr;
     use datafusion_common::arrow::datatypes::Field;
     use datafusion_common::{Column, DFSchema};
-    use datafusion_expr::expr::AggregateFunctionDefinition;
-    use datafusion_expr::{AggregateFunction, LogicalPlanBuilder};
+    use datafusion_expr::LogicalPlanBuilder;
     use datafusion_sql::TableReference;
     use session::context::QueryContext;
 
@@ -476,14 +473,16 @@ mod tests {
             .unwrap()
             .aggregate(
                 Vec::<Expr>::new(),
-                vec![Expr::AggregateFunction(AggrExpr {
-                    func_def: AggregateFunctionDefinition::BuiltIn(AggregateFunction::Count),
-                    args: vec![Expr::Column(Column::from_name("column1"))],
-                    distinct: false,
-                    filter: None,
-                    order_by: None,
-                    null_treatment: None,
-                })],
+                vec![Expr::AggregateFunction(
+                    datafusion_expr::expr::AggregateFunction::new_udf(
+                        datafusion::functions_aggregate::count::count_udaf(),
+                        vec![Expr::Column(Column::from_name("column1"))],
+                        false,
+                        None,
+                        None,
+                        None,
+                    ),
+                )],
             )
             .unwrap()
             .build()
@@ -494,7 +493,7 @@ mod tests {
             .analyze(plan, &context, &ConfigOptions::default())
             .unwrap();
         let expected = String::from(
-            "Aggregate: groupBy=[[]], aggr=[[COUNT(column1)]]\
+            "Aggregate: groupBy=[[]], aggr=[[count(column1)]]\
             \n  Filter: TimestampSecond(-28800, None) <= column3\
             \n    Filter: column3 > TimestampSecond(-28800, None)\
             \n      Values: (Int64(1), Float64(1), TimestampMillisecond(1, None))",

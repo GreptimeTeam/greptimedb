@@ -42,7 +42,7 @@ impl Function for VersionFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::exact(vec![], Volatility::Immutable)
+        Signature::nullary(Volatility::Immutable)
     }
 
     fn eval(&self, func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {

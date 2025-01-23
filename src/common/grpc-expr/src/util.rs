@@ -166,7 +166,7 @@ pub fn build_create_table_expr(
             default_constraint: vec![],
             semantic_type,
             comment: String::new(),
-            datatype_extension: datatype_extension.clone(),
+            datatype_extension: *datatype_extension,
             options: options.clone(),
         });
     }
@@ -208,7 +208,7 @@ pub fn extract_new_columns(
                 default_constraint: vec![],
                 semantic_type: expr.semantic_type,
                 comment: String::new(),
-                datatype_extension: expr.datatype_extension.clone(),
+                datatype_extension: *expr.datatype_extension,
                 options: expr.options.clone(),
             });
             AddColumn {

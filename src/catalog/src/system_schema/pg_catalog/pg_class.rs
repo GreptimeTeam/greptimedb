@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
 use std::sync::{Arc, Weak};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
@@ -97,6 +98,15 @@ impl PGClass {
             self.catalog_manager.clone(),
             self.namespace_oid_map.clone(),
         )
+    }
+}
+
+impl fmt::Debug for PGClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PGClass")
+            .field("schema", &self.schema)
+            .field("catalog_name", &self.catalog_name)
+            .finish()
     }
 }
 

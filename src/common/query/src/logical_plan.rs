@@ -214,8 +214,7 @@ mod tests {
         ];
 
         // call the function
-        let result = (df_udf.fun())(&args).unwrap();
-
+        let result = df_udf.invoke_batch(&args, 4).unwrap();
         match result {
             DfColumnarValue::Array(arr) => {
                 let arr = arr.as_any().downcast_ref::<BooleanArray>().unwrap();
@@ -308,7 +307,7 @@ mod tests {
 Projection: person.id AS a, person.name AS b
   Filter: person.id > Int32(500)
     TableScan: person"#,
-            format!("\n{:?}", new_plan)
+            format!("\n{}", new_plan)
         );
     }
 

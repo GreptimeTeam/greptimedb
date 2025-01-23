@@ -634,7 +634,7 @@ desc table build_info;
 select count(*) from build_info;
 
 +----------+
-| COUNT(*) |
+| count(*) |
 +----------+
 | 1        |
 +----------+

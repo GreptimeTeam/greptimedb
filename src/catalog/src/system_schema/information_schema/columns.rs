@@ -45,6 +45,7 @@ use crate::error::{
 use crate::information_schema::Predicates;
 use crate::CatalogManager;
 
+#[derive(Debug)]
 pub(super) struct InformationSchemaColumns {
     schema: SchemaRef,
     catalog_name: String,

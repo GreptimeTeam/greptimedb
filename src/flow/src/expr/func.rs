@@ -829,18 +829,8 @@ impl BinaryFunc {
         arg_types: &[Option<ConcreteDataType>],
     ) -> Result<(Self, Signature), Error> {
         // this `name_to_op` if error simply return a similar message of `unsupported function xxx` so
-        let op = name_to_op(name).or_else(|err| {
-            if let datafusion_common::DataFusionError::NotImplemented(msg) = err {
-                InvalidQuerySnafu {
-                    reason: format!("Unsupported binary function: {}", msg),
-                }
-                .fail()
-            } else {
-                InvalidQuerySnafu {
-                    reason: format!("Error when parsing binary function: {:?}", err),
-                }
-                .fail()
-            }
+        let op = name_to_op(name).with_context(|| InvalidQuerySnafu {
+            reason: format!("Unsupported binary function: {}", name),
         })?;
 
         // get first arg type and make sure if both is some, they are the same

@@ -67,8 +67,7 @@ EXPLAIN ANALYZE SELECT * FROM test ORDER BY t LIMIT 5;
 +-+-+-+
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_GlobalLimitExec: skip=0, fetch=5 REDACTED
-|_|_|_SortPreservingMergeExec: [t@1 ASC NULLS LAST] REDACTED
+| 1_| 0_|_SortPreservingMergeExec: [t@1 ASC NULLS LAST], fetch=5 REDACTED
 |_|_|_WindowedSortExec: expr=t@1 ASC NULLS LAST num_ranges=4 fetch=5 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=4 (1 memtable ranges, 3 file 3 ranges) REDACTED
 |_|_|_|
@@ -99,8 +98,7 @@ EXPLAIN ANALYZE SELECT * FROM test ORDER BY t DESC LIMIT 5;
 +-+-+-+
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_GlobalLimitExec: skip=0, fetch=5 REDACTED
-|_|_|_SortPreservingMergeExec: [t@1 DESC] REDACTED
+| 1_| 0_|_SortPreservingMergeExec: [t@1 DESC], fetch=5 REDACTED
 |_|_|_WindowedSortExec: expr=t@1 DESC num_ranges=4 fetch=5 REDACTED
 |_|_|_PartSortExec: expr=t@1 DESC num_ranges=4 limit=5 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=4 (1 memtable ranges, 3 file 3 ranges) REDACTED
@@ -181,8 +179,7 @@ EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t LIMIT 5;
 +-+-+-+
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_GlobalLimitExec: skip=0, fetch=5 REDACTED
-|_|_|_SortPreservingMergeExec: [t@2 ASC NULLS LAST] REDACTED
+| 1_| 0_|_SortPreservingMergeExec: [t@2 ASC NULLS LAST], fetch=5 REDACTED
 |_|_|_WindowedSortExec: expr=t@2 ASC NULLS LAST num_ranges=4 fetch=5 REDACTED
 |_|_|_PartSortExec: expr=t@2 ASC NULLS LAST num_ranges=4 limit=5 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=4 (1 memtable ranges, 3 file 3 ranges) REDACTED
@@ -214,8 +211,7 @@ EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t DESC LIMIT 5;
 +-+-+-+
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_GlobalLimitExec: skip=0, fetch=5 REDACTED
-|_|_|_SortPreservingMergeExec: [t@2 DESC] REDACTED
+| 1_| 0_|_SortPreservingMergeExec: [t@2 DESC], fetch=5 REDACTED
 |_|_|_WindowedSortExec: expr=t@2 DESC num_ranges=4 fetch=5 REDACTED
 |_|_|_PartSortExec: expr=t@2 DESC num_ranges=4 limit=5 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=4 (1 memtable ranges, 3 file 3 ranges) REDACTED

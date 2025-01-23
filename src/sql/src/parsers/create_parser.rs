@@ -44,9 +44,8 @@ use crate::statements::create::{
     CreateTableLike, CreateView, Partitions, TableConstraint, VECTOR_OPT_DIM,
 };
 use crate::statements::statement::Statement;
-use crate::statements::{
-    get_data_type_by_alias_name, sql_data_type_to_concrete_data_type, OptionMap,
-};
+use crate::statements::transform::type_alias::get_data_type_by_alias_name;
+use crate::statements::{sql_data_type_to_concrete_data_type, OptionMap};
 use crate::util::parse_option_string;
 
 pub const ENGINE: &str = "ENGINE";
@@ -291,13 +290,7 @@ impl<'a> ParserContext<'a> {
                     reason: format!("cannot cast {} to interval type", expire_after_expr),
                 })?;
             if let ScalarValue::IntervalMonthDayNano(Some(nanoseconds)) = expire_after_lit {
-                Some(
-                    i64::try_from(nanoseconds / 1_000_000_000)
-                        .ok()
-                        .with_context(|| InvalidIntervalSnafu {
-                            reason: format!("interval {} overflows", nanoseconds),
-                        })?,
-                )
+                Some(nanoseconds.nanoseconds / 1_000_000_000)
             } else {
                 unreachable!()
             }
@@ -326,7 +319,7 @@ impl<'a> ParserContext<'a> {
             .expect_keyword(Keyword::AS)
             .context(SyntaxSnafu)?;
 
-        let query = Box::new(self.parser.parse_query().context(error::SyntaxSnafu)?);
+        let query = self.parser.parse_query().context(error::SyntaxSnafu)?;
 
         Ok(Statement::CreateFlow(CreateFlow {
             flow_name,
@@ -1179,7 +1172,7 @@ mod tests {
                 assert_column_def(&columns[0].column_def, "host", "STRING");
                 assert_column_def(&columns[1].column_def, "ts", "TIMESTAMP");
                 assert_column_def(&columns[2].column_def, "cpu", "FLOAT");
-                assert_column_def(&columns[3].column_def, "memory", "FLOAT64");
+                assert_column_def(&columns[3].column_def, "memory", "DOUBLE");
 
                 let constraints = &c.constraints;
                 assert_eq!(
@@ -1758,7 +1751,7 @@ ENGINE=mito";
         assert!(result
             .unwrap_err()
             .output_msg()
-            .contains("sql parser error: Expected ON, found: COLUMNS"));
+            .contains("sql parser error: Expected: ON, found: COLUMNS"));
     }
 
     #[test]
@@ -1835,7 +1828,7 @@ ENGINE=mito";
                 assert_column_def(&columns[0].column_def, "host", "STRING");
                 assert_column_def(&columns[1].column_def, "ts", "TIMESTAMP");
                 assert_column_def(&columns[2].column_def, "cpu", "FLOAT");
-                assert_column_def(&columns[3].column_def, "memory", "FLOAT64");
+                assert_column_def(&columns[3].column_def, "memory", "DOUBLE");
 
                 let constraints = &c.constraints;
                 assert_eq!(

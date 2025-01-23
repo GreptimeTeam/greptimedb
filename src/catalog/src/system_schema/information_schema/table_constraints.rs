@@ -43,6 +43,7 @@ use crate::information_schema::Predicates;
 use crate::CatalogManager;
 
 /// The `TABLE_CONSTRAINTS` table describes which tables have constraints.
+#[derive(Debug)]
 pub(super) struct InformationSchemaTableConstraints {
     schema: SchemaRef,
     catalog_name: String,

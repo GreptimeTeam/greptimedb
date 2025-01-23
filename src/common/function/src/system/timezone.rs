@@ -38,7 +38,7 @@ impl Function for TimezoneFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::uniform(0, vec![], Volatility::Immutable)
+        Signature::nullary(Volatility::Immutable)
     }
 
     fn eval(&self, func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
@@ -58,7 +58,6 @@ impl fmt::Display for TimezoneFunction {
 mod tests {
     use std::sync::Arc;
 
-    use common_query::prelude::TypeSignature;
     use session::context::QueryContextBuilder;
 
     use super::*;
@@ -70,12 +69,7 @@ mod tests {
             ConcreteDataType::string_datatype(),
             build.return_type(&[]).unwrap()
         );
-        assert!(matches!(build.signature(),
-                         Signature {
-                             type_signature: TypeSignature::Uniform(0, valid_types),
-                             volatility: Volatility::Immutable
-                         } if  valid_types == vec![]
-        ));
+        assert_eq!(build.signature(), Signature::nullary(Volatility::Immutable));
 
         let query_ctx = QueryContextBuilder::default().build().into();
 

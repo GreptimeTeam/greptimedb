@@ -32,7 +32,7 @@ SELECT * FROM system_metrics;
 SELECT count(*) FROM system_metrics;
 
 +----------+
-| COUNT(*) |
+| count(*) |
 +----------+
 | 3        |
 +----------+
@@ -40,7 +40,7 @@ SELECT count(*) FROM system_metrics;
 SELECT avg(cpu_util) FROM system_metrics;
 
 +------------------------------+
-| AVG(system_metrics.cpu_util) |
+| avg(system_metrics.cpu_util) |
 +------------------------------+
 | 47.26666666666667            |
 +------------------------------+
@@ -48,7 +48,7 @@ SELECT avg(cpu_util) FROM system_metrics;
 SELECT idc, avg(memory_util) FROM system_metrics GROUP BY idc ORDER BY idc;
 
 +-------+---------------------------------+
-| idc   | AVG(system_metrics.memory_util) |
+| idc   | avg(system_metrics.memory_util) |
 +-------+---------------------------------+
 | idc_a | 40.3                            |
 | idc_b | 66.7                            |

@@ -107,7 +107,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
-        error: prost::DecodeError,
+        error: prost::UnknownEnumValue,
     },
 
     #[snafu(display(
@@ -137,7 +137,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
-        error: prost::DecodeError,
+        error: prost::UnknownEnumValue,
     },
 
     #[snafu(display("Missing alter index options"))]

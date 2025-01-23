@@ -28,17 +28,19 @@ pub fn simple_range_udf_runner(
     input_value: RangeArray,
     expected: Vec<Option<f64>>,
 ) {
+    let num_rows = input_ts.len();
     let input = vec![
         ColumnarValue::Array(Arc::new(input_ts.into_dict())),
         ColumnarValue::Array(Arc::new(input_value.into_dict())),
     ];
-    let eval_result: Vec<Option<f64>> = extract_array(&(range_fn.fun())(&input).unwrap())
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .unwrap()
-        .iter()
-        .collect();
+    let eval_result: Vec<Option<f64>> =
+        extract_array(&range_fn.invoke_batch(&input, num_rows).unwrap())
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .iter()
+            .collect();
     assert_eq!(eval_result.len(), expected.len());
     assert!(eval_result
         .iter()

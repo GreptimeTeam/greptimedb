@@ -1,5 +1,5 @@
 CREATE TABLE not_supported_table_options_keys (
-  id INT UNSIGNED,
+  `id` INT UNSIGNED,
   host STRING,
   cpu DOUBLE,
   disk FLOAT,
@@ -7,10 +7,10 @@ CREATE TABLE not_supported_table_options_keys (
   TIME INDEX (ts),
   PRIMARY KEY (id, host)
 )
-PARTITION ON COLUMNS (id) (
-  id < 5,
-  id >= 5 AND id < 9,
-  id >= 9
+PARTITION ON COLUMNS (`id`) (
+  `id` < 5,
+  `id` >= 5 AND `id` < 9,
+  `id` >= 9
 )
 ENGINE=mito
 WITH(

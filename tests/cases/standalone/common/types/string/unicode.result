@@ -1,6 +1,6 @@
 -- description: Test unicode strings
 -- insert unicode strings into the database
-CREATE TABLE emojis(id INTEGER, s VARCHAR, ts timestamp time index);
+CREATE TABLE emojis(`id` INTEGER, s VARCHAR, ts timestamp time index);
 
 Affected Rows: 0
 
