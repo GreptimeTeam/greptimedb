@@ -659,6 +659,18 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert!(prom_resp.error_type.is_none());
 
     // query `__name__` without match[]
+    // create a physical table and a logical table
+    let res = client
+        .get("/v1/sql?sql=create table physical_table (`ts` timestamp time index, message string) with ('physical_metric_table' = 'true');")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+    let res = client
+        .get("/v1/sql?sql=create table logic_table (`ts` timestamp time index, message string) with ('on_physical_table' = 'physical_table');")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+    // query `__name__`
     let res = client
         .get("/v1/prometheus/api/v1/label/__name__/values")
         .send()
@@ -668,6 +680,15 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(prom_resp.status, "success");
     assert!(prom_resp.error.is_none());
     assert!(prom_resp.error_type.is_none());
+    assert_eq!(
+        prom_resp.data,
+        PrometheusResponse::Labels(vec![
+            "demo".to_string(),
+            "demo_metrics".to_string(),
+            "logic_table".to_string(),
+            "numbers".to_string()
+        ])
+    );
 
     // buildinfo
     let res = client
