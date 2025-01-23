@@ -1352,10 +1352,15 @@ mod tests {
     use crate::key::table_info::TableInfoValue;
     use crate::key::table_name::TableNameKey;
     use crate::key::table_route::TableRouteValue;
-    use crate::key::{DeserializedValueWithBytes, TableMetadataManager, ViewInfoValue};
+    use crate::key::{
+        DeserializedValueWithBytes, TableMetadataManager, ViewInfoValue, TOPIC_REGION_PREFIX,
+    };
     use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::kv_backend::KvBackend;
     use crate::peer::Peer;
     use crate::rpc::router::{region_distribution, LeaderState, Region, RegionRoute};
+    use crate::rpc::store::RangeRequest;
+    use crate::wal_options_allocator::{allocate_region_wal_options, WalOptionsAllocator};
 
     #[test]
     fn test_deserialized_value_with_bytes() {
@@ -1456,6 +1461,33 @@ mod tests {
             .collect::<Vec<_>>();
 
         (0..16).zip(wal_options).collect()
+    }
+
+    #[tokio::test]
+    async fn test_raft_engine_topic_region_map() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let table_metadata_manager = TableMetadataManager::new(mem_kv.clone());
+        let region_route = new_test_region_route();
+        let region_routes = &vec![region_route.clone()];
+        let table_info: RawTableInfo =
+            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
+        let wal_allocator = WalOptionsAllocator::RaftEngine;
+        let regions = (0..16).collect();
+        let region_wal_options = allocate_region_wal_options(regions, &wal_allocator).unwrap();
+        create_physical_table_metadata(
+            &table_metadata_manager,
+            table_info.clone(),
+            region_routes.clone(),
+            region_wal_options.clone(),
+        )
+        .await
+        .unwrap();
+
+        let topic_region_key = TOPIC_REGION_PREFIX.to_string();
+        let range_req = RangeRequest::new().with_prefix(topic_region_key);
+        let resp = mem_kv.range(range_req).await.unwrap();
+        // Should be empty because the topic region map is empty for raft engine.
+        assert!(resp.kvs.is_empty());
     }
 
     #[tokio::test]
