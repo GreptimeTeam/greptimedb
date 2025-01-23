@@ -1316,7 +1316,7 @@ pub async fn test_identify_pipeline_with_flatten(store_type: StorageType) {
     let (app, mut guard) =
         setup_test_http_app_with_frontend(store_type, "test_identify_pipeline_with_flatten").await;
 
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
     let body = r#"{"__time__":1453809242,"__topic__":"","__source__":"10.170.***.***","ip":"10.200.**.***","time":"26/Jan/2016:19:54:02 +0800","url":"POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","status":"200","user-agent":"aliyun-sdk-java","custom_map":{"value_a":["a","b","c"],"value_b":"b"}}"#;
 
     let res = send_req(
