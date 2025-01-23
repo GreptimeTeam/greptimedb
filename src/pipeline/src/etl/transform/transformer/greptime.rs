@@ -14,7 +14,7 @@
 
 pub mod coerce;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use ahash::HashMap;
@@ -52,36 +52,37 @@ pub struct GreptimeTransformer {
 impl GreptimeTransformer {
     /// Add a default timestamp column to the transforms
     fn add_greptime_timestamp_column(transforms: &mut Transforms) {
-        let ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
-        let type_ = Value::Timestamp(Timestamp::Nanosecond(ns));
-        let default = Some(type_.clone());
+        // let ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        // let type_ = Value::Timestamp(Timestamp::Nanosecond(ns));
+        // let default = Some(type_.clone());
 
-        let transform = Transform {
-            real_fields: vec![OneInputOneOutputField::new(
-                InputFieldInfo {
-                    name: DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(),
-                    index: usize::MAX,
-                },
-                (
-                    DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(),
-                    transforms
-                        .transforms
-                        .iter()
-                        .map(|x| x.real_fields.len())
-                        .sum(),
-                ),
-            )],
-            type_,
-            default,
-            index: Some(Index::Time),
-            on_failure: Some(crate::etl::transform::OnFailure::Default),
-        };
-        let required_keys = transforms.required_keys_mut();
-        required_keys.push(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string());
+        // let transform = Transform {
+        //     real_fields: vec![OneInputOneOutputField::new(
+        //         InputFieldInfo {
+        //             name: DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(),
+        //             index: usize::MAX,
+        //         },
+        //         (
+        //             DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(),
+        //             transforms
+        //                 .transforms
+        //                 .iter()
+        //                 .map(|x| x.real_fields.len())
+        //                 .sum(),
+        //         ),
+        //     )],
+        //     type_,
+        //     default,
+        //     index: Some(Index::Time),
+        //     on_failure: Some(crate::etl::transform::OnFailure::Default),
+        // };
+        // let required_keys = transforms.required_keys_mut();
+        // required_keys.push(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string());
 
-        let output_keys = transforms.output_keys_mut();
-        output_keys.push(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string());
-        transforms.push(transform);
+        // let output_keys = transforms.output_keys_mut();
+        // output_keys.push(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string());
+        // transforms.push(transform);
+        todo!()
     }
 
     /// Generate the schema for the GreptimeTransformer
@@ -161,30 +162,31 @@ impl Transformer for GreptimeTransformer {
         }
     }
 
-    fn transform_mut(&self, val: &mut Vec<Value>) -> Result<Self::VecOutput> {
-        let mut values = vec![GreptimeValue { value_data: None }; self.schema.len()];
-        for transform in self.transforms.iter() {
-            for field in transform.real_fields.iter() {
-                let index = field.input_index();
-                let output_index = field.output_index();
-                match val.get(index) {
-                    Some(v) => {
-                        let value_data = coerce_value(v, transform)?;
-                        // every transform fields has only one output field
-                        values[output_index] = GreptimeValue { value_data };
-                    }
-                    None => {
-                        let default = transform.get_default();
-                        let value_data = match default {
-                            Some(default) => coerce_value(default, transform)?,
-                            None => None,
-                        };
-                        values[output_index] = GreptimeValue { value_data };
-                    }
-                }
-            }
-        }
-        Ok(Row { values })
+    fn transform_mut(&self, val: &mut BTreeMap<String, Value>) -> Result<Self::VecOutput> {
+        // let mut values = vec![GreptimeValue { value_data: None }; self.schema.len()];
+        // for transform in self.transforms.iter() {
+        //     for field in transform.real_fields.iter() {
+        //         let index = field.input_index();
+        //         let output_index = field.output_index();
+        //         match val.get(index) {
+        //             Some(v) => {
+        //                 let value_data = coerce_value(v, transform)?;
+        //                 // every transform fields has only one output field
+        //                 values[output_index] = GreptimeValue { value_data };
+        //             }
+        //             None => {
+        //                 let default = transform.get_default();
+        //                 let value_data = match default {
+        //                     Some(default) => coerce_value(default, transform)?,
+        //                     None => None,
+        //                 };
+        //                 values[output_index] = GreptimeValue { value_data };
+        //             }
+        //         }
+        //     }
+        // }
+        // Ok(Row { values })
+        todo!()
     }
 
     fn transforms(&self) -> &Transforms {

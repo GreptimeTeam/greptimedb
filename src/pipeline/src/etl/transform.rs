@@ -15,6 +15,8 @@
 pub mod index;
 pub mod transformer;
 
+use std::collections::BTreeMap;
+
 use snafu::OptionExt;
 
 use crate::etl::error::{Error, Result};
@@ -47,7 +49,7 @@ pub trait Transformer: std::fmt::Debug + Sized + Send + Sync + 'static {
     fn schemas(&self) -> &Vec<greptime_proto::v1::ColumnSchema>;
     fn transforms(&self) -> &Transforms;
     fn transforms_mut(&mut self) -> &mut Transforms;
-    fn transform_mut(&self, val: &mut Vec<Value>) -> Result<Self::VecOutput>;
+    fn transform_mut(&self, val: &mut BTreeMap<String, Value>) -> Result<Self::VecOutput>;
 }
 
 /// On Failure behavior when transform fails
@@ -74,36 +76,11 @@ impl std::str::FromStr for OnFailure {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct TransformBuilders {
-    pub(crate) builders: Vec<TransformBuilder>,
-    pub(crate) output_keys: Vec<String>,
-    pub(crate) required_keys: Vec<String>,
-}
-
-#[derive(Debug, Default, Clone)]
 pub struct Transforms {
     pub(crate) transforms: Vec<Transform>,
-    pub(crate) output_keys: Vec<String>,
-    pub(crate) required_keys: Vec<String>,
 }
 
 impl Transforms {
-    pub fn output_keys(&self) -> &Vec<String> {
-        &self.output_keys
-    }
-
-    pub fn output_keys_mut(&mut self) -> &mut Vec<String> {
-        &mut self.output_keys
-    }
-
-    pub fn required_keys_mut(&mut self) -> &mut Vec<String> {
-        &mut self.required_keys
-    }
-
-    pub fn required_keys(&self) -> &Vec<String> {
-        &self.required_keys
-    }
-
     pub fn transforms(&self) -> &Vec<Transform> {
         &self.transforms
     }
@@ -123,75 +100,11 @@ impl std::ops::DerefMut for Transforms {
     }
 }
 
-impl TryFrom<&Vec<yaml_rust::Yaml>> for TransformBuilders {
+impl TryFrom<&Vec<yaml_rust::Yaml>> for Transforms {
     type Error = Error;
 
     fn try_from(docs: &Vec<yaml_rust::Yaml>) -> Result<Self> {
-        let mut transforms = Vec::with_capacity(100);
-        let mut all_output_keys: Vec<String> = Vec::with_capacity(100);
-        let mut all_required_keys = Vec::with_capacity(100);
-        for doc in docs {
-            let transform_builder: TransformBuilder = doc
-                .as_hash()
-                .context(TransformElementMustBeMapSnafu)?
-                .try_into()?;
-            let mut transform_output_keys = transform_builder
-                .fields
-                .iter()
-                .map(|f| f.target_or_input_field().to_string())
-                .collect();
-            all_output_keys.append(&mut transform_output_keys);
-
-            let mut transform_required_keys = transform_builder
-                .fields
-                .iter()
-                .map(|f| f.input_field().to_string())
-                .collect();
-            all_required_keys.append(&mut transform_required_keys);
-
-            transforms.push(transform_builder);
-        }
-
-        all_required_keys.sort();
-
-        Ok(TransformBuilders {
-            builders: transforms,
-            output_keys: all_output_keys,
-            required_keys: all_required_keys,
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct TransformBuilder {
-    fields: Fields,
-    type_: Value,
-    default: Option<Value>,
-    index: Option<Index>,
-    on_failure: Option<OnFailure>,
-}
-
-impl TransformBuilder {
-    pub fn build(self, intermediate_keys: &[String], output_keys: &[String]) -> Result<Transform> {
-        let mut real_fields = vec![];
-        for field in self.fields {
-            let input_index = find_key_index(intermediate_keys, field.input_field(), "transform")?;
-            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
-            let output_index =
-                find_key_index(output_keys, field.target_or_input_field(), "transform")?;
-            let input = OneInputOneOutputField::new(
-                input_field_info,
-                (field.target_or_input_field().to_string(), output_index),
-            );
-            real_fields.push(input);
-        }
-        Ok(Transform {
-            real_fields,
-            type_: self.type_,
-            default: self.default,
-            index: self.index,
-            on_failure: self.on_failure,
-        })
+        todo!()
     }
 }
 
@@ -228,80 +141,5 @@ impl Transform {
 
     pub(crate) fn get_type_matched_default_val(&self) -> &Value {
         &self.type_
-    }
-}
-
-impl TryFrom<&yaml_rust::yaml::Hash> for TransformBuilder {
-    type Error = Error;
-
-    fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self> {
-        let mut fields = Fields::default();
-        let mut type_ = Value::Null;
-        let mut default = None;
-        let mut index = None;
-        let mut on_failure = None;
-
-        for (k, v) in hash {
-            let key = k
-                .as_str()
-                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
-            match key {
-                TRANSFORM_FIELD => {
-                    fields = Fields::one(yaml_new_field(v, TRANSFORM_FIELD)?);
-                }
-
-                TRANSFORM_FIELDS => {
-                    fields = yaml_new_fields(v, TRANSFORM_FIELDS)?;
-                }
-
-                TRANSFORM_TYPE => {
-                    let t = yaml_string(v, TRANSFORM_TYPE)?;
-                    type_ = Value::parse_str_type(&t)?;
-                }
-
-                TRANSFORM_INDEX => {
-                    let index_str = yaml_string(v, TRANSFORM_INDEX)?;
-                    index = Some(index_str.try_into()?);
-                }
-
-                TRANSFORM_DEFAULT => {
-                    default = Some(Value::try_from(v)?);
-                }
-
-                TRANSFORM_ON_FAILURE => {
-                    let on_failure_str = yaml_string(v, TRANSFORM_ON_FAILURE)?;
-                    on_failure = Some(on_failure_str.parse()?);
-                }
-
-                _ => {}
-            }
-        }
-        let mut final_default = None;
-
-        if let Some(default_value) = default {
-            match (&type_, &default_value) {
-                (Value::Null, _) => {
-                    return TransformTypeMustBeSetSnafu {
-                        fields: format!("{:?}", fields),
-                        default: default_value.to_string(),
-                    }
-                    .fail();
-                }
-                (_, Value::Null) => {} // if default is not set, then it will be regarded as default null
-                (_, _) => {
-                    let target = type_.parse_str_value(default_value.to_str_value().as_str())?;
-                    final_default = Some(target);
-                }
-            }
-        }
-        let builder = TransformBuilder {
-            fields,
-            type_,
-            default: final_default,
-            index,
-            on_failure,
-        };
-
-        Ok(builder)
     }
 }
