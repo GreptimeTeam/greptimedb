@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::{Rows, WriteHint};
-use common_telemetry::{debug, error, info};
+use common_telemetry::{error, info};
 use snafu::{ensure, OptionExt};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::region_request::{AffectedRows, RegionPutRequest};
@@ -26,7 +26,7 @@ use crate::error::{
 };
 use crate::metrics::{FORBIDDEN_OPERATION_COUNT, MITO_OPERATION_ELAPSED};
 use crate::row_modifier::RowsIter;
-use crate::utils::{self, to_data_region_id};
+use crate::utils::to_data_region_id;
 
 impl MetricEngineInner {
     /// Dispatch region put request

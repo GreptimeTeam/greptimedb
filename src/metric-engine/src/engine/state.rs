@@ -16,7 +16,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use common_telemetry::{debug, info};
 use snafu::OptionExt;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::ColumnMetadata;
