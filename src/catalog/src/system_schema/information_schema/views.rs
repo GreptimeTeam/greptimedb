@@ -54,6 +54,7 @@ pub const CHARACTER_SET_CLIENT: &str = "character_set_client";
 pub const COLLATION_CONNECTION: &str = "collation_connection";
 
 /// The `information_schema.views` to provides information about views in databases.
+#[derive(Debug)]
 pub(super) struct InformationSchemaViews {
     schema: SchemaRef,
     catalog_name: String,

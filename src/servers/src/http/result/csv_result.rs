@@ -20,7 +20,6 @@ use common_error::status_code::StatusCode;
 use common_query::Output;
 use itertools::Itertools;
 use mime_guess::mime;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
@@ -28,7 +27,7 @@ use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_
 use crate::http::result::error_result::ErrorResponse;
 use crate::http::{handler, process_with_limit, GreptimeQueryOutput, HttpResponse, ResponseFormat};
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct CsvResponse {
     output: Vec<GreptimeQueryOutput>,
     execution_time_ms: u64,

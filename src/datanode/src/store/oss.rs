@@ -29,13 +29,15 @@ pub(crate) async fn new_oss_object_store(oss_config: &OssConfig) -> Result<Objec
         oss_config.bucket, &root
     );
 
+    let client = build_http_client(&oss_config.http_client)?;
+
     let builder = Oss::default()
         .root(&root)
         .bucket(&oss_config.bucket)
         .endpoint(&oss_config.endpoint)
         .access_key_id(oss_config.access_key_id.expose_secret())
         .access_key_secret(oss_config.access_key_secret.expose_secret())
-        .http_client(build_http_client()?);
+        .http_client(client);
 
     Ok(ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?

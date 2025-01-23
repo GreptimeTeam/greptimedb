@@ -241,7 +241,10 @@ impl Helper {
             | ScalarValue::LargeList(_)
             | ScalarValue::Dictionary(_, _)
             | ScalarValue::Union(_, _, _)
-            | ScalarValue::Float16(_) => {
+            | ScalarValue::Float16(_)
+            | ScalarValue::Utf8View(_)
+            | ScalarValue::BinaryView(_)
+            | ScalarValue::Map(_) => {
                 return error::ConversionSnafu {
                     from: format!("Unsupported scalar value: {value}"),
                 }
@@ -415,13 +418,13 @@ mod tests {
         TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
     };
     use arrow::buffer::Buffer;
-    use arrow::datatypes::Int32Type;
+    use arrow::datatypes::{Int32Type, IntervalMonthDayNano};
     use arrow_array::{BinaryArray, DictionaryArray, FixedSizeBinaryArray, LargeStringArray};
     use arrow_schema::DataType;
     use common_decimal::Decimal128;
     use common_time::time::Time;
     use common_time::timestamp::TimeUnit;
-    use common_time::{Date, DateTime, Duration, IntervalMonthDayNano};
+    use common_time::{Date, DateTime, Duration};
 
     use super::*;
     use crate::value::Value;
@@ -509,6 +512,7 @@ mod tests {
         let value = ScalarValue::List(ScalarValue::new_list(
             &[ScalarValue::Int32(Some(1)), ScalarValue::Int32(Some(2))],
             &ArrowDataType::Int32,
+            true,
         ));
         let vector = Helper::try_from_scalar_value(value, 3).unwrap();
         assert_eq!(
@@ -679,9 +683,11 @@ mod tests {
 
     #[test]
     fn test_try_from_scalar_interval_value() {
-        let vector =
-            Helper::try_from_scalar_value(ScalarValue::IntervalMonthDayNano(Some(2000)), 3)
-                .unwrap();
+        let vector = Helper::try_from_scalar_value(
+            ScalarValue::IntervalMonthDayNano(Some(IntervalMonthDayNano::new(1, 1, 2000))),
+            3,
+        )
+        .unwrap();
 
         assert_eq!(
             ConcreteDataType::interval_month_day_nano_datatype(),
@@ -690,7 +696,7 @@ mod tests {
         assert_eq!(3, vector.len());
         for i in 0..vector.len() {
             assert_eq!(
-                Value::IntervalMonthDayNano(IntervalMonthDayNano::from_i128(2000)),
+                Value::IntervalMonthDayNano(IntervalMonthDayNano::new(1, 1, 2000).into()),
                 vector.get(i)
             );
         }

@@ -23,7 +23,7 @@ pub use bulk::part::BulkPart;
 use common_time::Timestamp;
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::config::MitoConfig;
@@ -70,13 +70,15 @@ impl Default for MemtableConfig {
 pub struct MemtableStats {
     /// The estimated bytes allocated by this memtable from heap.
     estimated_bytes: usize,
-    /// The time range that this memtable contains. It is None if
+    /// The inclusive time range that this memtable contains. It is None if
     /// and only if the memtable is empty.
     time_range: Option<(Timestamp, Timestamp)>,
     /// Total rows in memtable
     num_rows: usize,
     /// Total number of ranges in the memtable.
     num_ranges: usize,
+    /// The maximum sequence number in the memtable.
+    max_sequence: SequenceNumber,
 }
 
 impl MemtableStats {
@@ -106,9 +108,23 @@ impl MemtableStats {
     pub fn num_ranges(&self) -> usize {
         self.num_ranges
     }
+
+    /// Returns the maximum sequence number in the memtable.
+    pub fn max_sequence(&self) -> SequenceNumber {
+        self.max_sequence
+    }
 }
 
 pub type BoxedBatchIterator = Box<dyn Iterator<Item = Result<Batch>> + Send>;
+
+/// Ranges in a memtable.
+#[derive(Default)]
+pub struct MemtableRanges {
+    /// Range IDs and ranges.
+    pub ranges: BTreeMap<usize, MemtableRange>,
+    /// Statistics of the memtable at the query time.
+    pub stats: MemtableStats,
+}
 
 /// In memory write buffer.
 pub trait Memtable: Send + Sync + fmt::Debug {
@@ -131,6 +147,7 @@ pub trait Memtable: Send + Sync + fmt::Debug {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
+        sequence: Option<SequenceNumber>,
     ) -> Result<BoxedBatchIterator>;
 
     /// Returns the ranges in the memtable.
@@ -139,7 +156,8 @@ pub trait Memtable: Send + Sync + fmt::Debug {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-    ) -> BTreeMap<usize, MemtableRange>;
+        sequence: Option<SequenceNumber>,
+    ) -> MemtableRanges;
 
     /// Returns true if the memtable is empty.
     fn is_empty(&self) -> bool;

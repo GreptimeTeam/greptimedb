@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use client::{CachedMetaKvBackend, CachedMetaKvBackendBuilder, MetaKvBackend};
+pub use client::{CachedKvBackend, CachedKvBackendBuilder, MetaKvBackend};
 
 mod client;
 mod manager;

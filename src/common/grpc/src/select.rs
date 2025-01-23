@@ -205,7 +205,7 @@ pub fn values(arrays: &[VectorRef]) -> Result<Values> {
             ConcreteDataType::Interval(IntervalType::DayTime(_)),
             IntervalDayTimeVector,
             interval_day_time_values,
-            |x| { x.into_native() }
+            |x| { x.to_i64() }
         ),
         (
             ConcreteDataType::Interval(IntervalType::MonthDayNano(_)),
@@ -231,6 +231,8 @@ pub fn values(arrays: &[VectorRef]) -> Result<Values> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
+    use datatypes::arrow::datatypes::{IntervalDayTime, IntervalMonthDayNano};
 
     use super::*;
 
@@ -266,7 +268,12 @@ mod tests {
 
     #[test]
     fn test_convert_arrow_array_interval_day_time() {
-        let array = IntervalDayTimeVector::from(vec![Some(1), Some(2), None, Some(3)]);
+        let array = IntervalDayTimeVector::from(vec![
+            Some(IntervalDayTime::new(0, 1)),
+            Some(IntervalDayTime::new(0, 2)),
+            None,
+            Some(IntervalDayTime::new(0, 3)),
+        ]);
         let array: VectorRef = Arc::new(array);
 
         let values = values(&[array]).unwrap();
@@ -276,7 +283,12 @@ mod tests {
 
     #[test]
     fn test_convert_arrow_array_interval_month_day_nano() {
-        let array = IntervalMonthDayNanoVector::from(vec![Some(1), Some(2), None, Some(3)]);
+        let array = IntervalMonthDayNanoVector::from(vec![
+            Some(IntervalMonthDayNano::new(0, 0, 1)),
+            Some(IntervalMonthDayNano::new(0, 0, 2)),
+            None,
+            Some(IntervalMonthDayNano::new(0, 0, 3)),
+        ]);
         let array: VectorRef = Arc::new(array);
 
         let values = values(&[array]).unwrap();

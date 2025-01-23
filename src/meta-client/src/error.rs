@@ -31,7 +31,11 @@ pub enum Error {
     },
 
     #[snafu(display("{}", msg))]
-    MetaServer { code: StatusCode, msg: String },
+    MetaServer {
+        code: StatusCode,
+        msg: String,
+        tonic_code: tonic::Code,
+    },
 
     #[snafu(display("No leader, should ask leader first"))]
     NoLeader {
@@ -95,8 +99,22 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to get flow stat"))]
+    GetFlowStat {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Retry exceeded max times({}), message: {}", times, msg))]
     RetryTimesExceeded { times: usize, msg: String },
+
+    #[snafu(display("Trying to write to a read-only kv backend: {}", name))]
+    ReadOnlyKvBackend {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 #[allow(dead_code)]
@@ -116,14 +134,28 @@ impl ErrorExt for Error {
             | Error::SendHeartbeat { .. }
             | Error::CreateHeartbeatStream { .. }
             | Error::CreateChannel { .. }
-            | Error::RetryTimesExceeded { .. } => StatusCode::Internal,
+            | Error::RetryTimesExceeded { .. }
+            | Error::ReadOnlyKvBackend { .. } => StatusCode::Internal,
 
             Error::MetaServer { code, .. } => *code,
 
             Error::InvalidResponseHeader { source, .. }
             | Error::ConvertMetaRequest { source, .. }
-            | Error::ConvertMetaResponse { source, .. } => source.status_code(),
+            | Error::ConvertMetaResponse { source, .. }
+            | Error::GetFlowStat { source, .. } => source.status_code(),
         }
+    }
+}
+
+impl Error {
+    pub fn is_exceeded_size_limit(&self) -> bool {
+        matches!(
+            self,
+            Error::MetaServer {
+                tonic_code: tonic::Code::OutOfRange,
+                ..
+            }
+        )
     }
 }
 
@@ -149,6 +181,10 @@ impl From<Status> for Error {
         let msg = get_metadata_value(&e, GREPTIME_DB_HEADER_ERROR_MSG)
             .unwrap_or_else(|| e.message().to_string());
 
-        Self::MetaServer { code, msg }
+        Self::MetaServer {
+            code,
+            msg,
+            tonic_code: e.code(),
+        }
     }
 }

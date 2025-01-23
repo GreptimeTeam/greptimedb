@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::alter_expr::Kind;
+use std::collections::HashSet;
+
+use api::v1::alter_table_expr::Kind;
 use api::v1::region::region_request::Body;
 use api::v1::region::{
     alter_request, AddColumn, AddColumns, AlterRequest, DropColumn, DropColumns, RegionColumnDef,
@@ -27,13 +29,15 @@ use crate::ddl::alter_table::AlterTableProcedure;
 use crate::error::{InvalidProtoMsgSnafu, Result};
 
 impl AlterTableProcedure {
-    /// Makes alter region request.
-    pub(crate) fn make_alter_region_request(&self, region_id: RegionId) -> Result<RegionRequest> {
-        // Safety: Checked in `AlterTableProcedure::new`.
-        let alter_kind = self.data.task.alter_table.kind.as_ref().unwrap();
+    /// Makes alter region request from existing an alter kind.
+    /// Region alter request always add columns if not exist.
+    pub(crate) fn make_alter_region_request(
+        &self,
+        region_id: RegionId,
+        kind: Option<alter_request::Kind>,
+    ) -> Result<RegionRequest> {
         // Safety: checked
         let table_info = self.data.table_info().unwrap();
-        let kind = create_proto_alter_kind(table_info, alter_kind)?;
 
         Ok(RegionRequest {
             header: Some(RegionRequestHeader {
@@ -47,45 +51,66 @@ impl AlterTableProcedure {
             })),
         })
     }
+
+    /// Makes alter kind proto that all regions can reuse.
+    /// Region alter request always add columns if not exist.
+    pub(crate) fn make_region_alter_kind(&self) -> Result<Option<alter_request::Kind>> {
+        // Safety: Checked in `AlterTableProcedure::new`.
+        let alter_kind = self.data.task.alter_table.kind.as_ref().unwrap();
+        // Safety: checked
+        let table_info = self.data.table_info().unwrap();
+        let kind = create_proto_alter_kind(table_info, alter_kind)?;
+
+        Ok(kind)
+    }
 }
 
 /// Creates region proto alter kind from `table_info` and `alter_kind`.
 ///
-/// Returns the kind and next column id if it adds new columns.
+/// It always adds column if not exists and drops column if exists.
+/// It skips the column if it already exists in the table.
 fn create_proto_alter_kind(
     table_info: &RawTableInfo,
     alter_kind: &Kind,
 ) -> Result<Option<alter_request::Kind>> {
     match alter_kind {
         Kind::AddColumns(x) => {
+            // Construct a set of existing columns in the table.
+            let existing_columns: HashSet<_> = table_info
+                .meta
+                .schema
+                .column_schemas
+                .iter()
+                .map(|col| &col.name)
+                .collect();
             let mut next_column_id = table_info.meta.next_column_id;
 
-            let add_columns = x
-                .add_columns
-                .iter()
-                .map(|add_column| {
-                    let column_def =
-                        add_column
-                            .column_def
-                            .as_ref()
-                            .context(InvalidProtoMsgSnafu {
-                                err_msg: "'column_def' is absent",
-                            })?;
+            let mut add_columns = Vec::with_capacity(x.add_columns.len());
+            for add_column in &x.add_columns {
+                let column_def = add_column
+                    .column_def
+                    .as_ref()
+                    .context(InvalidProtoMsgSnafu {
+                        err_msg: "'column_def' is absent",
+                    })?;
 
-                    let column_id = next_column_id;
-                    next_column_id += 1;
+                // Skips existing columns.
+                if existing_columns.contains(&column_def.name) {
+                    continue;
+                }
 
-                    let column_def = RegionColumnDef {
-                        column_def: Some(column_def.clone()),
-                        column_id,
-                    };
+                let column_id = next_column_id;
+                next_column_id += 1;
+                let column_def = RegionColumnDef {
+                    column_def: Some(column_def.clone()),
+                    column_id,
+                };
 
-                    Ok(AddColumn {
-                        column_def: Some(column_def),
-                        location: add_column.location.clone(),
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
+                add_columns.push(AddColumn {
+                    column_def: Some(column_def),
+                    location: add_column.location.clone(),
+                });
+            }
 
             Ok(Some(alter_request::Kind::AddColumns(AddColumns {
                 add_columns,
@@ -106,11 +131,10 @@ fn create_proto_alter_kind(
             })))
         }
         Kind::RenameTable(_) => Ok(None),
-        Kind::ChangeTableOptions(v) => Ok(Some(alter_request::Kind::ChangeTableOptions(v.clone()))),
-        Kind::SetColumnFulltext(v) => Ok(Some(alter_request::Kind::SetColumnFulltext(v.clone()))),
-        Kind::UnsetColumnFulltext(v) => {
-            Ok(Some(alter_request::Kind::UnsetColumnFulltext(v.clone())))
-        }
+        Kind::SetTableOptions(v) => Ok(Some(alter_request::Kind::SetTableOptions(v.clone()))),
+        Kind::UnsetTableOptions(v) => Ok(Some(alter_request::Kind::UnsetTableOptions(v.clone()))),
+        Kind::SetIndex(v) => Ok(Some(alter_request::Kind::SetIndex(v.clone()))),
+        Kind::UnsetIndex(v) => Ok(Some(alter_request::Kind::UnsetIndex(v.clone()))),
     }
 }
 
@@ -120,11 +144,11 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::add_column_location::LocationType;
-    use api::v1::alter_expr::Kind;
+    use api::v1::alter_table_expr::Kind;
     use api::v1::region::region_request::Body;
     use api::v1::region::RegionColumnDef;
     use api::v1::{
-        region, AddColumn, AddColumnLocation, AddColumns, AlterExpr, ColumnDataType,
+        region, AddColumn, AddColumnLocation, AddColumns, AlterTableExpr, ColumnDataType,
         ColumnDef as PbColumnDef, ModifyColumnType, ModifyColumnTypes, SemanticType,
     };
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -142,6 +166,7 @@ mod tests {
     use crate::rpc::router::{Region, RegionRoute};
     use crate::test_util::{new_ddl_context, MockDatanodeManager};
 
+    /// Prepares a region with schema `[ts: Timestamp, host: Tag, cpu: Field]`.
     async fn prepare_ddl_context() -> (DdlContext, u64, TableId, RegionId, String) {
         let datanode_manager = Arc::new(MockDatanodeManager::new(()));
         let ddl_context = new_ddl_context(datanode_manager);
@@ -170,6 +195,7 @@ mod tests {
                     .name("cpu")
                     .data_type(ColumnDataType::Float64)
                     .semantic_type(SemanticType::Field)
+                    .is_nullable(true)
                     .build()
                     .unwrap()
                     .into(),
@@ -214,7 +240,7 @@ mod tests {
             prepare_ddl_context().await;
 
         let task = AlterTableTask {
-            alter_table: AlterExpr {
+            alter_table: AlterTableExpr {
                 catalog_name: DEFAULT_CATALOG_NAME.to_string(),
                 schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                 table_name,
@@ -224,15 +250,16 @@ mod tests {
                             name: "my_tag3".to_string(),
                             data_type: ColumnDataType::String as i32,
                             is_nullable: true,
-                            default_constraint: b"hello".to_vec(),
+                            default_constraint: Vec::new(),
                             semantic_type: SemanticType::Tag as i32,
                             comment: String::new(),
                             ..Default::default()
                         }),
                         location: Some(AddColumnLocation {
                             location_type: LocationType::After as i32,
-                            after_column_name: "my_tag2".to_string(),
+                            after_column_name: "host".to_string(),
                         }),
+                        add_if_not_exists: false,
                     }],
                 })),
             },
@@ -241,8 +268,11 @@ mod tests {
         let mut procedure =
             AlterTableProcedure::new(cluster_id, table_id, task, ddl_context).unwrap();
         procedure.on_prepare().await.unwrap();
-        let Some(Body::Alter(alter_region_request)) =
-            procedure.make_alter_region_request(region_id).unwrap().body
+        let alter_kind = procedure.make_region_alter_kind().unwrap();
+        let Some(Body::Alter(alter_region_request)) = procedure
+            .make_alter_region_request(region_id, alter_kind)
+            .unwrap()
+            .body
         else {
             unreachable!()
         };
@@ -258,7 +288,7 @@ mod tests {
                                 name: "my_tag3".to_string(),
                                 data_type: ColumnDataType::String as i32,
                                 is_nullable: true,
-                                default_constraint: b"hello".to_vec(),
+                                default_constraint: Vec::new(),
                                 semantic_type: SemanticType::Tag as i32,
                                 comment: String::new(),
                                 ..Default::default()
@@ -267,7 +297,7 @@ mod tests {
                         }),
                         location: Some(AddColumnLocation {
                             location_type: LocationType::After as i32,
-                            after_column_name: "my_tag2".to_string(),
+                            after_column_name: "host".to_string(),
                         }),
                     }]
                 }
@@ -281,7 +311,7 @@ mod tests {
             prepare_ddl_context().await;
 
         let task = AlterTableTask {
-            alter_table: AlterExpr {
+            alter_table: AlterTableExpr {
                 catalog_name: DEFAULT_CATALOG_NAME.to_string(),
                 schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                 table_name,
@@ -298,8 +328,11 @@ mod tests {
         let mut procedure =
             AlterTableProcedure::new(cluster_id, table_id, task, ddl_context).unwrap();
         procedure.on_prepare().await.unwrap();
-        let Some(Body::Alter(alter_region_request)) =
-            procedure.make_alter_region_request(region_id).unwrap().body
+        let alter_kind = procedure.make_region_alter_kind().unwrap();
+        let Some(Body::Alter(alter_region_request)) = procedure
+            .make_alter_region_request(region_id, alter_kind)
+            .unwrap()
+            .body
         else {
             unreachable!()
         };

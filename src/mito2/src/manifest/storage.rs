@@ -343,7 +343,7 @@ impl ManifestObjectStore {
         );
 
         self.object_store
-            .remove(paths)
+            .delete_iter(paths)
             .await
             .context(OpenDalSnafu)?;
 

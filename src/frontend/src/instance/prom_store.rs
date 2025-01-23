@@ -30,7 +30,7 @@ use common_telemetry::{debug, tracing};
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
 use prost::Message;
-use servers::error::{self, AuthSnafu, Result as ServerResult};
+use servers::error::{self, AuthSnafu, InFlightWriteBytesExceededSnafu, Result as ServerResult};
 use servers::http::header::{collect_plan_metrics, CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{PromStoreProtocolInterceptor, PromStoreProtocolInterceptorRef};
@@ -174,6 +174,16 @@ impl PromStoreProtocolHandler for Instance {
             .plugins
             .get::<PromStoreProtocolInterceptorRef<servers::error::Error>>();
         interceptor_ref.pre_write(&request, ctx.clone())?;
+
+        let _guard = if let Some(limiter) = &self.limiter {
+            let result = limiter.limit_row_inserts(&request);
+            if result.is_none() {
+                return InFlightWriteBytesExceededSnafu.fail();
+            }
+            result
+        } else {
+            None
+        };
 
         let output = if with_metric_engine {
             let physical_table = ctx

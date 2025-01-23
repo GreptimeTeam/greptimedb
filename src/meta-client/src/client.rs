@@ -25,6 +25,7 @@ use std::sync::Arc;
 
 use api::v1::meta::{ProcedureDetailResponse, Role};
 use cluster::Client as ClusterClient;
+pub use cluster::ClusterKvBackend;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::cluster::{
@@ -33,6 +34,8 @@ use common_meta::cluster::{
 use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, RegionStat};
 use common_meta::ddl::{ExecutorContext, ProcedureExecutor};
 use common_meta::error::{self as meta_error, ExternalSnafu, Result as MetaResult};
+use common_meta::key::flow::flow_state::{FlowStat, FlowStateManager};
+use common_meta::kv_backend::KvBackendRef;
 use common_meta::range_stream::PaginationStream;
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::procedure::{
@@ -54,7 +57,8 @@ use store::Client as StoreClient;
 
 pub use self::heartbeat::{HeartbeatSender, HeartbeatStream};
 use crate::error::{
-    ConvertMetaRequestSnafu, ConvertMetaResponseSnafu, Error, NotStartedSnafu, Result,
+    ConvertMetaRequestSnafu, ConvertMetaResponseSnafu, Error, GetFlowStatSnafu, NotStartedSnafu,
+    Result,
 };
 
 pub type Id = (u64, u64);
@@ -322,8 +326,8 @@ impl ClusterInfo for MetaClient {
         let cluster_kv_backend = Arc::new(self.cluster_client()?);
         let range_prefix = DatanodeStatKey::key_prefix_with_cluster_id(self.id.0);
         let req = RangeRequest::new().with_prefix(range_prefix);
-        let stream = PaginationStream::new(cluster_kv_backend, req, 256, Arc::new(decode_stats))
-            .into_stream();
+        let stream =
+            PaginationStream::new(cluster_kv_backend, req, 256, decode_stats).into_stream();
         let mut datanode_stats = stream
             .try_collect::<Vec<_>>()
             .await
@@ -347,6 +351,15 @@ fn decode_stats(kv: KeyValue) -> MetaResult<DatanodeStatValue> {
 }
 
 impl MetaClient {
+    pub async fn list_flow_stats(&self) -> Result<Option<FlowStat>> {
+        let cluster_backend = ClusterKvBackend::new(Arc::new(self.cluster_client()?));
+        let cluster_backend = Arc::new(cluster_backend) as KvBackendRef;
+        let flow_state_manager = FlowStateManager::new(cluster_backend);
+        let res = flow_state_manager.get().await.context(GetFlowStatSnafu)?;
+
+        Ok(res.map(|r| r.into()))
+    }
+
     pub fn new(id: Id) -> Self {
         Self {
             id,
@@ -543,24 +556,29 @@ impl MetaClient {
 #[cfg(test)]
 mod tests {
     use api::v1::meta::{HeartbeatRequest, Peer};
+    use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
+    use rand::Rng;
 
     use super::*;
-    use crate::{error, mocks};
+    use crate::error;
+    use crate::mocks::{self, MockMetaContext};
 
     const TEST_KEY_PREFIX: &str = "__unit_test__meta__";
 
     struct TestClient {
         ns: String,
         client: MetaClient,
+        meta_ctx: MockMetaContext,
     }
 
     impl TestClient {
         async fn new(ns: impl Into<String>) -> Self {
             // can also test with etcd: mocks::mock_client_with_etcdstore("127.0.0.1:2379").await;
-            let client = mocks::mock_client_with_memstore().await;
+            let (client, meta_ctx) = mocks::mock_client_with_memstore().await;
             Self {
                 ns: ns.into(),
                 client,
+                meta_ctx,
             }
         }
 
@@ -584,6 +602,15 @@ mod tests {
                 DeleteRangeRequest::new().with_prefix(format!("{}-{}", TEST_KEY_PREFIX, self.ns));
             let res = self.client.delete_range(req).await;
             let _ = res.unwrap();
+        }
+
+        #[allow(dead_code)]
+        fn kv_backend(&self) -> KvBackendRef {
+            self.meta_ctx.kv_backend.clone()
+        }
+
+        fn in_memory(&self) -> Option<ResettableKvBackendRef> {
+            self.meta_ctx.in_memory.clone()
         }
     }
 
@@ -939,5 +966,37 @@ mod tests {
                 kv.take_value()
             );
         }
+    }
+
+    fn mock_decoder(_kv: KeyValue) -> MetaResult<()> {
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_cluster_client_adaptive_range() {
+        let tx = new_client("test_cluster_client").await;
+        let in_memory = tx.in_memory().unwrap();
+        let cluster_client = tx.client.cluster_client().unwrap();
+        let mut rng = rand::thread_rng();
+
+        // Generates rough 10MB data, which is larger than the default grpc message size limit.
+        for i in 0..10 {
+            let data: Vec<u8> = (0..1024 * 1024).map(|_| rng.gen()).collect();
+            in_memory
+                .put(
+                    PutRequest::new()
+                        .with_key(format!("__prefix/{i}").as_bytes())
+                        .with_value(data.clone()),
+                )
+                .await
+                .unwrap();
+        }
+
+        let req = RangeRequest::new().with_prefix(b"__prefix/");
+        let stream =
+            PaginationStream::new(Arc::new(cluster_client), req, 10, mock_decoder).into_stream();
+
+        let res = stream.try_collect::<Vec<_>>().await.unwrap();
+        assert_eq!(10, res.len());
     }
 }

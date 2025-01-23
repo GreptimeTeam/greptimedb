@@ -21,20 +21,20 @@ drop table test;
 -- Append table
 
 create table count_where_bug (
-    tag String,
+    `tag` String,
     ts TimestampMillisecond time index,
     num Int64,
-    primary key (tag),
+    primary key (`tag`),
 ) engine=mito with('append_mode'='true');
 
-insert into count_where_bug (tag, ts, num)
+insert into count_where_bug (`tag`, ts, num)
 values  ('a', '2024-09-06T06:00:01Z', 1),
         ('a', '2024-09-06T06:00:02Z', 2),
         ('a', '2024-09-06T06:00:03Z', 3),
         ('b', '2024-09-06T06:00:04Z', 4),
         ('b', '2024-09-06T06:00:05Z', 5);
 
-select count(1) from count_where_bug where tag = 'b';
+select count(1) from count_where_bug where `tag` = 'b';
 
 select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
 

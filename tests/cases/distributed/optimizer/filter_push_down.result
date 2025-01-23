@@ -228,7 +228,7 @@ SELECT i FROM (SELECT * FROM integers i1 UNION SELECT * FROM integers i2) a WHER
 SELECT * FROM (SELECT i1.i AS a, i2.i AS b, row_number() OVER (ORDER BY i1.i, i2.i) FROM integers i1, integers i2 WHERE i1.i IS NOT NULL AND i2.i IS NOT NULL) a1 WHERE a=b ORDER BY 1;
 
 +---+---+--------------------------------------------------------------------------------------------------------------------+
-| a | b | ROW_NUMBER() ORDER BY [i1.i ASC NULLS LAST, i2.i ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
+| a | b | row_number() ORDER BY [i1.i ASC NULLS LAST, i2.i ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
 +---+---+--------------------------------------------------------------------------------------------------------------------+
 | 1 | 1 | 1                                                                                                                  |
 | 2 | 2 | 5                                                                                                                  |
@@ -249,7 +249,7 @@ EXPLAIN SELECT * FROM (SELECT 0=1 AS cond FROM integers i1, integers i2) a1 WHER
 | logical_plan_| Sort: a1.cond ASC NULLS LAST_|
 |_|_SubqueryAlias: a1_|
 |_|_Projection: Boolean(false) AS cond_|
-|_|_CrossJoin:_|
+|_|_Cross Join:_|
 |_|_SubqueryAlias: i1_|
 |_|_Projection:_|
 |_|_MergeScan [is_placeholder=false]_|
@@ -267,9 +267,15 @@ EXPLAIN SELECT * FROM (SELECT 0=1 AS cond FROM integers i1, integers i2) a1 WHER
 |_|_|
 +-+-+
 
+-- This should be a bug in DataFusion, it use UserDefinedLogicalNode::prevent_predicate_push_down_columns()
+-- to prevent pushdown, but this filter is Literal(Boolean(false)). It doesn't reference any column.
 SELECT * FROM (SELECT 0=1 AS cond FROM integers i1, integers i2 GROUP BY 1) a1 WHERE cond ORDER BY 1;
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Error during planning: Attempted to create Filter predicate with expression `Boolean(false)` aliased as 'Int64(0) = Int64(1)'. Filter predicates should not be aliased.
++-------+
+| cond  |
++-------+
+| false |
++-------+
 
 DROP TABLE integers;
 

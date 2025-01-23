@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Pipeline Processor for CMCD (Common Media Client Data) data.
+//!
+//! Refer to [`CmcdProcessor`] for more information.
+
 use std::collections::BTreeMap;
 
 use ahash::HashSet;

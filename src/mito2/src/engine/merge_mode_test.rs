@@ -92,7 +92,6 @@ async fn test_merge_mode_compaction() {
     let mut env = TestEnv::new();
     let engine = env
         .create_engine(MitoConfig {
-            scan_parallelism: 2,
             ..Default::default()
         })
         .await;
@@ -105,6 +104,7 @@ async fn test_merge_mode_compaction() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -190,19 +190,19 @@ async fn test_merge_mode_compaction() {
 | a     |         | 13.0    | 1970-01-01T00:00:03 |
 +-------+---------+---------+---------------------+";
     // Scans in parallel.
-    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    let mut scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
     assert_eq!(1, scanner.num_files());
     assert_eq!(1, scanner.num_memtables());
+    scanner.set_target_partitions(2);
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(expected, sort_batches_and_print(&batches, &["tag_0", "ts"]));
 
-    // Reopens engine with parallelism 1.
+    // Reopens engine.
     let engine = env
         .reopen_engine(
             engine,
             MitoConfig {
-                scan_parallelism: 1,
                 ..Default::default()
             },
         )

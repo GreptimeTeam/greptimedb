@@ -19,24 +19,23 @@ use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
 use common_error::ext::BoxedError;
+use pipeline::pipeline_operator::PipelineOperator;
 use pipeline::{GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion};
 use servers::error::{
-    AuthSnafu, Error as ServerError, ExecuteGrpcRequestSnafu, PipelineSnafu, Result as ServerResult,
+    AuthSnafu, Error as ServerError, ExecuteGrpcRequestSnafu, InFlightWriteBytesExceededSnafu,
+    PipelineSnafu, Result as ServerResult,
 };
 use servers::interceptor::{LogIngestInterceptor, LogIngestInterceptorRef};
-use servers::query_handler::LogHandler;
-use session::context::QueryContextRef;
+use servers::query_handler::PipelineHandler;
+use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
+use table::Table;
 
 use crate::instance::Instance;
 
 #[async_trait]
-impl LogHandler for Instance {
-    async fn insert_logs(
-        &self,
-        log: RowInsertRequests,
-        ctx: QueryContextRef,
-    ) -> ServerResult<Output> {
+impl PipelineHandler for Instance {
+    async fn insert(&self, log: RowInsertRequests, ctx: QueryContextRef) -> ServerResult<Output> {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
@@ -88,6 +87,22 @@ impl LogHandler for Instance {
             .await
             .context(PipelineSnafu)
     }
+
+    async fn get_table(
+        &self,
+        table: &str,
+        query_ctx: &QueryContext,
+    ) -> std::result::Result<Option<Arc<Table>>, catalog::error::Error> {
+        let catalog = query_ctx.current_catalog();
+        let schema = query_ctx.current_schema();
+        self.catalog_manager
+            .table(catalog, &schema, table, None)
+            .await
+    }
+
+    fn build_pipeline(&self, pipeline: &str) -> ServerResult<Pipeline<GreptimeTransformer>> {
+        PipelineOperator::build_pipeline(pipeline).context(PipelineSnafu)
+    }
 }
 
 impl Instance {
@@ -96,6 +111,16 @@ impl Instance {
         log: RowInsertRequests,
         ctx: QueryContextRef,
     ) -> ServerResult<Output> {
+        let _guard = if let Some(limiter) = &self.limiter {
+            let result = limiter.limit_row_inserts(&log);
+            if result.is_none() {
+                return InFlightWriteBytesExceededSnafu.fail();
+            }
+            result
+        } else {
+            None
+        };
+
         self.inserter
             .handle_log_inserts(log, ctx, self.statement_executor.as_ref())
             .await

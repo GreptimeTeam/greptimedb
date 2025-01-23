@@ -46,14 +46,6 @@ impl Key {
         self.column_indices.push(col);
     }
 
-    /// Add columns to Key
-    pub fn add_cols<I>(&mut self, cols: I)
-    where
-        I: IntoIterator<Item = usize>,
-    {
-        self.column_indices.extend(cols);
-    }
-
     /// Remove a column from Key
     pub fn remove_col(&mut self, col: usize) {
         self.column_indices.retain(|&r| r != col);
@@ -220,6 +212,8 @@ impl RelationType {
         for key in &mut self.keys {
             key.remove_col(time_index.unwrap_or(usize::MAX));
         }
+        // remove empty keys
+        self.keys.retain(|key| !key.is_empty());
         self
     }
 
@@ -495,12 +489,6 @@ impl RelationDesc {
         self
     }
 
-    /// Drops all existing keys.
-    pub fn without_keys(mut self) -> Self {
-        self.typ.keys.clear();
-        self
-    }
-
     /// Builds a new relation description with the column names replaced with
     /// new names.
     ///
@@ -555,32 +543,6 @@ impl RelationDesc {
     /// Panics if `i` is not a valid column index.
     pub fn get_name(&self, i: usize) -> &Option<ColumnName> {
         &self.names[i]
-    }
-
-    /// Mutably gets the name of the `i`th column.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `i` is not a valid column index.
-    pub fn get_name_mut(&mut self, i: usize) -> &mut Option<ColumnName> {
-        &mut self.names[i]
-    }
-
-    /// Gets the name of the `i`th column if that column name is unambiguous.
-    ///
-    /// If at least one other column has the same name as the `i`th column,
-    /// returns `None`. If the `i`th column has no name, returns `None`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `i` is not a valid column index.
-    pub fn get_unambiguous_name(&self, i: usize) -> Option<&ColumnName> {
-        let name = &self.names[i];
-        if self.iter_names().filter(|n| *n == name).count() == 1 {
-            name.as_ref()
-        } else {
-            None
-        }
     }
 }
 

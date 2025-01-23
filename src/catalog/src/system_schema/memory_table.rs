@@ -33,6 +33,7 @@ use super::SystemTable;
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
 
 /// A memory table with specified schema and columns.
+#[derive(Debug)]
 pub(crate) struct MemoryTable {
     pub(crate) table_id: TableId,
     pub(crate) table_name: &'static str,

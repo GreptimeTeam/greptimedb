@@ -21,10 +21,9 @@ use common_query::error::{
 };
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeIterator, TreeNodeRecursion};
 use datafusion::common::{DFSchema, Result as DfResult};
-use datafusion::execution::context::SessionState;
+use datafusion::execution::SessionStateBuilder;
 use datafusion::logical_expr::{self, Expr, Volatility};
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
-use datafusion::prelude::SessionConfig;
 use datatypes::arrow::array::RecordBatch;
 use datatypes::arrow::datatypes::{DataType, Field};
 use datatypes::prelude::VectorRef;
@@ -104,8 +103,7 @@ impl MatchesFunction {
         let like_expr = ast.into_like_expr(col_name);
 
         let input_schema = Self::input_schema();
-        let session_state =
-            SessionState::new_with_config_rt(SessionConfig::default(), Arc::default());
+        let session_state = SessionStateBuilder::new().with_default_features().build();
         let planner = DefaultPhysicalPlanner::default();
         let physical_expr = planner
             .create_physical_expr(&like_expr, &input_schema, &session_state)
@@ -131,7 +129,7 @@ impl MatchesFunction {
     }
 
     fn input_schema() -> DFSchema {
-        DFSchema::from_unqualifed_fields(
+        DFSchema::from_unqualified_fields(
             [Arc::new(Field::new("data", DataType::Utf8, true))].into(),
             HashMap::new(),
         )
@@ -204,18 +202,8 @@ impl PatternAst {
     fn convert_literal(column: &str, pattern: &str) -> Expr {
         logical_expr::col(column).like(logical_expr::lit(format!(
             "%{}%",
-            Self::escape_pattern(pattern)
+            crate::utils::escape_like_pattern(pattern)
         )))
-    }
-
-    fn escape_pattern(pattern: &str) -> String {
-        pattern
-            .chars()
-            .flat_map(|c| match c {
-                '\\' | '%' | '_' => vec!['\\', c],
-                _ => vec![c],
-            })
-            .collect::<String>()
     }
 
     /// Transform this AST with preset rules to make it correct.
@@ -735,7 +723,8 @@ struct Tokenizer {
 impl Tokenizer {
     pub fn tokenize(mut self, pattern: &str) -> Result<Vec<Token>> {
         let mut tokens = vec![];
-        while self.cursor < pattern.len() {
+        let char_len = pattern.chars().count();
+        while self.cursor < char_len {
             // TODO: collect pattern into Vec<char> if this tokenizer is bottleneck in the future
             let c = pattern.chars().nth(self.cursor).unwrap();
             match c {
@@ -804,7 +793,8 @@ impl Tokenizer {
         let mut phase = String::new();
         let mut is_quote_present = false;
 
-        while self.cursor < pattern.len() {
+        let char_len = pattern.chars().count();
+        while self.cursor < char_len {
             let mut c = pattern.chars().nth(self.cursor).unwrap();
 
             match c {
@@ -907,6 +897,26 @@ mod test {
                     Phase("b".to_string()),
                     Or,
                     Phase("c".to_string()),
+                ],
+            ),
+            (
+                r#"中文 测试"#,
+                vec![Phase("中文".to_string()), Phase("测试".to_string())],
+            ),
+            (
+                r#"中文 AND 测试"#,
+                vec![Phase("中文".to_string()), And, Phase("测试".to_string())],
+            ),
+            (
+                r#"中文 +测试"#,
+                vec![Phase("中文".to_string()), Must, Phase("测试".to_string())],
+            ),
+            (
+                r#"中文 -测试"#,
+                vec![
+                    Phase("中文".to_string()),
+                    Negative,
+                    Phase("测试".to_string()),
                 ],
             ),
         ];
@@ -1036,6 +1046,61 @@ mod test {
                                     pattern: "d".to_string(),
                                 },
                             ],
+                        },
+                    ],
+                },
+            ),
+            (
+                r#"中文 测试"#,
+                PatternAst::Binary {
+                    op: BinaryOp::Or,
+                    children: vec![
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "中文".to_string(),
+                        },
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "测试".to_string(),
+                        },
+                    ],
+                },
+            ),
+            (
+                r#"中文 AND 测试"#,
+                PatternAst::Binary {
+                    op: BinaryOp::And,
+                    children: vec![
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "中文".to_string(),
+                        },
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "测试".to_string(),
+                        },
+                    ],
+                },
+            ),
+            (
+                r#"中文 +测试"#,
+                PatternAst::Literal {
+                    op: UnaryOp::Must,
+                    pattern: "测试".to_string(),
+                },
+            ),
+            (
+                r#"中文 -测试"#,
+                PatternAst::Binary {
+                    op: BinaryOp::And,
+                    children: vec![
+                        PatternAst::Literal {
+                            op: UnaryOp::Negative,
+                            pattern: "测试".to_string(),
+                        },
+                        PatternAst::Literal {
+                            op: UnaryOp::Optional,
+                            pattern: "中文".to_string(),
                         },
                     ],
                 },

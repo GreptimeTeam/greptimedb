@@ -12,20 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use common_error::ext::ErrorExt;
+use common_error::from_err_code_msg_to_header;
 use common_error::status_code::StatusCode;
 use common_telemetry::{debug, error};
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::error::status_code_to_http_status;
-use crate::http::header::constants::GREPTIME_DB_HEADER_ERROR_CODE;
-use crate::http::header::GREPTIME_DB_HEADER_EXECUTION_TIME;
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ErrorResponse {
     code: u32,
     error: String,
@@ -75,13 +72,16 @@ impl IntoResponse for ErrorResponse {
     fn into_response(self) -> Response {
         let code = self.code;
         let execution_time = self.execution_time_ms;
-        let mut resp = Json(self).into_response();
-        resp.headers_mut()
-            .insert(GREPTIME_DB_HEADER_ERROR_CODE, HeaderValue::from(code));
-        resp.headers_mut().insert(
-            &GREPTIME_DB_HEADER_EXECUTION_TIME,
-            HeaderValue::from(execution_time),
+        let new_header = from_err_code_msg_to_header(
+            code,
+            &format!(
+                "error: {}, execution_time_ms: {}",
+                self.error, execution_time
+            ),
         );
+        let mut resp = Json(self).into_response();
+        resp.headers_mut().extend(new_header);
+
         let status = StatusCode::from_u32(code).unwrap_or(StatusCode::Unknown);
         let status_code = status_code_to_http_status(&status);
 

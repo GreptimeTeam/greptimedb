@@ -103,7 +103,7 @@ mod tests {
 
     use super::*;
     use crate::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
-    use crate::inverted_index::Bytes;
+    use crate::Bytes;
 
     fn unpack(fst_value: u64) -> [u32; 2] {
         bytemuck::cast::<u64, [u32; 2]>(fst_value)
@@ -118,7 +118,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut reader = InvertedIndexBlobReader::new(blob);
+        let reader = InvertedIndexBlobReader::new(blob);
         let metadata = reader.metadata().await.unwrap();
         assert_eq!(metadata.total_row_count, 8);
         assert_eq!(metadata.segment_row_count, 1);
@@ -158,7 +158,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut reader = InvertedIndexBlobReader::new(blob);
+        let reader = InvertedIndexBlobReader::new(blob);
         let metadata = reader.metadata().await.unwrap();
         assert_eq!(metadata.total_row_count, 8);
         assert_eq!(metadata.segment_row_count, 1);

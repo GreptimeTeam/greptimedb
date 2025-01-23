@@ -12,11 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod convert;
 mod distance;
+mod elem_product;
+mod elem_sum;
+pub mod impl_conv;
+pub(crate) mod product;
+mod scalar_add;
+mod scalar_mul;
+mod sub;
+pub(crate) mod sum;
+mod vector_div;
+mod vector_mul;
+mod vector_norm;
 
 use std::sync::Arc;
-
-use distance::{CosDistanceFunction, DotProductFunction, L2SqDistanceFunction};
 
 use crate::function_registry::FunctionRegistry;
 
@@ -24,8 +34,25 @@ pub(crate) struct VectorFunction;
 
 impl VectorFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(CosDistanceFunction));
-        registry.register(Arc::new(DotProductFunction));
-        registry.register(Arc::new(L2SqDistanceFunction));
+        // conversion
+        registry.register(Arc::new(convert::ParseVectorFunction));
+        registry.register(Arc::new(convert::VectorToStringFunction));
+
+        // distance
+        registry.register(Arc::new(distance::CosDistanceFunction));
+        registry.register(Arc::new(distance::DotProductFunction));
+        registry.register(Arc::new(distance::L2SqDistanceFunction));
+
+        // scalar calculation
+        registry.register(Arc::new(scalar_add::ScalarAddFunction));
+        registry.register(Arc::new(scalar_mul::ScalarMulFunction));
+
+        // vector calculation
+        registry.register(Arc::new(vector_mul::VectorMulFunction));
+        registry.register(Arc::new(vector_norm::VectorNormFunction));
+        registry.register(Arc::new(vector_div::VectorDivFunction));
+        registry.register(Arc::new(sub::SubFunction));
+        registry.register(Arc::new(elem_sum::ElemSumFunction));
+        registry.register(Arc::new(elem_product::ElemProductFunction));
     }
 }

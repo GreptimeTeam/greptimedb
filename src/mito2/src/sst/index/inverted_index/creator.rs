@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod temp_provider;
-
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::atomic::AtomicUsize;
@@ -36,11 +34,12 @@ use crate::error::{
     PushIndexValueSnafu, Result,
 };
 use crate::read::Batch;
-use crate::row_converter::SortField;
+use crate::row_converter::{CompositeValues, SortField};
 use crate::sst::file::FileId;
-use crate::sst::index::intermediate::{IntermediateLocation, IntermediateManager};
-use crate::sst::index::inverted_index::codec::{IndexValueCodec, IndexValuesCodec};
-use crate::sst::index::inverted_index::creator::temp_provider::TempFileProvider;
+use crate::sst::index::codec::{IndexValueCodec, IndexValuesCodec};
+use crate::sst::index::intermediate::{
+    IntermediateLocation, IntermediateManager, TempFileProvider,
+};
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
@@ -102,7 +101,10 @@ impl InvertedIndexer {
         );
         let index_creator = Box::new(SortIndexCreator::new(sorter, segment_row_count));
 
-        let codec = IndexValuesCodec::from_tag_columns(metadata.primary_key_columns());
+        let codec = IndexValuesCodec::from_tag_columns(
+            metadata.primary_key_encoding,
+            metadata.primary_key_columns(),
+        );
         Self {
             codec,
             index_creator,
@@ -181,10 +183,24 @@ impl InvertedIndexer {
         let n = batch.num_rows();
         guard.inc_row_count(n);
 
-        for ((col_id, col_id_str), field, value) in self.codec.decode(batch.primary_key())? {
+        // TODO(weny, zhenchi): lazy decode
+        let values = self.codec.decode(batch.primary_key())?;
+        for (idx, (col_id, field)) in self.codec.fields().iter().enumerate() {
             if !self.indexed_column_ids.contains(col_id) {
                 continue;
             }
+
+            let value = match &values {
+                CompositeValues::Dense(vec) => {
+                    let value = &vec[idx].1;
+                    if value.is_null() {
+                        None
+                    } else {
+                        Some(value)
+                    }
+                }
+                CompositeValues::Sparse(sparse_values) => sparse_values.get(col_id),
+            };
 
             if let Some(value) = value.as_ref() {
                 self.value_buf.clear();
@@ -194,6 +210,9 @@ impl InvertedIndexer {
                     &mut self.value_buf,
                 )?;
             }
+
+            // Safety: the column id is guaranteed to be in the map
+            let col_id_str = self.codec.column_ids().get(col_id).unwrap();
 
             // non-null value -> Some(encoded_bytes), null value -> None
             let value = value.is_some().then_some(self.value_buf.as_slice());
@@ -310,14 +329,16 @@ mod tests {
     use futures::future::BoxFuture;
     use object_store::services::Memory;
     use object_store::ObjectStore;
+    use puffin::puffin_manager::cache::PuffinMetadataCache;
     use puffin::puffin_manager::PuffinManager;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::cache::index::InvertedIndexCache;
+    use crate::cache::index::inverted_index::InvertedIndexCache;
+    use crate::metrics::CACHE_BYTES;
     use crate::read::BatchColumn;
-    use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+    use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
     use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
     use crate::sst::location;
@@ -380,10 +401,10 @@ mod tests {
         u64_field: impl IntoIterator<Item = u64>,
     ) -> Batch {
         let fields = vec![
-            SortField::new(ConcreteDataType::string_datatype()),
-            SortField::new(ConcreteDataType::int32_datatype()),
+            (0, SortField::new(ConcreteDataType::string_datatype())),
+            (1, SortField::new(ConcreteDataType::int32_datatype())),
         ];
-        let codec = McmpRowCodec::new(fields);
+        let codec = DensePrimaryKeyCodec::with_fields(fields);
         let row: [ValueRef; 2] = [str_tag.as_ref().into(), i32_tag.into().into()];
         let primary_key = codec.encode(row.into_iter()).unwrap();
 
@@ -446,22 +467,23 @@ mod tests {
 
         move |expr| {
             let _d = &d;
-            let cache = Arc::new(InvertedIndexCache::new(10, 10));
+            let cache = Arc::new(InvertedIndexCache::new(10, 10, 100));
+            let puffin_metadata_cache = Arc::new(PuffinMetadataCache::new(10, &CACHE_BYTES));
             let applier = InvertedIndexApplierBuilder::new(
                 region_dir.clone(),
                 object_store.clone(),
-                None,
-                Some(cache),
                 &region_metadata,
                 indexed_column_ids.clone(),
                 factory.clone(),
             )
+            .with_inverted_index_cache(Some(cache))
+            .with_puffin_metadata_cache(Some(puffin_metadata_cache))
             .build(&[expr])
             .unwrap()
             .unwrap();
             Box::pin(async move {
                 applier
-                    .apply(sst_file_id)
+                    .apply(sst_file_id, None)
                     .await
                     .unwrap()
                     .matched_segment_ids

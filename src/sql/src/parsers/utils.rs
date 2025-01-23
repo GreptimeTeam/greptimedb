@@ -18,6 +18,7 @@ use chrono::Utc;
 use datafusion::config::ConfigOptions;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::SessionState;
+use datafusion::execution::SessionStateBuilder;
 use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion_common::{DFSchema, ScalarValue};
 use datafusion_expr::execution_props::ExecutionProps;
@@ -26,7 +27,10 @@ use datafusion_expr::{AggregateUDF, ScalarUDF, TableSource, WindowUDF};
 use datafusion_sql::planner::{ContextProvider, SqlToRel};
 use datafusion_sql::TableReference;
 use datatypes::arrow::datatypes::DataType;
-use datatypes::schema::{COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE};
+use datatypes::schema::{
+    COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,
+    COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE,
+};
 use snafu::ResultExt;
 
 use crate::error::{
@@ -69,7 +73,11 @@ struct StubContextProvider {
 impl Default for StubContextProvider {
     fn default() -> Self {
         Self {
-            state: SessionState::new_with_config_rt(Default::default(), Default::default()),
+            state: SessionStateBuilder::new()
+                .with_config(Default::default())
+                .with_runtime_env(Default::default())
+                .with_default_features()
+                .build(),
         }
     }
 }
@@ -116,6 +124,14 @@ pub fn validate_column_fulltext_create_option(key: &str) -> bool {
     [
         COLUMN_FULLTEXT_OPT_KEY_ANALYZER,
         COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,
+    ]
+    .contains(&key)
+}
+
+pub fn validate_column_skipping_index_create_option(key: &str) -> bool {
+    [
+        COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY,
+        COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE,
     ]
     .contains(&key)
 }

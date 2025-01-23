@@ -14,7 +14,7 @@
 
 use std::collections::HashSet;
 
-use api::v1::alter_expr::Kind;
+use api::v1::alter_table_expr::Kind;
 use snafu::{ensure, OptionExt};
 
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;

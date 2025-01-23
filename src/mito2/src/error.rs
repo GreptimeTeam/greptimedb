@@ -30,6 +30,7 @@ use snafu::{Location, Snafu};
 use store_api::logstore::provider::Provider;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
+use tokio::time::error::Elapsed;
 
 use crate::cache::file_cache::FileType;
 use crate::region::{RegionLeaderState, RegionRoleState};
@@ -575,6 +576,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to apply bloom filter index"))]
+    ApplyBloomFilterIndex {
+        source: index::bloom_filter::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to push index value"))]
     PushIndexValue {
         source: index::inverted_index::error::Error,
@@ -676,6 +684,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to create directory {}", dir))]
+    CreateDir {
+        dir: String,
+        #[snafu(source)]
+        error: std::io::Error,
+    },
+
     #[snafu(display("Failed to filter record batch"))]
     FilterRecordBatch {
         source: common_recordbatch::error::Error,
@@ -715,8 +730,18 @@ pub enum Error {
 
     #[snafu(display("Failed to iter data part"))]
     ReadDataPart {
+        #[snafu(implicit)]
+        location: Location,
         #[snafu(source)]
         error: parquet::errors::ParquetError,
+    },
+
+    #[snafu(display("Failed to read row group in memtable"))]
+    DecodeArrowRowGroup {
+        #[snafu(source)]
+        error: ArrowError,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Invalid region options, {}", reason))]
@@ -744,13 +769,6 @@ pub enum Error {
     TimeRangePredicateOverflow {
         timestamp: Timestamp,
         unit: TimeUnit,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to build time range filters for value: {:?}", timestamp))]
-    BuildTimeRangeFilter {
-        timestamp: Timestamp,
         #[snafu(implicit)]
         location: Location,
     },
@@ -805,8 +823,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to retrieve fulltext options from column metadata"))]
-    FulltextOptions {
+    #[snafu(display("Failed to retrieve index options from column metadata"))]
+    IndexOptions {
         #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
@@ -877,6 +895,53 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Timeout"))]
+    Timeout {
+        #[snafu(source)]
+        error: Elapsed,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to read file metadata"))]
+    Metadata {
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to push value to bloom filter"))]
+    PushBloomFilterValue {
+        source: index::bloom_filter::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to finish bloom filter"))]
+    BloomFilterFinish {
+        source: index::bloom_filter::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Unexpected impure default value with region_id: {}, column: {}, default_value: {}",
+        region_id,
+        column,
+        default_value
+    ))]
+    UnexpectedImpureDefault {
+        #[snafu(implicit)]
+        location: Location,
+        region_id: RegionId,
+        column: String,
+        default_value: String,
+    },
+
+    #[snafu(display("Manual compaction is override by following operations."))]
+    ManualCompactionOverride {},
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -916,7 +981,8 @@ impl ErrorExt for Error {
             | InvalidParquet { .. }
             | OperateAbortedIndex { .. }
             | UnexpectedReplay { .. }
-            | IndexEncodeNull { .. } => StatusCode::Unexpected,
+            | IndexEncodeNull { .. }
+            | UnexpectedImpureDefault { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }
             | InvalidScanIndex { .. }
@@ -946,9 +1012,11 @@ impl ErrorExt for Error {
             | ComputeVector { .. }
             | SerializeField { .. }
             | EncodeMemtable { .. }
+            | CreateDir { .. }
             | ReadDataPart { .. }
             | CorruptedEntry { .. }
-            | BuildEntry { .. } => StatusCode::Internal,
+            | BuildEntry { .. }
+            | Metadata { .. } => StatusCode::Internal,
 
             OpenRegion { source, .. } => source.status_code(),
 
@@ -979,6 +1047,7 @@ impl ErrorExt for Error {
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,
             ConvertValue { source, .. } => source.status_code(),
+            ApplyBloomFilterIndex { source, .. } => source.status_code(),
             BuildIndexApplier { source, .. }
             | PushIndexValue { source, .. }
             | ApplyInvertedIndex { source, .. }
@@ -997,11 +1066,10 @@ impl ErrorExt for Error {
             ChecksumMismatch { .. } => StatusCode::Unexpected,
             RegionStopped { .. } => StatusCode::RegionNotReady,
             TimeRangePredicateOverflow { .. } => StatusCode::InvalidArguments,
-            BuildTimeRangeFilter { .. } => StatusCode::Unexpected,
             UnsupportedOperation { .. } => StatusCode::Unsupported,
             RemoteCompaction { .. } => StatusCode::Unexpected,
 
-            FulltextOptions { source, .. } => source.status_code(),
+            IndexOptions { source, .. } => source.status_code(),
             CreateFulltextCreator { source, .. } => source.status_code(),
             CastVector { source, .. } => source.status_code(),
             FulltextPushText { source, .. }
@@ -1010,6 +1078,15 @@ impl ErrorExt for Error {
             DecodeStats { .. } | StatsNotPresent { .. } => StatusCode::Internal,
             RegionBusy { .. } => StatusCode::RegionBusy,
             GetSchemaMetadata { source, .. } => source.status_code(),
+            Timeout { .. } => StatusCode::Cancelled,
+
+            DecodeArrowRowGroup { .. } => StatusCode::Internal,
+
+            PushBloomFilterValue { source, .. } | BloomFilterFinish { source, .. } => {
+                source.status_code()
+            }
+
+            ManualCompactionOverride {} => StatusCode::Cancelled,
         }
     }
 

@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use common_telemetry::{error, info};
+use common_telemetry::error;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
@@ -23,9 +23,8 @@ use store_api::storage::RegionId;
 
 use crate::engine::MetricEngineInner;
 use crate::error::{
-    ForbiddenPhysicalAlterSnafu, LogicalRegionNotFoundSnafu, Result, SerializeColumnMetadataSnafu,
+    LogicalRegionNotFoundSnafu, PhysicalRegionNotFoundSnafu, Result, SerializeColumnMetadataSnafu,
 };
-use crate::metrics::FORBIDDEN_OPERATION_COUNT;
 use crate::utils::{to_data_region_id, to_metadata_region_id};
 
 impl MetricEngineInner {
@@ -67,16 +66,27 @@ impl MetricEngineInner {
         logical_region_id: RegionId,
         request: RegionAlterRequest,
     ) -> Result<RegionId> {
-        let physical_region_id = {
+        let (physical_region_id, index_options) = {
             let state = &self.state.read().unwrap();
-            state
+            let physical_region_id = state
                 .get_physical_region_id(logical_region_id)
                 .with_context(|| {
                     error!("Trying to alter an nonexistent region {logical_region_id}");
                     LogicalRegionNotFoundSnafu {
                         region_id: logical_region_id,
                     }
+                })?;
+
+            let index_options = state
+                .physical_region_states()
+                .get(&physical_region_id)
+                .with_context(|| PhysicalRegionNotFoundSnafu {
+                    region_id: physical_region_id,
                 })?
+                .options()
+                .index;
+
+            (physical_region_id, index_options)
         };
 
         // only handle adding column
@@ -125,6 +135,7 @@ impl MetricEngineInner {
             data_region_id,
             logical_region_id,
             &mut columns_to_add,
+            index_options,
         )
         .await?;
 
@@ -150,20 +161,22 @@ impl MetricEngineInner {
         region_id: RegionId,
         request: RegionAlterRequest,
     ) -> Result<()> {
-        info!("Metric region received alter request {request:?} on physical region {region_id:?}");
-        FORBIDDEN_OPERATION_COUNT.inc();
-
-        ForbiddenPhysicalAlterSnafu.fail()
+        self.data_region
+            .alter_region_options(region_id, request)
+            .await?;
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod test {
+    use std::time::Duration;
+
     use api::v1::SemanticType;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use store_api::metadata::ColumnMetadata;
-    use store_api::region_request::AddColumn;
+    use store_api::region_request::{AddColumn, SetRegionOption};
 
     use super::*;
     use crate::test_util::TestEnv;
@@ -203,6 +216,18 @@ mod test {
             result.unwrap_err().to_string(),
             "Alter request to physical region is forbidden".to_string()
         );
+
+        // alter physical region's option should work
+        let alter_region_option_request = RegionAlterRequest {
+            schema_version: 0,
+            kind: AlterKind::SetRegionOptions {
+                options: vec![SetRegionOption::Ttl(Some(Duration::from_secs(500).into()))],
+            },
+        };
+        let result = engine_inner
+            .alter_physical_region(physical_region_id, alter_region_option_request.clone())
+            .await;
+        assert!(result.is_ok());
 
         // alter logical region
         let metadata_region = env.metadata_region();

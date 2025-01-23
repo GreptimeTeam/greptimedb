@@ -54,8 +54,15 @@ const INIT_CAPACITY: usize = 42;
 pub(crate) const PRI_CONSTRAINT_NAME: &str = "PRIMARY";
 /// Time index constraint name
 pub(crate) const TIME_INDEX_CONSTRAINT_NAME: &str = "TIME INDEX";
+/// Inverted index constraint name
+pub(crate) const INVERTED_INDEX_CONSTRAINT_NAME: &str = "INVERTED INDEX";
+/// Fulltext index constraint name
+pub(crate) const FULLTEXT_INDEX_CONSTRAINT_NAME: &str = "FULLTEXT INDEX";
+/// Skipping index constraint name
+pub(crate) const SKIPPING_INDEX_CONSTRAINT_NAME: &str = "SKIPPING INDEX";
 
 /// The virtual table implementation for `information_schema.KEY_COLUMN_USAGE`.
+#[derive(Debug)]
 pub(super) struct InformationSchemaKeyColumnUsage {
     schema: SchemaRef,
     catalog_name: String,
@@ -216,14 +223,19 @@ impl InformationSchemaKeyColumnUsageBuilder {
             let mut stream = catalog_manager.tables(&catalog_name, &schema_name, None);
 
             while let Some(table) = stream.try_next().await? {
-                let mut primary_constraints = vec![];
-
                 let table_info = table.table_info();
                 let table_name = &table_info.name;
                 let keys = &table_info.meta.primary_key_indices;
                 let schema = table.schema();
 
+                // For compatibility, use primary key columns as inverted index columns.
+                let pk_as_inverted_index = !schema
+                    .column_schemas()
+                    .iter()
+                    .any(|c| c.has_inverted_index_key());
+
                 for (idx, column) in schema.column_schemas().iter().enumerate() {
+                    let mut constraints = vec![];
                     if column.is_time_index() {
                         self.add_key_column_usage(
                             &predicates,
@@ -236,30 +248,37 @@ impl InformationSchemaKeyColumnUsageBuilder {
                             1, //always 1 for time index
                         );
                     }
-                    if keys.contains(&idx) {
-                        primary_constraints.push((
-                            catalog_name.clone(),
-                            schema_name.clone(),
-                            table_name.to_string(),
-                            column.name.clone(),
-                        ));
-                    }
                     // TODO(dimbtp): foreign key constraint not supported yet
-                }
+                    if keys.contains(&idx) {
+                        constraints.push(PRI_CONSTRAINT_NAME);
 
-                for (i, (catalog_name, schema_name, table_name, column_name)) in
-                    primary_constraints.into_iter().enumerate()
-                {
-                    self.add_key_column_usage(
-                        &predicates,
-                        &schema_name,
-                        PRI_CONSTRAINT_NAME,
-                        &catalog_name,
-                        &schema_name,
-                        &table_name,
-                        &column_name,
-                        i as u32 + 1,
-                    );
+                        if pk_as_inverted_index {
+                            constraints.push(INVERTED_INDEX_CONSTRAINT_NAME);
+                        }
+                    }
+                    if column.is_inverted_indexed() {
+                        constraints.push(INVERTED_INDEX_CONSTRAINT_NAME);
+                    }
+                    if column.is_fulltext_indexed() {
+                        constraints.push(FULLTEXT_INDEX_CONSTRAINT_NAME);
+                    }
+                    if column.is_skipping_indexed() {
+                        constraints.push(SKIPPING_INDEX_CONSTRAINT_NAME);
+                    }
+
+                    if !constraints.is_empty() {
+                        let aggregated_constraints = constraints.join(", ");
+                        self.add_key_column_usage(
+                            &predicates,
+                            &schema_name,
+                            &aggregated_constraints,
+                            &catalog_name,
+                            &schema_name,
+                            table_name,
+                            &column.name,
+                            idx as u32 + 1,
+                        );
+                    }
                 }
             }
         }

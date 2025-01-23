@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
-use api::v1::{column_def, AlterExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr};
+use api::v1::{
+    column_def, AlterDatabaseExpr, AlterTableExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
+};
 use catalog::CatalogManagerRef;
 use chrono::Utc;
 use common_catalog::consts::{is_readonly_schema, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -26,7 +28,7 @@ use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
 use common_meta::ddl::ExecutorContext;
 use common_meta::instruction::CacheIdent;
-use common_meta::key::schema_name::SchemaNameKey;
+use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
 use common_meta::key::NAME_PATTERN;
 use common_meta::rpc::ddl::{
     CreateFlowTask, DdlTask, DropFlowTask, DropViewTask, SubmitDdlTaskRequest,
@@ -51,7 +53,7 @@ use regex::Regex;
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::statements::alter::AlterTable;
+use sql::statements::alter::{AlterDatabase, AlterTable};
 use sql::statements::create::{
     CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView, Partitions,
 };
@@ -125,7 +127,8 @@ impl StatementExecutor {
                 schema: &schema,
             })
             .await
-            .context(TableMetadataManagerSnafu)?;
+            .context(TableMetadataManagerSnafu)?
+            .map(|v| v.into_inner());
 
         let quote_style = ctx.quote_style();
         let mut create_stmt =
@@ -268,7 +271,8 @@ impl StatementExecutor {
 
         table_info.ident.table_id = table_id;
 
-        let table_info = Arc::new(table_info.try_into().context(CreateTableInfoSnafu)?);
+        let table_info: Arc<TableInfo> =
+            Arc::new(table_info.try_into().context(CreateTableInfoSnafu)?);
         create_table.table_id = Some(api::v1::TableId { id: table_id });
 
         let table = DistTable::table(table_info);
@@ -723,7 +727,7 @@ impl StatementExecutor {
     #[tracing::instrument(skip_all)]
     pub async fn alter_logical_tables(
         &self,
-        alter_table_exprs: Vec<AlterExpr>,
+        alter_table_exprs: Vec<AlterTableExpr>,
         query_context: QueryContextRef,
     ) -> Result<Output> {
         let _timer = crate::metrics::DIST_ALTER_TABLES.start_timer();
@@ -881,12 +885,17 @@ impl StatementExecutor {
         Ok(Output::new_with_affected_rows(0))
     }
 
+    /// Verifies an alter and returns whether it is necessary to perform the alter.
+    ///
+    /// # Returns
+    ///
+    /// Returns true if the alter need to be porformed; otherwise, it returns false.
     fn verify_alter(
         &self,
         table_id: TableId,
         table_info: Arc<TableInfo>,
-        expr: AlterExpr,
-    ) -> Result<()> {
+        expr: AlterTableExpr,
+    ) -> Result<bool> {
         let request: AlterTableRequest = common_grpc_expr::alter_expr_to_request(table_id, expr)
             .context(AlterExprToRequestSnafu)?;
 
@@ -903,16 +912,31 @@ impl StatementExecutor {
                     violated: format!("Invalid table name: {}", new_table_name)
                 }
             );
+        } else if let AlterKind::AddColumns { columns } = alter_kind {
+            // If all the columns are marked as add_if_not_exists and they already exist in the table,
+            // there is no need to perform the alter.
+            let column_names: HashSet<_> = table_info
+                .meta
+                .schema
+                .column_schemas()
+                .iter()
+                .map(|schema| &schema.name)
+                .collect();
+            if columns.iter().all(|column| {
+                column_names.contains(&column.column_schema.name) && column.add_if_not_exists
+            }) {
+                return Ok(false);
+            }
         }
 
         let _ = table_info
             .meta
-            .builder_with_alter_kind(table_name, &request.alter_kind, false)
+            .builder_with_alter_kind(table_name, &request.alter_kind)
             .context(error::TableSnafu)?
             .build()
             .context(error::BuildTableMetaSnafu { table_name })?;
 
-        Ok(())
+        Ok(true)
     }
 
     #[tracing::instrument(skip_all)]
@@ -921,14 +945,14 @@ impl StatementExecutor {
         alter_table: AlterTable,
         query_context: QueryContextRef,
     ) -> Result<Output> {
-        let expr = expr_factory::to_alter_expr(alter_table, &query_context)?;
+        let expr = expr_factory::to_alter_table_expr(alter_table, &query_context)?;
         self.alter_table_inner(expr, query_context).await
     }
 
     #[tracing::instrument(skip_all)]
     pub async fn alter_table_inner(
         &self,
-        expr: AlterExpr,
+        expr: AlterTableExpr,
         query_context: QueryContextRef,
     ) -> Result<Output> {
         ensure!(
@@ -967,8 +991,10 @@ impl StatementExecutor {
             })?;
 
         let table_id = table.table_info().ident.table_id;
-        self.verify_alter(table_id, table.table_info(), expr.clone())?;
-
+        let need_alter = self.verify_alter(table_id, table.table_info(), expr.clone())?;
+        if !need_alter {
+            return Ok(Output::new_with_affected_rows(0));
+        }
         info!(
             "Table info before alter is {:?}, expr: {:?}",
             table.table_info(),
@@ -1041,6 +1067,58 @@ impl StatementExecutor {
         Ok(Output::new_with_affected_rows(0))
     }
 
+    #[tracing::instrument(skip_all)]
+    pub async fn alter_database(
+        &self,
+        alter_expr: AlterDatabase,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
+        let alter_expr = expr_factory::to_alter_database_expr(alter_expr, &query_context)?;
+        self.alter_database_inner(alter_expr, query_context).await
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn alter_database_inner(
+        &self,
+        alter_expr: AlterDatabaseExpr,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
+        ensure!(
+            !is_readonly_schema(&alter_expr.schema_name),
+            SchemaReadOnlySnafu {
+                name: query_context.current_schema().clone()
+            }
+        );
+
+        let exists = self
+            .catalog_manager
+            .schema_exists(&alter_expr.catalog_name, &alter_expr.schema_name, None)
+            .await
+            .context(CatalogSnafu)?;
+        ensure!(
+            exists,
+            SchemaNotFoundSnafu {
+                schema_info: alter_expr.schema_name,
+            }
+        );
+
+        let cache_ident = [CacheIdent::SchemaName(SchemaName {
+            catalog_name: alter_expr.catalog_name.clone(),
+            schema_name: alter_expr.schema_name.clone(),
+        })];
+
+        self.alter_database_procedure(alter_expr, query_context)
+            .await?;
+
+        // Invalidates local cache ASAP.
+        self.cache_invalidator
+            .invalidate(&Context::default(), &cache_ident)
+            .await
+            .context(error::InvalidateTableCacheSnafu)?;
+
+        Ok(Output::new_with_affected_rows(0))
+    }
+
     async fn create_table_procedure(
         &self,
         create_table: CreateTableExpr,
@@ -1079,7 +1157,7 @@ impl StatementExecutor {
 
     async fn alter_logical_tables_procedure(
         &self,
-        tables_data: Vec<AlterExpr>,
+        tables_data: Vec<AlterTableExpr>,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest {
@@ -1127,6 +1205,22 @@ impl StatementExecutor {
         let request = SubmitDdlTaskRequest {
             query_context,
             task: DdlTask::new_drop_database(catalog, schema, drop_if_exists),
+        };
+
+        self.procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), request)
+            .await
+            .context(error::ExecuteDdlSnafu)
+    }
+
+    async fn alter_database_procedure(
+        &self,
+        alter_expr: AlterDatabaseExpr,
+        query_context: QueryContextRef,
+    ) -> Result<SubmitDdlTaskResponse> {
+        let request = SubmitDdlTaskRequest {
+            query_context,
+            task: DdlTask::new_alter_database(alter_expr),
         };
 
         self.procedure_executor
@@ -1383,7 +1477,7 @@ fn find_partition_entries(
         for column in column_defs {
             let column_name = &column.name;
             let data_type = ConcreteDataType::from(
-                ColumnDataTypeWrapper::try_new(column.data_type, column.datatype_extension.clone())
+                ColumnDataTypeWrapper::try_new(column.data_type, column.datatype_extension)
                     .context(ColumnDataTypeSnafu)?,
             );
             column_name_and_type.insert(column_name, data_type);

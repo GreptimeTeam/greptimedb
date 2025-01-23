@@ -64,6 +64,13 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to list flow stats"))]
+    ListFlowStats {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to list flows in catalog {catalog}"))]
     ListFlows {
         #[snafu(implicit)]
@@ -110,13 +117,6 @@ pub enum Error {
 
     #[snafu(display("convert proto data error"))]
     ConvertProtoData {
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
-    },
-
-    #[snafu(display("Failed to re-compile script due to internal error"))]
-    CompileScriptInternal {
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
@@ -326,6 +326,7 @@ impl ErrorExt for Error {
             | Error::ListSchemas { source, .. }
             | Error::ListTables { source, .. }
             | Error::ListFlows { source, .. }
+            | Error::ListFlowStats { source, .. }
             | Error::ListProcedures { source, .. }
             | Error::ListRegionStats { source, .. }
             | Error::ConvertProtoData { source, .. } => source.status_code(),
@@ -335,9 +336,7 @@ impl ErrorExt for Error {
             Error::DecodePlan { source, .. } => source.status_code(),
             Error::InvalidTableInfoInCatalog { source, .. } => source.status_code(),
 
-            Error::CompileScriptInternal { source, .. } | Error::Internal { source, .. } => {
-                source.status_code()
-            }
+            Error::Internal { source, .. } => source.status_code(),
 
             Error::QueryAccessDenied { .. } => StatusCode::AccessDenied,
             Error::Datafusion { error, .. } => datafusion_status_code::<Self>(error, None),

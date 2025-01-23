@@ -138,7 +138,7 @@ fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
     let is_strict_mode = false;
     let instance = Arc::new(DummyInstance { tx });
     let server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(instance.clone(), None)
+        .with_sql_handler(instance.clone())
         .with_prom_handler(instance, true, is_strict_mode)
         .build();
     server.build(server.make_app())
@@ -150,7 +150,7 @@ async fn test_prometheus_remote_write_read() {
     let (tx, mut rx) = mpsc::channel(100);
 
     let app = make_test_app(tx);
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     let write_request = WriteRequest {
         timeseries: prom_store::mock_timeseries(),

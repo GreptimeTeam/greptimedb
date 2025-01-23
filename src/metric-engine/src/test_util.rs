@@ -32,6 +32,7 @@ use store_api::region_request::{
 };
 use store_api::storage::{ColumnId, RegionId};
 
+use crate::config::EngineConfig;
 use crate::data_region::DataRegion;
 use crate::engine::MetricEngine;
 use crate::metadata_region::MetadataRegion;
@@ -54,7 +55,7 @@ impl TestEnv {
     pub async fn with_prefix(prefix: &str) -> Self {
         let mut mito_env = MitoTestEnv::with_prefix(prefix);
         let mito = mito_env.create_engine(MitoConfig::default()).await;
-        let metric = MetricEngine::new(mito.clone());
+        let metric = MetricEngine::new(mito.clone(), EngineConfig::default());
         Self {
             mito_env,
             mito,
@@ -313,12 +314,12 @@ mod test {
         let region_dir = "test_metric_region";
         // assert metadata region's dir
         let metadata_region_dir = join_dir(region_dir, METADATA_REGION_SUBDIR);
-        let exist = object_store.is_exist(&metadata_region_dir).await.unwrap();
+        let exist = object_store.exists(&metadata_region_dir).await.unwrap();
         assert!(exist);
 
         // assert data region's dir
         let data_region_dir = join_dir(region_dir, DATA_REGION_SUBDIR);
-        let exist = object_store.is_exist(&data_region_dir).await.unwrap();
+        let exist = object_store.exists(&data_region_dir).await.unwrap();
         assert!(exist);
 
         // check mito engine

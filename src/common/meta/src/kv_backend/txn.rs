@@ -131,9 +131,16 @@ pub struct TxnResponse {
 pub struct Txn {
     // HACK - chroot would modify this field
     pub(super) req: TxnRequest,
-    c_when: bool,
-    c_then: bool,
-    c_else: bool,
+    pub(super) c_when: bool,
+    pub(super) c_then: bool,
+    pub(super) c_else: bool,
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl Txn {
+    pub fn req(&self) -> &TxnRequest {
+        &self.req
+    }
 }
 
 impl Txn {
@@ -234,14 +241,7 @@ impl From<Txn> for TxnRequest {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
-    use crate::error::Error;
-    use crate::kv_backend::memory::MemoryKvBackend;
-    use crate::kv_backend::KvBackendRef;
-    use crate::rpc::store::PutRequest;
-    use crate::rpc::KeyValue;
 
     #[test]
     fn test_compare() {
@@ -302,233 +302,5 @@ mod tests {
                 c_else: true,
             }
         );
-    }
-
-    #[tokio::test]
-    async fn test_txn_one_compare_op() {
-        let kv_backend = create_kv_backend().await;
-
-        let _ = kv_backend
-            .put(PutRequest {
-                key: vec![11],
-                value: vec![3],
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-
-        let txn = Txn::new()
-            .when(vec![Compare::with_value(
-                vec![11],
-                CompareOp::Greater,
-                vec![1],
-            )])
-            .and_then(vec![TxnOp::Put(vec![11], vec![1])])
-            .or_else(vec![TxnOp::Put(vec![11], vec![2])]);
-
-        let txn_response = kv_backend.txn(txn).await.unwrap();
-
-        assert!(txn_response.succeeded);
-        assert_eq!(txn_response.responses.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_txn_multi_compare_op() {
-        let kv_backend = create_kv_backend().await;
-
-        for i in 1..3 {
-            let _ = kv_backend
-                .put(PutRequest {
-                    key: vec![i],
-                    value: vec![i],
-                    ..Default::default()
-                })
-                .await
-                .unwrap();
-        }
-
-        let when: Vec<_> = (1..3u8)
-            .map(|i| Compare::with_value(vec![i], CompareOp::Equal, vec![i]))
-            .collect();
-
-        let txn = Txn::new()
-            .when(when)
-            .and_then(vec![
-                TxnOp::Put(vec![1], vec![10]),
-                TxnOp::Put(vec![2], vec![20]),
-            ])
-            .or_else(vec![TxnOp::Put(vec![1], vec![11])]);
-
-        let txn_response = kv_backend.txn(txn).await.unwrap();
-
-        assert!(txn_response.succeeded);
-        assert_eq!(txn_response.responses.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_txn_compare_equal() {
-        let kv_backend = create_kv_backend().await;
-        let key = vec![101u8];
-        kv_backend.delete(&key, false).await.unwrap();
-
-        let txn = Txn::new()
-            .when(vec![Compare::with_value_not_exists(
-                key.clone(),
-                CompareOp::Equal,
-            )])
-            .and_then(vec![TxnOp::Put(key.clone(), vec![1])])
-            .or_else(vec![TxnOp::Put(key.clone(), vec![2])]);
-        let txn_response = kv_backend.txn(txn.clone()).await.unwrap();
-        assert!(txn_response.succeeded);
-
-        let txn_response = kv_backend.txn(txn).await.unwrap();
-        assert!(!txn_response.succeeded);
-
-        let txn = Txn::new()
-            .when(vec![Compare::with_value(
-                key.clone(),
-                CompareOp::Equal,
-                vec![2],
-            )])
-            .and_then(vec![TxnOp::Put(key.clone(), vec![3])])
-            .or_else(vec![TxnOp::Put(key, vec![4])]);
-        let txn_response = kv_backend.txn(txn).await.unwrap();
-        assert!(txn_response.succeeded);
-    }
-
-    #[tokio::test]
-    async fn test_txn_compare_greater() {
-        let kv_backend = create_kv_backend().await;
-        let key = vec![102u8];
-        kv_backend.delete(&key, false).await.unwrap();
-
-        let txn = Txn::new()
-            .when(vec![Compare::with_value_not_exists(
-                key.clone(),
-                CompareOp::Greater,
-            )])
-            .and_then(vec![TxnOp::Put(key.clone(), vec![1])])
-            .or_else(vec![TxnOp::Put(key.clone(), vec![2])]);
-        let txn_response = kv_backend.txn(txn.clone()).await.unwrap();
-        assert!(!txn_response.succeeded);
-
-        let txn_response = kv_backend.txn(txn).await.unwrap();
-        assert!(txn_response.succeeded);
-
-        let txn = Txn::new()
-            .when(vec![Compare::with_value(
-                key.clone(),
-                CompareOp::Greater,
-                vec![1],
-            )])
-            .and_then(vec![TxnOp::Put(key.clone(), vec![3])])
-            .or_else(vec![TxnOp::Get(key.clone())]);
-        let mut txn_response = kv_backend.txn(txn).await.unwrap();
-        assert!(!txn_response.succeeded);
-        let res = txn_response.responses.pop().unwrap();
-        assert_eq!(
-            res,
-            TxnOpResponse::ResponseGet(RangeResponse {
-                kvs: vec![KeyValue {
-                    key,
-                    value: vec![1]
-                }],
-                more: false,
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn test_txn_compare_less() {
-        let kv_backend = create_kv_backend().await;
-        let key = vec![103u8];
-        kv_backend.delete(&[3], false).await.unwrap();
-
-        let txn = Txn::new()
-            .when(vec![Compare::with_value_not_exists(
-                key.clone(),
-                CompareOp::Less,
-            )])
-            .and_then(vec![TxnOp::Put(key.clone(), vec![1])])
-            .or_else(vec![TxnOp::Put(key.clone(), vec![2])]);
-        let txn_response = kv_backend.txn(txn.clone()).await.unwrap();
-        assert!(!txn_response.succeeded);
-
-        let txn_response = kv_backend.txn(txn).await.unwrap();
-        assert!(!txn_response.succeeded);
-
-        let txn = Txn::new()
-            .when(vec![Compare::with_value(
-                key.clone(),
-                CompareOp::Less,
-                vec![2],
-            )])
-            .and_then(vec![TxnOp::Put(key.clone(), vec![3])])
-            .or_else(vec![TxnOp::Get(key.clone())]);
-        let mut txn_response = kv_backend.txn(txn).await.unwrap();
-        assert!(!txn_response.succeeded);
-        let res = txn_response.responses.pop().unwrap();
-        assert_eq!(
-            res,
-            TxnOpResponse::ResponseGet(RangeResponse {
-                kvs: vec![KeyValue {
-                    key,
-                    value: vec![2]
-                }],
-                more: false,
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn test_txn_compare_not_equal() {
-        let kv_backend = create_kv_backend().await;
-        let key = vec![104u8];
-        kv_backend.delete(&key, false).await.unwrap();
-
-        let txn = Txn::new()
-            .when(vec![Compare::with_value_not_exists(
-                key.clone(),
-                CompareOp::NotEqual,
-            )])
-            .and_then(vec![TxnOp::Put(key.clone(), vec![1])])
-            .or_else(vec![TxnOp::Put(key.clone(), vec![2])]);
-        let txn_response = kv_backend.txn(txn.clone()).await.unwrap();
-        assert!(!txn_response.succeeded);
-
-        let txn_response = kv_backend.txn(txn).await.unwrap();
-        assert!(txn_response.succeeded);
-
-        let txn = Txn::new()
-            .when(vec![Compare::with_value(
-                key.clone(),
-                CompareOp::Equal,
-                vec![2],
-            )])
-            .and_then(vec![TxnOp::Put(key.clone(), vec![3])])
-            .or_else(vec![TxnOp::Get(key.clone())]);
-        let mut txn_response = kv_backend.txn(txn).await.unwrap();
-        assert!(!txn_response.succeeded);
-        let res = txn_response.responses.pop().unwrap();
-        assert_eq!(
-            res,
-            TxnOpResponse::ResponseGet(RangeResponse {
-                kvs: vec![KeyValue {
-                    key,
-                    value: vec![1]
-                }],
-                more: false,
-            })
-        );
-    }
-
-    async fn create_kv_backend() -> KvBackendRef {
-        Arc::new(MemoryKvBackend::<Error>::new())
-        // TODO(jiachun): Add a feature to test against etcd in github CI
-        //
-        // The same test can be run against etcd by uncommenting the following line
-        // crate::service::store::etcd::EtcdStore::with_endpoints(["127.0.0.1:2379"])
-        //     .await
-        //     .unwrap()
     }
 }

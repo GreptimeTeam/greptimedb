@@ -134,7 +134,7 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
             }
         });
 
-        Ok(HandleControl::Done)
+        Ok(HandleControl::Continue)
     }
 }
 
@@ -285,7 +285,7 @@ mod tests {
 
             let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
             let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
-            assert_matches!(control, HandleControl::Done);
+            assert_matches!(control, HandleControl::Continue);
 
             let (_, reply) = heartbeat_env.receiver.recv().await.unwrap();
 
@@ -340,7 +340,7 @@ mod tests {
 
             let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
             let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
-            assert_matches!(control, HandleControl::Done);
+            assert_matches!(control, HandleControl::Continue);
 
             let (_, reply) = heartbeat_env.receiver.recv().await.unwrap();
 
@@ -373,7 +373,7 @@ mod tests {
 
         let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
         let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
-        assert_matches!(control, HandleControl::Done);
+        assert_matches!(control, HandleControl::Continue);
 
         let (_, reply) = heartbeat_env.receiver.recv().await.unwrap();
 
@@ -420,7 +420,7 @@ mod tests {
 
             let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
             let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
-            assert_matches!(control, HandleControl::Done);
+            assert_matches!(control, HandleControl::Continue);
 
             let (_, reply) = heartbeat_env.receiver.recv().await.unwrap();
 
@@ -442,7 +442,7 @@ mod tests {
         });
         let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
         let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
-        assert_matches!(control, HandleControl::Done);
+        assert_matches!(control, HandleControl::Continue);
 
         let (_, reply) = heartbeat_env.receiver.recv().await.unwrap();
 

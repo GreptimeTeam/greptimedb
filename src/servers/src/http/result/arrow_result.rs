@@ -24,7 +24,6 @@ use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatchStream;
 use futures::StreamExt;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
@@ -33,7 +32,7 @@ use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_
 use crate::http::result::error_result::ErrorResponse;
 use crate::http::{HttpResponse, ResponseFormat};
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ArrowResponse {
     pub(crate) data: Vec<u8>,
     pub(crate) execution_time_ms: u64,

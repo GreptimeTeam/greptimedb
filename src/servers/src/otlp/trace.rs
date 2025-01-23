@@ -15,7 +15,9 @@
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequests};
 use common_grpc::precision::Precision;
+use itertools::Itertools;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use opentelemetry_proto::tonic::common::v1::any_value;
 
 use self::span::{parse_span, TraceSpan, TraceSpans};
 use crate::error::Result;
@@ -34,16 +36,39 @@ pub mod span;
 /// <https://github.com/open-telemetry/opentelemetry-proto/blob/main/opentelemetry/proto/trace/v1/trace.proto>
 /// for data structure of OTLP traces.
 pub fn parse(request: ExportTraceServiceRequest) -> TraceSpans {
-    let mut spans = vec![];
+    let span_size = request
+        .resource_spans
+        .iter()
+        .flat_map(|res| res.scope_spans.iter())
+        .flat_map(|scope| scope.spans.iter())
+        .count();
+    let mut spans = Vec::with_capacity(span_size);
     for resource_spans in request.resource_spans {
         let resource_attrs = resource_spans
             .resource
             .map(|r| r.attributes)
             .unwrap_or_default();
+        let service_name = resource_attrs
+            .iter()
+            .find_or_first(|kv| kv.key == "service.name")
+            .and_then(|kv| kv.value.clone())
+            .and_then(|v| match v.value {
+                Some(any_value::Value::StringValue(s)) => Some(s),
+                Some(any_value::Value::BytesValue(b)) => {
+                    Some(String::from_utf8_lossy(&b).to_string())
+                }
+                _ => None,
+            });
+
         for scope_spans in resource_spans.scope_spans {
             let scope = scope_spans.scope.unwrap_or_default();
             for span in scope_spans.spans {
-                spans.push(parse_span(&resource_attrs, &scope, span));
+                spans.push(parse_span(
+                    service_name.clone(),
+                    &resource_attrs,
+                    &scope,
+                    span,
+                ));
             }
         }
     }
@@ -95,6 +120,10 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
         ),
     ];
     row_writer::write_fields(writer, fields.into_iter(), &mut row)?;
+
+    if let Some(service_name) = span.service_name {
+        row_writer::write_tag(writer, "service_name", service_name, &mut row)?;
+    }
 
     // tags
     let iter = vec![

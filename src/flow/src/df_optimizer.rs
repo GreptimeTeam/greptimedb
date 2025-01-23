@@ -23,6 +23,9 @@ use common_error::ext::BoxedError;
 use common_telemetry::debug;
 use datafusion::config::ConfigOptions;
 use datafusion::error::DataFusionError;
+use datafusion::functions_aggregate::count::count_udaf;
+use datafusion::functions_aggregate::sum::sum_udaf;
+use datafusion::optimizer::analyzer::count_wildcard_rule::CountWildcardRule;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::optimizer::common_subexpr_eliminate::CommonSubexprEliminate;
 use datafusion::optimizer::optimize_projections::OptimizeProjections;
@@ -34,8 +37,6 @@ use datafusion_common::tree_node::{
     Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter, TreeNodeVisitor,
 };
 use datafusion_common::{Column, DFSchema, ScalarValue};
-use datafusion_expr::aggregate_function::AggregateFunction;
-use datafusion_expr::expr::AggregateFunctionDefinition;
 use datafusion_expr::utils::merge_schema;
 use datafusion_expr::{
     BinaryExpr, Expr, Operator, Projection, ScalarUDFImpl, Signature, TypeSignature, Volatility,
@@ -59,6 +60,7 @@ pub async fn apply_df_optimizer(
 ) -> Result<datafusion_expr::LogicalPlan, Error> {
     let cfg = ConfigOptions::new();
     let analyzer = Analyzer::with_rules(vec![
+        Arc::new(CountWildcardRule::new()),
         Arc::new(AvgExpandRule::new()),
         Arc::new(TumbleExpandRule::new()),
         Arc::new(CheckGroupByRule::new()),
@@ -124,6 +126,7 @@ pub async fn sql_to_flow_plan(
     Ok(flow_plan)
 }
 
+#[derive(Debug)]
 struct AvgExpandRule {}
 
 impl AvgExpandRule {
@@ -236,7 +239,7 @@ fn put_aggr_to_proj_analyzer(
 fn expand_avg_analyzer(
     plan: datafusion_expr::LogicalPlan,
 ) -> Result<Transformed<datafusion_expr::LogicalPlan>, DataFusionError> {
-    let mut schema = merge_schema(plan.inputs());
+    let mut schema = merge_schema(&plan.inputs());
 
     if let datafusion_expr::LogicalPlan::TableScan(ts) = &plan {
         let source_schema =
@@ -249,9 +252,10 @@ fn expand_avg_analyzer(
     let name_preserver = NamePreserver::new(&plan);
     // apply coercion rewrite all expressions in the plan individually
     plan.map_expressions(|expr| {
-        let original_name = name_preserver.save(&expr)?;
-        expr.rewrite(&mut expr_rewrite)?
-            .map_data(|expr| original_name.restore(expr))
+        let original_name = name_preserver.save(&expr);
+        Ok(expr
+            .rewrite(&mut expr_rewrite)?
+            .update_data(|expr| original_name.restore(expr)))
     })?
     .map_data(|plan| plan.recompute_schema())
 }
@@ -278,12 +282,10 @@ impl TreeNodeRewriter for ExpandAvgRewriter<'_> {
 
     fn f_up(&mut self, expr: Expr) -> Result<Transformed<Expr>, DataFusionError> {
         if let Expr::AggregateFunction(aggr_func) = &expr {
-            if let AggregateFunctionDefinition::BuiltIn(AggregateFunction::Avg) =
-                &aggr_func.func_def
-            {
+            if aggr_func.func.name() == "avg" {
                 let sum_expr = {
                     let mut tmp = aggr_func.clone();
-                    tmp.func_def = AggregateFunctionDefinition::BuiltIn(AggregateFunction::Sum);
+                    tmp.func = sum_udaf();
                     Expr::AggregateFunction(tmp)
                 };
                 let sum_cast = {
@@ -297,7 +299,7 @@ impl TreeNodeRewriter for ExpandAvgRewriter<'_> {
 
                 let count_expr = {
                     let mut tmp = aggr_func.clone();
-                    tmp.func_def = AggregateFunctionDefinition::BuiltIn(AggregateFunction::Count);
+                    tmp.func = count_udaf();
 
                     Expr::AggregateFunction(tmp)
                 };
@@ -327,6 +329,7 @@ impl TreeNodeRewriter for ExpandAvgRewriter<'_> {
 }
 
 /// expand tumble in aggr expr to tumble_start and tumble_end with column name like `window_start`
+#[derive(Debug)]
 struct TumbleExpandRule {}
 
 impl TumbleExpandRule {
@@ -490,7 +493,7 @@ impl ScalarUDFImpl for TumbleExpand {
                 if let Some(start_time) = opt{
                     if !matches!(start_time,  Utf8 | Date32 | Date64 | Timestamp(_, _)){
                         return Err(DataFusionError::Plan(
-                            format!("Expect start_time to either be date, timestampe or string, found {:?}", start_time)
+                            format!("Expect start_time to either be date, timestamp or string, found {:?}", start_time)
                         ));
                     }
                 }
@@ -526,6 +529,7 @@ impl ScalarUDFImpl for TumbleExpand {
 }
 
 /// This rule check all group by exprs, and make sure they are also in select clause in a aggr query
+#[derive(Debug)]
 struct CheckGroupByRule {}
 
 impl CheckGroupByRule {

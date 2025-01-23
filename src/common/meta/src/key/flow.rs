@@ -15,6 +15,7 @@
 pub mod flow_info;
 pub(crate) mod flow_name;
 pub(crate) mod flow_route;
+pub mod flow_state;
 pub(crate) mod flownode_flow;
 pub(crate) mod table_flow;
 
@@ -35,6 +36,7 @@ use crate::ensure_values;
 use crate::error::{self, Result};
 use crate::key::flow::flow_info::FlowInfoManager;
 use crate::key::flow::flow_name::FlowNameManager;
+use crate::key::flow::flow_state::FlowStateManager;
 use crate::key::flow::flownode_flow::FlownodeFlowManager;
 pub use crate::key::flow::table_flow::{TableFlowManager, TableFlowManagerRef};
 use crate::key::txn_helper::TxnOpGetResponseSet;
@@ -102,6 +104,8 @@ pub struct FlowMetadataManager {
     flownode_flow_manager: FlownodeFlowManager,
     table_flow_manager: TableFlowManager,
     flow_name_manager: FlowNameManager,
+    /// only metasrv have access to itself's memory backend, so for other case it should be None
+    flow_state_manager: Option<FlowStateManager>,
     kv_backend: KvBackendRef,
 }
 
@@ -114,6 +118,7 @@ impl FlowMetadataManager {
             flow_name_manager: FlowNameManager::new(kv_backend.clone()),
             flownode_flow_manager: FlownodeFlowManager::new(kv_backend.clone()),
             table_flow_manager: TableFlowManager::new(kv_backend.clone()),
+            flow_state_manager: None,
             kv_backend,
         }
     }
@@ -121,6 +126,10 @@ impl FlowMetadataManager {
     /// Returns the [`FlowNameManager`].
     pub fn flow_name_manager(&self) -> &FlowNameManager {
         &self.flow_name_manager
+    }
+
+    pub fn flow_state_manager(&self) -> Option<&FlowStateManager> {
+        self.flow_state_manager.as_ref()
     }
 
     /// Returns the [`FlowInfoManager`].
@@ -197,7 +206,7 @@ impl FlowMetadataManager {
                 on_create_flow_flow_name_failure(&mut set)?.with_context(|| {
                     error::UnexpectedSnafu {
                         err_msg: format!(
-                    "Reads the empty flow name during the creating flow, flow_id: {flow_id}"
+                    "Reads the empty flow name in comparing operation of the creating flow, flow_id: {flow_id}"
                 ),
                     }
                 })?;
@@ -220,7 +229,7 @@ impl FlowMetadataManager {
             let remote_flow =
                 on_create_flow_failure(&mut set)?.with_context(|| error::UnexpectedSnafu {
                     err_msg: format!(
-                        "Reads the empty flow during the creating flow, flow_id: {flow_id}"
+                        "Reads the empty flow in comparing operation of creating flow, flow_id: {flow_id}"
                     ),
                 })?;
             let op_name = "creating flow";
@@ -288,7 +297,7 @@ impl FlowMetadataManager {
                 on_create_flow_flow_name_failure(&mut set)?.with_context(|| {
                     error::UnexpectedSnafu {
                         err_msg: format!(
-                        "Reads the empty flow name during the updating flow, flow_id: {flow_id}"
+                        "Reads the empty flow name in comparing operation of the updating flow, flow_id: {flow_id}"
                     ),
                     }
                 })?;
@@ -316,7 +325,7 @@ impl FlowMetadataManager {
             let remote_flow =
                 on_create_flow_failure(&mut set)?.with_context(|| error::UnexpectedSnafu {
                     err_msg: format!(
-                        "Reads the empty flow during the updating flow, flow_id: {flow_id}"
+                        "Reads the empty flow in comparing operation of the updating flow, flow_id: {flow_id}"
                     ),
                 })?;
             let op_name = "updating flow";
@@ -366,6 +375,12 @@ impl FlowMetadataManager {
             .batch_delete(BatchDeleteRequest::new().with_keys(keys))
             .await?;
         Ok(())
+    }
+}
+
+impl std::fmt::Debug for FlowMetadataManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlowMetadataManager").finish()
     }
 }
 

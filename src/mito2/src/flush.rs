@@ -15,11 +15,11 @@
 //! Flush related utilities and structs.
 
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use common_telemetry::{debug, error, info};
-use smallvec::SmallVec;
+use common_telemetry::{debug, error, info, trace};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use strum::IntoStaticStr;
@@ -32,7 +32,10 @@ use crate::error::{
     Error, FlushRegionSnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::metrics::{FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_ERRORS_TOTAL, FLUSH_REQUESTS_TOTAL};
+use crate::metrics::{
+    FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_ERRORS_TOTAL, FLUSH_REQUESTS_TOTAL,
+    INFLIGHT_FLUSH_COUNT,
+};
 use crate::read::Source;
 use crate::region::options::IndexOptions;
 use crate::region::version::{VersionControlData, VersionControlRef};
@@ -42,7 +45,7 @@ use crate::request::{
     SenderWriteRequest, WorkerRequest,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
-use crate::sst::file::{FileId, FileMeta, IndexType};
+use crate::sst::file::{FileId, FileMeta};
 use crate::sst::parquet::WriteOptions;
 use crate::worker::WorkerListener;
 
@@ -138,17 +141,22 @@ impl WriteBufferManager for WriteBufferManagerImpl {
         // If the memory exceeds the buffer size, we trigger more aggressive
         // flush. But if already more than half memory is being flushed,
         // triggering more flush may not help. We will hold it instead.
-        if memory_usage >= self.global_write_buffer_size
-            && mutable_memtable_memory_usage >= self.global_write_buffer_size / 2
-        {
-            debug!(
+        if memory_usage >= self.global_write_buffer_size {
+            if mutable_memtable_memory_usage >= self.global_write_buffer_size / 2 {
+                debug!(
                 "Engine should flush (over total limit), memory_usage: {}, global_write_buffer_size: {}, \
                  mutable_usage: {}.",
                 memory_usage,
                 self.global_write_buffer_size,
-                mutable_memtable_memory_usage,
-            );
-            return true;
+                mutable_memtable_memory_usage);
+                return true;
+            } else {
+                trace!(
+                    "Engine won't flush, memory_usage: {}, global_write_buffer_size: {}, mutable_usage: {}.",
+                    memory_usage,
+                    self.global_write_buffer_size,
+                    mutable_memtable_memory_usage);
+            }
         }
 
         false
@@ -261,7 +269,9 @@ impl RegionFlushTask {
         let version_data = version_control.current();
 
         Box::pin(async move {
+            INFLIGHT_FLUSH_COUNT.inc();
             self.do_flush(version_data).await;
+            INFLIGHT_FLUSH_COUNT.dec();
         })
     }
 
@@ -336,8 +346,9 @@ impl RegionFlushTask {
                 continue;
             }
 
+            let max_sequence = mem.stats().max_sequence();
             let file_id = FileId::random();
-            let iter = mem.iter(None, None)?;
+            let iter = mem.iter(None, None, None)?;
             let source = Source::Iter(iter);
 
             // Flush to level 0.
@@ -348,9 +359,11 @@ impl RegionFlushTask {
                 source,
                 cache_manager: self.cache_manager.clone(),
                 storage: version.options.storage.clone(),
+                max_sequence: Some(max_sequence),
                 index_options: self.index_options.clone(),
                 inverted_index_config: self.engine_config.inverted_index.clone(),
                 fulltext_index_config: self.engine_config.fulltext_index.clone(),
+                bloom_filter_index_config: self.engine_config.bloom_filter_index.clone(),
             };
             let Some(sst_info) = self
                 .access_layer
@@ -368,19 +381,11 @@ impl RegionFlushTask {
                 time_range: sst_info.time_range,
                 level: 0,
                 file_size: sst_info.file_size,
-                available_indexes: {
-                    let mut indexes = SmallVec::new();
-                    if sst_info.index_metadata.inverted_index.is_available() {
-                        indexes.push(IndexType::InvertedIndex);
-                    }
-                    if sst_info.index_metadata.fulltext_index.is_available() {
-                        indexes.push(IndexType::FulltextIndex);
-                    }
-                    indexes
-                },
+                available_indexes: sst_info.index_metadata.build_available_indexes(),
                 index_file_size: sst_info.index_metadata.file_size,
                 num_rows: sst_info.num_rows as u64,
                 num_row_groups: sst_info.num_row_groups,
+                sequence: NonZeroU64::new(max_sequence),
             };
             file_metas.push(file_meta);
         }
@@ -530,6 +535,7 @@ impl FlushScheduler {
             self.region_status.remove(&region_id);
             return Err(e);
         }
+
         flush_status.flushing = true;
 
         Ok(())

@@ -13,15 +13,18 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
-use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
+use catalog::information_extension::DistributedInformationExtension;
+use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use clap::Parser;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
 use common_config::Configurable;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
+use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::key::flow::FlowMetadataManager;
@@ -30,7 +33,6 @@ use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use common_version::{short_version, version};
 use flow::{FlownodeBuilder, FlownodeInstance, FrontendInvoker};
-use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use meta_client::{MetaClientOptions, MetaClientType};
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
@@ -41,7 +43,7 @@ use crate::error::{
     MissingConfigSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{log_versions, App, DistributedInformationExtension};
+use crate::{log_versions, App};
 
 pub const APP_NAME: &str = "greptime-flownode";
 
@@ -62,12 +64,13 @@ impl Instance {
         }
     }
 
-    pub fn flownode_mut(&mut self) -> &mut FlownodeInstance {
-        &mut self.flownode
-    }
-
     pub fn flownode(&self) -> &FlownodeInstance {
         &self.flownode
+    }
+
+    /// allow customizing flownode for downstream projects
+    pub fn flownode_mut(&mut self) -> &mut FlownodeInstance {
+        &mut self.flownode
     }
 }
 
@@ -140,6 +143,11 @@ struct StartCommand {
     /// The prefix of environment variables, default is `GREPTIMEDB_FLOWNODE`;
     #[clap(long, default_value = "GREPTIMEDB_FLOWNODE")]
     env_prefix: String,
+    #[clap(long)]
+    http_addr: Option<String>,
+    /// HTTP request timeout in seconds.
+    #[clap(long)]
+    http_timeout: Option<u64>,
 }
 
 impl StartCommand {
@@ -196,6 +204,14 @@ impl StartCommand {
             opts.mode = Mode::Distributed;
         }
 
+        if let Some(http_addr) = &self.http_addr {
+            opts.http.addr.clone_from(http_addr);
+        }
+
+        if let Some(http_timeout) = self.http_timeout {
+            opts.http.timeout = Duration::from_secs(http_timeout);
+        }
+
         if let (Mode::Distributed, None) = (&opts.mode, &opts.node_id) {
             return MissingConfigSnafu {
                 msg: "Missing node id option",
@@ -220,7 +236,8 @@ impl StartCommand {
         info!("Flownode start command: {:#?}", self);
         info!("Flownode options: {:#?}", opts);
 
-        let opts = opts.component;
+        let mut opts = opts.component;
+        opts.grpc.detect_hostname();
 
         // TODO(discord9): make it not optionale after cluster id is required
         let cluster_id = opts.cluster_id.unwrap_or(0);
@@ -246,11 +263,12 @@ impl StartCommand {
         let cache_tti = meta_config.metadata_cache_tti;
 
         // TODO(discord9): add helper function to ease the creation of cache registry&such
-        let cached_meta_backend = CachedMetaKvBackendBuilder::new(meta_client.clone())
-            .cache_max_capacity(cache_max_capacity)
-            .cache_ttl(cache_ttl)
-            .cache_tti(cache_tti)
-            .build();
+        let cached_meta_backend =
+            CachedKvBackendBuilder::new(Arc::new(MetaKvBackend::new(meta_client.clone())))
+                .cache_max_capacity(cache_max_capacity)
+                .cache_ttl(cache_ttl)
+                .cache_tti(cache_tti)
+                .build();
         let cached_meta_backend = Arc::new(cached_meta_backend);
 
         // Builds cache registry
@@ -287,9 +305,7 @@ impl StartCommand {
 
         let executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
-            Arc::new(InvalidateTableCacheHandler::new(
-                layered_cache_registry.clone(),
-            )),
+            Arc::new(InvalidateCacheHandler::new(layered_cache_registry.clone())),
         ]);
 
         let heartbeat_task = flow::heartbeat::HeartbeatTask::new(

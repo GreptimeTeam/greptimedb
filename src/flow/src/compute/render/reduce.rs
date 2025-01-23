@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::Arc;
 
+use arrow::array::new_null_array;
 use common_telemetry::trace;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
@@ -87,6 +88,8 @@ impl Context<'_, '_> {
         })?;
         let key_val_plan = key_val_plan.clone();
 
+        let output_type = output_type.clone();
+
         let now = self.compute_state.current_time_ref();
 
         let err_collector = self.err_collector.clone();
@@ -118,6 +121,7 @@ impl Context<'_, '_> {
                     src_data,
                     &key_val_plan,
                     &accum_plan,
+                    &output_type,
                     SubgraphArg {
                         now,
                         err_collector: &err_collector,
@@ -354,6 +358,7 @@ fn reduce_batch_subgraph(
     src_data: impl IntoIterator<Item = Batch>,
     key_val_plan: &KeyValPlan,
     accum_plan: &AccumulablePlan,
+    output_type: &RelationType,
     SubgraphArg {
         now,
         err_collector,
@@ -394,20 +399,54 @@ fn reduce_batch_subgraph(
                 }
             }
 
-            // TODO: here reduce numbers of eq to minimal by keeping slicing key/val batch
+            let key_data_types = output_type
+                .column_types
+                .iter()
+                .map(|t| t.scalar_type.clone())
+                .collect_vec();
+
+            // TODO(discord9): here reduce numbers of eq to minimal by keeping slicing key/val batch
             for key_row in distinct_keys {
                 let key_scalar_value = {
                     let mut key_scalar_value = Vec::with_capacity(key_row.len());
-                    for key in key_row.iter() {
+                    for (key_idx, key) in key_row.iter().enumerate() {
                         let v =
                             key.try_to_scalar_value(&key.data_type())
                                 .context(DataTypeSnafu {
                                     msg: "can't convert key values to datafusion value",
                                 })?;
-                        let arrow_value =
+
+                        let key_data_type = key_data_types.get(key_idx).context(InternalSnafu {
+                            reason: format!(
+                                "Key index out of bound, expected at most {} but got {}",
+                                output_type.column_types.len(),
+                                key_idx
+                            ),
+                        })?;
+
+                        // if incoming value's datatype is null, it need to be handled specially, see below
+                        if key_data_type.as_arrow_type() != v.data_type()
+                            && !v.data_type().is_null()
+                        {
+                            crate::expr::error::InternalSnafu {
+                                reason: format!(
+                                    "Key data type mismatch, expected {:?} but got {:?}",
+                                    key_data_type.as_arrow_type(),
+                                    v.data_type()
+                                ),
+                            }
+                            .fail()?
+                        }
+
+                        // handle single null key
+                        let arrow_value = if v.data_type().is_null() {
+                            let ret = new_null_array(&arrow::datatypes::DataType::Null, 1);
+                            arrow::array::Scalar::new(ret)
+                        } else {
                             v.to_scalar().context(crate::expr::error::DatafusionSnafu {
                                 context: "can't convert key values to arrow value",
-                            })?;
+                            })?
+                        };
                         key_scalar_value.push(arrow_value);
                     }
                     key_scalar_value
@@ -419,7 +458,19 @@ fn reduce_batch_subgraph(
                     .zip(key_batch.batch().iter())
                     .map(|(key, col)| {
                         // TODO(discord9): this takes half of the cpu! And this is redundant amount of `eq`!
-                        arrow::compute::kernels::cmp::eq(&key, &col.to_arrow_array().as_ref() as _)
+
+                        // note that if lhs is a null, we still need to get all rows that are null! But can't use `eq` since
+                        // it will return null if input have null, so we need to use `is_null` instead
+                        if arrow::array::Datum::get(&key).0.data_type().is_null() {
+                            arrow::compute::kernels::boolean::is_null(
+                                col.to_arrow_array().as_ref() as _
+                            )
+                        } else {
+                            arrow::compute::kernels::cmp::eq(
+                                &key,
+                                &col.to_arrow_array().as_ref() as _,
+                            )
+                        }
                     })
                     .try_collect::<_, Vec<_>, _>()
                     .context(ArrowSnafu {
@@ -535,17 +586,13 @@ fn reduce_batch_subgraph(
     // this output part is not supposed to be resource intensive
     // (because for every batch there wouldn't usually be as many output row?),
     // so we can do some costly operation here
-    let output_types = all_output_dict.first_entry().map(|entry| {
-        entry
-            .key()
-            .iter()
-            .chain(entry.get().iter())
-            .map(|v| v.data_type())
-            .collect::<Vec<ConcreteDataType>>()
-    });
+    let output_types = output_type
+        .column_types
+        .iter()
+        .map(|t| t.scalar_type.clone())
+        .collect_vec();
 
-    if let Some(output_types) = output_types {
-        err_collector.run(|| {
+    err_collector.run(|| {
             let column_cnt = output_types.len();
             let row_cnt = all_output_dict.len();
 
@@ -585,7 +632,6 @@ fn reduce_batch_subgraph(
 
             Ok(())
         });
-    }
 }
 
 /// reduce subgraph, reduce the input data into a single row
@@ -1516,7 +1562,9 @@ mod test {
         let mut ctx = harness_test_ctx(&mut df, &mut state);
 
         let rows = vec![
-            (Row::new(vec![1i64.into()]), 1, 1),
+            (Row::new(vec![Value::Null]), -1, 1),
+            (Row::new(vec![1i64.into()]), 0, 1),
+            (Row::new(vec![Value::Null]), 1, 1),
             (Row::new(vec![2i64.into()]), 2, 1),
             (Row::new(vec![3i64.into()]), 3, 1),
             (Row::new(vec![1i64.into()]), 4, 1),
@@ -1558,13 +1606,15 @@ mod test {
                 Box::new(input_plan.with_types(typ.into_unnamed())),
                 &key_val_plan,
                 &reduce_plan,
-                &RelationType::empty(),
+                &RelationType::new(vec![ColumnType::new(CDT::int64_datatype(), true)]),
             )
             .unwrap();
 
         {
             let now_inner = now.clone();
             let expected = BTreeMap::<i64, Vec<i64>>::from([
+                (-1, vec![]),
+                (0, vec![1i64]),
                 (1, vec![1i64]),
                 (2, vec![3i64]),
                 (3, vec![6i64]),
@@ -1581,7 +1631,11 @@ mod test {
 
                     if let Some(expected) = expected.get(&now) {
                         let batch = expected.iter().map(|v| Value::from(*v)).collect_vec();
-                        let batch = Batch::try_from_rows(vec![batch.into()]).unwrap();
+                        let batch = Batch::try_from_rows_with_types(
+                            vec![batch.into()],
+                            &[CDT::int64_datatype()],
+                        )
+                        .unwrap();
                         assert_eq!(res.first(), Some(&batch));
                     }
                 });

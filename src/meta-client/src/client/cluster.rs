@@ -21,7 +21,9 @@ use api::v1::meta::cluster_client::ClusterClient;
 use api::v1::meta::{MetasrvNodeInfo, MetasrvPeersRequest, ResponseHeader, Role};
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::ChannelManager;
-use common_meta::error::{Error as MetaError, ExternalSnafu, Result as MetaResult};
+use common_meta::error::{
+    Error as MetaError, ExternalSnafu, ResponseExceededSizeLimitSnafu, Result as MetaResult,
+};
 use common_meta::kv_backend::{KvBackend, TxnService};
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -31,14 +33,15 @@ use common_meta::rpc::store::{
 use common_telemetry::{info, warn};
 use snafu::{ensure, ResultExt};
 use tokio::sync::RwLock;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
 use tonic::Status;
 
 use crate::client::ask_leader::AskLeader;
 use crate::client::{util, Id};
 use crate::error::{
-    ConvertMetaResponseSnafu, CreateChannelSnafu, Error, IllegalGrpcClientStateSnafu, Result,
-    RetryTimesExceededSnafu,
+    ConvertMetaResponseSnafu, CreateChannelSnafu, Error, IllegalGrpcClientStateSnafu,
+    ReadOnlyKvBackendSnafu, Result, RetryTimesExceededSnafu,
 };
 
 #[derive(Clone, Debug)]
@@ -102,10 +105,14 @@ impl KvBackend for Client {
     }
 
     async fn range(&self, req: RangeRequest) -> MetaResult<RangeResponse> {
-        self.range(req)
-            .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)
+        let resp = self.range(req).await;
+        match resp {
+            Ok(resp) => Ok(resp),
+            Err(err) if err.is_exceeded_size_limit() => {
+                Err(BoxedError::new(err)).context(ResponseExceededSizeLimitSnafu)
+            }
+            Err(err) => Err(BoxedError::new(err)).context(ExternalSnafu),
+        }
     }
 
     async fn put(&self, _: PutRequest) -> MetaResult<PutResponse> {
@@ -173,7 +180,10 @@ impl Inner {
     fn make_client(&self, addr: impl AsRef<str>) -> Result<ClusterClient<Channel>> {
         let channel = self.channel_manager.get(addr).context(CreateChannelSnafu)?;
 
-        Ok(ClusterClient::new(channel))
+        Ok(ClusterClient::new(channel)
+            .accept_compressed(CompressionEncoding::Gzip)
+            .accept_compressed(CompressionEncoding::Zstd)
+            .send_compressed(CompressionEncoding::Zstd))
     }
 
     #[inline]
@@ -296,5 +306,77 @@ impl Inner {
         )
         .await
         .map(|res| (res.leader, res.followers))
+    }
+}
+
+/// A client for the cluster info. Read only and corresponding to
+/// `in_memory` kvbackend in the meta-srv.
+#[derive(Clone, Debug)]
+pub struct ClusterKvBackend {
+    inner: Arc<Client>,
+}
+
+impl ClusterKvBackend {
+    pub fn new(client: Arc<Client>) -> Self {
+        Self { inner: client }
+    }
+
+    fn unimpl(&self) -> common_meta::error::Error {
+        let ret: common_meta::error::Result<()> = ReadOnlyKvBackendSnafu {
+            name: self.name().to_string(),
+        }
+        .fail()
+        .map_err(BoxedError::new)
+        .context(common_meta::error::ExternalSnafu);
+        ret.unwrap_err()
+    }
+}
+
+impl TxnService for ClusterKvBackend {
+    type Error = common_meta::error::Error;
+}
+
+#[async_trait::async_trait]
+impl KvBackend for ClusterKvBackend {
+    fn name(&self) -> &str {
+        "ClusterKvBackend"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    async fn range(&self, req: RangeRequest) -> common_meta::error::Result<RangeResponse> {
+        self.inner
+            .range(req)
+            .await
+            .map_err(BoxedError::new)
+            .context(common_meta::error::ExternalSnafu)
+    }
+
+    async fn batch_get(&self, _: BatchGetRequest) -> common_meta::error::Result<BatchGetResponse> {
+        Err(self.unimpl())
+    }
+
+    async fn put(&self, _: PutRequest) -> common_meta::error::Result<PutResponse> {
+        Err(self.unimpl())
+    }
+
+    async fn batch_put(&self, _: BatchPutRequest) -> common_meta::error::Result<BatchPutResponse> {
+        Err(self.unimpl())
+    }
+
+    async fn delete_range(
+        &self,
+        _: DeleteRangeRequest,
+    ) -> common_meta::error::Result<DeleteRangeResponse> {
+        Err(self.unimpl())
+    }
+
+    async fn batch_delete(
+        &self,
+        _: BatchDeleteRequest,
+    ) -> common_meta::error::Result<BatchDeleteResponse> {
+        Err(self.unimpl())
     }
 }

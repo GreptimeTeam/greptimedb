@@ -13,8 +13,11 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use common_base::range_read::RangeReader;
+use common_base::range_read::{FileReader, SizeAwareRangeReader};
+use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use futures::AsyncWrite;
+use tokio::fs::File;
+use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
 use crate::error::Result;
 
@@ -22,7 +25,7 @@ use crate::error::Result;
 #[async_trait]
 #[auto_impl::auto_impl(Arc)]
 pub trait PuffinFileAccessor: Send + Sync + 'static {
-    type Reader: RangeReader + Sync;
+    type Reader: SizeAwareRangeReader + Sync;
     type Writer: AsyncWrite + Unpin + Send;
 
     /// Opens a reader for the given puffin file.
@@ -30,4 +33,38 @@ pub trait PuffinFileAccessor: Send + Sync + 'static {
 
     /// Creates a writer for the given puffin file.
     async fn writer(&self, puffin_file_name: &str) -> Result<Self::Writer>;
+}
+
+pub struct MockFileAccessor {
+    tempdir: TempDir,
+}
+
+impl MockFileAccessor {
+    pub fn new(prefix: &str) -> Self {
+        let tempdir = create_temp_dir(prefix);
+        Self { tempdir }
+    }
+}
+
+#[async_trait]
+impl PuffinFileAccessor for MockFileAccessor {
+    type Reader = FileReader;
+    type Writer = Compat<File>;
+
+    async fn reader(&self, puffin_file_name: &str) -> Result<Self::Reader> {
+        Ok(FileReader::new(self.tempdir.path().join(puffin_file_name))
+            .await
+            .unwrap())
+    }
+
+    async fn writer(&self, puffin_file_name: &str) -> Result<Self::Writer> {
+        let p = self.tempdir.path().join(puffin_file_name);
+        if let Some(p) = p.parent() {
+            if !tokio::fs::try_exists(p).await.unwrap() {
+                tokio::fs::create_dir_all(p).await.unwrap();
+            }
+        }
+        let f = tokio::fs::File::create(p).await.unwrap();
+        Ok(f.compat())
+    }
 }

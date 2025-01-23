@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use api::v1::Rows;
 use common_meta::key::SchemaMetadataManager;
+use common_meta::kv_backend::KvBackendRef;
 use object_store::util::join_path;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionDropRequest, RegionRequest};
@@ -49,6 +50,7 @@ async fn test_engine_drop_region() {
             "test_catalog",
             "test_schema",
             None,
+            env.get_kv_backend(),
         )
         .await;
 
@@ -71,7 +73,7 @@ async fn test_engine_drop_region() {
     assert!(!env
         .get_object_store()
         .unwrap()
-        .is_exist(&join_path(&region_dir, DROPPING_MARKER_FILE))
+        .exists(&join_path(&region_dir, DROPPING_MARKER_FILE))
         .await
         .unwrap());
 
@@ -93,7 +95,7 @@ async fn test_engine_drop_region() {
     listener.wait().await;
 
     let object_store = env.get_object_store().unwrap();
-    assert!(!object_store.is_exist(&region_dir).await.unwrap());
+    assert!(!object_store.exists(&region_dir).await.unwrap());
 }
 
 #[tokio::test]
@@ -102,6 +104,7 @@ async fn test_engine_drop_region_for_custom_store() {
     async fn setup(
         engine: &MitoEngine,
         schema_metadata_manager: &SchemaMetadataManager,
+        kv_backend: &KvBackendRef,
         region_id: RegionId,
         storage_name: &str,
     ) {
@@ -123,6 +126,7 @@ async fn test_engine_drop_region_for_custom_store() {
                 "test_catalog",
                 "test_schema",
                 None,
+                kv_backend.clone(),
             )
             .await;
 
@@ -145,17 +149,26 @@ async fn test_engine_drop_region_for_custom_store() {
         .await;
     let schema_metadata_manager = env.get_schema_metadata_manager();
     let object_store_manager = env.get_object_store_manager().unwrap();
+    let kv_backend = env.get_kv_backend();
 
     let global_region_id = RegionId::new(1, 1);
     setup(
         &engine,
         &schema_metadata_manager,
+        &kv_backend,
         global_region_id,
         "default",
     )
     .await;
     let custom_region_id = RegionId::new(2, 1);
-    setup(&engine, &schema_metadata_manager, custom_region_id, "Gcs").await;
+    setup(
+        &engine,
+        &schema_metadata_manager,
+        &kv_backend,
+        custom_region_id,
+        "Gcs",
+    )
+    .await;
 
     let global_region = engine.get_region(global_region_id).unwrap();
     let global_region_dir = global_region.access_layer.region_dir().to_string();
@@ -167,13 +180,13 @@ async fn test_engine_drop_region_for_custom_store() {
     assert!(object_store_manager
         .find("Gcs")
         .unwrap()
-        .is_exist(&custom_region_dir)
+        .exists(&custom_region_dir)
         .await
         .unwrap());
     assert!(object_store_manager
         .find("default")
         .unwrap()
-        .is_exist(&global_region_dir)
+        .exists(&global_region_dir)
         .await
         .unwrap());
 
@@ -190,13 +203,13 @@ async fn test_engine_drop_region_for_custom_store() {
     assert!(!object_store_manager
         .find("Gcs")
         .unwrap()
-        .is_exist(&custom_region_dir)
+        .exists(&custom_region_dir)
         .await
         .unwrap());
     assert!(object_store_manager
         .find("default")
         .unwrap()
-        .is_exist(&global_region_dir)
+        .exists(&global_region_dir)
         .await
         .unwrap());
 }

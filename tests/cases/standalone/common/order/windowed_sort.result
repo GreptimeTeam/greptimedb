@@ -1,5 +1,5 @@
 -- Test without PK, with a windowed sort query.
-CREATE TABLE test(i INTEGER, t TIMESTAMP TIME INDEX);
+CREATE TABLE test(i INTEGER, t TIMESTAMP TIME INDEX) WITH('compaction.type'='twcs', 'compaction.twcs.max_inactive_window_files'='4');
 
 Affected Rows: 0
 
@@ -67,10 +67,9 @@ EXPLAIN ANALYZE SELECT * FROM test ORDER BY t LIMIT 5;
 +-+-+-+
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_GlobalLimitExec: skip=0, fetch=5 REDACTED
-|_|_|_SortPreservingMergeExec: [t@1 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=t@1 ASC NULLS LAST num_ranges=2 fetch=5 REDACTED
-|_|_|_SeqScan: region=REDACTED, partition_count=2 (1 memtable ranges, 1 file 1 ranges) REDACTED
+| 1_| 0_|_SortPreservingMergeExec: [t@1 ASC NULLS LAST], fetch=5 REDACTED
+|_|_|_WindowedSortExec: expr=t@1 ASC NULLS LAST num_ranges=4 fetch=5 REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=4 (1 memtable ranges, 3 file 3 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
 +-+-+-+
@@ -99,11 +98,10 @@ EXPLAIN ANALYZE SELECT * FROM test ORDER BY t DESC LIMIT 5;
 +-+-+-+
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_GlobalLimitExec: skip=0, fetch=5 REDACTED
-|_|_|_SortPreservingMergeExec: [t@1 DESC] REDACTED
-|_|_|_WindowedSortExec: expr=t@1 DESC num_ranges=2 fetch=5 REDACTED
-|_|_|_PartSortExec: expr=t@1 DESC num_ranges=2 limit=5 REDACTED
-|_|_|_SeqScan: region=REDACTED, partition_count=2 (1 memtable ranges, 1 file 1 ranges) REDACTED
+| 1_| 0_|_SortPreservingMergeExec: [t@1 DESC], fetch=5 REDACTED
+|_|_|_WindowedSortExec: expr=t@1 DESC num_ranges=4 fetch=5 REDACTED
+|_|_|_PartSortExec: expr=t@1 DESC num_ranges=4 limit=5 REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=4 (1 memtable ranges, 3 file 3 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
 +-+-+-+
@@ -113,7 +111,7 @@ DROP TABLE test;
 Affected Rows: 0
 
 -- Test with PK, with a windowed sort query.
-CREATE TABLE test_pk(pk INTEGER PRIMARY KEY, i INTEGER, t TIMESTAMP TIME INDEX);
+CREATE TABLE test_pk(pk INTEGER PRIMARY KEY, i INTEGER, t TIMESTAMP TIME INDEX) WITH('compaction.type'='twcs', 'compaction.twcs.max_inactive_window_files'='4');
 
 Affected Rows: 0
 
@@ -181,11 +179,10 @@ EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t LIMIT 5;
 +-+-+-+
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_GlobalLimitExec: skip=0, fetch=5 REDACTED
-|_|_|_SortPreservingMergeExec: [t@2 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=t@2 ASC NULLS LAST num_ranges=2 fetch=5 REDACTED
-|_|_|_PartSortExec: expr=t@2 ASC NULLS LAST num_ranges=2 limit=5 REDACTED
-|_|_|_SeqScan: region=REDACTED, partition_count=2 (1 memtable ranges, 1 file 1 ranges) REDACTED
+| 1_| 0_|_SortPreservingMergeExec: [t@2 ASC NULLS LAST], fetch=5 REDACTED
+|_|_|_WindowedSortExec: expr=t@2 ASC NULLS LAST num_ranges=4 fetch=5 REDACTED
+|_|_|_PartSortExec: expr=t@2 ASC NULLS LAST num_ranges=4 limit=5 REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=4 (1 memtable ranges, 3 file 3 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
 +-+-+-+
@@ -214,11 +211,10 @@ EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t DESC LIMIT 5;
 +-+-+-+
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_GlobalLimitExec: skip=0, fetch=5 REDACTED
-|_|_|_SortPreservingMergeExec: [t@2 DESC] REDACTED
-|_|_|_WindowedSortExec: expr=t@2 DESC num_ranges=2 fetch=5 REDACTED
-|_|_|_PartSortExec: expr=t@2 DESC num_ranges=2 limit=5 REDACTED
-|_|_|_SeqScan: region=REDACTED, partition_count=2 (1 memtable ranges, 1 file 1 ranges) REDACTED
+| 1_| 0_|_SortPreservingMergeExec: [t@2 DESC], fetch=5 REDACTED
+|_|_|_WindowedSortExec: expr=t@2 DESC num_ranges=4 fetch=5 REDACTED
+|_|_|_PartSortExec: expr=t@2 DESC num_ranges=4 limit=5 REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=4 (1 memtable ranges, 3 file 3 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
 +-+-+-+

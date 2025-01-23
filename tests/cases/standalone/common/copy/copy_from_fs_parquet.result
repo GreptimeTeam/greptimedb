@@ -98,7 +98,7 @@ Affected Rows: 6
 select count(*) from without_limit_rows;
 
 +----------+
-| COUNT(*) |
+| count(*) |
 +----------+
 | 6        |
 +----------+
@@ -114,14 +114,14 @@ Affected Rows: 3
 select count(*) from with_limit_rows_segment;
 
 +----------+
-| COUNT(*) |
+| count(*) |
 +----------+
 | 3        |
 +----------+
 
 Copy with_limit_rows_segment FROM '${SQLNESS_HOME}/demo/export/parquet_files/' LIMIT hello;
 
-Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement, expected: 'the number of maximum rows', found: ;: sql parser error: Expected literal int, found: hello at Line: 1, Column 86
+Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement, expected: 'the number of maximum rows', found: ;: sql parser error: Expected: literal int, found: hello at Line: 1, Column: 86
 
 drop table demo;
 

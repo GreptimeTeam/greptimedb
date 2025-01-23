@@ -38,6 +38,7 @@ use store_api::storage::{ScanRequest, TableId};
 use super::{InformationTable, RUNTIME_METRICS};
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
 
+#[derive(Debug)]
 pub(super) struct InformationSchemaMetrics {
     schema: SchemaRef,
 }

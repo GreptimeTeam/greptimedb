@@ -31,7 +31,7 @@ use pgwire::api::results::{
     DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, QueryResponse, Response, Tag,
 };
 use pgwire::api::stmt::{QueryParser, StoredStatement};
-use pgwire::api::{ClientInfo, Type};
+use pgwire::api::{ClientInfo, ErrorHandler, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::PgWireBackendMessage;
 use query::query_engine::DescribeResult;
@@ -69,6 +69,9 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
             // early return if query is empty
             return Ok(vec![Response::EmptyQuery]);
         }
+
+        let query = fixtures::rewrite_sql(query);
+        let query = query.as_ref();
 
         if let Some(resps) = fixtures::process(query, query_ctx.clone()) {
             send_warning_opt(client, query_ctx).await?;
@@ -228,6 +231,9 @@ impl QueryParser for DefaultQueryParser {
                 schema: None,
             });
         }
+
+        let sql = fixtures::rewrite_sql(sql);
+        let sql = sql.as_ref();
 
         let mut stmts =
             ParserContext::create_with_dialect(sql, &PostgreSqlDialect {}, ParseOptions::default())
@@ -406,5 +412,14 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
 
             Ok(DescribePortalResponse::new(vec![]))
         }
+    }
+}
+
+impl ErrorHandler for PostgresServerHandlerInner {
+    fn on_error<C>(&self, _client: &C, error: &mut PgWireError)
+    where
+        C: ClientInfo,
+    {
+        debug!("Postgres interface error {}", error)
     }
 }

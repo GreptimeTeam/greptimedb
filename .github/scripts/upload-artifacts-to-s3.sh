@@ -27,11 +27,11 @@ function upload_artifacts() {
   # ├── latest-version.txt
   # ├── latest-nightly-version.txt
   # ├── v0.1.0
-  # │   ├── greptime-darwin-amd64-pyo3-v0.1.0.sha256sum
-  # │   └── greptime-darwin-amd64-pyo3-v0.1.0.tar.gz
+  # │   ├── greptime-darwin-amd64-v0.1.0.sha256sum
+  # │   └── greptime-darwin-amd64-v0.1.0.tar.gz
   # └── v0.2.0
-  #    ├── greptime-darwin-amd64-pyo3-v0.2.0.sha256sum
-  #    └── greptime-darwin-amd64-pyo3-v0.2.0.tar.gz
+  #    ├── greptime-darwin-amd64-v0.2.0.sha256sum
+  #    └── greptime-darwin-amd64-v0.2.0.tar.gz
   find "$ARTIFACTS_DIR" -type f \( -name "*.tar.gz" -o -name "*.sha256sum" \) | while IFS= read -r file; do
     aws s3 cp \
       "$file" "s3://$AWS_S3_BUCKET/$RELEASE_DIRS/$VERSION/$(basename "$file")"

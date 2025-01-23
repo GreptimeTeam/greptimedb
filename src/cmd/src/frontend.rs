@@ -17,20 +17,21 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
-use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
+use catalog::information_extension::DistributedInformationExtension;
+use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use clap::Parser;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
 use common_config::Configurable;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
+use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use common_time::timezone::set_default_timezone;
 use common_version::{short_version, version};
-use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
@@ -46,7 +47,7 @@ use crate::error::{
     Result, StartFrontendSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{log_versions, App, DistributedInformationExtension};
+use crate::{log_versions, App};
 
 type FrontendOptions = GreptimeOptions<frontend::frontend::FrontendOptions>;
 
@@ -267,7 +268,8 @@ impl StartCommand {
         info!("Frontend options: {:#?}", opts);
 
         let plugin_opts = opts.plugins;
-        let opts = opts.component;
+        let mut opts = opts.component;
+        opts.grpc.detect_hostname();
         let mut plugins = Plugins::new();
         plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &opts)
             .await
@@ -293,11 +295,12 @@ impl StartCommand {
         .context(MetaClientInitSnafu)?;
 
         // TODO(discord9): add helper function to ease the creation of cache registry&such
-        let cached_meta_backend = CachedMetaKvBackendBuilder::new(meta_client.clone())
-            .cache_max_capacity(cache_max_capacity)
-            .cache_ttl(cache_ttl)
-            .cache_tti(cache_tti)
-            .build();
+        let cached_meta_backend =
+            CachedKvBackendBuilder::new(Arc::new(MetaKvBackend::new(meta_client.clone())))
+                .cache_max_capacity(cache_max_capacity)
+                .cache_ttl(cache_ttl)
+                .cache_tti(cache_tti)
+                .build();
         let cached_meta_backend = Arc::new(cached_meta_backend);
 
         // Builds cache registry
@@ -327,9 +330,7 @@ impl StartCommand {
 
         let executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
-            Arc::new(InvalidateTableCacheHandler::new(
-                layered_cache_registry.clone(),
-            )),
+            Arc::new(InvalidateCacheHandler::new(layered_cache_registry.clone())),
         ]);
 
         let heartbeat_task = HeartbeatTask::new(

@@ -20,12 +20,12 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
-use common_telemetry::{info, warn};
+use common_telemetry::{error, info, warn};
 use futures::{FutureExt, TryStreamExt};
 use moka::future::Cache;
 use moka::notification::RemovalCause;
 use object_store::util::join_path;
-use object_store::{ErrorKind, Metakey, ObjectStore, Reader};
+use object_store::{ErrorKind, ObjectStore, Reader};
 use parquet::file::metadata::ParquetMetaData;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -37,8 +37,10 @@ use crate::sst::file::FileId;
 use crate::sst::parquet::helper::fetch_byte_ranges;
 use crate::sst::parquet::metadata::MetadataLoader;
 
-/// Subdirectory of cached files.
-const FILE_DIR: &str = "files/";
+/// Subdirectory of cached files for write.
+///
+/// This must contain three layers, corresponding to [`build_prometheus_metrics_layer`](object_store::layers::build_prometheus_metrics_layer).
+const FILE_DIR: &str = "cache/object/write/";
 
 /// A file cache manages files on local store and evict files based
 /// on size.
@@ -188,14 +190,11 @@ impl FileCache {
         }
     }
 
-    /// Recovers the index from local store.
-    pub(crate) async fn recover(&self) -> Result<()> {
+    async fn recover_inner(&self) -> Result<()> {
         let now = Instant::now();
-
         let mut lister = self
             .local_store
             .lister_with(FILE_DIR)
-            .metakey(Metakey::ContentLength)
             .await
             .context(OpenDalSnafu)?;
         // Use i64 for total_size to reduce the risk of overflow.
@@ -209,6 +208,12 @@ impl FileCache {
             let Some(key) = parse_index_key(entry.name()) else {
                 continue;
             };
+
+            let meta = self
+                .local_store
+                .stat(entry.path())
+                .await
+                .context(OpenDalSnafu)?;
             let file_size = meta.content_length() as u32;
             self.memory_index
                 .insert(key, IndexValue { file_size })
@@ -225,8 +230,21 @@ impl FileCache {
             total_size,
             now.elapsed()
         );
-
         Ok(())
+    }
+
+    /// Recovers the index from local store.
+    pub(crate) async fn recover(self: &Arc<Self>, sync: bool) {
+        let moved_self = self.clone();
+        let handle = tokio::spawn(async move {
+            if let Err(err) = moved_self.recover_inner().await {
+                error!(err; "Failed to recover file cache.")
+            }
+        });
+
+        if sync {
+            let _ = handle.await;
+        }
     }
 
     /// Returns the cache file path for the key.
@@ -275,7 +293,7 @@ impl FileCache {
     }
 
     async fn get_reader(&self, file_path: &str) -> object_store::Result<Option<Reader>> {
-        if self.local_store.is_exist(file_path).await? {
+        if self.local_store.exists(file_path).await? {
             Ok(Some(self.local_store.reader(file_path).await?))
         } else {
             Ok(None)
@@ -393,7 +411,7 @@ mod tests {
         let cache = FileCache::new(
             local_store.clone(),
             ReadableSize::mb(10),
-            Some(Duration::from_millis(5)),
+            Some(Duration::from_millis(10)),
         );
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
@@ -419,7 +437,7 @@ mod tests {
 
         let exist = cache.reader(key).await;
         assert!(exist.is_some());
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(15)).await;
         cache.memory_index.run_pending_tasks().await;
         let non = cache.reader(key).await;
         assert!(non.is_none());
@@ -469,7 +487,7 @@ mod tests {
         cache.memory_index.run_pending_tasks().await;
 
         // The file also not exists.
-        assert!(!local_store.is_exist(&file_path).await.unwrap());
+        assert!(!local_store.exists(&file_path).await.unwrap());
         assert_eq!(0, cache.memory_index.weighted_size());
     }
 
@@ -536,13 +554,17 @@ mod tests {
         }
 
         // Recover the cache.
-        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None);
+        let cache = Arc::new(FileCache::new(
+            local_store.clone(),
+            ReadableSize::mb(10),
+            None,
+        ));
         // No entry before recovery.
         assert!(cache
             .reader(IndexKey::new(region_id, file_ids[0], file_type))
             .await
             .is_none());
-        cache.recover().await.unwrap();
+        cache.recover(true).await;
 
         // Check size.
         cache.memory_index.run_pending_tasks().await;

@@ -17,6 +17,7 @@ use std::io;
 use std::ops::Range;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -33,14 +34,22 @@ pub struct Metadata {
     pub content_length: u64,
 }
 
+/// `SizeAwareRangeReader` is a `RangeReader` that supports setting a file size hint.
+pub trait SizeAwareRangeReader: RangeReader {
+    /// Sets the file size hint for the reader.
+    ///
+    /// It's used to optimize the reading process by reducing the number of remote requests.
+    fn with_file_size_hint(&mut self, file_size_hint: u64);
+}
+
 /// `RangeReader` reads a range of bytes from a source.
 #[async_trait]
-pub trait RangeReader: Send + Unpin {
+pub trait RangeReader: Sync + Send + Unpin {
     /// Returns the metadata of the source.
-    async fn metadata(&mut self) -> io::Result<Metadata>;
+    async fn metadata(&self) -> io::Result<Metadata>;
 
     /// Reads the bytes in the given range.
-    async fn read(&mut self, range: Range<u64>) -> io::Result<Bytes>;
+    async fn read(&self, range: Range<u64>) -> io::Result<Bytes>;
 
     /// Reads the bytes in the given range into the buffer.
     ///
@@ -48,18 +57,14 @@ pub trait RangeReader: Send + Unpin {
     /// - If the buffer is insufficient to hold the bytes, it will either:
     ///   - Allocate additional space (e.g., for `Vec<u8>`)
     ///   - Panic (e.g., for `&mut [u8]`)
-    async fn read_into(
-        &mut self,
-        range: Range<u64>,
-        buf: &mut (impl BufMut + Send),
-    ) -> io::Result<()> {
+    async fn read_into(&self, range: Range<u64>, buf: &mut (impl BufMut + Send)) -> io::Result<()> {
         let bytes = self.read(range).await?;
         buf.put_slice(&bytes);
         Ok(())
     }
 
     /// Reads the bytes in the given ranges.
-    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> io::Result<Vec<Bytes>> {
+    async fn read_vec(&self, ranges: &[Range<u64>]) -> io::Result<Vec<Bytes>> {
         let mut result = Vec::with_capacity(ranges.len());
         for range in ranges {
             result.push(self.read(range.clone()).await?);
@@ -69,21 +74,20 @@ pub trait RangeReader: Send + Unpin {
 }
 
 #[async_trait]
-impl<R: ?Sized + RangeReader> RangeReader for &mut R {
-    async fn metadata(&mut self) -> io::Result<Metadata> {
+impl<R: ?Sized + RangeReader> RangeReader for &R {
+    async fn metadata(&self) -> io::Result<Metadata> {
         (*self).metadata().await
     }
-    async fn read(&mut self, range: Range<u64>) -> io::Result<Bytes> {
+
+    async fn read(&self, range: Range<u64>) -> io::Result<Bytes> {
         (*self).read(range).await
     }
-    async fn read_into(
-        &mut self,
-        range: Range<u64>,
-        buf: &mut (impl BufMut + Send),
-    ) -> io::Result<()> {
+
+    async fn read_into(&self, range: Range<u64>, buf: &mut (impl BufMut + Send)) -> io::Result<()> {
         (*self).read_into(range, buf).await
     }
-    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> io::Result<Vec<Bytes>> {
+
+    async fn read_vec(&self, ranges: &[Range<u64>]) -> io::Result<Vec<Bytes>> {
         (*self).read_vec(ranges).await
     }
 }
@@ -111,7 +115,7 @@ pub struct AsyncReadAdapter<R> {
 
 impl<R: RangeReader + 'static> AsyncReadAdapter<R> {
     pub async fn new(inner: R) -> io::Result<Self> {
-        let mut inner = inner;
+        let inner = inner;
         let metadata = inner.metadata().await?;
         Ok(AsyncReadAdapter {
             inner: Arc::new(Mutex::new(inner)),
@@ -151,7 +155,7 @@ impl<R: RangeReader + 'static> AsyncRead for AsyncReadAdapter<R> {
             let range = *this.position..(*this.position + size);
             let inner = this.inner.clone();
             let fut = async move {
-                let mut inner = inner.lock().await;
+                let inner = inner.lock().await;
                 inner.read(range).await
             };
 
@@ -186,25 +190,24 @@ impl<R: RangeReader + 'static> AsyncRead for AsyncReadAdapter<R> {
 
 #[async_trait]
 impl RangeReader for Vec<u8> {
-    async fn metadata(&mut self) -> io::Result<Metadata> {
+    async fn metadata(&self) -> io::Result<Metadata> {
         Ok(Metadata {
             content_length: self.len() as u64,
         })
     }
 
-    async fn read(&mut self, mut range: Range<u64>) -> io::Result<Bytes> {
-        range.end = range.end.min(self.len() as u64);
-
+    async fn read(&self, range: Range<u64>) -> io::Result<Bytes> {
         let bytes = Bytes::copy_from_slice(&self[range.start as usize..range.end as usize]);
         Ok(bytes)
     }
 }
 
+// TODO(weny): considers replacing `tokio::fs::File` with opendal reader.
 /// `FileReader` is a `RangeReader` for reading a file.
 pub struct FileReader {
     content_length: u64,
-    position: u64,
-    file: tokio::fs::File,
+    position: AtomicU64,
+    file: Mutex<tokio::fs::File>,
 }
 
 impl FileReader {
@@ -214,28 +217,36 @@ impl FileReader {
         let metadata = file.metadata().await?;
         Ok(FileReader {
             content_length: metadata.len(),
-            position: 0,
-            file,
+            position: AtomicU64::new(0),
+            file: Mutex::new(file),
         })
+    }
+}
+
+impl SizeAwareRangeReader for FileReader {
+    fn with_file_size_hint(&mut self, _file_size_hint: u64) {
+        // do nothing
     }
 }
 
 #[async_trait]
 impl RangeReader for FileReader {
-    async fn metadata(&mut self) -> io::Result<Metadata> {
+    async fn metadata(&self) -> io::Result<Metadata> {
         Ok(Metadata {
             content_length: self.content_length,
         })
     }
 
-    async fn read(&mut self, mut range: Range<u64>) -> io::Result<Bytes> {
-        if range.start != self.position {
-            self.file.seek(io::SeekFrom::Start(range.start)).await?;
-            self.position = range.start;
+    async fn read(&self, mut range: Range<u64>) -> io::Result<Bytes> {
+        let mut file = self.file.lock().await;
+
+        if range.start != self.position.load(Ordering::Relaxed) {
+            file.seek(io::SeekFrom::Start(range.start)).await?;
+            self.position.store(range.start, Ordering::Relaxed);
         }
 
         range.end = range.end.min(self.content_length);
-        if range.end <= self.position {
+        if range.end <= self.position.load(Ordering::Relaxed) {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "Start of range is out of bounds",
@@ -244,8 +255,8 @@ impl RangeReader for FileReader {
 
         let mut buf = vec![0; (range.end - range.start) as usize];
 
-        self.file.read_exact(&mut buf).await?;
-        self.position = range.end;
+        file.read_exact(&mut buf).await?;
+        self.position.store(range.end, Ordering::Relaxed);
 
         Ok(Bytes::from(buf))
     }
@@ -286,7 +297,7 @@ mod tests {
         let data = b"hello world";
         tokio::fs::write(path, data).await.unwrap();
 
-        let mut reader = FileReader::new(path).await.unwrap();
+        let reader = FileReader::new(path).await.unwrap();
         let metadata = reader.metadata().await.unwrap();
         assert_eq!(metadata.content_length, data.len() as u64);
 

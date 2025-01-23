@@ -35,6 +35,7 @@ use api::v1::{OpType, Row, Rows, SemanticType};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_datasource::compression::CompressionType;
+use common_meta::cache::{new_schema_cache, new_table_schema_cache};
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
@@ -47,6 +48,7 @@ use datatypes::schema::ColumnSchema;
 use log_store::kafka::log_store::KafkaLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
+use moka::future::CacheBuilder;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::services::Fs;
 use object_store::ObjectStore;
@@ -199,6 +201,7 @@ pub struct TestEnv {
     log_store_factory: LogStoreFactory,
     object_store_manager: Option<ObjectStoreManagerRef>,
     schema_metadata_manager: SchemaMetadataManagerRef,
+    kv_backend: KvBackendRef,
 }
 
 impl Default for TestEnv {
@@ -210,43 +213,40 @@ impl Default for TestEnv {
 impl TestEnv {
     /// Returns a new env with empty prefix for test.
     pub fn new() -> TestEnv {
+        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
         TestEnv {
             data_home: create_temp_dir(""),
             log_store: None,
             log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
-            schema_metadata_manager: Arc::new(SchemaMetadataManager::new(Arc::new(
-                MemoryKvBackend::new(),
-            )
-                as KvBackendRef)),
+            schema_metadata_manager,
+            kv_backend,
         }
     }
 
     /// Returns a new env with specific `prefix` for test.
     pub fn with_prefix(prefix: &str) -> TestEnv {
+        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
         TestEnv {
             data_home: create_temp_dir(prefix),
             log_store: None,
             log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
-            schema_metadata_manager: Arc::new(SchemaMetadataManager::new(Arc::new(
-                MemoryKvBackend::new(),
-            )
-                as KvBackendRef)),
+            schema_metadata_manager,
+            kv_backend,
         }
     }
 
     /// Returns a new env with specific `data_home` for test.
     pub fn with_data_home(data_home: TempDir) -> TestEnv {
+        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
         TestEnv {
             data_home,
             log_store: None,
             log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
-            schema_metadata_manager: Arc::new(SchemaMetadataManager::new(Arc::new(
-                MemoryKvBackend::new(),
-            )
-                as KvBackendRef)),
+            schema_metadata_manager,
+            kv_backend,
         }
     }
 
@@ -647,23 +647,19 @@ impl TestEnv {
             .await
             .unwrap();
 
-        let object_store_manager = self.get_object_store_manager().unwrap();
-        let write_cache = WriteCache::new(
-            local_store,
-            object_store_manager,
-            capacity,
-            None,
-            puffin_mgr,
-            intm_mgr,
-        )
-        .await
-        .unwrap();
+        let write_cache = WriteCache::new(local_store, capacity, None, puffin_mgr, intm_mgr)
+            .await
+            .unwrap();
 
         Arc::new(write_cache)
     }
 
     pub fn get_schema_metadata_manager(&self) -> SchemaMetadataManagerRef {
         self.schema_metadata_manager.clone()
+    }
+
+    pub fn get_kv_backend(&self) -> KvBackendRef {
+        self.kv_backend.clone()
     }
 }
 
@@ -1053,7 +1049,10 @@ pub fn delete_rows_schema(request: &RegionCreateRequest) -> Vec<api::v1::ColumnS
 pub async fn put_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
     let num_rows = rows.rows.len();
     let result = engine
-        .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest { rows, hint: None }),
+        )
         .await
         .unwrap();
     assert_eq!(num_rows, result.affected_rows);
@@ -1153,4 +1152,22 @@ pub async fn reopen_region(
             .set_region_role(region_id, RegionRole::Leader)
             .unwrap();
     }
+}
+
+pub(crate) fn mock_schema_metadata_manager() -> (Arc<SchemaMetadataManager>, KvBackendRef) {
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let table_schema_cache = Arc::new(new_table_schema_cache(
+        "table_schema_name_cache".to_string(),
+        CacheBuilder::default().build(),
+        kv_backend.clone(),
+    ));
+    let schema_cache = Arc::new(new_schema_cache(
+        "schema_cache".to_string(),
+        CacheBuilder::default().build(),
+        kv_backend.clone(),
+    ));
+    (
+        Arc::new(SchemaMetadataManager::new(table_schema_cache, schema_cache)),
+        kv_backend as KvBackendRef,
+    )
 }

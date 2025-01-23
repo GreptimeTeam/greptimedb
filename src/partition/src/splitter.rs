@@ -80,35 +80,20 @@ impl<'a> SplitReadRowHelper<'a> {
 
     fn split_rows(mut self) -> Result<HashMap<RegionNumber, Rows>> {
         let regions = self.split_to_regions()?;
-        let request_splits = if regions.len() == 1 {
-            // fast path, zero copy
-            regions
-                .into_keys()
-                .map(|region_number| {
-                    let rows = std::mem::take(&mut self.rows);
-                    let rows = Rows {
-                        schema: self.schema.clone(),
-                        rows,
-                    };
-                    (region_number, rows)
-                })
-                .collect::<HashMap<_, _>>()
-        } else {
-            regions
-                .into_iter()
-                .map(|(region_number, row_indexes)| {
-                    let rows = row_indexes
-                        .into_iter()
-                        .map(|row_idx| std::mem::take(&mut self.rows[row_idx]))
-                        .collect();
-                    let rows = Rows {
-                        schema: self.schema.clone(),
-                        rows,
-                    };
-                    (region_number, rows)
-                })
-                .collect::<HashMap<_, _>>()
-        };
+        let request_splits = regions
+            .into_iter()
+            .map(|(region_number, row_indexes)| {
+                let rows = row_indexes
+                    .into_iter()
+                    .map(|row_idx| std::mem::take(&mut self.rows[row_idx]))
+                    .collect();
+                let rows = Rows {
+                    schema: self.schema.clone(),
+                    rows,
+                };
+                (region_number, rows)
+            })
+            .collect::<HashMap<_, _>>();
 
         Ok(request_splits)
     }

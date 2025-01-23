@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1;
-use api::v1::alter_expr::Kind;
+use api::v1::alter_table_expr::Kind;
 use api::v1::region::{
     alter_request, region_request, AddColumn, AddColumns, AlterRequest, AlterRequests,
     RegionColumnDef, RegionRequest, RegionRequestHeader,

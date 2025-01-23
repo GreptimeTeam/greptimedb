@@ -13,8 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::fmt;
-use std::time::Duration;
+use std::fmt::{self, Display};
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
@@ -24,8 +23,9 @@ use api::v1::region::{
     CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
     FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
-use api::v1::{self, Analyzer, ChangeTableOption, Rows, SemanticType};
+use api::v1::{self, set_index, Analyzer, Option as PbOption, Rows, SemanticType, WriteHint};
 pub use common_base::AffectedRows;
+use common_time::TimeToLive;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::FulltextOptions;
 use serde::{Deserialize, Serialize};
@@ -34,8 +34,8 @@ use strum::IntoStaticStr;
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, DecodeProtoSnafu, InvalidRawRegionRequestSnafu,
-    InvalidRegionOptionChangeRequestSnafu, InvalidRegionRequestSnafu, MetadataError,
+    ColumnMetadata, DecodeProtoSnafu, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu,
+    InvalidSetRegionOptionRequestSnafu, InvalidUnsetRegionOptionRequestSnafu, MetadataError,
     RegionMetadata, Result,
 };
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
@@ -95,8 +95,12 @@ fn make_region_puts(inserts: InsertRequests) -> Result<Vec<(RegionId, RegionRequ
         .into_iter()
         .filter_map(|r| {
             let region_id = r.region_id.into();
-            r.rows
-                .map(|rows| (region_id, RegionRequest::Put(RegionPutRequest { rows })))
+            r.rows.map(|rows| {
+                (
+                    region_id,
+                    RegionRequest::Put(RegionPutRequest { rows, hint: None }),
+                )
+            })
         })
         .collect();
     Ok(requests)
@@ -232,6 +236,8 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
 pub struct RegionPutRequest {
     /// Rows to put.
     pub rows: Rows,
+    /// Write hint.
+    pub hint: Option<WriteHint>,
 }
 
 #[derive(Debug)]
@@ -412,18 +418,63 @@ pub enum AlterKind {
         /// Columns to change.
         columns: Vec<ModifyColumnType>,
     },
-    /// Change region options.
-    ChangeRegionOptions {
-        options: Vec<ChangeOption>,
-    },
-    /// Change fulltext index options.
-    SetColumnFulltext {
+    /// Set region options.
+    SetRegionOptions { options: Vec<SetRegionOption> },
+    /// Unset region options.
+    UnsetRegionOptions { keys: Vec<UnsetRegionOption> },
+    /// Set index options.
+    SetIndex { options: ApiSetIndexOptions },
+    /// Unset index options.
+    UnsetIndex { options: ApiUnsetIndexOptions },
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum ApiSetIndexOptions {
+    Fulltext {
         column_name: String,
         options: FulltextOptions,
     },
-    UnsetColumnFulltext {
+    Inverted {
         column_name: String,
     },
+}
+
+impl ApiSetIndexOptions {
+    pub fn column_name(&self) -> &String {
+        match self {
+            ApiSetIndexOptions::Fulltext { column_name, .. } => column_name,
+            ApiSetIndexOptions::Inverted { column_name } => column_name,
+        }
+    }
+
+    pub fn is_fulltext(&self) -> bool {
+        match self {
+            ApiSetIndexOptions::Fulltext { .. } => true,
+            ApiSetIndexOptions::Inverted { .. } => false,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum ApiUnsetIndexOptions {
+    Fulltext { column_name: String },
+    Inverted { column_name: String },
+}
+
+impl ApiUnsetIndexOptions {
+    pub fn column_name(&self) -> &String {
+        match self {
+            ApiUnsetIndexOptions::Fulltext { column_name } => column_name,
+            ApiUnsetIndexOptions::Inverted { column_name } => column_name,
+        }
+    }
+
+    pub fn is_fulltext(&self) -> bool {
+        match self {
+            ApiUnsetIndexOptions::Fulltext { .. } => true,
+            ApiUnsetIndexOptions::Inverted { .. } => false,
+        }
+    }
 }
 
 impl AlterKind {
@@ -447,10 +498,21 @@ impl AlterKind {
                     col_to_change.validate(metadata)?;
                 }
             }
-            AlterKind::ChangeRegionOptions { .. } => {}
-            AlterKind::SetColumnFulltext { column_name, .. }
-            | AlterKind::UnsetColumnFulltext { column_name } => {
-                Self::validate_column_fulltext_option(column_name, metadata)?;
+            AlterKind::SetRegionOptions { .. } => {}
+            AlterKind::UnsetRegionOptions { .. } => {}
+            AlterKind::SetIndex { options } => {
+                Self::validate_column_alter_index_option(
+                    options.column_name(),
+                    metadata,
+                    options.is_fulltext(),
+                )?;
+            }
+            AlterKind::UnsetIndex { options } => {
+                Self::validate_column_alter_index_option(
+                    options.column_name(),
+                    metadata,
+                    options.is_fulltext(),
+                )?;
             }
         }
         Ok(())
@@ -469,16 +531,17 @@ impl AlterKind {
             AlterKind::ModifyColumnTypes { columns } => columns
                 .iter()
                 .any(|col_to_change| col_to_change.need_alter(metadata)),
-            AlterKind::ChangeRegionOptions { .. } => {
+            AlterKind::SetRegionOptions { .. } => {
                 // we need to update region options for `ChangeTableOptions`.
                 // todo: we need to check if ttl has ever changed.
                 true
             }
-            AlterKind::SetColumnFulltext { column_name, .. } => {
-                metadata.column_by_name(column_name).is_some()
+            AlterKind::UnsetRegionOptions { .. } => true,
+            AlterKind::SetIndex { options, .. } => {
+                metadata.column_by_name(options.column_name()).is_some()
             }
-            AlterKind::UnsetColumnFulltext { column_name } => {
-                metadata.column_by_name(column_name).is_some()
+            AlterKind::UnsetIndex { options } => {
+                metadata.column_by_name(options.column_name()).is_some()
             }
         }
     }
@@ -498,10 +561,11 @@ impl AlterKind {
         Ok(())
     }
 
-    /// Returns an error if the column to change fulltext index option is invalid.
-    fn validate_column_fulltext_option(
+    /// Returns an error if the column's alter index option is invalid.
+    fn validate_column_alter_index_option(
         column_name: &String,
         metadata: &RegionMetadata,
+        is_fulltext: bool,
     ) -> Result<()> {
         let column = metadata
             .column_by_name(column_name)
@@ -510,16 +574,18 @@ impl AlterKind {
                 err: format!("column {} not found", column_name),
             })?;
 
-        ensure!(
-            column.column_schema.data_type.is_string(),
-            InvalidRegionRequestSnafu {
-                region_id: metadata.region_id,
-                err: format!(
-                    "cannot change fulltext index options for non-string column {}",
-                    column_name
-                ),
-            }
-        );
+        if is_fulltext {
+            ensure!(
+                column.column_schema.data_type.is_string(),
+                InvalidRegionRequestSnafu {
+                    region_id: metadata.region_id,
+                    err: format!(
+                        "cannot change alter index options for non-string column {}",
+                        column_name
+                    ),
+                }
+            );
+        }
 
         Ok(())
     }
@@ -550,27 +616,50 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                 let names = x.drop_columns.into_iter().map(|x| x.name).collect();
                 AlterKind::DropColumns { names }
             }
-            alter_request::Kind::ChangeTableOptions(change_options) => {
-                AlterKind::ChangeRegionOptions {
-                    options: change_options
-                        .change_table_options
-                        .iter()
-                        .map(TryFrom::try_from)
-                        .collect::<Result<Vec<_>>>()?,
-                }
-            }
-            alter_request::Kind::SetColumnFulltext(x) => AlterKind::SetColumnFulltext {
-                column_name: x.column_name.clone(),
-                options: FulltextOptions {
-                    enable: x.enable,
-                    analyzer: as_fulltext_option(
-                        Analyzer::try_from(x.analyzer).context(DecodeProtoSnafu)?,
-                    ),
-                    case_sensitive: x.case_sensitive,
+            alter_request::Kind::SetTableOptions(options) => AlterKind::SetRegionOptions {
+                options: options
+                    .table_options
+                    .iter()
+                    .map(TryFrom::try_from)
+                    .collect::<Result<Vec<_>>>()?,
+            },
+            alter_request::Kind::UnsetTableOptions(options) => AlterKind::UnsetRegionOptions {
+                keys: options
+                    .keys
+                    .iter()
+                    .map(|key| UnsetRegionOption::try_from(key.as_str()))
+                    .collect::<Result<Vec<_>>>()?,
+            },
+            alter_request::Kind::SetIndex(o) => match o.options.unwrap() {
+                set_index::Options::Fulltext(x) => AlterKind::SetIndex {
+                    options: ApiSetIndexOptions::Fulltext {
+                        column_name: x.column_name.clone(),
+                        options: FulltextOptions {
+                            enable: x.enable,
+                            analyzer: as_fulltext_option(
+                                Analyzer::try_from(x.analyzer).context(DecodeProtoSnafu)?,
+                            ),
+                            case_sensitive: x.case_sensitive,
+                        },
+                    },
+                },
+                set_index::Options::Inverted(i) => AlterKind::SetIndex {
+                    options: ApiSetIndexOptions::Inverted {
+                        column_name: i.column_name,
+                    },
                 },
             },
-            alter_request::Kind::UnsetColumnFulltext(x) => AlterKind::UnsetColumnFulltext {
-                column_name: x.column_name,
+            alter_request::Kind::UnsetIndex(o) => match o.options.unwrap() {
+                v1::unset_index::Options::Fulltext(f) => AlterKind::UnsetIndex {
+                    options: ApiUnsetIndexOptions::Fulltext {
+                        column_name: f.column_name,
+                    },
+                },
+                v1::unset_index::Options::Inverted(i) => AlterKind::UnsetIndex {
+                    options: ApiUnsetIndexOptions::Inverted {
+                        column_name: i.column_name,
+                    },
+                },
             },
         };
 
@@ -591,7 +680,8 @@ pub struct AddColumn {
 impl AddColumn {
     /// Returns an error if the column to add is invalid.
     ///
-    /// It allows adding existing columns.
+    /// It allows adding existing columns. However, the existing column must have the same metadata
+    /// and the location must be None.
     pub fn validate(&self, metadata: &RegionMetadata) -> Result<()> {
         ensure!(
             self.column_metadata.column_schema.is_nullable()
@@ -608,6 +698,46 @@ impl AddColumn {
                 ),
             }
         );
+
+        if let Some(existing_column) =
+            metadata.column_by_name(&self.column_metadata.column_schema.name)
+        {
+            // If the column already exists.
+            ensure!(
+                *existing_column == self.column_metadata,
+                InvalidRegionRequestSnafu {
+                    region_id: metadata.region_id,
+                    err: format!(
+                        "column {} already exists with different metadata, existing: {:?}, got: {:?}",
+                        self.column_metadata.column_schema.name, existing_column, self.column_metadata,
+                    ),
+                }
+            );
+            ensure!(
+                self.location.is_none(),
+                InvalidRegionRequestSnafu {
+                    region_id: metadata.region_id,
+                    err: format!(
+                        "column {} already exists, but location is specified",
+                        self.column_metadata.column_schema.name
+                    ),
+                }
+            );
+        }
+
+        if let Some(existing_column) = metadata.column_by_id(self.column_metadata.column_id) {
+            // Ensures the existing column has the same name.
+            ensure!(
+                existing_column.column_schema.name == self.column_metadata.column_schema.name,
+                InvalidRegionRequestSnafu {
+                    region_id: metadata.region_id,
+                    err: format!(
+                        "column id {} already exists with different name {}",
+                        self.column_metadata.column_id, existing_column.column_schema.name
+                    ),
+                }
+            );
+        }
 
         Ok(())
     }
@@ -739,27 +869,23 @@ impl From<v1::ModifyColumnType> for ModifyColumnType {
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
-pub enum ChangeOption {
-    TTL(Duration),
+pub enum SetRegionOption {
+    Ttl(Option<TimeToLive>),
     // Modifying TwscOptions with values as (option name, new value).
     Twsc(String, String),
 }
 
-impl TryFrom<&ChangeTableOption> for ChangeOption {
+impl TryFrom<&PbOption> for SetRegionOption {
     type Error = MetadataError;
 
-    fn try_from(value: &ChangeTableOption) -> std::result::Result<Self, Self::Error> {
-        let ChangeTableOption { key, value } = value;
-
+    fn try_from(value: &PbOption) -> std::result::Result<Self, Self::Error> {
+        let PbOption { key, value } = value;
         match key.as_str() {
             TTL_KEY => {
-                let ttl = if value.is_empty() {
-                    Duration::from_secs(0)
-                } else {
-                    humantime::parse_duration(value)
-                        .map_err(|_| InvalidRegionOptionChangeRequestSnafu { key, value }.build())?
-                };
-                Ok(Self::TTL(ttl))
+                let ttl = TimeToLive::from_humantime_or_str(value)
+                    .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+
+                Ok(Self::Ttl(Some(ttl)))
             }
             TWCS_MAX_ACTIVE_WINDOW_RUNS
             | TWCS_MAX_ACTIVE_WINDOW_FILES
@@ -767,8 +893,82 @@ impl TryFrom<&ChangeTableOption> for ChangeOption {
             | TWCS_MAX_INACTIVE_WINDOW_RUNS
             | TWCS_MAX_OUTPUT_FILE_SIZE
             | TWCS_TIME_WINDOW => Ok(Self::Twsc(key.to_string(), value.to_string())),
-            _ => InvalidRegionOptionChangeRequestSnafu { key, value }.fail(),
+            _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
+    }
+}
+
+impl From<&UnsetRegionOption> for SetRegionOption {
+    fn from(unset_option: &UnsetRegionOption) -> Self {
+        match unset_option {
+            UnsetRegionOption::TwcsMaxActiveWindowFiles => {
+                SetRegionOption::Twsc(unset_option.to_string(), String::new())
+            }
+            UnsetRegionOption::TwcsMaxInactiveWindowFiles => {
+                SetRegionOption::Twsc(unset_option.to_string(), String::new())
+            }
+            UnsetRegionOption::TwcsMaxActiveWindowRuns => {
+                SetRegionOption::Twsc(unset_option.to_string(), String::new())
+            }
+            UnsetRegionOption::TwcsMaxInactiveWindowRuns => {
+                SetRegionOption::Twsc(unset_option.to_string(), String::new())
+            }
+            UnsetRegionOption::TwcsMaxOutputFileSize => {
+                SetRegionOption::Twsc(unset_option.to_string(), String::new())
+            }
+            UnsetRegionOption::TwcsTimeWindow => {
+                SetRegionOption::Twsc(unset_option.to_string(), String::new())
+            }
+            UnsetRegionOption::Ttl => SetRegionOption::Ttl(Default::default()),
+        }
+    }
+}
+
+impl TryFrom<&str> for UnsetRegionOption {
+    type Error = MetadataError;
+
+    fn try_from(key: &str) -> Result<Self> {
+        match key.to_ascii_lowercase().as_str() {
+            TTL_KEY => Ok(Self::Ttl),
+            TWCS_MAX_ACTIVE_WINDOW_FILES => Ok(Self::TwcsMaxActiveWindowFiles),
+            TWCS_MAX_INACTIVE_WINDOW_FILES => Ok(Self::TwcsMaxInactiveWindowFiles),
+            TWCS_MAX_ACTIVE_WINDOW_RUNS => Ok(Self::TwcsMaxActiveWindowRuns),
+            TWCS_MAX_INACTIVE_WINDOW_RUNS => Ok(Self::TwcsMaxInactiveWindowRuns),
+            TWCS_MAX_OUTPUT_FILE_SIZE => Ok(Self::TwcsMaxOutputFileSize),
+            TWCS_TIME_WINDOW => Ok(Self::TwcsTimeWindow),
+            _ => InvalidUnsetRegionOptionRequestSnafu { key }.fail(),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
+pub enum UnsetRegionOption {
+    TwcsMaxActiveWindowFiles,
+    TwcsMaxInactiveWindowFiles,
+    TwcsMaxActiveWindowRuns,
+    TwcsMaxInactiveWindowRuns,
+    TwcsMaxOutputFileSize,
+    TwcsTimeWindow,
+    Ttl,
+}
+
+impl UnsetRegionOption {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Ttl => TTL_KEY,
+            Self::TwcsMaxActiveWindowFiles => TWCS_MAX_ACTIVE_WINDOW_FILES,
+            Self::TwcsMaxInactiveWindowFiles => TWCS_MAX_INACTIVE_WINDOW_FILES,
+            Self::TwcsMaxActiveWindowRuns => TWCS_MAX_ACTIVE_WINDOW_RUNS,
+            Self::TwcsMaxInactiveWindowRuns => TWCS_MAX_INACTIVE_WINDOW_RUNS,
+            Self::TwcsMaxOutputFileSize => TWCS_MAX_OUTPUT_FILE_SIZE,
+            Self::TwcsTimeWindow => TWCS_TIME_WINDOW,
+        }
+    }
+}
+
+impl Display for UnsetRegionOption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }
 
@@ -932,6 +1132,8 @@ mod tests {
         );
     }
 
+    /// Returns a new region metadata for testing. Metadata:
+    /// `[(ts, ms, 1), (tag_0, string, 2), (field_0, string, 3), (field_1, bool, 4)]`
     fn new_metadata() -> RegionMetadata {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
         builder
@@ -986,7 +1188,7 @@ mod tests {
                     true,
                 ),
                 semantic_type: SemanticType::Tag,
-                column_id: 4,
+                column_id: 5,
             },
             location: None,
         };
@@ -1002,7 +1204,7 @@ mod tests {
                     false,
                 ),
                 semantic_type: SemanticType::Tag,
-                column_id: 4,
+                column_id: 5,
             },
             location: None,
         }
@@ -1018,7 +1220,7 @@ mod tests {
                     true,
                 ),
                 semantic_type: SemanticType::Tag,
-                column_id: 4,
+                column_id: 2,
             },
             location: None,
         };
@@ -1038,7 +1240,7 @@ mod tests {
                             true,
                         ),
                         semantic_type: SemanticType::Tag,
-                        column_id: 4,
+                        column_id: 5,
                     },
                     location: None,
                 },
@@ -1050,7 +1252,7 @@ mod tests {
                             true,
                         ),
                         semantic_type: SemanticType::Field,
-                        column_id: 5,
+                        column_id: 6,
                     },
                     location: None,
                 },
@@ -1059,6 +1261,82 @@ mod tests {
         let metadata = new_metadata();
         kind.validate(&metadata).unwrap();
         assert!(kind.need_alter(&metadata));
+    }
+
+    #[test]
+    fn test_add_existing_column_different_metadata() {
+        let metadata = new_metadata();
+
+        // Add existing column with different id.
+        let kind = AlterKind::AddColumns {
+            columns: vec![AddColumn {
+                column_metadata: ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "tag_0",
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 4,
+                },
+                location: None,
+            }],
+        };
+        kind.validate(&metadata).unwrap_err();
+
+        // Add existing column with different type.
+        let kind = AlterKind::AddColumns {
+            columns: vec![AddColumn {
+                column_metadata: ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "tag_0",
+                        ConcreteDataType::int64_datatype(),
+                        true,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 2,
+                },
+                location: None,
+            }],
+        };
+        kind.validate(&metadata).unwrap_err();
+
+        // Add existing column with different name.
+        let kind = AlterKind::AddColumns {
+            columns: vec![AddColumn {
+                column_metadata: ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "tag_1",
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 2,
+                },
+                location: None,
+            }],
+        };
+        kind.validate(&metadata).unwrap_err();
+    }
+
+    #[test]
+    fn test_add_existing_column_with_location() {
+        let metadata = new_metadata();
+        let kind = AlterKind::AddColumns {
+            columns: vec![AddColumn {
+                column_metadata: ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "tag_0",
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 2,
+                },
+                location: Some(AddColumnLocation::First),
+            }],
+        };
+        kind.validate(&metadata).unwrap_err();
     }
 
     #[test]
@@ -1159,19 +1437,19 @@ mod tests {
                             true,
                         ),
                         semantic_type: SemanticType::Tag,
-                        column_id: 4,
+                        column_id: 5,
                     },
                     location: None,
                 },
                 AddColumn {
                     column_metadata: ColumnMetadata {
                         column_schema: ColumnSchema::new(
-                            "field_1",
+                            "field_2",
                             ConcreteDataType::string_datatype(),
                             true,
                         ),
                         semantic_type: SemanticType::Field,
-                        column_id: 5,
+                        column_id: 6,
                     },
                     location: None,
                 },
@@ -1230,12 +1508,14 @@ mod tests {
 
     #[test]
     fn test_validate_modify_column_fulltext_options() {
-        let kind = AlterKind::SetColumnFulltext {
-            column_name: "tag_0".to_string(),
-            options: FulltextOptions {
-                enable: true,
-                analyzer: FulltextAnalyzer::Chinese,
-                case_sensitive: false,
+        let kind = AlterKind::SetIndex {
+            options: ApiSetIndexOptions::Fulltext {
+                column_name: "tag_0".to_string(),
+                options: FulltextOptions {
+                    enable: true,
+                    analyzer: FulltextAnalyzer::Chinese,
+                    case_sensitive: false,
+                },
             },
         };
         let request = RegionAlterRequest {
@@ -1246,8 +1526,10 @@ mod tests {
         metadata.schema_version = 1;
         request.validate(&metadata).unwrap();
 
-        let kind = AlterKind::UnsetColumnFulltext {
-            column_name: "tag_0".to_string(),
+        let kind = AlterKind::UnsetIndex {
+            options: ApiUnsetIndexOptions::Fulltext {
+                column_name: "tag_0".to_string(),
+            },
         };
         let request = RegionAlterRequest {
             schema_version: 1,

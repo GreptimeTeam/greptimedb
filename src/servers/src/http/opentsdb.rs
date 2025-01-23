@@ -15,11 +15,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Query, RawBody, State};
+use axum::body::Bytes;
+use axum::extract::{Query, State};
 use axum::http::StatusCode as HttpStatusCode;
 use axum::{Extension, Json};
 use common_error::ext::ErrorExt;
-use hyper::Body;
 use serde::{Deserialize, Serialize};
 use session::context::{Channel, QueryContext};
 use snafu::ResultExt;
@@ -76,7 +76,7 @@ pub async fn put(
     State(opentsdb_handler): State<OpentsdbProtocolHandlerRef>,
     Query(params): Query<HashMap<String, String>>,
     Extension(mut ctx): Extension<QueryContext>,
-    RawBody(body): RawBody,
+    body: Bytes,
 ) -> Result<(HttpStatusCode, Json<OpentsdbPutResponse>)> {
     let summary = params.contains_key("summary");
     let details = params.contains_key("details");
@@ -125,10 +125,7 @@ pub async fn put(
     Ok(response)
 }
 
-async fn parse_data_points(body: Body) -> Result<Vec<DataPointRequest>> {
-    let body = hyper::body::to_bytes(body)
-        .await
-        .context(error::HyperSnafu)?;
+async fn parse_data_points(body: Bytes) -> Result<Vec<DataPointRequest>> {
     let data_points = serde_json::from_slice::<OneOrMany<DataPointRequest>>(&body[..])
         .context(error::InvalidOpentsdbJsonRequestSnafu)?;
     Ok(data_points.into())
@@ -213,24 +210,24 @@ mod test {
             }"#;
         let data_point2 = serde_json::from_str::<DataPointRequest>(raw_data_point2).unwrap();
 
-        let body = Body::from(raw_data_point1);
+        let body = Bytes::from(raw_data_point1);
         let data_points = parse_data_points(body).await.unwrap();
         assert_eq!(data_points.len(), 1);
         assert_eq!(data_points[0], data_point1);
 
-        let body = Body::from(format!("[{raw_data_point1},{raw_data_point2}]"));
+        let body = Bytes::from(format!("[{raw_data_point1},{raw_data_point2}]"));
         let data_points = parse_data_points(body).await.unwrap();
         assert_eq!(data_points.len(), 2);
         assert_eq!(data_points[0], data_point1);
         assert_eq!(data_points[1], data_point2);
 
-        let body = Body::from("");
+        let body = Bytes::from("");
         let result = parse_data_points(body).await;
         assert!(result.is_err());
         let err = result.unwrap_err().output_msg();
         assert!(err.contains("EOF while parsing a value at line 1 column 0"));
 
-        let body = Body::from("hello world");
+        let body = Bytes::from("hello world");
         let result = parse_data_points(body).await;
         assert!(result.is_err());
         let err = result.unwrap_err().output_msg();

@@ -15,7 +15,6 @@
 pub mod index;
 pub mod transformer;
 
-use itertools::Itertools;
 use snafu::OptionExt;
 
 use crate::etl::error::{Error, Result};
@@ -40,7 +39,7 @@ use super::error::{
 use super::field::{Fields, InputFieldInfo, OneInputOneOutputField};
 use super::processor::{yaml_new_field, yaml_new_fields};
 
-pub trait Transformer: std::fmt::Display + Sized + Send + Sync + 'static {
+pub trait Transformer: std::fmt::Debug + Sized + Send + Sync + 'static {
     type Output;
     type VecOutput;
 
@@ -74,14 +73,6 @@ impl std::str::FromStr for OnFailure {
     }
 }
 
-impl std::fmt::Display for OnFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            OnFailure::Ignore => write!(f, "ignore"),
-            OnFailure::Default => write!(f, "default"),
-        }
-    }
-}
 #[derive(Debug, Default, Clone)]
 pub struct TransformBuilders {
     pub(crate) builders: Vec<TransformBuilder>,
@@ -115,18 +106,6 @@ impl Transforms {
 
     pub fn transforms(&self) -> &Vec<Transform> {
         &self.transforms
-    }
-}
-
-impl std::fmt::Display for Transforms {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let transforms = self
-            .transforms
-            .iter()
-            .map(|field| field.to_string())
-            .join(", ");
-
-        write!(f, "{}", transforms)
     }
 }
 
@@ -228,32 +207,6 @@ pub struct Transform {
     pub index: Option<Index>,
 
     pub on_failure: Option<OnFailure>,
-}
-
-impl std::fmt::Display for Transform {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let index = if let Some(index) = &self.index {
-            format!(", index: {}", index)
-        } else {
-            "".to_string()
-        };
-
-        let type_ = format!("type: {}", self.type_);
-        let fields = format!("field(s): {:?}", self.real_fields);
-        let default = if let Some(default) = &self.default {
-            format!(", default: {}", default)
-        } else {
-            "".to_string()
-        };
-
-        let on_failure = if let Some(on_failure) = &self.on_failure {
-            format!(", on_failure: {}", on_failure)
-        } else {
-            "".to_string()
-        };
-
-        write!(f, "{type_}{index}, {fields}{default}{on_failure}",)
-    }
 }
 
 impl Default for Transform {

@@ -78,15 +78,14 @@ where
     }
 
     pub fn http_server_builder(&self, opts: &FrontendOptions) -> HttpServerBuilder {
-        let mut builder = HttpServerBuilder::new(opts.http.clone()).with_sql_handler(
-            ServerSqlQueryHandlerAdapter::arc(self.instance.clone()),
-            Some(self.instance.clone()),
-        );
+        let mut builder = HttpServerBuilder::new(opts.http.clone())
+            .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(self.instance.clone()));
 
         let validator = self.plugins.get::<LogValidatorRef>();
         let ingest_interceptor = self.plugins.get::<LogIngestInterceptorRef<ServerError>>();
         builder =
             builder.with_log_ingest_handler(self.instance.clone(), validator, ingest_interceptor);
+        builder = builder.with_logs_handler(self.instance.clone());
 
         if let Some(user_provider) = self.plugins.get::<UserProviderRef>() {
             builder = builder.with_user_provider(user_provider);

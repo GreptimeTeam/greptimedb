@@ -14,11 +14,10 @@
 
 use std::collections::HashMap;
 
-use axum::headers::HeaderValue;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use common_query::Output;
-use schemars::JsonSchema;
+use headers::HeaderValue;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -27,7 +26,7 @@ use crate::http::header::{
 };
 use crate::http::{handler, process_with_limit, GreptimeQueryOutput, HttpResponse, ResponseFormat};
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct GreptimedbV1Response {
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub(crate) output: Vec<GreptimeQueryOutput>,

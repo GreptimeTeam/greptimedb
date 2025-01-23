@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::alter_expr::Kind;
+use api::v1::alter_table_expr::Kind;
 use api::v1::promql_request::Promql;
 use api::v1::{
-    column, AddColumn, AddColumns, AlterExpr, Basic, Column, ColumnDataType, ColumnDef,
+    column, AddColumn, AddColumns, AlterTableExpr, Basic, Column, ColumnDataType, ColumnDef,
     CreateTableExpr, InsertRequest, InsertRequests, PromInstantQuery, PromRangeQuery,
     PromqlRequest, RequestHeader, SemanticType,
 };
@@ -372,9 +372,10 @@ pub async fn test_insert_and_select(store_type: StorageType) {
         add_columns: vec![AddColumn {
             column_def: Some(add_column),
             location: None,
+            add_if_not_exists: false,
         }],
     });
-    let expr = AlterExpr {
+    let expr = AlterTableExpr {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: "demo".to_string(),
@@ -444,6 +445,40 @@ async fn insert_with_hints_and_assert(db: &Database) {
 +-------+-------------------------------------+\
 ";
     assert_eq!(pretty, expected);
+
+    // testing data with ttl=instant and auto_create_table = true can be handled correctly
+    let (expected_host_col, expected_cpu_col, expected_mem_col, expected_ts_col) = expect_data();
+
+    let request = InsertRequest {
+        table_name: "demo1".to_string(),
+        columns: vec![
+            expected_host_col.clone(),
+            expected_cpu_col.clone(),
+            expected_mem_col.clone(),
+            expected_ts_col.clone(),
+        ],
+        row_count: 4,
+    };
+    let result = db
+        .insert_with_hints(
+            InsertRequests {
+                inserts: vec![request],
+            },
+            &[("auto_create_table", "true"), ("ttl", "instant")],
+        )
+        .await;
+    assert_eq!(result.unwrap(), 0);
+
+    // check table is empty
+    let output = db.sql("SELECT * FROM demo1").await.unwrap();
+
+    let record_batches = match output.data {
+        OutputData::RecordBatches(record_batches) => record_batches,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
+    };
+
+    assert!(record_batches.iter().all(|r| r.num_rows() == 0));
 }
 
 async fn insert_and_assert(db: &Database) {

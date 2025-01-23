@@ -59,8 +59,11 @@ pub async fn init_greptime_connections_via_env() -> Connections {
 /// Connects to GreptimeDB.
 pub async fn init_greptime_connections(mysql: Option<String>) -> Connections {
     let mysql = if let Some(addr) = mysql {
-        let mut opts: MySqlConnectOptions = format!("mysql://{addr}/public").parse().unwrap();
-        opts.log_statements(LevelFilter::Off);
+        let opts = format!("mysql://{addr}/public")
+            .parse::<MySqlConnectOptions>()
+            .unwrap()
+            .log_statements(LevelFilter::Off);
+
         Some(MySqlPoolOptions::new().connect_with(opts).await.unwrap())
     } else {
         None
@@ -141,10 +144,10 @@ macro_rules! make_get_from_env_helper {
 }
 
 make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_ALTER_ACTIONS, 256);
-make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_INSERT_ACTIONS, 8);
-make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_ROWS, 2048);
-make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_TABLES, 64);
-make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_COLUMNS, 32);
+make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_INSERT_ACTIONS, 4);
+make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_ROWS, 512);
+make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_TABLES, 32);
+make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_COLUMNS, 16);
 
 /// Retrieves a value from the environment variables
 /// or returns a default value if the environment variable is not set.

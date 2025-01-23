@@ -16,10 +16,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use cache::build_datanode_cache_registry;
 use catalog::kvbackend::MetaKvBackend;
 use clap::Parser;
 use common_base::Plugins;
 use common_config::Configurable;
+use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_telemetry::logging::TracingOptions;
 use common_telemetry::{info, warn};
 use common_version::{short_version, version};
@@ -57,12 +59,13 @@ impl Instance {
         }
     }
 
-    pub fn datanode_mut(&mut self) -> &mut Datanode {
-        &mut self.datanode
-    }
-
     pub fn datanode(&self) -> &Datanode {
         &self.datanode
+    }
+
+    /// allow customizing datanode for downstream projects
+    pub fn datanode_mut(&mut self) -> &mut Datanode {
+        &mut self.datanode
     }
 }
 
@@ -273,7 +276,8 @@ impl StartCommand {
         info!("Datanode options: {:#?}", opts);
 
         let plugin_opts = opts.plugins;
-        let opts = opts.component;
+        let mut opts = opts.component;
+        opts.grpc.detect_hostname();
         let mut plugins = Plugins::new();
         plugins::setup_datanode_plugins(&mut plugins, &plugin_opts, &opts)
             .await
@@ -300,9 +304,17 @@ impl StartCommand {
             client: meta_client.clone(),
         });
 
+        // Builds cache registry for datanode.
+        let layered_cache_registry = Arc::new(
+            LayeredCacheRegistryBuilder::default()
+                .add_cache_registry(build_datanode_cache_registry(meta_backend.clone()))
+                .build(),
+        );
+
         let mut datanode = DatanodeBuilder::new(opts.clone(), plugins)
             .with_meta_client(meta_client)
             .with_kv_backend(meta_backend)
+            .with_cache_registry(layered_cache_registry)
             .build()
             .await
             .context(StartDatanodeSnafu)?;

@@ -14,10 +14,10 @@
 
 use itertools::Itertools;
 use snafu::OptionExt;
+use substrait_proto::proto;
 use substrait_proto::proto::aggregate_function::AggregationInvocation;
 use substrait_proto::proto::aggregate_rel::{Grouping, Measure};
 use substrait_proto::proto::function_argument::ArgType;
-use substrait_proto::proto::{self};
 
 use crate::error::{Error, NotImplementedSnafu, PlanSnafu};
 use crate::expr::{
@@ -28,8 +28,11 @@ use crate::repr::{ColumnType, RelationDesc, RelationType};
 use crate::transform::{substrait_proto, FlownodeContext, FunctionExtensions};
 
 impl TypedExpr {
+    /// Allow `deprecated` due to the usage of deprecated grouping_expressions on datafusion to substrait side
+    #[allow(deprecated)]
     async fn from_substrait_agg_grouping(
         ctx: &mut FlownodeContext,
+        grouping_expressions: &[proto::Expression],
         groupings: &[Grouping],
         typ: &RelationDesc,
         extensions: &FunctionExtensions,
@@ -38,7 +41,34 @@ impl TypedExpr {
         let mut group_expr = vec![];
         match groupings.len() {
             1 => {
-                for e in &groupings[0].grouping_expressions {
+                // handle case when deprecated grouping_expressions is referenced by index is empty
+                let expressions: Box<dyn Iterator<Item = &proto::Expression> + Send> = if groupings
+                    [0]
+                .expression_references
+                .is_empty()
+                {
+                    Box::new(groupings[0].grouping_expressions.iter())
+                } else {
+                    if groupings[0]
+                        .expression_references
+                        .iter()
+                        .any(|idx| *idx as usize >= grouping_expressions.len())
+                    {
+                        return PlanSnafu {
+                            reason: format!("Invalid grouping expression reference: {:?} for grouping expr: {:?}", 
+                            groupings[0].expression_references,
+                            grouping_expressions
+                        ),
+                        }.fail()?;
+                    }
+                    Box::new(
+                        groupings[0]
+                            .expression_references
+                            .iter()
+                            .map(|idx| &grouping_expressions[*idx as usize]),
+                    )
+                };
+                for e in expressions {
                     let x = TypedExpr::from_substrait_rex(e, typ, extensions).await?;
                     group_expr.push(x);
                 }
@@ -128,7 +158,11 @@ impl AggregateExpr {
         }
 
         if args.len() != 1 {
-            return not_impl_err!("Aggregated function with multiple arguments is not supported");
+            let fn_name = extensions.get(&f.function_reference).cloned();
+            return not_impl_err!(
+                "Aggregated function (name={:?}) with multiple arguments is not supported",
+                fn_name
+            );
         }
 
         let arg = if let Some(first) = args.first() {
@@ -216,6 +250,7 @@ impl KeyValPlan {
 
 /// find out the column that should be time index in group exprs(which is all columns that should be keys)
 /// TODO(discord9): better ways to assign time index
+/// for now, it will found the first column that is timestamp or has a tumble window floor function
 fn find_time_index_in_group_exprs(group_exprs: &[TypedExpr]) -> Option<usize> {
     group_exprs.iter().position(|expr| {
         matches!(
@@ -224,7 +259,7 @@ fn find_time_index_in_group_exprs(group_exprs: &[TypedExpr]) -> Option<usize> {
                 func: UnaryFunc::TumbleWindowFloor { .. },
                 expr: _
             }
-        )
+        ) || expr.typ.scalar_type.is_timestamp()
     })
 }
 
@@ -246,9 +281,14 @@ impl TypedPlan {
             return not_impl_err!("Aggregate without an input is not supported");
         };
 
-        let group_exprs =
-            TypedExpr::from_substrait_agg_grouping(ctx, &agg.groupings, &input.schema, extensions)
-                .await?;
+        let group_exprs = TypedExpr::from_substrait_agg_grouping(
+            ctx,
+            &agg.grouping_expressions,
+            &agg.groupings,
+            &input.schema,
+            extensions,
+        )
+        .await?;
 
         let time_index = find_time_index_in_group_exprs(&group_exprs);
 
@@ -334,7 +374,6 @@ impl TypedPlan {
             reduce_plan: ReducePlan::Accumulable(accum_plan),
         };
         // FIX(discord9): deal with key first
-
         return Ok(TypedPlan {
             schema: output_type,
             plan,
@@ -344,7 +383,6 @@ impl TypedPlan {
 
 #[cfg(test)]
 mod test {
-    use std::collections::BTreeMap;
     use std::time::Duration;
 
     use bytes::BytesMut;
@@ -385,7 +423,7 @@ mod test {
             .with_key(vec![2])
             .with_time_index(Some(1))
             .into_named(vec![
-                Some("SUM(abs(numbers_with_ts.number))".to_string()),
+                Some("sum(abs(numbers_with_ts.number))".to_string()),
                 Some("window_start".to_string()),
                 Some("window_end".to_string()),
             ]),
@@ -449,14 +487,15 @@ mod test {
                                                 false,
                                             )])
                                             .into_unnamed(),
-                                            extensions: FunctionExtensions {
-                                                anchor_to_name: BTreeMap::from([
+                                            extensions: FunctionExtensions::from_iter(
+                                                [
                                                     (0, "tumble_start".to_string()),
                                                     (1, "tumble_end".to_string()),
                                                     (2, "abs".to_string()),
                                                     (3, "sum".to_string()),
-                                                ]),
-                                            },
+                                                ]
+                                                .into_iter(),
+                                            ),
                                         },
                                     )
                                     .await
@@ -525,7 +564,7 @@ mod test {
             .with_key(vec![2])
             .with_time_index(Some(1))
             .into_named(vec![
-                Some("abs(SUM(numbers_with_ts.number))".to_string()),
+                Some("abs(sum(numbers_with_ts.number))".to_string()),
                 Some("window_start".to_string()),
                 Some("window_end".to_string()),
             ]),
@@ -610,14 +649,15 @@ mod test {
                                     true,
                                 )])
                                 .into_unnamed(),
-                                extensions: FunctionExtensions {
-                                    anchor_to_name: BTreeMap::from([
+                                extensions: FunctionExtensions::from_iter(
+                                    [
                                         (0, "abs".to_string()),
                                         (1, "tumble_start".to_string()),
                                         (2, "tumble_end".to_string()),
                                         (3, "sum".to_string()),
-                                    ]),
-                                },
+                                    ]
+                                    .into_iter(),
+                                ),
                             })
                             .await
                             .unwrap(),
@@ -779,8 +819,8 @@ mod test {
             .with_key(vec![0, 3])
             .with_time_index(Some(2))
             .into_named(vec![
-                Some("numbers_with_ts.number".to_string()),
-                Some("AVG(numbers_with_ts.number)".to_string()),
+                Some("number".to_string()),
+                Some("avg(numbers_with_ts.number)".to_string()),
                 Some("window_start".to_string()),
                 Some("window_end".to_string()),
             ]),
@@ -813,7 +853,7 @@ mod test {
             .with_key(vec![2])
             .with_time_index(Some(1))
             .into_named(vec![
-                Some("SUM(numbers_with_ts.number)".to_string()),
+                Some("sum(numbers_with_ts.number)".to_string()),
                 Some("window_start".to_string()),
                 Some("window_end".to_string()),
             ]),
@@ -923,7 +963,7 @@ mod test {
             .with_key(vec![2])
             .with_time_index(Some(1))
             .into_named(vec![
-                Some("SUM(numbers_with_ts.number)".to_string()),
+                Some("sum(numbers_with_ts.number)".to_string()),
                 Some("window_start".to_string()),
                 Some("window_end".to_string()),
             ]),
@@ -1055,8 +1095,8 @@ mod test {
             ])
             .with_key(vec![1])
             .into_named(vec![
-                Some("AVG(numbers.number)".to_string()),
-                Some("numbers.number".to_string()),
+                Some("avg(numbers.number)".to_string()),
+                Some("number".to_string()),
             ]),
             plan: Plan::Mfp {
                 input: Box::new(
@@ -1187,7 +1227,7 @@ mod test {
         );
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::float64_datatype(), true)])
-                .into_named(vec![Some("AVG(numbers.number)".to_string())]),
+                .into_named(vec![Some("avg(numbers.number)".to_string())]),
             plan: Plan::Mfp {
                 input: Box::new(
                     Plan::Reduce {
@@ -1265,7 +1305,7 @@ mod test {
         };
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)])
-                .into_named(vec![Some("SUM(numbers.number)".to_string())]),
+                .into_named(vec![Some("sum(numbers.number)".to_string())]),
             plan: Plan::Reduce {
                 input: Box::new(
                     Plan::Get {
@@ -1305,6 +1345,61 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_distinct_number() {
+        let engine = create_test_query_engine();
+        let sql = "SELECT DISTINCT number FROM numbers";
+        let plan = sql_to_substrait(engine.clone(), sql).await;
+
+        let mut ctx = create_test_ctx();
+        let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
+            .await
+            .unwrap();
+
+        let expected = TypedPlan {
+            schema: RelationType::new(vec![
+                ColumnType::new(CDT::uint32_datatype(), false), // col number
+            ])
+            .with_key(vec![0])
+            .into_named(vec![Some("number".to_string())]),
+            plan: Plan::Reduce {
+                input: Box::new(
+                    Plan::Get {
+                        id: crate::expr::Id::Global(GlobalId::User(0)),
+                    }
+                    .with_types(
+                        RelationType::new(vec![ColumnType::new(
+                            ConcreteDataType::uint32_datatype(),
+                            false,
+                        )])
+                        .into_named(vec![Some("number".to_string())]),
+                    )
+                    .mfp(MapFilterProject::new(1).into_safe())
+                    .unwrap(),
+                ),
+                key_val_plan: KeyValPlan {
+                    key_plan: MapFilterProject::new(1)
+                        .map(vec![ScalarExpr::Column(0)])
+                        .unwrap()
+                        .project(vec![1])
+                        .unwrap()
+                        .into_safe(),
+                    val_plan: MapFilterProject::new(1)
+                        .project(vec![0])
+                        .unwrap()
+                        .into_safe(),
+                },
+                reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
+                    full_aggrs: vec![],
+                    simple_aggrs: vec![],
+                    distinct_aggrs: vec![],
+                }),
+            },
+        };
+
+        assert_eq!(flow_plan, expected);
+    }
+
+    #[tokio::test]
     async fn test_sum_group_by() {
         let engine = create_test_query_engine();
         let sql = "SELECT sum(number), number FROM numbers GROUP BY number";
@@ -1327,8 +1422,8 @@ mod test {
             ])
             .with_key(vec![1])
             .into_named(vec![
-                Some("SUM(numbers.number)".to_string()),
-                Some("numbers.number".to_string()),
+                Some("sum(numbers.number)".to_string()),
+                Some("number".to_string()),
             ]),
             plan: Plan::Mfp {
                 input: Box::new(
@@ -1405,7 +1500,7 @@ mod test {
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)])
                 .into_named(vec![Some(
-                    "SUM(numbers.number + numbers.number)".to_string(),
+                    "sum(numbers.number + numbers.number)".to_string(),
                 )]),
             plan: Plan::Reduce {
                 input: Box::new(
@@ -1482,10 +1577,10 @@ mod test {
                 ColumnType::new(CDT::float64_datatype(), true),
                 ColumnType::new(CDT::timestamp_millisecond_datatype(), true),
             ])
-            .with_key(vec![1])
+            .with_time_index(Some(1))
             .into_named(vec![
                 Some(
-                    "MAX(numbers_with_ts.number) - MIN(numbers_with_ts.number) / Float64(30)"
+                    "max(numbers_with_ts.number) - min(numbers_with_ts.number) / Float64(30)"
                         .to_string(),
                 ),
                 Some("time_window".to_string()),
@@ -1517,7 +1612,7 @@ mod test {
                                     df_scalar_fn: DfScalarFunction::try_from_raw_fn(
                                         RawDfScalarFn {
                                             f: BytesMut::from(
-                                                b"\x08\x02\"I\x1aG\nE\x8a\x02?\x08\x03\x12+\n\x17interval-month-day-nano\x12\x10\0\xac#\xfc\x06\0\0\0\0\0\0\0\0\0\0\0\x1a\x06\x12\x04:\x02\x10\x02\x1a\x06\x12\x04:\x02\x10\x02\x98\x03\x03\"\n\x1a\x08\x12\x06\n\x04\x12\x02\x08\x01".as_ref(),
+                                                b"\x08\x02\"\x0f\x1a\r\n\x0b\xa2\x02\x08\n\0\x12\x04\x10\x1e \t\"\n\x1a\x08\x12\x06\n\x04\x12\x02\x08\x01".as_ref(),
                                             ),
                                             input_schema: RelationType::new(vec![ColumnType::new(
                                                 ConcreteDataType::interval_month_day_nano_datatype(),
@@ -1527,15 +1622,13 @@ mod test {
                                                 false,
                                             )])
                                             .into_unnamed(),
-                                            extensions: FunctionExtensions {
-                                                anchor_to_name: BTreeMap::from([
+                                            extensions: FunctionExtensions::from_iter([
                                                     (0, "subtract".to_string()),
                                                     (1, "divide".to_string()),
                                                     (2, "date_bin".to_string()),
                                                     (3, "max".to_string()),
                                                     (4, "min".to_string()),
                                                 ]),
-                                            },
                                         },
                                     )
                                     .await
@@ -1571,7 +1664,7 @@ mod test {
                             ColumnType::new(ConcreteDataType::uint32_datatype(), true), // max
                             ColumnType::new(ConcreteDataType::uint32_datatype(), true), // min
                         ])
-                        .with_key(vec![0])
+                        .with_time_index(Some(0))
                         .into_unnamed(),
                     ),
                 ),

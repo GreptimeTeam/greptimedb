@@ -49,6 +49,7 @@ pub const SCHEMA_OPTS: &str = "options";
 const INIT_CAPACITY: usize = 42;
 
 /// The `information_schema.schemata` table implementation.
+#[derive(Debug)]
 pub(super) struct InformationSchemaSchemata {
     schema: SchemaRef,
     catalog_name: String,
@@ -180,7 +181,7 @@ impl InformationSchemaSchemataBuilder {
                     .context(TableMetadataManagerSnafu)?
                     // information_schema is not available from this
                     // table_metadata_manager and we return None
-                    .map(|schema_opts| format!("{schema_opts}"))
+                    .map(|schema_opts| format!("{}", schema_opts.into_inner()))
             } else {
                 None
             };

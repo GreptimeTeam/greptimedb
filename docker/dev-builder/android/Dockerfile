@@ -13,12 +13,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     git \
     build-essential \
-    pkg-config \
-    python3 \
-    python3-dev \
-    python3-pip \
-    && pip3 install --upgrade pip \
-    && pip3 install pyarrow
+    pkg-config
 
 # Trust workdir
 RUN git config --global --add safe.directory /greptimedb

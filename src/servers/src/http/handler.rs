@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
@@ -28,12 +27,16 @@ use common_query::{Output, OutputData};
 use common_recordbatch::util;
 use common_telemetry::tracing;
 use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use session::context::{Channel, QueryContext, QueryContextRef};
+use snafu::ResultExt;
+use sql::dialect::GreptimeDbDialect;
+use sql::parser::{ParseOptions, ParserContext};
+use sql::statements::statement::Statement;
 
 use super::header::collect_plan_metrics;
+use crate::error::{FailedToParseQuerySnafu, InvalidQuerySnafu, Result};
 use crate::http::result::arrow_result::ArrowResponse;
 use crate::http::result::csv_result::CsvResponse;
 use crate::http::result::error_result::ErrorResponse;
@@ -48,7 +51,7 @@ use crate::http::{
 use crate::metrics_handler::MetricsHandler;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SqlQuery {
     pub db: Option<String>,
     pub sql: Option<String>,
@@ -148,10 +151,31 @@ pub async fn sql(
     resp.with_execution_time(start.elapsed().as_millis() as u64)
 }
 
+/// Handler to parse sql
+#[axum_macros::debug_handler]
+#[tracing::instrument(skip_all, fields(protocol = "http", request_type = "sql"))]
+pub async fn sql_parse(
+    Query(query_params): Query<SqlQuery>,
+    Form(form_params): Form<SqlQuery>,
+) -> Result<Json<Vec<Statement>>> {
+    let Some(sql) = query_params.sql.or(form_params.sql) else {
+        return InvalidQuerySnafu {
+            reason: "sql parameter is required.",
+        }
+        .fail();
+    };
+
+    let stmts =
+        ParserContext::create_with_dialect(&sql, &GreptimeDbDialect {}, ParseOptions::default())
+            .context(FailedToParseQuerySnafu)?;
+
+    Ok(stmts.into())
+}
+
 /// Create a response from query result
 pub async fn from_output(
     outputs: Vec<crate::error::Result<Output>>,
-) -> Result<(Vec<GreptimeQueryOutput>, HashMap<String, Value>), ErrorResponse> {
+) -> std::result::Result<(Vec<GreptimeQueryOutput>, HashMap<String, Value>), ErrorResponse> {
     // TODO(sunng87): this api response structure cannot represent error well.
     //  It hides successful execution results from error response
     let mut results = Vec::with_capacity(outputs.len());
@@ -219,7 +243,7 @@ pub async fn from_output(
     Ok((results, merge_map))
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PromqlQuery {
     pub query: String,
     pub start: String,
@@ -277,10 +301,6 @@ pub async fn promql(
         .into_response()
 }
 
-pub(crate) fn sql_docs(op: TransformOperation) -> TransformOperation {
-    op.response::<200, Json<HttpResponse>>()
-}
-
 /// Handler to export metrics
 #[axum_macros::debug_handler]
 pub async fn metrics(
@@ -300,10 +320,10 @@ pub async fn metrics(
     state.render()
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct HealthQuery {}
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {}
 
 /// Handler to export healthy check
@@ -314,7 +334,7 @@ pub async fn health(Query(_params): Query<HealthQuery>) -> Json<HealthResponse> 
     Json(HealthResponse {})
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StatusResponse<'a> {
     pub source_time: &'a str,
     pub commit: &'a str,

@@ -33,7 +33,11 @@ use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
 
-use crate::region_request::{AddColumn, AddColumnLocation, AlterKind, ModifyColumnType};
+use crate::codec::PrimaryKeyEncoding;
+use crate::region_request::{
+    AddColumn, AddColumnLocation, AlterKind, ApiSetIndexOptions, ApiUnsetIndexOptions,
+    ModifyColumnType,
+};
 use crate::storage::consts::is_internal_column;
 use crate::storage::{ColumnId, RegionId};
 
@@ -145,6 +149,9 @@ pub struct RegionMetadata {
     ///
     /// The version starts from 0. Altering the schema bumps the version.
     pub schema_version: u64,
+
+    /// Primary key encoding mode.
+    pub primary_key_encoding: PrimaryKeyEncoding,
 }
 
 impl fmt::Debug for RegionMetadata {
@@ -173,6 +180,8 @@ impl<'de> Deserialize<'de> for RegionMetadata {
             primary_key: Vec<ColumnId>,
             region_id: RegionId,
             schema_version: u64,
+            #[serde(default)]
+            primary_key_encoding: PrimaryKeyEncoding,
         }
 
         let without_schema = RegionMetadataWithoutSchema::deserialize(deserializer)?;
@@ -187,6 +196,7 @@ impl<'de> Deserialize<'de> for RegionMetadata {
             primary_key: without_schema.primary_key,
             region_id: without_schema.region_id,
             schema_version: without_schema.schema_version,
+            primary_key_encoding: without_schema.primary_key_encoding,
         })
     }
 }
@@ -228,6 +238,11 @@ impl RegionMetadata {
     pub fn time_index_column(&self) -> &ColumnMetadata {
         let index = self.id_to_index[&self.time_index];
         &self.column_metadatas[index]
+    }
+
+    /// Returns the position of the time index.
+    pub fn time_index_column_pos(&self) -> usize {
+        self.id_to_index[&self.time_index]
     }
 
     /// Returns the arrow field of the time index column.
@@ -320,6 +335,7 @@ impl RegionMetadata {
             primary_key: projected_primary_key,
             region_id: self.region_id,
             schema_version: self.schema_version,
+            primary_key_encoding: self.primary_key_encoding,
         })
     }
 
@@ -504,6 +520,7 @@ pub struct RegionMetadataBuilder {
     column_metadatas: Vec<ColumnMetadata>,
     primary_key: Vec<ColumnId>,
     schema_version: u64,
+    primary_key_encoding: PrimaryKeyEncoding,
 }
 
 impl RegionMetadataBuilder {
@@ -514,6 +531,7 @@ impl RegionMetadataBuilder {
             column_metadatas: vec![],
             primary_key: vec![],
             schema_version: 0,
+            primary_key_encoding: PrimaryKeyEncoding::Dense,
         }
     }
 
@@ -524,7 +542,14 @@ impl RegionMetadataBuilder {
             primary_key: existing.primary_key,
             region_id: existing.region_id,
             schema_version: existing.schema_version,
+            primary_key_encoding: existing.primary_key_encoding,
         }
+    }
+
+    /// Sets the primary key encoding mode.
+    pub fn primary_key_encoding(&mut self, encoding: PrimaryKeyEncoding) -> &mut Self {
+        self.primary_key_encoding = encoding;
+        self
     }
 
     /// Pushes a new column metadata to this region's metadata.
@@ -553,14 +578,27 @@ impl RegionMetadataBuilder {
             AlterKind::AddColumns { columns } => self.add_columns(columns)?,
             AlterKind::DropColumns { names } => self.drop_columns(&names),
             AlterKind::ModifyColumnTypes { columns } => self.modify_column_types(columns),
-            AlterKind::SetColumnFulltext {
-                column_name,
-                options,
-            } => self.change_column_fulltext_options(column_name, true, Some(options))?,
-            AlterKind::UnsetColumnFulltext { column_name } => {
-                self.change_column_fulltext_options(column_name, false, None)?
+            AlterKind::SetIndex { options } => match options {
+                ApiSetIndexOptions::Fulltext {
+                    column_name,
+                    options,
+                } => self.change_column_fulltext_options(column_name, true, Some(options))?,
+                ApiSetIndexOptions::Inverted { column_name } => {
+                    self.change_column_inverted_index_options(column_name, true)?
+                }
+            },
+            AlterKind::UnsetIndex { options } => match options {
+                ApiUnsetIndexOptions::Fulltext { column_name } => {
+                    self.change_column_fulltext_options(column_name, false, None)?
+                }
+                ApiUnsetIndexOptions::Inverted { column_name } => {
+                    self.change_column_inverted_index_options(column_name, false)?
+                }
+            },
+            AlterKind::SetRegionOptions { options: _ } => {
+                // nothing to be done with RegionMetadata
             }
-            AlterKind::ChangeRegionOptions { options: _ } => {
+            AlterKind::UnsetRegionOptions { keys: _ } => {
                 // nothing to be done with RegionMetadata
             }
         }
@@ -579,6 +617,7 @@ impl RegionMetadataBuilder {
             primary_key: self.primary_key,
             region_id: self.region_id,
             schema_version: self.schema_version,
+            primary_key_encoding: self.primary_key_encoding,
         };
 
         meta.validate()?;
@@ -594,10 +633,34 @@ impl RegionMetadataBuilder {
             .map(|col| col.column_schema.name.clone())
             .collect();
 
+        let pk_as_inverted_index = !self
+            .column_metadatas
+            .iter()
+            .any(|c| c.column_schema.has_inverted_index_key());
+        let mut set_inverted_index_for_primary_keys = false;
+
         for add_column in columns {
             if names.contains(&add_column.column_metadata.column_schema.name) {
                 // Column already exists.
                 continue;
+            }
+
+            // Handles using primary key as inverted index.
+            let has_inverted_index_key = add_column
+                .column_metadata
+                .column_schema
+                .has_inverted_index_key();
+
+            if pk_as_inverted_index
+                && has_inverted_index_key
+                && !set_inverted_index_for_primary_keys
+            {
+                self.column_metadatas.iter_mut().for_each(|col| {
+                    if col.semantic_type == SemanticType::Tag {
+                        col.column_schema.set_inverted_index(true);
+                    }
+                });
+                set_inverted_index_for_primary_keys = true;
             }
 
             let column_id = add_column.column_metadata.column_id;
@@ -661,6 +724,19 @@ impl RegionMetadataBuilder {
                 column_meta.column_schema.data_type = target_type;
             }
         }
+    }
+
+    fn change_column_inverted_index_options(
+        &mut self,
+        column_name: String,
+        value: bool,
+    ) -> Result<()> {
+        for column_meta in self.column_metadatas.iter_mut() {
+            if column_meta.column_schema.name == column_name {
+                column_meta.column_schema.set_inverted_index(value)
+            }
+        }
+        Ok(())
     }
 
     fn change_column_fulltext_options(
@@ -829,10 +905,17 @@ pub enum MetadataError {
         location: Location,
     },
 
-    #[snafu(display("Invalid region option change request, key: {}, value: {}", key, value))]
-    InvalidRegionOptionChangeRequest {
+    #[snafu(display("Invalid set region option request, key: {}, value: {}", key, value))]
+    InvalidSetRegionOptionRequest {
         key: String,
         value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid set region option request, key: {}", key))]
+    InvalidUnsetRegionOptionRequest {
+        key: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -840,7 +923,7 @@ pub enum MetadataError {
     #[snafu(display("Failed to decode protobuf"))]
     DecodeProto {
         #[snafu(source)]
-        error: prost::DecodeError,
+        error: prost::UnknownEnumValue,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1353,12 +1436,14 @@ mod test {
 
         let mut builder = RegionMetadataBuilder::from_existing(metadata);
         builder
-            .alter(AlterKind::SetColumnFulltext {
-                column_name: "b".to_string(),
-                options: FulltextOptions {
-                    enable: true,
-                    analyzer: datatypes::schema::FulltextAnalyzer::Chinese,
-                    case_sensitive: true,
+            .alter(AlterKind::SetIndex {
+                options: ApiSetIndexOptions::Fulltext {
+                    column_name: "b".to_string(),
+                    options: FulltextOptions {
+                        enable: true,
+                        analyzer: datatypes::schema::FulltextAnalyzer::Chinese,
+                        case_sensitive: true,
+                    },
                 },
             })
             .unwrap();
@@ -1379,8 +1464,10 @@ mod test {
 
         let mut builder = RegionMetadataBuilder::from_existing(metadata);
         builder
-            .alter(AlterKind::UnsetColumnFulltext {
-                column_name: "b".to_string(),
+            .alter(AlterKind::UnsetIndex {
+                options: ApiUnsetIndexOptions::Fulltext {
+                    column_name: "b".to_string(),
+                },
             })
             .unwrap();
         let metadata = builder.build().unwrap();
@@ -1435,6 +1522,43 @@ mod test {
             .unwrap();
         let metadata = builder.build().unwrap();
         check_columns(&metadata, &["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn test_add_column_with_inverted_index() {
+        // a (tag), b (field), c (ts)
+        let metadata = build_test_region_metadata();
+        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        // tag d, e
+        let mut col = new_column_metadata("d", true, 4);
+        col.column_schema.set_inverted_index(true);
+        builder
+            .alter(AlterKind::AddColumns {
+                columns: vec![
+                    AddColumn {
+                        column_metadata: col,
+                        location: None,
+                    },
+                    AddColumn {
+                        column_metadata: new_column_metadata("e", true, 5),
+                        location: None,
+                    },
+                ],
+            })
+            .unwrap();
+        let metadata = builder.build().unwrap();
+        check_columns(&metadata, &["a", "b", "c", "d", "e"]);
+        assert_eq!([1, 4, 5], &metadata.primary_key[..]);
+        let column_metadata = metadata.column_by_name("a").unwrap();
+        assert!(column_metadata.column_schema.is_inverted_indexed());
+        let column_metadata = metadata.column_by_name("b").unwrap();
+        assert!(!column_metadata.column_schema.is_inverted_indexed());
+        let column_metadata = metadata.column_by_name("c").unwrap();
+        assert!(!column_metadata.column_schema.is_inverted_indexed());
+        let column_metadata = metadata.column_by_name("d").unwrap();
+        assert!(column_metadata.column_schema.is_inverted_indexed());
+        let column_metadata = metadata.column_by_name("e").unwrap();
+        assert!(!column_metadata.column_schema.is_inverted_indexed());
     }
 
     #[test]
@@ -1504,5 +1628,19 @@ mod test {
         let region_metadata = build_test_region_metadata();
         let formatted = format!("{:?}", region_metadata);
         assert_eq!(formatted, "RegionMetadata { column_metadatas: [[a Int64 not null Tag 1], [b Float64 not null Field 2], [c TimestampMillisecond not null Timestamp 3]], time_index: 3, primary_key: [1], region_id: 5299989648942(1234, 5678), schema_version: 0 }");
+    }
+
+    #[test]
+    fn test_region_metadata_deserialize_default_primary_key_encoding() {
+        let serialize = r#"{"column_metadatas":[{"column_schema":{"name":"a","data_type":{"Int64":{}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Tag","column_id":1},{"column_schema":{"name":"b","data_type":{"Float64":{}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Field","column_id":2},{"column_schema":{"name":"c","data_type":{"Timestamp":{"Millisecond":null}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Timestamp","column_id":3}],"primary_key":[1],"region_id":5299989648942,"schema_version":0}"#;
+        let deserialized: RegionMetadata = serde_json::from_str(serialize).unwrap();
+        assert_eq!(deserialized.primary_key_encoding, PrimaryKeyEncoding::Dense);
+
+        let serialize = r#"{"column_metadatas":[{"column_schema":{"name":"a","data_type":{"Int64":{}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Tag","column_id":1},{"column_schema":{"name":"b","data_type":{"Float64":{}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Field","column_id":2},{"column_schema":{"name":"c","data_type":{"Timestamp":{"Millisecond":null}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Timestamp","column_id":3}],"primary_key":[1],"region_id":5299989648942,"schema_version":0,"primary_key_encoding":"sparse"}"#;
+        let deserialized: RegionMetadata = serde_json::from_str(serialize).unwrap();
+        assert_eq!(
+            deserialized.primary_key_encoding,
+            PrimaryKeyEncoding::Sparse
+        );
     }
 }

@@ -30,6 +30,7 @@ use table::TableRef;
 use crate::error::Result;
 
 pub mod error;
+pub mod information_extension;
 pub mod kvbackend;
 pub mod memory;
 mod metrics;
@@ -40,6 +41,7 @@ pub mod information_schema {
 }
 
 pub mod table_source;
+
 #[async_trait::async_trait]
 pub trait CatalogManager: Send + Sync {
     fn as_any(&self) -> &dyn Any;

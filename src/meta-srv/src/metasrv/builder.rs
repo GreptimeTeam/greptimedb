@@ -26,6 +26,7 @@ use common_meta::ddl::{
 };
 use common_meta::ddl_manager::DdlManager;
 use common_meta::distributed_time_constants;
+use common_meta::key::flow::flow_state::FlowStateManager;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::maintenance::MaintenanceModeManager;
 use common_meta::key::TableMetadataManager;
@@ -35,7 +36,7 @@ use common_meta::node_manager::NodeManagerRef;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
-use common_meta::wal_options_allocator::WalOptionsAllocator;
+use common_meta::wal_options_allocator::build_wal_options_allocator;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
 use snafu::ResultExt;
@@ -43,10 +44,11 @@ use snafu::ResultExt;
 use super::{SelectTarget, FLOW_ID_SEQ};
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
-use crate::error::{self, Result};
+use crate::error::{self, BuildWalOptionsAllocatorSnafu, Result};
 use crate::flow_meta_alloc::FlowPeerAllocator;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
+use crate::handler::flow_state_handler::FlowStateHandler;
 use crate::handler::region_lease_handler::RegionLeaseHandler;
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers};
 use crate::lease::MetaPeerLookupService;
@@ -206,10 +208,10 @@ impl MetasrvBuilder {
             table_id: None,
         };
 
-        let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
-            options.wal.clone(),
-            kv_backend.clone(),
-        ));
+        let wal_options_allocator = build_wal_options_allocator(&options.wal, kv_backend.clone())
+            .await
+            .context(BuildWalOptionsAllocatorSnafu)?;
+        let wal_options_allocator = Arc::new(wal_options_allocator);
         let is_remote_wal = wal_options_allocator.is_remote_wal();
         let table_metadata_allocator = table_metadata_allocator.unwrap_or_else(|| {
             let sequence = Arc::new(
@@ -228,6 +230,7 @@ impl MetasrvBuilder {
                 peer_allocator,
             ))
         });
+
         let flow_metadata_allocator = {
             // for now flownode just use round-robin selector
             let flow_selector = RoundRobinSelector::new(SelectTarget::Flownode);
@@ -248,6 +251,9 @@ impl MetasrvBuilder {
                 peer_allocator,
             ))
         };
+        let flow_state_handler =
+            FlowStateHandler::new(FlowStateManager::new(in_memory.clone().as_kv_backend_ref()));
+
         let memory_region_keeper = Arc::new(MemoryRegionKeeper::default());
         let node_manager = node_manager.unwrap_or_else(|| {
             let datanode_client_channel_config = ChannelConfig::new()
@@ -350,6 +356,7 @@ impl MetasrvBuilder {
                     .with_region_failure_handler(region_failover_handler)
                     .with_region_lease_handler(Some(region_lease_handler))
                     .with_flush_stats_factor(Some(options.flush_stats_factor))
+                    .with_flow_state_handler(Some(flow_state_handler))
                     .add_default_handlers()
             }
         };

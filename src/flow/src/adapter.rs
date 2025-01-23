@@ -30,12 +30,13 @@ use common_telemetry::{debug, info, trace};
 use datatypes::schema::ColumnSchema;
 use datatypes::value::Value;
 use greptime_proto::v1;
-use itertools::Itertools;
+use itertools::{EitherOrBoth, Itertools};
 use meta_client::MetaClientOptions;
 use query::QueryEngine;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
+use servers::http::HttpOptions;
 use servers::Mode;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -45,30 +46,31 @@ use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 pub(crate) use crate::adapter::node_context::FlownodeContext;
-use crate::adapter::table_source::TableSource;
-use crate::adapter::util::column_schemas_to_proto;
-use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
+use crate::adapter::refill::RefillTask;
+use crate::adapter::table_source::ManagedTableSource;
+use crate::adapter::util::relation_desc_to_column_schemas_with_fallback;
+pub(crate) use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
 use crate::compute::ErrCollector;
 use crate::df_optimizer::sql_to_flow_plan;
-use crate::error::{
-    EvalSnafu, ExternalSnafu, FlowAlreadyExistSnafu, InternalSnafu, TableNotFoundSnafu,
-    UnexpectedSnafu,
-};
-use crate::expr::{Batch, GlobalId};
-use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_RUN_INTERVAL_MS};
-use crate::repr::{self, DiffRow, Row, BATCH_SIZE};
+use crate::error::{EvalSnafu, ExternalSnafu, InternalSnafu, InvalidQuerySnafu, UnexpectedSnafu};
+use crate::expr::Batch;
+use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_ROWS, METRIC_FLOW_RUN_INTERVAL_MS};
+use crate::repr::{self, DiffRow, RelationDesc, Row, BATCH_SIZE};
 
 mod flownode_impl;
 mod parse_expr;
+pub(crate) mod refill;
+mod stat;
 #[cfg(test)]
 mod tests;
 mod util;
 mod worker;
 
 pub(crate) mod node_context;
-mod table_source;
+pub(crate) mod table_source;
 
 use crate::error::Error;
+use crate::utils::StateReportHandler;
 use crate::FrontendInvoker;
 
 // `GREPTIME_TIMESTAMP` is not used to distinguish when table is created automatically by flow
@@ -81,6 +83,21 @@ pub const UPDATE_AT_TS_COL: &str = "update_at";
 pub type FlowId = u64;
 pub type TableName = [String; 3];
 
+/// Flow config that exists both in standalone&distributed mode
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FlowConfig {
+    pub num_workers: usize,
+}
+
+impl Default for FlowConfig {
+    fn default() -> Self {
+        Self {
+            num_workers: (common_config::utils::get_cpus() / 2).max(1),
+        }
+    }
+}
+
 /// Options for flow node
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -88,7 +105,9 @@ pub struct FlownodeOptions {
     pub mode: Mode,
     pub cluster_id: Option<u64>,
     pub node_id: Option<u64>,
+    pub flow: FlowConfig,
     pub grpc: GrpcOptions,
+    pub http: HttpOptions,
     pub meta_client: Option<MetaClientOptions>,
     pub logging: LoggingOptions,
     pub tracing: TracingOptions,
@@ -101,7 +120,9 @@ impl Default for FlownodeOptions {
             mode: servers::Mode::Standalone,
             cluster_id: None,
             node_id: None,
+            flow: FlowConfig::default(),
             grpc: GrpcOptions::default().with_addr("127.0.0.1:3004"),
+            http: HttpOptions::default(),
             meta_client: None,
             logging: LoggingOptions::default(),
             tracing: TracingOptions::default(),
@@ -110,7 +131,14 @@ impl Default for FlownodeOptions {
     }
 }
 
-impl Configurable for FlownodeOptions {}
+impl Configurable for FlownodeOptions {
+    fn validate_sanitize(&mut self) -> common_config::error::Result<()> {
+        if self.flow.num_workers == 0 {
+            self.flow.num_workers = (common_config::utils::get_cpus() / 2).max(1);
+        }
+        Ok(())
+    }
+}
 
 /// Arc-ed FlowNodeManager, cheaper to clone
 pub type FlowWorkerManagerRef = Arc<FlowWorkerManager>;
@@ -121,14 +149,18 @@ pub type FlowWorkerManagerRef = Arc<FlowWorkerManager>;
 pub struct FlowWorkerManager {
     /// The handler to the worker that will run the dataflow
     /// which is `!Send` so a handle is used
-    pub worker_handles: Vec<Mutex<WorkerHandle>>,
+    pub worker_handles: Vec<WorkerHandle>,
+    /// The selector to select a worker to run the dataflow
+    worker_selector: Mutex<usize>,
     /// The query engine that will be used to parse the query and convert it to a dataflow plan
     pub query_engine: Arc<dyn QueryEngine>,
     /// Getting table name and table schema from table info manager
-    table_info_source: TableSource,
+    table_info_source: ManagedTableSource,
     frontend_invoker: RwLock<Option<FrontendInvoker>>,
     /// contains mapping from table name to global id, and table schema
     node_context: RwLock<FlownodeContext>,
+    /// Contains all refill tasks
+    refill_tasks: RwLock<BTreeMap<FlowId, RefillTask>>,
     flow_err_collectors: RwLock<BTreeMap<FlowId, ErrCollector>>,
     src_send_buf_lens: RwLock<BTreeMap<TableId, watch::Receiver<usize>>>,
     tick_manager: FlowTickManager,
@@ -137,6 +169,8 @@ pub struct FlowWorkerManager {
     ///
     /// So that a series of event like `inserts -> flush` can be handled correctly
     flush_lock: RwLock<()>,
+    /// receive a oneshot sender to send state size report
+    state_report_handler: RwLock<Option<StateReportHandler>>,
 }
 
 /// Building FlownodeManager
@@ -152,42 +186,57 @@ impl FlowWorkerManager {
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
     ) -> Self {
-        let srv_map = TableSource::new(
+        let srv_map = ManagedTableSource::new(
             table_meta.table_info_manager().clone(),
             table_meta.table_name_manager().clone(),
         );
-        let node_context = FlownodeContext::default();
+        let node_context = FlownodeContext::new(Box::new(srv_map.clone()) as _);
         let tick_manager = FlowTickManager::new();
         let worker_handles = Vec::new();
         FlowWorkerManager {
             worker_handles,
+            worker_selector: Mutex::new(0),
             query_engine,
             table_info_source: srv_map,
             frontend_invoker: RwLock::new(None),
             node_context: RwLock::new(node_context),
+            refill_tasks: Default::default(),
             flow_err_collectors: Default::default(),
             src_send_buf_lens: Default::default(),
             tick_manager,
             node_id,
             flush_lock: RwLock::new(()),
+            state_report_handler: RwLock::new(None),
         }
     }
 
+    pub async fn with_state_report_handler(self, handler: StateReportHandler) -> Self {
+        *self.state_report_handler.write().await = Some(handler);
+        self
+    }
+
     /// Create a flownode manager with one worker
-    pub fn new_with_worker<'s>(
+    pub fn new_with_workers<'s>(
         node_id: Option<u32>,
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
-    ) -> (Self, Worker<'s>) {
+        num_workers: usize,
+    ) -> (Self, Vec<Worker<'s>>) {
         let mut zelf = Self::new(node_id, query_engine, table_meta);
-        let (handle, worker) = create_worker();
-        zelf.add_worker_handle(handle);
-        (zelf, worker)
+
+        let workers: Vec<_> = (0..num_workers)
+            .map(|_| {
+                let (handle, worker) = create_worker();
+                zelf.add_worker_handle(handle);
+                worker
+            })
+            .collect();
+        (zelf, workers)
     }
 
     /// add a worker handler to manager, meaning this corresponding worker is under it's manage
     pub fn add_worker_handle(&mut self, handle: WorkerHandle) {
-        self.worker_handles.push(Mutex::new(handle));
+        self.worker_handles.push(handle);
     }
 }
 
@@ -204,28 +253,6 @@ impl DiffRequest {
             Self::Delete(v) => v.len(),
         }
     }
-}
-
-/// iterate through the diff row and form continuous diff row with same diff type
-pub fn diff_row_to_request(rows: Vec<DiffRow>) -> Vec<DiffRequest> {
-    let mut reqs = Vec::new();
-    for (row, ts, diff) in rows {
-        let last = reqs.last_mut();
-        match (last, diff) {
-            (Some(DiffRequest::Insert(rows)), 1) => {
-                rows.push((row, ts));
-            }
-            (Some(DiffRequest::Insert(_)), -1) => reqs.push(DiffRequest::Delete(vec![(row, ts)])),
-            (Some(DiffRequest::Delete(rows)), -1) => {
-                rows.push((row, ts));
-            }
-            (Some(DiffRequest::Delete(_)), 1) => reqs.push(DiffRequest::Insert(vec![(row, ts)])),
-            (None, 1) => reqs.push(DiffRequest::Insert(vec![(row, ts)])),
-            (None, -1) => reqs.push(DiffRequest::Delete(vec![(row, ts)])),
-            _ => {}
-        }
-    }
-    reqs
 }
 
 pub fn batches_to_rows_req(batches: Vec<Batch>) -> Result<Vec<DiffRequest>, Error> {
@@ -257,16 +284,43 @@ impl FlowWorkerManager {
             let (catalog, schema) = (table_name[0].clone(), table_name[1].clone());
             let ctx = Arc::new(QueryContext::with(&catalog, &schema));
 
-            let (is_ts_placeholder, proto_schema) =
-                self.try_fetch_or_create_table(&table_name).await?;
+            let (is_ts_placeholder, proto_schema) = match self
+                .try_fetch_existing_table(&table_name)
+                .await?
+                .context(UnexpectedSnafu {
+                    reason: format!("Table not found: {}", table_name.join(".")),
+                }) {
+                Ok(r) => r,
+                Err(e) => {
+                    if self
+                        .table_info_source
+                        .get_opt_table_id_from_name(&table_name)
+                        .await?
+                        .is_none()
+                    {
+                        // deal with both flow&sink table no longer exists
+                        // but some output is still in output buf
+                        common_telemetry::warn!(e; "Table `{}` no longer exists, skip writeback", table_name.join("."));
+                        continue;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
             let schema_len = proto_schema.len();
 
+            let total_rows = reqs.iter().map(|r| r.len()).sum::<usize>();
             trace!(
                 "Sending {} writeback requests to table {}, reqs total rows={}",
                 reqs.len(),
                 table_name.join("."),
                 reqs.iter().map(|r| r.len()).sum::<usize>()
             );
+
+            METRIC_FLOW_ROWS
+                .with_label_values(&["out"])
+                .inc_by(total_rows as u64);
+
             let now = self.tick_manager.tick();
             for req in reqs {
                 match req {
@@ -402,16 +456,14 @@ impl FlowWorkerManager {
         Ok(output)
     }
 
-    /// Fetch table info or create table from flow's schema if not exist
-    async fn try_fetch_or_create_table(
+    /// Fetch table schema and primary key from table info source, if table not exist return None
+    async fn fetch_table_pk_schema(
         &self,
         table_name: &TableName,
-    ) -> Result<(bool, Vec<api::v1::ColumnSchema>), Error> {
-        // TODO(discord9): instead of auto build table from request schema, actually build table
-        // before `create flow` to be able to assign pk and ts etc.
-        let (primary_keys, schema, is_ts_placeholder) = if let Some(table_id) = self
+    ) -> Result<Option<(Vec<String>, Option<usize>, Vec<ColumnSchema>)>, Error> {
+        if let Some(table_id) = self
             .table_info_source
-            .get_table_id_from_name(table_name)
+            .get_opt_table_id_from_name(table_name)
             .await?
         {
             let table_info = self
@@ -426,102 +478,90 @@ impl FlowWorkerManager {
                 .map(|i| meta.schema.column_schemas[i].name.clone())
                 .collect_vec();
             let schema = meta.schema.column_schemas;
-            // check if the last column is the auto created timestamp column, hence the table is auto created from
-            // flow's plan type
-            let is_auto_create = {
-                let correct_name = schema
-                    .last()
-                    .map(|s| s.name == AUTO_CREATED_PLACEHOLDER_TS_COL)
-                    .unwrap_or(false);
-                let correct_time_index = meta.schema.timestamp_index == Some(schema.len() - 1);
-                correct_name && correct_time_index
-            };
-            (primary_keys, schema, is_auto_create)
+            let time_index = meta.schema.timestamp_index;
+            Ok(Some((primary_keys, time_index, schema)))
         } else {
-            // TODO(discord9): condiser remove buggy auto create by schema
+            Ok(None)
+        }
+    }
 
-            let node_ctx = self.node_context.read().await;
-            let gid: GlobalId = node_ctx
-                .table_repr
-                .get_by_name(table_name)
-                .map(|x| x.1)
-                .unwrap();
-            let schema = node_ctx
-                .schema
-                .get(&gid)
-                .with_context(|| TableNotFoundSnafu {
-                    name: format!("Table name = {:?}", table_name),
-                })?
-                .clone();
-            // TODO(discord9): use default key from schema
-            let primary_keys = schema
-                .typ()
-                .keys
-                .first()
-                .map(|v| {
-                    v.column_indices
-                        .iter()
-                        .map(|i| {
-                            schema
-                                .get_name(*i)
-                                .clone()
-                                .unwrap_or_else(|| format!("col_{i}"))
-                        })
-                        .collect_vec()
-                })
-                .unwrap_or_default();
-            let update_at = ColumnSchema::new(
-                UPDATE_AT_TS_COL,
+    /// return (primary keys, schema and if the table have a placeholder timestamp column)
+    /// schema of the table comes from flow's output plan
+    ///
+    /// adjust to add `update_at` column and ts placeholder if needed
+    async fn adjust_auto_created_table_schema(
+        &self,
+        schema: &RelationDesc,
+    ) -> Result<(Vec<String>, Vec<ColumnSchema>, bool), Error> {
+        // TODO(discord9): condiser remove buggy auto create by schema
+
+        // TODO(discord9): use default key from schema
+        let primary_keys = schema
+            .typ()
+            .keys
+            .first()
+            .map(|v| {
+                v.column_indices
+                    .iter()
+                    .map(|i| {
+                        schema
+                            .get_name(*i)
+                            .clone()
+                            .unwrap_or_else(|| format!("col_{i}"))
+                    })
+                    .collect_vec()
+            })
+            .unwrap_or_default();
+        let update_at = ColumnSchema::new(
+            UPDATE_AT_TS_COL,
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            true,
+        );
+
+        let original_schema = relation_desc_to_column_schemas_with_fallback(schema);
+
+        let mut with_auto_added_col = original_schema.clone();
+        with_auto_added_col.push(update_at);
+
+        // if no time index, add one as placeholder
+        let no_time_index = schema.typ().time_index.is_none();
+        if no_time_index {
+            let ts_col = ColumnSchema::new(
+                AUTO_CREATED_PLACEHOLDER_TS_COL,
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 true,
-            );
+            )
+            .with_time_index(true);
+            with_auto_added_col.push(ts_col);
+        }
 
-            let original_schema = schema
-                .typ()
-                .column_types
-                .clone()
-                .into_iter()
-                .enumerate()
-                .map(|(idx, typ)| {
-                    let name = schema
-                        .names
-                        .get(idx)
-                        .cloned()
-                        .flatten()
-                        .unwrap_or(format!("col_{}", idx));
-                    let ret = ColumnSchema::new(name, typ.scalar_type, typ.nullable);
-                    if schema.typ().time_index == Some(idx) {
-                        ret.with_time_index(true)
-                    } else {
-                        ret
-                    }
-                })
-                .collect_vec();
-
-            let mut with_auto_added_col = original_schema.clone();
-            with_auto_added_col.push(update_at);
-
-            // if no time index, add one as placeholder
-            let no_time_index = schema.typ().time_index.is_none();
-            if no_time_index {
-                let ts_col = ColumnSchema::new(
-                    AUTO_CREATED_PLACEHOLDER_TS_COL,
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    true,
-                )
-                .with_time_index(true);
-                with_auto_added_col.push(ts_col);
-            }
-
-            (primary_keys, with_auto_added_col, no_time_index)
-        };
-        let proto_schema = column_schemas_to_proto(schema, &primary_keys)?;
-        Ok((is_ts_placeholder, proto_schema))
+        Ok((primary_keys, with_auto_added_col, no_time_index))
     }
 }
 
 /// Flow Runtime related methods
 impl FlowWorkerManager {
+    /// Start state report handler, which will receive a sender from HeartbeatTask to send state size report back
+    ///
+    /// if heartbeat task is shutdown, this future will exit too
+    async fn start_state_report_handler(self: Arc<Self>) -> Option<JoinHandle<()>> {
+        let state_report_handler = self.state_report_handler.write().await.take();
+        if let Some(mut handler) = state_report_handler {
+            let zelf = self.clone();
+            let handler = common_runtime::spawn_global(async move {
+                while let Some(ret_handler) = handler.recv().await {
+                    let state_report = zelf.gen_state_report().await;
+                    ret_handler.send(state_report).unwrap_or_else(|err| {
+                        common_telemetry::error!(err; "Send state size report error");
+                    });
+                }
+            });
+            Some(handler)
+        } else {
+            None
+        }
+    }
+
     /// run in common_runtime background runtime
     pub fn run_background(
         self: Arc<Self>,
@@ -529,6 +569,7 @@ impl FlowWorkerManager {
     ) -> JoinHandle<()> {
         info!("Starting flownode manager's background task");
         common_runtime::spawn_global(async move {
+            let _state_report_handler = self.clone().start_state_report_handler().await;
             self.run(shutdown).await;
         })
     }
@@ -553,11 +594,16 @@ impl FlowWorkerManager {
     pub async fn run(&self, mut shutdown: Option<broadcast::Receiver<()>>) {
         debug!("Starting to run");
         let default_interval = Duration::from_secs(1);
+        let mut tick_interval = tokio::time::interval(default_interval);
+        // burst mode, so that if we miss a tick, we will run immediately to fully utilize the cpu
+        tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
         let mut avg_spd = 0; // rows/sec
         let mut since_last_run = tokio::time::Instant::now();
+        let run_per_trace = 10;
+        let mut run_cnt = 0;
         loop {
             // TODO(discord9): only run when new inputs arrive or scheduled to
-            let row_cnt = self.run_available(true).await.unwrap_or_else(|err| {
+            let row_cnt = self.run_available(false).await.unwrap_or_else(|err| {
                 common_telemetry::error!(err;"Run available errors");
                 0
             });
@@ -587,9 +633,9 @@ impl FlowWorkerManager {
 
             // for now we want to batch rows until there is around `BATCH_SIZE` rows in send buf
             // before trigger a run of flow's worker
-            // (plus one for prevent div by zero)
             let wait_for = since_last_run.elapsed();
 
+            // last runs insert speed
             let cur_spd = row_cnt * 1000 / wait_for.as_millis().max(1) as usize;
             // rapid increase, slow decay
             avg_spd = if cur_spd > avg_spd {
@@ -597,13 +643,25 @@ impl FlowWorkerManager {
             } else {
                 (9 * avg_spd + cur_spd) / 10
             };
-            trace!("avg_spd={} r/s, cur_spd={} r/s", avg_spd, cur_spd);
             let new_wait = BATCH_SIZE * 1000 / avg_spd.max(1); //in ms
             let new_wait = Duration::from_millis(new_wait as u64).min(default_interval);
-            trace!("Wait for {} ms, row_cnt={}", new_wait.as_millis(), row_cnt);
+
+            // print trace every `run_per_trace` times so that we can see if there is something wrong
+            // but also not get flooded with trace
+            if run_cnt >= run_per_trace {
+                trace!("avg_spd={} r/s, cur_spd={} r/s", avg_spd, cur_spd);
+                trace!("Wait for {} ms, row_cnt={}", new_wait.as_millis(), row_cnt);
+                run_cnt = 0;
+            } else {
+                run_cnt += 1;
+            }
+
             METRIC_FLOW_RUN_INTERVAL_MS.set(new_wait.as_millis() as i64);
             since_last_run = tokio::time::Instant::now();
-            tokio::time::sleep(new_wait).await;
+            tokio::select! {
+                _ = tick_interval.tick() => (),
+                _ = tokio::time::sleep(new_wait) => ()
+            }
         }
         // flow is now shutdown, drop frontend_invoker early so a ref cycle(in standalone mode) can be prevent:
         // FlowWorkerManager.frontend_invoker -> FrontendInvoker.inserter
@@ -614,9 +672,9 @@ impl FlowWorkerManager {
     /// Run all available subgraph in the flow node
     /// This will try to run all dataflow in this node
     ///
-    /// set `blocking` to true to wait until lock is acquired
-    /// and false to return immediately if lock is not acquired
-    /// return numbers of rows send to worker
+    /// set `blocking` to true to wait until worker finish running
+    /// false to just trigger run and return immediately
+    /// return numbers of rows send to worker(Inaccuary)
     /// TODO(discord9): add flag for subgraph that have input since last run
     pub async fn run_available(&self, blocking: bool) -> Result<usize, Error> {
         let mut row_cnt = 0;
@@ -624,13 +682,7 @@ impl FlowWorkerManager {
         let now = self.tick_manager.tick();
         for worker in self.worker_handles.iter() {
             // TODO(discord9): consider how to handle error in individual worker
-            if blocking {
-                worker.lock().await.run_available(now, blocking).await?;
-            } else if let Ok(worker) = worker.try_lock() {
-                worker.run_available(now, blocking).await?;
-            } else {
-                return Ok(row_cnt);
-            }
+            worker.run_available(now, blocking).await?;
         }
         // check row send and rows remain in send buf
         let flush_res = if blocking {
@@ -660,13 +712,18 @@ impl FlowWorkerManager {
         &self,
         region_id: RegionId,
         rows: Vec<DiffRow>,
+        batch_datatypes: &[ConcreteDataType],
     ) -> Result<(), Error> {
         let rows_len = rows.len();
         let table_id = region_id.table_id();
         let _timer = METRIC_FLOW_INSERT_ELAPSED
             .with_label_values(&[table_id.to_string().as_str()])
             .start_timer();
-        self.node_context.read().await.send(table_id, rows).await?;
+        self.node_context
+            .read()
+            .await
+            .send(table_id, rows, batch_datatypes)
+            .await?;
         trace!(
             "Handling write request for table_id={} with {} rows",
             table_id,
@@ -696,7 +753,6 @@ impl FlowWorkerManager {
     /// remove a flow by it's id
     pub async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
         for handle in self.worker_handles.iter() {
-            let handle = handle.lock().await;
             if handle.contains_flow(flow_id).await? {
                 handle.remove_flow(flow_id).await?;
                 break;
@@ -726,43 +782,6 @@ impl FlowWorkerManager {
             query_ctx,
         } = args;
 
-        let already_exist = {
-            let mut flag = false;
-
-            // check if the task already exists
-            for handle in self.worker_handles.iter() {
-                if handle.lock().await.contains_flow(flow_id).await? {
-                    flag = true;
-                    break;
-                }
-            }
-            flag
-        };
-        match (create_if_not_exists, or_replace, already_exist) {
-            // do replace
-            (_, true, true) => {
-                info!("Replacing flow with id={}", flow_id);
-                self.remove_flow(flow_id).await?;
-            }
-            (false, false, true) => FlowAlreadyExistSnafu { id: flow_id }.fail()?,
-            // do nothing if exists
-            (true, false, true) => {
-                info!("Flow with id={} already exists, do nothing", flow_id);
-                return Ok(None);
-            }
-            // create if not exists
-            (_, _, false) => (),
-        }
-
-        if create_if_not_exists {
-            // check if the task already exists
-            for handle in self.worker_handles.iter() {
-                if handle.lock().await.contains_flow(flow_id).await? {
-                    return Ok(None);
-                }
-            }
-        }
-
         let mut node_ctx = self.node_context.write().await;
         // assign global id to source and sink table
         for source in &source_table_ids {
@@ -781,7 +800,69 @@ impl FlowWorkerManager {
         let flow_plan = sql_to_flow_plan(&mut node_ctx, &self.query_engine, &sql).await?;
 
         debug!("Flow {:?}'s Plan is {:?}", flow_id, flow_plan);
-        node_ctx.assign_table_schema(&sink_table_name, flow_plan.schema.clone())?;
+
+        // check schema against actual table schema if exists
+        // if not exist create sink table immediately
+        if let Some((_, _, real_schema)) = self.fetch_table_pk_schema(&sink_table_name).await? {
+            let auto_schema = relation_desc_to_column_schemas_with_fallback(&flow_plan.schema);
+
+            // for column schema, only `data_type` need to be check for equality
+            // since one can omit flow's column name when write flow query
+            // print a user friendly error message about mismatch and how to correct them
+            for (idx, zipped) in auto_schema
+                .iter()
+                .zip_longest(real_schema.iter())
+                .enumerate()
+            {
+                match zipped {
+                    EitherOrBoth::Both(auto, real) => {
+                        if auto.data_type != real.data_type {
+                            InvalidQuerySnafu {
+                                    reason: format!(
+                                        "Column {}(name is '{}', flow inferred name is '{}')'s data type mismatch, expect {:?} got {:?}",
+                                        idx,
+                                        real.name,
+                                        auto.name,
+                                        real.data_type,
+                                        auto.data_type
+                                    ),
+                                }
+                                .fail()?;
+                        }
+                    }
+                    EitherOrBoth::Right(real) if real.data_type.is_timestamp() => {
+                        // if table is auto created, the last one or two column should be timestamp(update at and ts placeholder)
+                        continue;
+                    }
+                    _ => InvalidQuerySnafu {
+                        reason: format!(
+                            "schema length mismatched, expected {} found {}",
+                            real_schema.len(),
+                            auto_schema.len()
+                        ),
+                    }
+                    .fail()?,
+                }
+            }
+        } else {
+            // assign inferred schema to sink table
+            // create sink table
+            let did_create = self
+                .create_table_from_relation(
+                    &format!("flow-id={flow_id}"),
+                    &sink_table_name,
+                    &flow_plan.schema,
+                )
+                .await?;
+            if !did_create {
+                UnexpectedSnafu {
+                    reason: format!("Failed to create table {:?}", sink_table_name),
+                }
+                .fail()?;
+            }
+        }
+
+        node_ctx.add_flow_plan(flow_id, flow_plan.clone());
 
         let _ = comment;
         let _ = flow_options;
@@ -807,7 +888,8 @@ impl FlowWorkerManager {
             .write()
             .await
             .insert(flow_id, err_collector.clone());
-        let handle = &self.worker_handles[0].lock().await;
+        // TODO(discord9): load balance?
+        let handle = self.get_worker_handle_for_create_flow().await;
         let create_request = worker::Request::Create {
             flow_id,
             plan: flow_plan,
@@ -816,9 +898,11 @@ impl FlowWorkerManager {
             source_ids,
             src_recvs: source_receivers,
             expire_after,
+            or_replace,
             create_if_not_exists,
             err_collector,
         };
+
         handle.create_flow(create_request).await?;
         info!("Successfully create flow with id={}", flow_id);
         Ok(Some(flow_id))

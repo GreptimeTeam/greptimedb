@@ -34,6 +34,7 @@ use async_trait::async_trait;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use mito2::engine::MitoEngine;
+pub(crate) use options::IndexOptions;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
@@ -45,9 +46,11 @@ use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
 
 use self::state::MetricEngineState;
+use crate::config::EngineConfig;
 use crate::data_region::DataRegion;
 use crate::error::{self, Result, UnsupportedRegionRequestSnafu};
 use crate::metadata_region::MetadataRegion;
+use crate::row_modifier::RowModifier;
 use crate::utils;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
@@ -96,9 +99,10 @@ use crate::utils;
 /// |    Read    |       ✅        |        ✅        |
 /// |   Close    |       ✅        |        ✅        |
 /// |    Open    |       ✅        |        ✅        |
-/// |   Alter    |       ✅        |        ❌        |
+/// |   Alter    |       ✅        |        ❓*       |
 ///
 /// *: Physical region can be dropped only when all related logical regions are dropped.
+/// *: Alter: Physical regions only support altering region options.
 ///
 /// ## Internal Columns
 ///
@@ -209,7 +213,6 @@ impl RegionEngine for MetricEngine {
         for x in [
             utils::to_metadata_region_id(region_id),
             utils::to_data_region_id(region_id),
-            region_id,
         ] {
             if let Err(e) = self.inner.mito.set_region_role(x, role)
                 && e.status_code() != StatusCode::RegionNotFound
@@ -225,6 +228,13 @@ impl RegionEngine for MetricEngine {
         region_id: RegionId,
         region_role_state: SettableRegionRoleState,
     ) -> std::result::Result<SetRegionRoleStateResponse, BoxedError> {
+        self.inner
+            .mito
+            .set_region_role_state_gracefully(
+                utils::to_metadata_region_id(region_id),
+                region_role_state,
+            )
+            .await?;
         self.inner
             .mito
             .set_region_role_state_gracefully(region_id, region_role_state)
@@ -248,7 +258,7 @@ impl RegionEngine for MetricEngine {
 }
 
 impl MetricEngine {
-    pub fn new(mito: MitoEngine) -> Self {
+    pub fn new(mito: MitoEngine, config: EngineConfig) -> Self {
         let metadata_region = MetadataRegion::new(mito.clone());
         let data_region = DataRegion::new(mito.clone());
         Self {
@@ -257,6 +267,8 @@ impl MetricEngine {
                 metadata_region,
                 data_region,
                 state: RwLock::default(),
+                config,
+                row_modifier: RowModifier::new(),
             }),
         }
     }
@@ -297,6 +309,10 @@ struct MetricEngineInner {
     metadata_region: MetadataRegion,
     data_region: DataRegion,
     state: RwLock<MetricEngineState>,
+    /// TODO(weny): remove it after the config is used.
+    #[allow(unused)]
+    config: EngineConfig,
+    row_modifier: RowModifier,
 }
 
 #[cfg(test)]

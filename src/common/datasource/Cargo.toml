@@ -31,7 +31,7 @@ derive_builder.workspace = true
 futures.workspace = true
 lazy_static.workspace = true
 object-store.workspace = true
-orc-rust = { git = "https://github.com/datafusion-contrib/datafusion-orc.git", rev = "502217315726314c4008808fe169764529640599", default-features = false, features = [
+orc-rust = { version = "0.5", default-features = false, features = [
     "async",
 ] }
 parquet.workspace = true
@@ -48,5 +48,4 @@ url = "2.3"
 [dev-dependencies]
 common-telemetry.workspace = true
 common-test-util.workspace = true
-dotenv.workspace = true
 uuid.workspace = true

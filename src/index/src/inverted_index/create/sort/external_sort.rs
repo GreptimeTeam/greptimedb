@@ -23,16 +23,17 @@ use async_trait::async_trait;
 use common_base::BitVec;
 use common_telemetry::{debug, error};
 use futures::stream;
+use snafu::ResultExt;
 
-use crate::inverted_index::create::sort::external_provider::ExternalTempFileProvider;
+use crate::external_provider::ExternalTempFileProvider;
 use crate::inverted_index::create::sort::intermediate_rw::{
     IntermediateReader, IntermediateWriter,
 };
 use crate::inverted_index::create::sort::merge_stream::MergeSortedStream;
 use crate::inverted_index::create::sort::{SortOutput, SortedStream, Sorter};
 use crate::inverted_index::create::sort_create::SorterFactory;
-use crate::inverted_index::error::Result;
-use crate::inverted_index::{Bytes, BytesRef};
+use crate::inverted_index::error::{IntermediateSnafu, Result};
+use crate::{Bytes, BytesRef};
 
 /// `ExternalSorter` manages the sorting of data using both in-memory structures and external files.
 /// It dumps data to external files when the in-memory buffer crosses a certain memory threshold.
@@ -107,7 +108,11 @@ impl Sorter for ExternalSorter {
     /// Finalizes the sorting operation, merging data from both in-memory buffer and external files
     /// into a sorted stream
     async fn output(&mut self) -> Result<SortOutput> {
-        let readers = self.temp_file_provider.read_all(&self.index_name).await?;
+        let readers = self
+            .temp_file_provider
+            .read_all(&self.index_name)
+            .await
+            .context(IntermediateSnafu)?;
 
         // TODO(zhongzc): k-way merge instead of 2-way merge
 
@@ -122,7 +127,7 @@ impl Sorter for ExternalSorter {
                     Ok((value, bitmap))
                 }),
         )));
-        for reader in readers {
+        for (_, reader) in readers {
             tree_nodes.push_back(IntermediateReader::new(reader).into_stream().await?);
         }
 
@@ -241,7 +246,11 @@ impl ExternalSorter {
 
         let file_id = &format!("{:012}", self.total_row_count);
         let index_name = &self.index_name;
-        let writer = self.temp_file_provider.create(index_name, file_id).await?;
+        let writer = self
+            .temp_file_provider
+            .create(index_name, file_id)
+            .await
+            .context(IntermediateSnafu)?;
 
         let values = mem::take(&mut self.values_buffer);
         self.global_memory_usage
@@ -302,7 +311,7 @@ mod tests {
     use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
     use super::*;
-    use crate::inverted_index::create::sort::external_provider::MockExternalTempFileProvider;
+    use crate::external_provider::MockExternalTempFileProvider;
 
     async fn test_external_sorter(
         current_memory_usage_threshold: Option<usize>,
@@ -332,7 +341,7 @@ mod tests {
             move |index_name| {
                 assert_eq!(index_name, "test");
                 let mut files = files.lock().unwrap();
-                Ok(files.drain().map(|f| f.1).collect::<Vec<_>>())
+                Ok(files.drain().collect::<Vec<_>>())
             }
         });
 

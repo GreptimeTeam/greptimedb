@@ -193,6 +193,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to build http client"))]
+    BuildHttpClient {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: reqwest::Error,
+    },
+
     #[snafu(display("Missing required field: {}", name))]
     MissingRequiredField {
         name: String,
@@ -364,6 +372,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Cache not found in registry"))]
+    MissingCache {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -400,9 +414,10 @@ impl ErrorExt for Error {
             | MissingKvBackend { .. }
             | TomlFormat { .. } => StatusCode::InvalidArguments,
 
-            PayloadNotExist { .. } | Unexpected { .. } | WatchAsyncTaskChange { .. } => {
-                StatusCode::Unexpected
-            }
+            PayloadNotExist { .. }
+            | Unexpected { .. }
+            | WatchAsyncTaskChange { .. }
+            | BuildHttpClient { .. } => StatusCode::Unexpected,
 
             AsyncTaskExecute { source, .. } => source.status_code(),
 
@@ -431,6 +446,7 @@ impl ErrorExt for Error {
             ConcurrentQueryLimiterClosed { .. } | ConcurrentQueryLimiterTimeout { .. } => {
                 StatusCode::RegionBusy
             }
+            MissingCache { .. } => StatusCode::Internal,
         }
     }
 

@@ -103,7 +103,9 @@ SHOW CREATE TABLE ato;
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=mito                        |
-|       |                                    |
+|       | WITH(                              |
+|       |   ttl = 'forever'                  |
+|       | )                                  |
 +-------+------------------------------------+
 
 ALTER TABLE ato SET 'ttl'='1s';
@@ -127,6 +129,14 @@ SHOW CREATE TABLE ato;
 |       |   ttl = '1s'                       |
 |       | )                                  |
 +-------+------------------------------------+
+
+ALTER TABLE ato SET 'ttl'='😁';
+
+Error: 1004(InvalidArguments), Invalid set table option request: Invalid set region option request, key: ttl, value: 😁
+
+ALTER TABLE ato SET '🕶️'='1s';
+
+Error: 1004(InvalidArguments), Invalid set table option request: Invalid set region option request, key: 🕶️, value: 1s
 
 SELECT i FROM ato;
 
@@ -163,83 +173,164 @@ Affected Rows: 0
 
 SHOW CREATE TABLE ato;
 
-+-------+----------------------------------------------------+
-| Table | Create Table                                       |
-+-------+----------------------------------------------------+
-| ato   | CREATE TABLE IF NOT EXISTS "ato" (                 |
-|       |   "i" INT NULL,                                    |
-|       |   "j" TIMESTAMP(3) NOT NULL,                       |
-|       |   TIME INDEX ("j"),                                |
-|       |   PRIMARY KEY ("i")                                |
-|       | )                                                  |
-|       |                                                    |
-|       | ENGINE=mito                                        |
-|       | WITH(                                              |
-|       |   compaction.twcs.max_active_window_files = '2',   |
-|       |   compaction.twcs.max_active_window_runs = '6',    |
-|       |   compaction.twcs.max_inactive_window_files = '2', |
-|       |   compaction.twcs.max_inactive_window_runs = '6',  |
-|       |   compaction.twcs.max_output_file_size = '500MB',  |
-|       |   compaction.twcs.time_window = '2h',              |
-|       |   compaction.type = 'twcs',                        |
-|       |   ttl = '1s'                                       |
-|       | )                                                  |
-+-------+----------------------------------------------------+
++-------+------------------------------------------------------+
+| Table | Create Table                                         |
++-------+------------------------------------------------------+
+| ato   | CREATE TABLE IF NOT EXISTS "ato" (                   |
+|       |   "i" INT NULL,                                      |
+|       |   "j" TIMESTAMP(3) NOT NULL,                         |
+|       |   TIME INDEX ("j"),                                  |
+|       |   PRIMARY KEY ("i")                                  |
+|       | )                                                    |
+|       |                                                      |
+|       | ENGINE=mito                                          |
+|       | WITH(                                                |
+|       |   'compaction.twcs.max_active_window_files' = '2',   |
+|       |   'compaction.twcs.max_active_window_runs' = '6',    |
+|       |   'compaction.twcs.max_inactive_window_files' = '2', |
+|       |   'compaction.twcs.max_inactive_window_runs' = '6',  |
+|       |   'compaction.twcs.max_output_file_size' = '500MB',  |
+|       |   'compaction.twcs.time_window' = '2h',              |
+|       |   'compaction.type' = 'twcs',                        |
+|       |   ttl = '1s'                                         |
+|       | )                                                    |
++-------+------------------------------------------------------+
 
-ALTER TABLE ato SET 'compaction.twcs.time_window'='';
+ALTER TABLE ato UNSET 'compaction.twcs.time_window';
+
+Affected Rows: 0
+
+ALTER TABLE ato UNSET '🕶️';
+
+Error: 1004(InvalidArguments), Invalid unset table option request: Invalid set region option request, key: 🕶️
+
+SHOW CREATE TABLE ato;
+
++-------+------------------------------------------------------+
+| Table | Create Table                                         |
++-------+------------------------------------------------------+
+| ato   | CREATE TABLE IF NOT EXISTS "ato" (                   |
+|       |   "i" INT NULL,                                      |
+|       |   "j" TIMESTAMP(3) NOT NULL,                         |
+|       |   TIME INDEX ("j"),                                  |
+|       |   PRIMARY KEY ("i")                                  |
+|       | )                                                    |
+|       |                                                      |
+|       | ENGINE=mito                                          |
+|       | WITH(                                                |
+|       |   'compaction.twcs.max_active_window_files' = '2',   |
+|       |   'compaction.twcs.max_active_window_runs' = '6',    |
+|       |   'compaction.twcs.max_inactive_window_files' = '2', |
+|       |   'compaction.twcs.max_inactive_window_runs' = '6',  |
+|       |   'compaction.twcs.max_output_file_size' = '500MB',  |
+|       |   'compaction.type' = 'twcs',                        |
+|       |   ttl = '1s'                                         |
+|       | )                                                    |
++-------+------------------------------------------------------+
+
+ALTER TABLE ato SET 'compaction.twcs.max_inactive_window_runs'='';
 
 Affected Rows: 0
 
 SHOW CREATE TABLE ato;
 
-+-------+----------------------------------------------------+
-| Table | Create Table                                       |
-+-------+----------------------------------------------------+
-| ato   | CREATE TABLE IF NOT EXISTS "ato" (                 |
-|       |   "i" INT NULL,                                    |
-|       |   "j" TIMESTAMP(3) NOT NULL,                       |
-|       |   TIME INDEX ("j"),                                |
-|       |   PRIMARY KEY ("i")                                |
-|       | )                                                  |
-|       |                                                    |
-|       | ENGINE=mito                                        |
-|       | WITH(                                              |
-|       |   compaction.twcs.max_active_window_files = '2',   |
-|       |   compaction.twcs.max_active_window_runs = '6',    |
-|       |   compaction.twcs.max_inactive_window_files = '2', |
-|       |   compaction.twcs.max_inactive_window_runs = '6',  |
-|       |   compaction.twcs.max_output_file_size = '500MB',  |
-|       |   compaction.type = 'twcs',                        |
-|       |   ttl = '1s'                                       |
-|       | )                                                  |
-+-------+----------------------------------------------------+
++-------+------------------------------------------------------+
+| Table | Create Table                                         |
++-------+------------------------------------------------------+
+| ato   | CREATE TABLE IF NOT EXISTS "ato" (                   |
+|       |   "i" INT NULL,                                      |
+|       |   "j" TIMESTAMP(3) NOT NULL,                         |
+|       |   TIME INDEX ("j"),                                  |
+|       |   PRIMARY KEY ("i")                                  |
+|       | )                                                    |
+|       |                                                      |
+|       | ENGINE=mito                                          |
+|       | WITH(                                                |
+|       |   'compaction.twcs.max_active_window_files' = '2',   |
+|       |   'compaction.twcs.max_active_window_runs' = '6',    |
+|       |   'compaction.twcs.max_inactive_window_files' = '2', |
+|       |   'compaction.twcs.max_output_file_size' = '500MB',  |
+|       |   'compaction.type' = 'twcs',                        |
+|       |   ttl = '1s'                                         |
+|       | )                                                    |
++-------+------------------------------------------------------+
 
 -- SQLNESS ARG restart=true
 SHOW CREATE TABLE ato;
 
-+-------+----------------------------------------------------+
-| Table | Create Table                                       |
-+-------+----------------------------------------------------+
-| ato   | CREATE TABLE IF NOT EXISTS "ato" (                 |
-|       |   "i" INT NULL,                                    |
-|       |   "j" TIMESTAMP(3) NOT NULL,                       |
-|       |   TIME INDEX ("j"),                                |
-|       |   PRIMARY KEY ("i")                                |
-|       | )                                                  |
-|       |                                                    |
-|       | ENGINE=mito                                        |
-|       | WITH(                                              |
-|       |   compaction.twcs.max_active_window_files = '2',   |
-|       |   compaction.twcs.max_active_window_runs = '6',    |
-|       |   compaction.twcs.max_inactive_window_files = '2', |
-|       |   compaction.twcs.max_inactive_window_runs = '6',  |
-|       |   compaction.twcs.max_output_file_size = '500MB',  |
-|       |   compaction.type = 'twcs',                        |
-|       |   ttl = '1s'                                       |
-|       | )                                                  |
-+-------+----------------------------------------------------+
++-------+------------------------------------------------------+
+| Table | Create Table                                         |
++-------+------------------------------------------------------+
+| ato   | CREATE TABLE IF NOT EXISTS "ato" (                   |
+|       |   "i" INT NULL,                                      |
+|       |   "j" TIMESTAMP(3) NOT NULL,                         |
+|       |   TIME INDEX ("j"),                                  |
+|       |   PRIMARY KEY ("i")                                  |
+|       | )                                                    |
+|       |                                                      |
+|       | ENGINE=mito                                          |
+|       | WITH(                                                |
+|       |   'compaction.twcs.max_active_window_files' = '2',   |
+|       |   'compaction.twcs.max_active_window_runs' = '6',    |
+|       |   'compaction.twcs.max_inactive_window_files' = '2', |
+|       |   'compaction.twcs.max_output_file_size' = '500MB',  |
+|       |   'compaction.type' = 'twcs',                        |
+|       |   ttl = '1s'                                         |
+|       | )                                                    |
++-------+------------------------------------------------------+
 
 DROP TABLE ato;
+
+Affected Rows: 0
+
+CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+ALTER TABLE phy set ttl='2years';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE phy;
+
++-------+------------------------------------+
+| Table | Create Table                       |
++-------+------------------------------------+
+| phy   | CREATE TABLE IF NOT EXISTS "phy" ( |
+|       |   "ts" TIMESTAMP(3) NOT NULL,      |
+|       |   "val" DOUBLE NULL,               |
+|       |   TIME INDEX ("ts")                |
+|       | )                                  |
+|       |                                    |
+|       | ENGINE=metric                      |
+|       | WITH(                              |
+|       |   physical_metric_table = '',      |
+|       |   ttl = '2years'                   |
+|       | )                                  |
++-------+------------------------------------+
+
+ALTER TABLE phy UNSET 'ttl';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE phy;
+
++-------+------------------------------------+
+| Table | Create Table                       |
++-------+------------------------------------+
+| phy   | CREATE TABLE IF NOT EXISTS "phy" ( |
+|       |   "ts" TIMESTAMP(3) NOT NULL,      |
+|       |   "val" DOUBLE NULL,               |
+|       |   TIME INDEX ("ts")                |
+|       | )                                  |
+|       |                                    |
+|       | ENGINE=metric                      |
+|       | WITH(                              |
+|       |   physical_metric_table = ''       |
+|       | )                                  |
++-------+------------------------------------+
+
+DROP TABLE phy;
 
 Affected Rows: 0
 

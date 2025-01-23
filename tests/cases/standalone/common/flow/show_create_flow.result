@@ -322,3 +322,102 @@ drop table numbers_input_show;
 
 Affected Rows: 0
 
+CREATE TABLE numbers_input_show (
+    number INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(number),
+    TIME INDEX(ts)
+);
+
+Affected Rows: 0
+
+create table out_num_cnt_show (
+    number INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP TIME INDEX,    
+    PRIMARY KEY(number),
+);
+
+Affected Rows: 0
+
+CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number as n1 FROM numbers_input_show where number > 10;
+
+Affected Rows: 0
+
+INSERT INTO numbers_input_show VALUES (10, 0),(15, 1),(16, 2);
+
+Affected Rows: 3
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('filter_numbers_show');
+
++-----------------------------------------+
+| ADMIN FLUSH_FLOW('filter_numbers_show') |
++-----------------------------------------+
+|  FLOW_FLUSHED  |
++-----------------------------------------+
+
+SELECT number FROM out_num_cnt_show;
+
++--------+
+| number |
++--------+
+| 15     |
+| 16     |
++--------+
+
+-- should mismatch, hence the old flow remains
+CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number AS n1, number AS n2 FROM numbers_input_show where number > 15;
+
+Error: 3001(EngineExecuteQuery), Invalid query: Column 1(name is 'ts', flow inferred name is 'n2')'s data type mismatch, expect Timestamp(Millisecond(TimestampMillisecondType)) got Int32(Int32Type)
+
+-- should mismatch, hence the old flow remains
+CREATE OR REPLACE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number AS n1, number AS n2, number AS n3 FROM numbers_input_show where number > 15;
+
+Error: 3001(EngineExecuteQuery), Invalid query: Column 1(name is 'ts', flow inferred name is 'n2')'s data type mismatch, expect Timestamp(Millisecond(TimestampMillisecondType)) got Int32(Int32Type)
+
+SELECT flow_definition FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
+
++---------------------------------------------------------------+
+| flow_definition                                               |
++---------------------------------------------------------------+
+| SELECT number AS n1 FROM numbers_input_show WHERE number > 10 |
++---------------------------------------------------------------+
+
+INSERT INTO numbers_input_show VALUES (10, 6),(11, 8),(15, 7),(18, 3);
+
+Affected Rows: 4
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('filter_numbers_show');
+
++-----------------------------------------+
+| ADMIN FLUSH_FLOW('filter_numbers_show') |
++-----------------------------------------+
+|  FLOW_FLUSHED  |
++-----------------------------------------+
+
+-- sink table shows new 11 since old flow remains
+SELECT number FROM out_num_cnt_show;
+
++--------+
+| number |
++--------+
+| 11     |
+| 15     |
+| 15     |
+| 16     |
+| 18     |
++--------+
+
+DROP FLOW filter_numbers_show;
+
+Affected Rows: 0
+
+drop table out_num_cnt_show;
+
+Affected Rows: 0
+
+drop table numbers_input_show;
+
+Affected Rows: 0
+

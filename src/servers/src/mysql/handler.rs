@@ -57,6 +57,23 @@ use crate::SqlPlan;
 const MYSQL_NATIVE_PASSWORD: &str = "mysql_native_password";
 const MYSQL_CLEAR_PASSWORD: &str = "mysql_clear_password";
 
+/// Parameters for the prepared statement
+enum Params<'a> {
+    /// Parameters passed through protocol
+    ProtocolParams(Vec<ParamValue<'a>>),
+    /// Parameters passed through cli
+    CliParams(Vec<sql::ast::Expr>),
+}
+
+impl Params<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Params::ProtocolParams(params) => params.len(),
+            Params::CliParams(params) => params.len(),
+        }
+    }
+}
+
 // An intermediate shim for executing MySQL queries.
 pub struct MysqlInstanceShim {
     query_handler: ServerSqlQueryHandlerRef,
@@ -143,9 +160,9 @@ impl MysqlInstanceShim {
     }
 
     /// Retrieve the query and logical plan by a given statement key
-    fn plan(&self, stmt_key: String) -> Option<SqlPlan> {
+    fn plan(&self, stmt_key: &str) -> Option<SqlPlan> {
         let guard = self.prepared_stmts.read();
-        guard.get(&stmt_key).cloned()
+        guard.get(stmt_key).cloned()
     }
 
     /// Save the prepared statement and return the parameters and result columns
@@ -189,8 +206,6 @@ impl MysqlInstanceShim {
             dummy_params(param_num)?
         };
 
-        debug_assert_eq!(params.len(), param_num - 1);
-
         let columns = schema
             .as_ref()
             .map(|schema| {
@@ -205,16 +220,88 @@ impl MysqlInstanceShim {
             .transpose()?
             .unwrap_or_default();
 
-        self.save_plan(
-            SqlPlan {
-                query: query.to_string(),
-                plan,
-                schema,
-            },
-            stmt_key,
-        );
+        // DataFusion may optimize the plan so that some parameters are not used.
+        if params.len() != param_num - 1 {
+            self.save_plan(
+                SqlPlan {
+                    query: query.to_string(),
+                    plan: None,
+                    schema: None,
+                },
+                stmt_key,
+            );
+        } else {
+            self.save_plan(
+                SqlPlan {
+                    query: query.to_string(),
+                    plan,
+                    schema,
+                },
+                stmt_key,
+            );
+        }
 
         Ok((params, columns))
+    }
+
+    async fn do_execute<'a>(
+        &mut self,
+        query_ctx: QueryContextRef,
+        stmt_key: String,
+        params: Params<'a>,
+    ) -> Result<Vec<std::result::Result<Output, error::Error>>> {
+        let sql_plan = match self.plan(&stmt_key) {
+            None => {
+                return error::PrepareStatementNotFoundSnafu { name: stmt_key }.fail();
+            }
+            Some(sql_plan) => sql_plan,
+        };
+
+        let outputs = match sql_plan.plan {
+            Some(plan) => {
+                let param_types = plan
+                    .get_parameter_types()
+                    .context(DataFrameSnafu)?
+                    .into_iter()
+                    .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
+                    .collect::<HashMap<_, _>>();
+
+                if params.len() != param_types.len() {
+                    return error::InternalSnafu {
+                        err_msg: "Prepare statement params number mismatch".to_string(),
+                    }
+                    .fail();
+                }
+
+                let plan = match params {
+                    Params::ProtocolParams(params) => {
+                        replace_params_with_values(&plan, param_types, &params)
+                    }
+                    Params::CliParams(params) => {
+                        replace_params_with_exprs(&plan, param_types, &params)
+                    }
+                }?;
+
+                debug!("Mysql execute prepared plan: {}", plan.display_indent());
+                vec![
+                    self.do_exec_plan(&sql_plan.query, plan, query_ctx.clone())
+                        .await,
+                ]
+            }
+            None => {
+                let param_strs = match params {
+                    Params::ProtocolParams(params) => {
+                        params.iter().map(convert_param_value_to_string).collect()
+                    }
+                    Params::CliParams(params) => params.iter().map(|x| x.to_string()).collect(),
+                };
+                let query = replace_params(param_strs, sql_plan.query);
+                debug!("Mysql execute replaced query: {}", query);
+                self.do_query(&query, query_ctx.clone()).await
+            }
+        };
+
+        Ok(outputs)
     }
 
     /// Remove the prepared statement by a given statement key
@@ -346,62 +433,20 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
         let params: Vec<ParamValue> = p.into_iter().collect();
         let stmt_key = uuid::Uuid::from_u128(stmt_id as u128).to_string();
-        let sql_plan = match self.plan(stmt_key) {
-            None => {
-                w.error(
-                    ErrorKind::ER_UNKNOWN_STMT_HANDLER,
-                    b"prepare statement not found",
-                )
-                .await?;
+
+        let outputs = match self
+            .do_execute(query_ctx.clone(), stmt_key, Params::ProtocolParams(params))
+            .await
+        {
+            Ok(outputs) => outputs,
+            Err(e) => {
+                let (kind, err) = handle_err(e, query_ctx);
+                debug!(
+                    "Failed to execute prepared statement, kind: {:?}, err: {}",
+                    kind, err
+                );
+                w.error(kind, err.as_bytes()).await?;
                 return Ok(());
-            }
-            Some(sql_plan) => sql_plan,
-        };
-
-        let outputs = match sql_plan.plan {
-            Some(plan) => {
-                let param_types = plan
-                    .get_parameter_types()
-                    .context(DataFrameSnafu)?
-                    .into_iter()
-                    .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
-                    .collect::<HashMap<_, _>>();
-
-                if params.len() != param_types.len() {
-                    return error::InternalSnafu {
-                        err_msg: "prepare statement params number mismatch".to_string(),
-                    }
-                    .fail();
-                }
-
-                let plan = match replace_params_with_values(&plan, param_types, &params) {
-                    Ok(plan) => plan,
-                    Err(e) => {
-                        let (kind, err) = handle_err(e, query_ctx);
-                        debug!(
-                            "Failed to replace params on execute, kind: {:?}, err: {}",
-                            kind, err
-                        );
-                        w.error(kind, err.as_bytes()).await?;
-
-                        return Ok(());
-                    }
-                };
-
-                debug!("Mysql execute prepared plan: {}", plan.display_indent());
-                vec![
-                    self.do_exec_plan(&sql_plan.query, plan, query_ctx.clone())
-                        .await,
-                ]
-            }
-            None => {
-                let param_strs = params
-                    .iter()
-                    .map(|x| convert_param_value_to_string(x))
-                    .collect();
-                let query = replace_params(param_strs, sql_plan.query);
-                debug!("Mysql execute replaced query: {}", query);
-                self.do_query(&query, query_ctx.clone()).await
             }
         };
 
@@ -459,67 +504,19 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             }
         } else if query_upcase.starts_with("EXECUTE ") {
             match ParserContext::parse_mysql_execute_stmt(query, query_ctx.sql_dialect()) {
-                // TODO: similar to on_execute, refactor this
                 Ok((stmt_name, params)) => {
-                    let sql_plan = match self.plan(stmt_name) {
-                        None => {
-                            writer
-                                .error(
-                                    ErrorKind::ER_UNKNOWN_STMT_HANDLER,
-                                    b"prepare statement not found",
-                                )
-                                .await?;
-                            return Ok(());
-                        }
-                        Some(sql_plan) => sql_plan,
-                    };
-
-                    let outputs = match sql_plan.plan {
-                        Some(plan) => {
-                            let param_types = plan
-                                .get_parameter_types()
-                                .context(DataFrameSnafu)?
-                                .into_iter()
-                                .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
-                                .collect::<HashMap<_, _>>();
-
-                            if params.len() != param_types.len() {
-                                writer
-                                    .error(
-                                        ErrorKind::ER_SP_BADSTATEMENT,
-                                        b"prepare statement params number mismatch",
-                                    )
-                                    .await?;
-                                return Ok(());
-                            }
-
-                            let plan = match replace_params_with_exprs(&plan, param_types, &params)
-                            {
-                                Ok(plan) => plan,
-                                Err(e) => {
-                                    let (kind, err) = handle_err(e, query_ctx);
-                                    debug!(
-                                        "Failed to replace params on query, kind: {:?}, err: {}",
-                                        kind, err
-                                    );
-                                    writer.error(kind, err.as_bytes()).await?;
-
-                                    return Ok(());
-                                }
-                            };
-
-                            debug!("Mysql execute prepared plan: {}", plan.display_indent());
-                            vec![
-                                self.do_exec_plan(&sql_plan.query, plan, query_ctx.clone())
-                                    .await,
-                            ]
-                        }
-                        None => {
-                            let param_strs = params.iter().map(|x| x.to_string()).collect();
-                            let query = replace_params(param_strs, sql_plan.query);
-                            debug!("Mysql execute replaced query: {}", query);
-                            let outputs = self.do_query(&query, query_ctx.clone()).await;
-                            writer::write_output(writer, query_ctx, outputs).await?;
+                    let outputs = match self
+                        .do_execute(query_ctx.clone(), stmt_name, Params::CliParams(params))
+                        .await
+                    {
+                        Ok(outputs) => outputs,
+                        Err(e) => {
+                            let (kind, err) = handle_err(e, query_ctx);
+                            debug!(
+                                "Failed to execute prepared statement, kind: {:?}, err: {}",
+                                kind, err
+                            );
+                            writer.error(kind, err.as_bytes()).await?;
                             return Ok(());
                         }
                     };
@@ -613,8 +610,8 @@ fn convert_param_value_to_string(param: &ParamValue) -> String {
         ValueInner::Double(u) => u.to_string(),
         ValueInner::NULL => "NULL".to_string(),
         ValueInner::Bytes(b) => format!("'{}'", &String::from_utf8_lossy(b)),
-        ValueInner::Date(_) => NaiveDate::from(param.value).to_string(),
-        ValueInner::Datetime(_) => NaiveDateTime::from(param.value).to_string(),
+        ValueInner::Date(_) => format!("'{}'", NaiveDate::from(param.value)),
+        ValueInner::Datetime(_) => format!("'{}'", NaiveDateTime::from(param.value)),
         ValueInner::Time(_) => format_duration(Duration::from(param.value)),
     }
 }
@@ -633,7 +630,7 @@ fn format_duration(duration: Duration) -> String {
     let seconds = duration.as_secs() % 60;
     let minutes = (duration.as_secs() / 60) % 60;
     let hours = (duration.as_secs() / 60) / 60;
-    format!("{}:{}:{}", hours, minutes, seconds)
+    format!("'{}:{}:{}'", hours, minutes, seconds)
 }
 
 fn replace_params_with_values(

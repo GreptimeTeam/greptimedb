@@ -5,8 +5,6 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["python"]
-python = ["dep:script"]
 testing = []
 
 [lints]
@@ -25,7 +23,6 @@ common-catalog.workspace = true
 common-config.workspace = true
 common-datasource.workspace = true
 common-error.workspace = true
-common-frontend.workspace = true
 common-function.workspace = true
 common-grpc.workspace = true
 common-macro.workspace = true
@@ -40,8 +37,10 @@ common-time.workspace = true
 common-version.workspace = true
 datafusion-expr.workspace = true
 datanode.workspace = true
+datatypes.workspace = true
 humantime-serde.workspace = true
 lazy_static.workspace = true
+log-query.workspace = true
 log-store.workspace = true
 meta-client.workspace = true
 opentelemetry-proto.workspace = true
@@ -49,10 +48,10 @@ operator.workspace = true
 partition.workspace = true
 pipeline.workspace = true
 prometheus.workspace = true
+promql-parser.workspace = true
 prost.workspace = true
 query.workspace = true
 raft-engine.workspace = true
-script = { workspace = true, features = ["python"], optional = true }
 serde.workspace = true
 servers.workspace = true
 session.workspace = true
@@ -71,7 +70,6 @@ common-test-util.workspace = true
 datanode.workspace = true
 datatypes.workspace = true
 futures = "0.3"
-meta-srv = { workspace = true, features = ["mock"] }
 serde_json.workspace = true
 strfmt = "0.2"
 tower.workspace = true

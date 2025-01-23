@@ -22,6 +22,8 @@ use env::{Env, WalConfig};
 use sqlness::interceptor::Registry;
 use sqlness::{ConfigBuilder, Runner};
 
+use crate::env::StoreConfig;
+
 mod env;
 mod protocol_interceptor;
 mod util;
@@ -92,6 +94,22 @@ struct Args {
     /// This may affect future test runs.
     #[clap(long)]
     preserve_state: bool,
+
+    /// Pull Different versions of GreptimeDB on need.
+    #[clap(long, default_value = "true")]
+    pull_version_on_need: bool,
+
+    /// The store addresses for metadata, if empty, will use memory store.
+    #[clap(long)]
+    store_addrs: Vec<String>,
+
+    /// Whether to setup etcd, by default it is false.
+    #[clap(long, default_value = "false")]
+    setup_etcd: bool,
+
+    /// Whether to setup pg, by default it is false.
+    #[clap(long, default_value = "false")]
+    setup_pg: bool,
 }
 
 #[tokio::main]
@@ -110,6 +128,11 @@ async fn main() {
         Arc::new(protocol_interceptor::ProtocolInterceptorFactory),
     );
 
+    if let Some(d) = &args.case_dir {
+        if !d.is_dir() {
+            panic!("{} is not a directory", d.display());
+        }
+    }
     let config = ConfigBuilder::default()
         .case_dir(util::get_case_dir(args.case_dir))
         .fail_fast(args.fail_fast)
@@ -132,19 +155,37 @@ async fn main() {
         },
     };
 
+    let store = StoreConfig {
+        store_addrs: args.store_addrs.clone(),
+        setup_etcd: args.setup_etcd,
+        setup_pg: args.setup_pg,
+    };
+
     let runner = Runner::new(
         config,
         Env::new(
             sqlness_home.clone(),
             args.server_addr.clone(),
             wal,
+            args.pull_version_on_need,
             args.bins_dir,
+            store,
         ),
     );
-    runner.run().await.unwrap();
+    match runner.run().await {
+        Ok(_) => println!("\x1b[32mAll sqlness tests passed!\x1b[0m"),
+        Err(e) => {
+            println!("\x1b[31mTest failed: {}\x1b[0m", e);
+            std::process::exit(1);
+        }
+    }
 
     // clean up and exit
     if !args.preserve_state {
+        if args.setup_etcd {
+            println!("Stopping etcd");
+            util::stop_rm_etcd();
+        }
         println!("Removing state in {:?}", sqlness_home);
         tokio::fs::remove_dir_all(sqlness_home).await.unwrap();
     }

@@ -39,7 +39,7 @@ pub enum Error {
     AddressBind {
         addr: SocketAddr,
         #[snafu(source)]
-        error: hyper::Error,
+        error: std::io::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -149,27 +149,12 @@ pub enum Error {
     #[snafu(display("Failed to describe statement"))]
     DescribeStatement { source: BoxedError },
 
-    #[snafu(display("Failed to insert script with name: {}", name))]
-    InsertScript {
-        name: String,
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
-    },
-
     #[snafu(display("Pipeline management api error"))]
     Pipeline {
+        #[snafu(source)]
         source: pipeline::error::Error,
         #[snafu(implicit)]
         location: Location,
-    },
-
-    #[snafu(display("Failed to execute script by name: {}", name))]
-    ExecuteScript {
-        name: String,
-        #[snafu(implicit)]
-        location: Location,
-        source: BoxedError,
     },
 
     #[snafu(display("Not supported: {}", feat))]
@@ -187,6 +172,13 @@ pub enum Error {
         reason: String,
         #[snafu(implicit)]
         location: Location,
+    },
+
+    #[snafu(display("Failed to parse query"))]
+    FailedToParseQuery {
+        #[snafu(implicit)]
+        location: Location,
+        source: sql::error::Error,
     },
 
     #[snafu(display("Failed to parse InfluxDB line protocol"))]
@@ -209,12 +201,6 @@ pub enum Error {
         name: String,
         #[snafu(implicit)]
         location: Location,
-    },
-
-    #[snafu(display("Hyper error"))]
-    Hyper {
-        #[snafu(source)]
-        error: hyper::Error,
     },
 
     #[snafu(display("Invalid OpenTSDB Json request"))]
@@ -498,10 +484,16 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse payload as json5"))]
-    ParseJson5 {
-        #[snafu(source)]
-        error: json5::Error,
+    #[snafu(display("Invalid Loki labels: {}", msg))]
+    InvalidLokiLabels {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid Loki JSON request: {}", msg))]
+    InvalidLokiPayload {
+        msg: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -575,9 +567,29 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Prepare statement not found: {}", name))]
+    PrepareStatementNotFound {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("In-flight write bytes exceeded the maximum limit"))]
+    InFlightWriteBytesExceeded {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid elasticsearch input, reason: {}", reason))]
+    InvalidElasticsearchInput {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
@@ -606,9 +618,7 @@ impl ErrorExt for Error {
 
             CollectRecordbatch { .. } => StatusCode::EngineExecuteQuery,
 
-            InsertScript { source, .. }
-            | ExecuteScript { source, .. }
-            | ExecuteQuery { source, .. }
+            ExecuteQuery { source, .. }
             | ExecutePlan { source, .. }
             | ExecuteGrpcQuery { source, .. }
             | ExecuteGrpcRequest { source, .. }
@@ -638,17 +648,20 @@ impl ErrorExt for Error {
             | MissingQueryContext { .. }
             | MysqlValueConversion { .. }
             | ParseJson { .. }
-            | ParseJson5 { .. }
+            | InvalidLokiLabels { .. }
+            | InvalidLokiPayload { .. }
             | UnsupportedContentType { .. }
             | TimestampOverflow { .. }
             | OpenTelemetryLog { .. }
             | UnsupportedJsonDataTypeForTag { .. }
-            | InvalidTableName { .. } => StatusCode::InvalidArguments,
+            | InvalidTableName { .. }
+            | PrepareStatementNotFound { .. }
+            | FailedToParseQuery { .. }
+            | InvalidElasticsearchInput { .. } => StatusCode::InvalidArguments,
 
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),
 
-            Hyper { .. } => StatusCode::Unknown,
             TlsRequired { .. } => StatusCode::Unknown,
             Auth { source, .. } => source.status_code(),
             DescribeStatement { source } => source.status_code(),
@@ -690,6 +703,8 @@ impl ErrorExt for Error {
             ToJson { .. } => StatusCode::Internal,
 
             ConvertSqlValue { source, .. } => source.status_code(),
+
+            InFlightWriteBytesExceeded { .. } => StatusCode::RateLimited,
         }
     }
 

@@ -16,11 +16,11 @@ use std::assert_matches::assert_matches;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::v1::alter_expr::Kind;
+use api::v1::alter_table_expr::Kind;
 use api::v1::region::{region_request, RegionRequest};
 use api::v1::{
-    AddColumn, AddColumns, AlterExpr, ChangeTableOption, ChangeTableOptions, ColumnDataType,
-    ColumnDef as PbColumnDef, DropColumn, DropColumns, SemanticType,
+    AddColumn, AddColumns, AlterTableExpr, ColumnDataType, ColumnDef as PbColumnDef, DropColumn,
+    DropColumns, SemanticType, SetTableOptions,
 };
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
@@ -133,13 +133,13 @@ async fn test_on_submit_alter_request() {
         .unwrap();
 
     let alter_table_task = AlterTableTask {
-        alter_table: AlterExpr {
+        alter_table: AlterTableExpr {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
             kind: Some(Kind::DropColumns(DropColumns {
                 drop_columns: vec![DropColumn {
-                    name: "my_field_column".to_string(),
+                    name: "cpu".to_string(),
                 }],
             })),
         },
@@ -219,13 +219,13 @@ async fn test_on_submit_alter_request_with_outdated_request() {
         .unwrap();
 
     let alter_table_task = AlterTableTask {
-        alter_table: AlterExpr {
+        alter_table: AlterTableExpr {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
             kind: Some(Kind::DropColumns(DropColumns {
                 drop_columns: vec![DropColumn {
-                    name: "my_field_column".to_string(),
+                    name: "cpu".to_string(),
                 }],
             })),
         },
@@ -316,7 +316,7 @@ async fn test_on_update_metadata_add_columns() {
         .unwrap();
 
     let task = AlterTableTask {
-        alter_table: AlterExpr {
+        alter_table: AlterTableExpr {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
@@ -330,6 +330,7 @@ async fn test_on_update_metadata_add_columns() {
                         ..Default::default()
                     }),
                     location: None,
+                    add_if_not_exists: false,
                 }],
             })),
         },
@@ -385,12 +386,12 @@ async fn test_on_update_table_options() {
         .unwrap();
 
     let task = AlterTableTask {
-        alter_table: AlterExpr {
+        alter_table: AlterTableExpr {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
-            kind: Some(Kind::ChangeTableOptions(ChangeTableOptions {
-                change_table_options: vec![ChangeTableOption {
+            kind: Some(Kind::SetTableOptions(SetTableOptions {
+                table_options: vec![api::v1::Option {
                     key: TTL_KEY.to_string(),
                     value: "1d".to_string(),
                 }],

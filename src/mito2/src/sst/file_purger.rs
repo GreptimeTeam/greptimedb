@@ -119,6 +119,8 @@ impl FilePurger for LocalFilePurger {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU64;
+
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::services::Fs;
     use object_store::ObjectStore;
@@ -176,6 +178,7 @@ mod tests {
                     index_file_size: 0,
                     num_rows: 0,
                     num_row_groups: 0,
+                    sequence: None,
                 },
                 file_purger,
             );
@@ -185,7 +188,7 @@ mod tests {
 
         scheduler.stop(true).await.unwrap();
 
-        assert!(!object_store.is_exist(&path).await.unwrap());
+        assert!(!object_store.exists(&path).await.unwrap());
     }
 
     #[tokio::test]
@@ -238,6 +241,7 @@ mod tests {
                     index_file_size: 4096,
                     num_rows: 1024,
                     num_row_groups: 1,
+                    sequence: NonZeroU64::new(4096),
                 },
                 file_purger,
             );
@@ -247,7 +251,7 @@ mod tests {
 
         scheduler.stop(true).await.unwrap();
 
-        assert!(!object_store.is_exist(&path).await.unwrap());
-        assert!(!object_store.is_exist(&index_path).await.unwrap());
+        assert!(!object_store.exists(&path).await.unwrap());
+        assert!(!object_store.exists(&index_path).await.unwrap());
     }
 }

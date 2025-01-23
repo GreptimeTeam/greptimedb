@@ -24,6 +24,8 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
 use tonic::body::BoxBody;
 use tonic::codegen::{empty_body, http, BoxFuture, Service};
 use tonic::server::NamedService;
@@ -190,10 +192,12 @@ fn check_path(path: &str) {
     }
 }
 
+/// Returns a [BoxBody] from a string.
+/// The implementation follows [empty_body()].
 fn boxed(body: String) -> BoxBody {
-    use http_body::Body;
-
-    body.map_err(|_| panic!("")).boxed_unsync()
+    Full::new(Bytes::from(body))
+        .map_err(|err| match err {})
+        .boxed_unsync()
 }
 
 #[cfg(test)]

@@ -25,14 +25,6 @@ use snafu::{Location, Snafu};
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Failed to seek"))]
-    Seek {
-        #[snafu(source)]
-        error: IoError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to read"))]
     Read {
         #[snafu(source)]
@@ -119,14 +111,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to convert bytes to integer"))]
-    BytesToInteger {
-        #[snafu(source)]
-        error: std::array::TryFromSliceError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Unsupported decompression: {}", decompression))]
     UnsupportedDecompression {
         decompression: String,
@@ -150,17 +134,15 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Parse stage not match, expected: {}, actual: {}", expected, actual))]
-    ParseStageNotMatch {
-        expected: String,
-        actual: String,
+    #[snafu(display("Unexpected footer payload size: {}", size))]
+    UnexpectedFooterPayloadSize {
+        size: i32,
         #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("Unexpected footer payload size: {}", size))]
-    UnexpectedFooterPayloadSize {
-        size: i32,
+    #[snafu(display("Invalid puffin footer"))]
+    InvalidPuffinFooter {
         #[snafu(implicit)]
         location: Location,
     },
@@ -173,20 +155,6 @@ pub enum Error {
     UnexpectedPuffinFileSize {
         min_file_size: u64,
         actual_file_size: u64,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Invalid blob offset: {}, location: {:?}", offset, location))]
-    InvalidBlobOffset {
-        offset: i64,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Invalid blob area end: {}, location: {:?}", offset, location))]
-    InvalidBlobAreaEnd {
-        offset: u64,
         #[snafu(implicit)]
         location: Location,
     },
@@ -262,8 +230,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            Seek { .. }
-            | Read { .. }
+            Read { .. }
             | MagicNotMatched { .. }
             | DeserializeJson { .. }
             | Write { .. }
@@ -275,18 +242,15 @@ impl ErrorExt for Error {
             | Remove { .. }
             | Rename { .. }
             | SerializeJson { .. }
-            | BytesToInteger { .. }
-            | ParseStageNotMatch { .. }
             | UnexpectedFooterPayloadSize { .. }
             | UnexpectedPuffinFileSize { .. }
-            | InvalidBlobOffset { .. }
-            | InvalidBlobAreaEnd { .. }
             | Lz4Compression { .. }
             | Lz4Decompression { .. }
             | BlobNotFound { .. }
             | BlobIndexOutOfBound { .. }
             | FileKeyNotMatch { .. }
-            | WalkDir { .. } => StatusCode::Unexpected,
+            | WalkDir { .. }
+            | InvalidPuffinFooter { .. } => StatusCode::Unexpected,
 
             UnsupportedCompression { .. } | UnsupportedDecompression { .. } => {
                 StatusCode::Unsupported

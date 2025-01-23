@@ -24,7 +24,8 @@ use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use super::MetricEngineInner;
-use crate::engine::options::set_data_region_options;
+use crate::engine::create::region_options_for_metadata_region;
+use crate::engine::options::{set_data_region_options, PhysicalRegionOptions};
 use crate::error::{OpenMitoRegionSnafu, Result};
 use crate::metrics::{LOGICAL_REGION_COUNT, PHYSICAL_REGION_COUNT};
 use crate::utils;
@@ -46,8 +47,10 @@ impl MetricEngineInner {
     ) -> Result<AffectedRows> {
         if request.is_physical_table() {
             // open physical region and recover states
+            let physical_region_options = PhysicalRegionOptions::try_from(&request.options)?;
             self.open_physical_region(region_id, request).await?;
-            self.recover_states(region_id).await?;
+            self.recover_states(region_id, physical_region_options)
+                .await?;
 
             Ok(0)
         } else {
@@ -68,9 +71,10 @@ impl MetricEngineInner {
         let metadata_region_dir = join_dir(&request.region_dir, METADATA_REGION_SUBDIR);
         let data_region_dir = join_dir(&request.region_dir, DATA_REGION_SUBDIR);
 
+        let metadata_region_options = region_options_for_metadata_region(request.options.clone());
         let open_metadata_region_request = RegionOpenRequest {
             region_dir: metadata_region_dir,
-            options: request.options.clone(),
+            options: metadata_region_options,
             engine: MITO_ENGINE_NAME.to_string(),
             skip_wal_replay: request.skip_wal_replay,
         };
@@ -118,7 +122,11 @@ impl MetricEngineInner {
     /// Includes:
     /// - Record physical region's column names
     /// - Record the mapping between logical region id and physical region id
-    pub(crate) async fn recover_states(&self, physical_region_id: RegionId) -> Result<()> {
+    pub(crate) async fn recover_states(
+        &self,
+        physical_region_id: RegionId,
+        physical_region_options: PhysicalRegionOptions,
+    ) -> Result<()> {
         // load logical regions and physical column names
         let logical_regions = self
             .metadata_region
@@ -133,11 +141,15 @@ impl MetricEngineInner {
         {
             let mut state = self.state.write().unwrap();
             // recover physical column names
-            let physical_column_names = physical_columns
+            let physical_columns = physical_columns
                 .into_iter()
-                .map(|col| col.column_schema.name)
+                .map(|col| (col.column_schema.name, col.column_id))
                 .collect();
-            state.add_physical_region(physical_region_id, physical_column_names);
+            state.add_physical_region(
+                physical_region_id,
+                physical_columns,
+                physical_region_options,
+            );
             // recover logical regions
             for logical_region_id in &logical_regions {
                 state.add_logical_region(physical_region_id, *logical_region_id);

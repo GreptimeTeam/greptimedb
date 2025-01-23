@@ -25,8 +25,8 @@ mod handle_manifest;
 mod handle_open;
 mod handle_truncate;
 mod handle_write;
-
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,7 +50,7 @@ use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
-use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
+use crate::error::{CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::{REGION_COUNT, WRITE_STALL_TOTAL};
@@ -157,7 +157,6 @@ impl WorkerGroup {
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_purges));
         let write_cache = write_cache_from_config(
             &config,
-            object_store_manager.clone(),
             puffin_manager_factory.clone(),
             intermediate_manager.clone(),
         )
@@ -168,8 +167,10 @@ impl WorkerGroup {
                 .vector_cache_size(config.vector_cache_size.as_bytes())
                 .page_cache_size(config.page_cache_size.as_bytes())
                 .selector_result_cache_size(config.selector_result_cache_size.as_bytes())
-                .index_metadata_size(config.inverted_index.metadata_cache_size.as_bytes())
-                .index_content_size(config.inverted_index.content_cache_size.as_bytes())
+                .index_metadata_size(config.index.metadata_cache_size.as_bytes())
+                .index_content_size(config.index.content_cache_size.as_bytes())
+                .index_content_page_size(config.index.content_cache_page_size.as_bytes())
+                .puffin_metadata_size(config.index.metadata_cache_size.as_bytes())
                 .write_cache(write_cache)
                 .build(),
         );
@@ -301,7 +302,6 @@ impl WorkerGroup {
             .with_buffer_size(Some(config.index.write_buffer_size.as_bytes() as _));
         let write_cache = write_cache_from_config(
             &config,
-            object_store_manager.clone(),
             puffin_manager_factory.clone(),
             intermediate_manager.clone(),
         )
@@ -362,22 +362,23 @@ fn region_id_to_index(id: RegionId, num_workers: usize) -> usize {
 
 async fn write_cache_from_config(
     config: &MitoConfig,
-    object_store_manager: ObjectStoreManagerRef,
     puffin_manager_factory: PuffinManagerFactory,
     intermediate_manager: IntermediateManager,
 ) -> Result<Option<WriteCacheRef>> {
-    if !config.enable_experimental_write_cache {
+    if !config.enable_write_cache {
         return Ok(None);
     }
 
-    // TODO(yingwen): Remove this and document the config once the write cache is ready.
-    warn!("Write cache is an experimental feature");
+    tokio::fs::create_dir_all(Path::new(&config.write_cache_path))
+        .await
+        .context(CreateDirSnafu {
+            dir: &config.write_cache_path,
+        })?;
 
     let cache = WriteCache::new_fs(
-        &config.experimental_write_cache_path,
-        object_store_manager,
-        config.experimental_write_cache_size,
-        config.experimental_write_cache_ttl,
+        &config.write_cache_path,
+        config.write_cache_size,
+        config.write_cache_ttl,
         puffin_manager_factory,
         intermediate_manager,
     )

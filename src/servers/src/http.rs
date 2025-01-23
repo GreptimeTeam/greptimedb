@@ -18,18 +18,15 @@ use std::net::SocketAddr;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
-use aide::axum::{routing as apirouting, ApiRouter, IntoApiResponse};
-use aide::openapi::{Info, OpenApi, Server as OpenAPIServer};
-use aide::OperationOutput;
 use async_trait::async_trait;
 use auth::UserProviderRef;
-use axum::error_handling::HandleErrorLayer;
 use axum::extract::DefaultBodyLimit;
-use axum::response::{Html, IntoResponse, Json, Response};
-use axum::{middleware, routing, BoxError, Extension, Router};
+use axum::http::StatusCode as HttpStatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::serve::ListenerExt;
+use axum::{middleware, routing, Router};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
-use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatch;
 use common_telemetry::{error, info};
 use common_time::timestamp::TimeUnit;
@@ -39,7 +36,6 @@ use datatypes::schema::SchemaRef;
 use datatypes::value::transform_value_ref_to_json_value;
 use event::{LogState, LogValidatorRef};
 use futures::FutureExt;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ensure, ResultExt};
@@ -52,7 +48,10 @@ use tower_http::trace::TraceLayer;
 use self::authorize::AuthState;
 use self::result::table_result::TableResponse;
 use crate::configurator::ConfiguratorRef;
-use crate::error::{AddressBindSnafu, AlreadyStartedSnafu, Error, HyperSnafu, Result, ToJsonSnafu};
+use crate::elasticsearch;
+use crate::error::{
+    AddressBindSnafu, AlreadyStartedSnafu, Error, InternalIoSnafu, Result, ToJsonSnafu,
+};
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::prometheus::{
     build_info_query, format_query, instant_query, label_values_query, labels_query, parse_query,
@@ -70,8 +69,8 @@ use crate::metrics_handler::MetricsHandler;
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
-    InfluxdbLineProtocolHandlerRef, LogHandlerRef, OpenTelemetryProtocolHandlerRef,
-    OpentsdbProtocolHandlerRef, PromStoreProtocolHandlerRef, ScriptHandlerRef,
+    InfluxdbLineProtocolHandlerRef, LogQueryHandlerRef, OpenTelemetryProtocolHandlerRef,
+    OpentsdbProtocolHandlerRef, PipelineHandlerRef, PromStoreProtocolHandlerRef,
 };
 use crate::server::Server;
 
@@ -84,6 +83,8 @@ mod extractor;
 pub mod handler;
 pub mod header;
 pub mod influxdb;
+pub mod logs;
+pub mod loki;
 pub mod mem_prof;
 pub mod opentsdb;
 pub mod otlp;
@@ -91,11 +92,11 @@ pub mod pprof;
 pub mod prom_store;
 pub mod prometheus;
 pub mod result;
-pub mod script;
 mod timeout;
 
 pub(crate) use timeout::DynamicTimeoutLayer;
 
+mod hints;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_helpers;
 
@@ -103,6 +104,9 @@ pub const HTTP_API_VERSION: &str = "v1";
 pub const HTTP_API_PREFIX: &str = "/v1/";
 /// Default http body limit (64M).
 const DEFAULT_BODY_LIMIT: ReadableSize = ReadableSize::mb(64);
+
+/// Authorization header
+pub const AUTHORIZATION_HEADER: &str = "x-greptime-auth";
 
 // TODO(fys): This is a temporary workaround, it will be improved later
 pub static PUBLIC_APIS: [&str; 2] = ["/v1/influxdb/ping", "/v1/influxdb/health"];
@@ -148,7 +152,7 @@ impl Default for HttpOptions {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ColumnSchema {
     name: String,
     data_type: String,
@@ -160,7 +164,7 @@ impl ColumnSchema {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct OutputSchema {
     column_schemas: Vec<ColumnSchema>,
 }
@@ -188,7 +192,7 @@ impl From<SchemaRef> for OutputSchema {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct HttpRecordsOutput {
     schema: OutputSchema,
     rows: Vec<Vec<Value>>,
@@ -264,7 +268,7 @@ impl HttpRecordsOutput {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum GreptimeQueryOutput {
     AffectedRows(usize),
@@ -352,7 +356,7 @@ impl Display for Epoch {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum HttpResponse {
     Arrow(ArrowResponse),
     Csv(CsvResponse),
@@ -420,10 +424,6 @@ impl IntoResponse for HttpResponse {
     }
 }
 
-impl OperationOutput for HttpResponse {
-    type Inner = Response;
-}
-
 impl From<ArrowResponse> for HttpResponse {
     fn from(value: ArrowResponse) -> Self {
         HttpResponse::Arrow(value)
@@ -466,18 +466,9 @@ impl From<JsonResponse> for HttpResponse {
     }
 }
 
-async fn serve_api(Extension(api): Extension<OpenApi>) -> impl IntoApiResponse {
-    Json(api)
-}
-
-async fn serve_docs() -> Html<String> {
-    Html(include_str!("http/redoc.html").to_owned())
-}
-
 #[derive(Clone)]
 pub struct ApiState {
     pub sql_handler: ServerSqlQueryHandlerRef,
-    pub script_handler: Option<ScriptHandlerRef>,
 }
 
 #[derive(Clone)]
@@ -490,50 +481,37 @@ pub struct HttpServerBuilder {
     options: HttpOptions,
     plugins: Plugins,
     user_provider: Option<UserProviderRef>,
-    api: OpenApi,
     router: Router,
 }
 
 impl HttpServerBuilder {
     pub fn new(options: HttpOptions) -> Self {
-        let api = OpenApi {
-            info: Info {
-                title: "GreptimeDB HTTP API".to_string(),
-                description: Some("HTTP APIs to interact with GreptimeDB".to_string()),
-                version: HTTP_API_VERSION.to_string(),
-                ..Info::default()
-            },
-            servers: vec![OpenAPIServer {
-                url: format!("/{HTTP_API_VERSION}"),
-                ..OpenAPIServer::default()
-            }],
-            ..OpenApi::default()
-        };
         Self {
             options,
             plugins: Plugins::default(),
             user_provider: None,
-            api,
             router: Router::new(),
         }
     }
 
-    pub fn with_sql_handler(
-        mut self,
-        sql_handler: ServerSqlQueryHandlerRef,
-        script_handler: Option<ScriptHandlerRef>,
-    ) -> Self {
-        let sql_router = HttpServer::route_sql(ApiState {
-            sql_handler,
-            script_handler,
-        })
-        .finish_api(&mut self.api)
-        .layer(Extension(self.api.clone()));
+    pub fn with_sql_handler(self, sql_handler: ServerSqlQueryHandlerRef) -> Self {
+        let sql_router = HttpServer::route_sql(ApiState { sql_handler });
 
         Self {
             router: self
                 .router
                 .nest(&format!("/{HTTP_API_VERSION}"), sql_router),
+            ..self
+        }
+    }
+
+    pub fn with_logs_handler(self, logs_handler: LogQueryHandlerRef) -> Self {
+        let logs_router = HttpServer::route_logs(logs_handler);
+
+        Self {
+            router: self
+                .router
+                .nest(&format!("/{HTTP_API_VERSION}"), logs_router),
             ..self
         }
     }
@@ -602,14 +580,14 @@ impl HttpServerBuilder {
 
     pub fn with_metrics_handler(self, handler: MetricsHandler) -> Self {
         Self {
-            router: self.router.nest("", HttpServer::route_metrics(handler)),
+            router: self.router.merge(HttpServer::route_metrics(handler)),
             ..self
         }
     }
 
     pub fn with_log_ingest_handler(
         self,
-        handler: LogHandlerRef,
+        handler: PipelineHandlerRef,
         validator: Option<LogValidatorRef>,
         ingest_interceptor: Option<LogIngestInterceptorRef<Error>>,
     ) -> Self {
@@ -625,7 +603,19 @@ impl HttpServerBuilder {
 
         let router = router.nest(
             &format!("/{HTTP_API_VERSION}/loki"),
-            HttpServer::route_loki(log_state),
+            HttpServer::route_loki(log_state.clone()),
+        );
+
+        let router = router.nest(
+            &format!("/{HTTP_API_VERSION}/elasticsearch"),
+            HttpServer::route_elasticsearch(log_state.clone()),
+        );
+
+        let router = router.nest(
+            &format!("/{HTTP_API_VERSION}/elasticsearch/"),
+            Router::new()
+                .route("/", routing::get(elasticsearch::handle_get_version))
+                .with_state(log_state),
         );
 
         Self { router, ..self }
@@ -635,21 +625,20 @@ impl HttpServerBuilder {
         Self { plugins, ..self }
     }
 
-    pub fn with_greptime_config_options(mut self, opts: String) -> Self {
+    pub fn with_greptime_config_options(self, opts: String) -> Self {
         let config_router = HttpServer::route_config(GreptimeOptionsConfigState {
             greptime_config_options: opts,
-        })
-        .finish_api(&mut self.api);
+        });
 
         Self {
-            router: self.router.nest("", config_router),
+            router: self.router.merge(config_router),
             ..self
         }
     }
 
     pub fn with_extra_router(self, router: Router) -> Self {
         Self {
-            router: self.router.nest("", router),
+            router: self.router.merge(router),
             ..self
         }
     }
@@ -666,16 +655,22 @@ impl HttpServerBuilder {
 }
 
 impl HttpServer {
+    /// Gets the router and adds necessary root routes (health, status, dashboard).
     pub fn make_app(&self) -> Router {
         let mut router = {
             let router = self.router.lock().unwrap();
             router.clone()
         };
 
-        router = router.route(
-            "/health",
-            routing::get(handler::health).post(handler::health),
-        );
+        router = router
+            .route(
+                "/health",
+                routing::get(handler::health).post(handler::health),
+            )
+            .route(
+                "/ready",
+                routing::get(handler::health).post(handler::health),
+            );
 
         router = router.route("/status", routing::get(handler::status));
 
@@ -683,15 +678,30 @@ impl HttpServer {
         {
             if !self.options.disable_dashboard {
                 info!("Enable dashboard service at '/dashboard'");
-                router = router.nest("/dashboard", dashboard::dashboard());
+                // redirect /dashboard to /dashboard/
+                router = router.route(
+                    "/dashboard",
+                    routing::get(|uri: axum::http::uri::Uri| async move {
+                        let path = uri.path();
+                        let query = uri.query().map(|q| format!("?{}", q)).unwrap_or_default();
+
+                        let new_uri = format!("{}/{}", path, query);
+                        axum::response::Redirect::permanent(&new_uri)
+                    }),
+                );
 
                 // "/dashboard" and "/dashboard/" are two different paths in Axum.
-                // We cannot nest "/dashboard/", because we already mapping "/dashboard/*x" while nesting "/dashboard".
+                // We cannot nest "/dashboard/", because we already mapping "/dashboard/{*x}" while nesting "/dashboard".
                 // So we explicitly route "/dashboard/" here.
-                router = router.route(
-                    "/dashboard/",
-                    routing::get(dashboard::static_handler).post(dashboard::static_handler),
-                );
+                router = router
+                    .route(
+                        "/dashboard/",
+                        routing::get(dashboard::static_handler).post(dashboard::static_handler),
+                    )
+                    .route(
+                        "/dashboard/{*x}",
+                        routing::get(dashboard::static_handler).post(dashboard::static_handler),
+                    );
             }
         }
 
@@ -701,6 +711,8 @@ impl HttpServer {
         router
     }
 
+    /// Attaches middlewares and debug routes to the router.
+    /// Callers should call this method after [HttpServer::make_app()].
     pub fn build(&self, router: Router) -> Router {
         let timeout_layer = if self.options.timeout != Duration::default() {
             Some(ServiceBuilder::new().layer(DynamicTimeoutLayer::new(self.options.timeout)))
@@ -722,7 +734,6 @@ impl HttpServer {
             // middlewares
             .layer(
                 ServiceBuilder::new()
-                    .layer(HandleErrorLayer::new(handle_error))
                     // disable on failure tracing. because printing out isn't very helpful,
                     // and we have impl IntoResponse for Error. It will print out more detailed error messages
                     .layer(TraceLayer::new_for_http().on_failure(()))
@@ -732,29 +743,20 @@ impl HttpServer {
                     .layer(middleware::from_fn_with_state(
                         AuthState::new(self.user_provider.clone()),
                         authorize::check_http_auth,
-                    )),
+                    ))
+                    .layer(middleware::from_fn(hints::extract_hints)),
             )
             // Handlers for debug, we don't expect a timeout.
             .nest(
                 "/debug",
                 Router::new()
                     // handler for changing log level dynamically
-                    .route(
-                        "/log_level",
-                        routing::get(dyn_log::dyn_log_handler).post(dyn_log::dyn_log_handler),
-                    )
+                    .route("/log_level", routing::post(dyn_log::dyn_log_handler))
                     .nest(
                         "/prof",
                         Router::new()
-                            .route(
-                                "/cpu",
-                                routing::get(pprof::pprof_handler).post(pprof::pprof_handler),
-                            )
-                            .route(
-                                "/mem",
-                                routing::get(mem_prof::mem_prof_handler)
-                                    .post(mem_prof::mem_prof_handler),
-                            ),
+                            .route("/cpu", routing::post(pprof::pprof_handler))
+                            .route("/mem", routing::post(mem_prof::mem_prof_handler)),
                     ),
             )
     }
@@ -767,7 +769,87 @@ impl HttpServer {
 
     fn route_loki<S>(log_state: LogState) -> Router<S> {
         Router::new()
-            .route("/api/v1/push", routing::post(event::loki_ingest))
+            .route("/api/v1/push", routing::post(loki::loki_ingest))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
+            )
+            .with_state(log_state)
+    }
+
+    fn route_elasticsearch<S>(log_state: LogState) -> Router<S> {
+        Router::new()
+            // Return fake responsefor HEAD '/' request.
+            .route(
+                "/",
+                routing::head((HttpStatusCode::OK, elasticsearch::elasticsearch_headers())),
+            )
+            // Return fake response for Elasticsearch version request.
+            .route("/", routing::get(elasticsearch::handle_get_version))
+            // Return fake response for Elasticsearch license request.
+            .route("/_license", routing::get(elasticsearch::handle_get_license))
+            .route("/_bulk", routing::post(elasticsearch::handle_bulk_api))
+            .route(
+                "/{index}/_bulk",
+                routing::post(elasticsearch::handle_bulk_api_with_index),
+            )
+            // Return fake response for Elasticsearch ilm request.
+            .route(
+                "/_ilm/policy/{*path}",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            // Return fake response for Elasticsearch index template request.
+            .route(
+                "/_index_template/{*path}",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            // Return fake response for Elasticsearch ingest pipeline request.
+            // See: https://www.elastic.co/guide/en/elasticsearch/reference/8.8/put-pipeline-api.html.
+            .route(
+                "/_ingest/{*path}",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            // Return fake response for Elasticsearch nodes discovery request.
+            // See: https://www.elastic.co/guide/en/elasticsearch/reference/8.8/cluster.html.
+            .route(
+                "/_nodes/{*path}",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            // Return fake response for Logstash APIs requests.
+            // See: https://www.elastic.co/guide/en/elasticsearch/reference/8.8/logstash-apis.html
+            .route(
+                "/logstash/{*path}",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            .route(
+                "/_logstash/{*path}",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            .layer(ServiceBuilder::new().layer(RequestDecompressionLayer::new()))
             .with_state(log_state)
     }
 
@@ -775,39 +857,39 @@ impl HttpServer {
         Router::new()
             .route("/logs", routing::post(event::log_ingester))
             .route(
-                "/pipelines/:pipeline_name",
+                "/pipelines/{pipeline_name}",
                 routing::post(event::add_pipeline),
             )
             .route(
-                "/pipelines/:pipeline_name",
+                "/pipelines/{pipeline_name}",
                 routing::delete(event::delete_pipeline),
             )
             .route("/pipelines/dryrun", routing::post(event::pipeline_dryrun))
             .layer(
                 ServiceBuilder::new()
-                    .layer(HandleErrorLayer::new(handle_error))
-                    .layer(RequestDecompressionLayer::new()),
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
             .with_state(log_state)
     }
 
-    fn route_sql<S>(api_state: ApiState) -> ApiRouter<S> {
-        ApiRouter::new()
-            .api_route(
-                "/sql",
-                apirouting::get_with(handler::sql, handler::sql_docs)
-                    .post_with(handler::sql, handler::sql_docs),
+    fn route_sql<S>(api_state: ApiState) -> Router<S> {
+        Router::new()
+            .route("/sql", routing::get(handler::sql).post(handler::sql))
+            .route(
+                "/sql/parse",
+                routing::get(handler::sql_parse).post(handler::sql_parse),
             )
-            .api_route(
+            .route(
                 "/promql",
-                apirouting::get_with(handler::promql, handler::sql_docs)
-                    .post_with(handler::promql, handler::sql_docs),
+                routing::get(handler::promql).post(handler::promql),
             )
-            .api_route("/scripts", apirouting::post(script::scripts))
-            .api_route("/run-script", apirouting::post(script::run_script))
-            .route("/private/api.json", apirouting::get(serve_api))
-            .route("/private/docs", apirouting::get(serve_docs))
             .with_state(api_state)
+    }
+
+    fn route_logs<S>(log_handler: LogQueryHandlerRef) -> Router<S> {
+        Router::new()
+            .route("/logs", routing::get(logs::logs).post(logs::logs))
+            .with_state(log_handler)
     }
 
     /// Route Prometheus [HTTP API].
@@ -826,7 +908,7 @@ impl HttpServer {
             .route("/series", routing::post(series_query).get(series_query))
             .route("/parse_query", routing::post(parse_query).get(parse_query))
             .route(
-                "/label/:label_name/values",
+                "/label/{label_name}/values",
                 routing::get(label_values_query),
             )
             .with_state(prometheus_handler)
@@ -875,8 +957,7 @@ impl HttpServer {
             .route("/api/v2/write", routing::post(influxdb_write_v2))
             .layer(
                 ServiceBuilder::new()
-                    .layer(HandleErrorLayer::new(handle_error))
-                    .layer(RequestDecompressionLayer::new()),
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
             .route("/ping", routing::get(influxdb_ping))
             .route("/health", routing::get(influxdb_health))
@@ -896,15 +977,14 @@ impl HttpServer {
             .route("/v1/logs", routing::post(otlp::logs))
             .layer(
                 ServiceBuilder::new()
-                    .layer(HandleErrorLayer::new(handle_error))
-                    .layer(RequestDecompressionLayer::new()),
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
             .with_state(otlp_handler)
     }
 
-    fn route_config<S>(state: GreptimeOptionsConfigState) -> ApiRouter<S> {
-        ApiRouter::new()
-            .route("/config", apirouting::get(handler::config))
+    fn route_config<S>(state: GreptimeOptionsConfigState) -> Router<S> {
+        Router::new()
+            .route("/config", routing::get(handler::config))
             .with_state(state)
     }
 }
@@ -927,7 +1007,7 @@ impl Server for HttpServer {
 
     async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
         let (tx, rx) = oneshot::channel();
-        let server = {
+        let serve = {
             let mut shutdown_tx = self.shutdown_tx.lock().await;
             ensure!(
                 shutdown_tx.is_none(),
@@ -939,30 +1019,44 @@ impl Server for HttpServer {
                 app = configurator.config_http(app);
             }
             let app = self.build(app);
-            let server = axum::Server::try_bind(&listening)
-                .with_context(|_| AddressBindSnafu { addr: listening })?
-                .tcp_nodelay(true)
-                // Enable TCP keepalive to close the dangling established connections.
-                // It's configured to let the keepalive probes first send after the connection sits
-                // idle for 59 minutes, and then send every 10 seconds for 6 times.
-                // So the connection will be closed after roughly 1 hour.
-                .tcp_keepalive(Some(Duration::from_secs(59 * 60)))
-                .tcp_keepalive_interval(Some(Duration::from_secs(10)))
-                .tcp_keepalive_retries(Some(6))
-                .serve(app.into_make_service());
+            let listener = tokio::net::TcpListener::bind(listening)
+                .await
+                .context(AddressBindSnafu { addr: listening })?
+                .tap_io(|tcp_stream| {
+                    if let Err(e) = tcp_stream.set_nodelay(true) {
+                        error!(e; "Failed to set TCP_NODELAY on incoming connection");
+                    }
+                });
+            let serve = axum::serve(listener, app.into_make_service());
+
+            // FIXME(yingwen): Support keepalive.
+            // See:
+            // - https://github.com/tokio-rs/axum/discussions/2939
+            // - https://stackoverflow.com/questions/73069718/how-do-i-keep-alive-tokiotcpstream-in-rust
+            // let server = axum::Server::try_bind(&listening)
+            //     .with_context(|_| AddressBindSnafu { addr: listening })?
+            //     .tcp_nodelay(true)
+            //     // Enable TCP keepalive to close the dangling established connections.
+            //     // It's configured to let the keepalive probes first send after the connection sits
+            //     // idle for 59 minutes, and then send every 10 seconds for 6 times.
+            //     // So the connection will be closed after roughly 1 hour.
+            //     .tcp_keepalive(Some(Duration::from_secs(59 * 60)))
+            //     .tcp_keepalive_interval(Some(Duration::from_secs(10)))
+            //     .tcp_keepalive_retries(Some(6))
+            //     .serve(app.into_make_service());
 
             *shutdown_tx = Some(tx);
 
-            server
+            serve
         };
-        let listening = server.local_addr();
+        let listening = serve.local_addr().context(InternalIoSnafu)?;
         info!("HTTP server is bound to {}", listening);
 
         common_runtime::spawn_global(async move {
-            if let Err(e) = server
+            if let Err(e) = serve
                 .with_graceful_shutdown(rx.map(drop))
                 .await
-                .context(HyperSnafu)
+                .context(InternalIoSnafu)
             {
                 error!(e; "Failed to shutdown http server");
             }
@@ -973,15 +1067,6 @@ impl Server for HttpServer {
     fn name(&self) -> &str {
         HTTP_SERVER
     }
-}
-
-/// handle error middleware
-async fn handle_error(err: BoxError) -> Json<HttpResponse> {
-    error!(err; "Unhandled internal error: {}", err.to_string());
-    Json(HttpResponse::Error(ErrorResponse::from_error_message(
-        StatusCode::Unexpected,
-        format!("Unhandled internal error: {err}"),
-    )))
 }
 
 #[cfg(test)]
@@ -1081,17 +1166,11 @@ mod test {
         let instance = Arc::new(DummyInstance { _tx: tx });
         let sql_instance = ServerSqlQueryHandlerAdapter::arc(instance.clone());
         let server = HttpServerBuilder::new(HttpOptions::default())
-            .with_sql_handler(sql_instance, None)
+            .with_sql_handler(sql_instance)
             .build();
         server.build(server.make_app()).route(
             "/test/timeout",
-            get(forever.layer(
-                ServiceBuilder::new()
-                    .layer(HandleErrorLayer::new(|_: BoxError| async {
-                        StatusCode::REQUEST_TIMEOUT
-                    }))
-                    .layer(timeout()),
-            )),
+            get(forever.layer(ServiceBuilder::new().layer(timeout()))),
         )
     }
 
@@ -1104,9 +1183,11 @@ mod test {
 
     #[tokio::test]
     async fn test_http_server_request_timeout() {
+        common_telemetry::init_default_ut_logging();
+
         let (tx, _rx) = mpsc::channel(100);
         let app = make_test_app(tx);
-        let client = TestClient::new(app);
+        let client = TestClient::new(app).await;
         let res = client.get("/test/timeout").send().await;
         assert_eq!(res.status(), StatusCode::REQUEST_TIMEOUT);
 
@@ -1119,6 +1200,29 @@ mod test {
         assert_eq!(res.status(), StatusCode::REQUEST_TIMEOUT);
         let elapsed = now.elapsed();
         assert!(elapsed > Duration::from_millis(15));
+
+        tokio::time::timeout(
+            Duration::from_millis(15),
+            client
+                .get("/test/timeout")
+                .header(GREPTIME_DB_HEADER_TIMEOUT, "0s")
+                .send(),
+        )
+        .await
+        .unwrap_err();
+
+        tokio::time::timeout(
+            Duration::from_millis(15),
+            client
+                .get("/test/timeout")
+                .header(
+                    GREPTIME_DB_HEADER_TIMEOUT,
+                    humantime::format_duration(Duration::default()).to_string(),
+                )
+                .send(),
+        )
+        .await
+        .unwrap_err();
     }
 
     #[tokio::test]

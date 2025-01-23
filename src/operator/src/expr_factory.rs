@@ -15,13 +15,15 @@
 use std::collections::{HashMap, HashSet};
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::alter_expr::Kind;
+use api::v1::alter_database_expr::Kind as AlterDatabaseKind;
+use api::v1::alter_table_expr::Kind as AlterTableKind;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{
-    AddColumn, AddColumns, AlterExpr, Analyzer, ChangeTableOptions, ColumnDataType,
-    ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn,
-    DropColumns, ExpireAfter, ModifyColumnType, ModifyColumnTypes, RenameTable, SemanticType,
-    SetColumnFulltext, TableName, UnsetColumnFulltext,
+    set_index, unset_index, AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer,
+    ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
+    DropColumn, DropColumns, ExpireAfter, ModifyColumnType, ModifyColumnTypes, RenameTable,
+    SemanticType, SetDatabaseOptions, SetFulltext, SetIndex, SetInverted, SetTableOptions,
+    TableName, UnsetDatabaseOptions, UnsetFulltext, UnsetIndex, UnsetInverted, UnsetTableOptions,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
@@ -37,7 +39,9 @@ use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::ColumnOption;
-use sql::statements::alter::{AlterTable, AlterTableOperation};
+use sql::statements::alter::{
+    AlterDatabase, AlterDatabaseOperation, AlterTable, AlterTableOperation,
+};
 use sql::statements::create::{
     Column as SqlColumn, CreateExternalTable, CreateFlow, CreateTable, CreateView, TableConstraint,
 };
@@ -64,6 +68,7 @@ impl CreateExprFactory {
         table_name: &TableReference<'_>,
         column_schemas: &[api::v1::ColumnSchema],
         engine: &str,
+        desc: Option<&str>,
     ) -> Result<CreateTableExpr> {
         let column_exprs = ColumnExpr::from_column_schemas(column_schemas);
         let create_expr = common_grpc_expr::util::build_create_table_expr(
@@ -71,7 +76,7 @@ impl CreateExprFactory {
             table_name,
             column_exprs,
             engine,
-            "Created on insertion",
+            desc.unwrap_or("Created on insertion"),
         )
         .context(BuildCreateExprOnInsertionSnafu)?;
 
@@ -472,10 +477,11 @@ pub fn column_schemas_to_defs(
         .collect()
 }
 
-pub(crate) fn to_alter_expr(
+/// Converts a SQL alter table statement into a gRPC alter table expression.
+pub(crate) fn to_alter_table_expr(
     alter_table: AlterTable,
     query_ctx: &QueryContextRef,
-) -> Result<AlterExpr> {
+) -> Result<AlterTableExpr> {
     let (catalog_name, schema_name, table_name) =
         table_idents_to_full_name(alter_table.table_name(), query_ctx)
             .map_err(BoxedError::new)
@@ -488,18 +494,23 @@ pub(crate) fn to_alter_expr(
             }
             .fail();
         }
-        AlterTableOperation::AddColumn {
-            column_def,
-            location,
-        } => Kind::AddColumns(AddColumns {
-            add_columns: vec![AddColumn {
-                column_def: Some(
-                    sql_column_def_to_grpc_column_def(&column_def, Some(&query_ctx.timezone()))
-                        .map_err(BoxedError::new)
-                        .context(ExternalSnafu)?,
-                ),
-                location: location.as_ref().map(From::from),
-            }],
+        AlterTableOperation::AddColumns { add_columns } => AlterTableKind::AddColumns(AddColumns {
+            add_columns: add_columns
+                .into_iter()
+                .map(|add_column| {
+                    let column_def = sql_column_def_to_grpc_column_def(
+                        &add_column.column_def,
+                        Some(&query_ctx.timezone()),
+                    )
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+                    Ok(AddColumn {
+                        column_def: Some(column_def),
+                        location: add_column.location.as_ref().map(From::from),
+                        add_if_not_exists: add_column.add_if_not_exists,
+                    })
+                })
+                .collect::<Result<Vec<AddColumn>>>()?,
         }),
         AlterTableOperation::ModifyColumnType {
             column_name,
@@ -510,7 +521,7 @@ pub(crate) fn to_alter_expr(
             let (target_type, target_type_extension) = ColumnDataTypeWrapper::try_from(target_type)
                 .map(|w| w.to_parts())
                 .context(ColumnDataTypeSnafu)?;
-            Kind::ModifyColumnTypes(ModifyColumnTypes {
+            AlterTableKind::ModifyColumnTypes(ModifyColumnTypes {
                 modify_column_types: vec![ModifyColumnType {
                     column_name: column_name.value,
                     target_type: target_type as i32,
@@ -518,42 +529,90 @@ pub(crate) fn to_alter_expr(
                 }],
             })
         }
-        AlterTableOperation::DropColumn { name } => Kind::DropColumns(DropColumns {
+        AlterTableOperation::DropColumn { name } => AlterTableKind::DropColumns(DropColumns {
             drop_columns: vec![DropColumn {
                 name: name.value.to_string(),
             }],
         }),
-        AlterTableOperation::RenameTable { new_table_name } => Kind::RenameTable(RenameTable {
-            new_table_name: new_table_name.to_string(),
-        }),
-        AlterTableOperation::ChangeTableOptions { options } => {
-            Kind::ChangeTableOptions(ChangeTableOptions {
-                change_table_options: options.into_iter().map(Into::into).collect(),
+        AlterTableOperation::RenameTable { new_table_name } => {
+            AlterTableKind::RenameTable(RenameTable {
+                new_table_name: new_table_name.to_string(),
             })
         }
-        AlterTableOperation::SetColumnFulltext {
-            column_name,
-            options,
-        } => Kind::SetColumnFulltext(SetColumnFulltext {
-            column_name: column_name.value,
-            enable: options.enable,
-            analyzer: match options.analyzer {
-                FulltextAnalyzer::English => Analyzer::English.into(),
-                FulltextAnalyzer::Chinese => Analyzer::Chinese.into(),
+        AlterTableOperation::SetTableOptions { options } => {
+            AlterTableKind::SetTableOptions(SetTableOptions {
+                table_options: options.into_iter().map(Into::into).collect(),
+            })
+        }
+        AlterTableOperation::UnsetTableOptions { keys } => {
+            AlterTableKind::UnsetTableOptions(UnsetTableOptions { keys })
+        }
+        AlterTableOperation::SetIndex { options } => AlterTableKind::SetIndex(match options {
+            sql::statements::alter::SetIndexOperation::Fulltext {
+                column_name,
+                options,
+            } => SetIndex {
+                options: Some(set_index::Options::Fulltext(SetFulltext {
+                    column_name: column_name.value,
+                    enable: options.enable,
+                    analyzer: match options.analyzer {
+                        FulltextAnalyzer::English => Analyzer::English.into(),
+                        FulltextAnalyzer::Chinese => Analyzer::Chinese.into(),
+                    },
+                    case_sensitive: options.case_sensitive,
+                })),
             },
-            case_sensitive: options.case_sensitive,
+            sql::statements::alter::SetIndexOperation::Inverted { column_name } => SetIndex {
+                options: Some(set_index::Options::Inverted(SetInverted {
+                    column_name: column_name.value,
+                })),
+            },
         }),
-        AlterTableOperation::UnsetColumnFulltext { column_name } => {
-            Kind::UnsetColumnFulltext(UnsetColumnFulltext {
-                column_name: column_name.value,
-            })
-        }
+        AlterTableOperation::UnsetIndex { options } => AlterTableKind::UnsetIndex(match options {
+            sql::statements::alter::UnsetIndexOperation::Fulltext { column_name } => UnsetIndex {
+                options: Some(unset_index::Options::Fulltext(UnsetFulltext {
+                    column_name: column_name.value,
+                })),
+            },
+            sql::statements::alter::UnsetIndexOperation::Inverted { column_name } => UnsetIndex {
+                options: Some(unset_index::Options::Inverted(UnsetInverted {
+                    column_name: column_name.value,
+                })),
+            },
+        }),
     };
 
-    Ok(AlterExpr {
+    Ok(AlterTableExpr {
         catalog_name,
         schema_name,
         table_name,
+        kind: Some(kind),
+    })
+}
+
+/// Try to cast the `[AlterDatabase]` statement into gRPC `[AlterDatabaseExpr]`.
+pub fn to_alter_database_expr(
+    alter_database: AlterDatabase,
+    query_ctx: &QueryContextRef,
+) -> Result<AlterDatabaseExpr> {
+    let catalog = query_ctx.current_catalog();
+    let schema = alter_database.database_name;
+
+    let kind = match alter_database.alter_operation {
+        AlterDatabaseOperation::SetDatabaseOption { options } => {
+            let options = options.into_iter().map(Into::into).collect();
+            AlterDatabaseKind::SetDatabaseOptions(SetDatabaseOptions {
+                set_database_options: options,
+            })
+        }
+        AlterDatabaseOperation::UnsetDatabaseOption { keys } => {
+            AlterDatabaseKind::UnsetDatabaseOptions(UnsetDatabaseOptions { keys })
+        }
+    };
+
+    Ok(AlterDatabaseExpr {
+        catalog_name: catalog.to_string(),
+        schema_name: schema.to_string(),
         kind: Some(kind),
     })
 }
@@ -653,6 +712,7 @@ pub fn to_create_flow_task_expr(
 
 #[cfg(test)]
 mod tests {
+    use api::v1::{SetDatabaseOptions, UnsetDatabaseOptions};
     use datatypes::value::Value;
     use session::context::{QueryContext, QueryContextBuilder};
     use sql::dialect::GreptimeDbDialect;
@@ -758,6 +818,55 @@ mod tests {
 
     #[test]
     fn test_to_alter_expr() {
+        let sql = "ALTER DATABASE greptime SET key1='value1', key2='value2';";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::AlterDatabase(alter_database) = stmt else {
+            unreachable!()
+        };
+
+        let expr = to_alter_database_expr(alter_database, &QueryContext::arc()).unwrap();
+        let kind = expr.kind.unwrap();
+
+        let AlterDatabaseKind::SetDatabaseOptions(SetDatabaseOptions {
+            set_database_options,
+        }) = kind
+        else {
+            unreachable!()
+        };
+
+        assert_eq!(2, set_database_options.len());
+        assert_eq!("key1", set_database_options[0].key);
+        assert_eq!("value1", set_database_options[0].value);
+        assert_eq!("key2", set_database_options[1].key);
+        assert_eq!("value2", set_database_options[1].value);
+
+        let sql = "ALTER DATABASE greptime UNSET key1, key2;";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::AlterDatabase(alter_database) = stmt else {
+            unreachable!()
+        };
+
+        let expr = to_alter_database_expr(alter_database, &QueryContext::arc()).unwrap();
+        let kind = expr.kind.unwrap();
+
+        let AlterDatabaseKind::UnsetDatabaseOptions(UnsetDatabaseOptions { keys }) = kind else {
+            unreachable!()
+        };
+
+        assert_eq!(2, keys.len());
+        assert!(keys.contains(&"key1".to_string()));
+        assert!(keys.contains(&"key2".to_string()));
+
         let sql = "ALTER TABLE monitor add column ts TIMESTAMP default '2024-01-30T00:01:01';";
         let stmt =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
@@ -765,15 +874,15 @@ mod tests {
                 .pop()
                 .unwrap();
 
-        let Statement::Alter(alter_table) = stmt else {
+        let Statement::AlterTable(alter_table) = stmt else {
             unreachable!()
         };
 
         // query context with system timezone UTC.
-        let expr = to_alter_expr(alter_table.clone(), &QueryContext::arc()).unwrap();
+        let expr = to_alter_table_expr(alter_table.clone(), &QueryContext::arc()).unwrap();
         let kind = expr.kind.unwrap();
 
-        let Kind::AddColumns(AddColumns { add_columns, .. }) = kind else {
+        let AlterTableKind::AddColumns(AddColumns { add_columns, .. }) = kind else {
             unreachable!()
         };
 
@@ -791,10 +900,10 @@ mod tests {
             .timezone(Timezone::from_tz_string("+08:00").unwrap())
             .build()
             .into();
-        let expr = to_alter_expr(alter_table, &ctx).unwrap();
+        let expr = to_alter_table_expr(alter_table, &ctx).unwrap();
         let kind = expr.kind.unwrap();
 
-        let Kind::AddColumns(AddColumns { add_columns, .. }) = kind else {
+        let AlterTableKind::AddColumns(AddColumns { add_columns, .. }) = kind else {
             unreachable!()
         };
 
@@ -816,15 +925,15 @@ mod tests {
                 .pop()
                 .unwrap();
 
-        let Statement::Alter(alter_table) = stmt else {
+        let Statement::AlterTable(alter_table) = stmt else {
             unreachable!()
         };
 
         // query context with system timezone UTC.
-        let expr = to_alter_expr(alter_table.clone(), &QueryContext::arc()).unwrap();
+        let expr = to_alter_table_expr(alter_table.clone(), &QueryContext::arc()).unwrap();
         let kind = expr.kind.unwrap();
 
-        let Kind::ModifyColumnTypes(ModifyColumnTypes {
+        let AlterTableKind::ModifyColumnTypes(ModifyColumnTypes {
             modify_column_types,
         }) = kind
         else {

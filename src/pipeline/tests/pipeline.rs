@@ -417,7 +417,7 @@ transform:
     .map(|(_, d)| GreptimeValue { value_data: d })
     .collect::<Vec<GreptimeValue>>();
 
-    let yaml_content = Content::Yaml(pipeline_yaml.into());
+    let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline<GreptimeTransformer> =
         parse(&yaml_content).expect("failed to parse pipeline");
     let mut stats = pipeline.init_intermediate_state();
@@ -487,7 +487,7 @@ transform:
       type: json
 "#;
 
-    let yaml_content = Content::Yaml(pipeline_yaml.into());
+    let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
 
     let mut status = pipeline.init_intermediate_state();
@@ -592,7 +592,7 @@ transform:
       type: json
 "#;
 
-    let yaml_content = Content::Yaml(pipeline_yaml.into());
+    let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
 
     let mut status = pipeline.init_intermediate_state();
@@ -655,7 +655,7 @@ transform:
     index: timestamp
 "#;
 
-    let yaml_content = Content::Yaml(pipeline_yaml.into());
+    let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
 
     let mut status = pipeline.init_intermediate_state();
@@ -670,6 +670,102 @@ transform:
     let expected = vec![
         StringValue("hello world".into()),
         TimestampNanosecondValue(1716668197217000000),
+    ];
+
+    assert_eq!(expected, r);
+}
+
+#[test]
+fn test_decolorize() {
+    let input_value = serde_json::json!({
+        "message": "\u{001b}[32mSuccess\u{001b}[0m and \u{001b}[31mError\u{001b}[0m"
+    });
+
+    let pipeline_yaml = r#"
+processors:
+  - decolorize:
+      fields:
+        - message
+transform:
+  - fields:
+      - message
+    type: string
+"#;
+    let yaml_content = Content::Yaml(pipeline_yaml);
+    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
+
+    let mut status = pipeline.init_intermediate_state();
+    pipeline.prepare(input_value, &mut status).unwrap();
+    let row = pipeline.exec_mut(&mut status).unwrap();
+
+    let r = row
+        .values
+        .into_iter()
+        .map(|v| v.value_data.unwrap())
+        .collect::<Vec<_>>();
+
+    let expected = StringValue("Success and Error".into());
+    assert_eq!(expected, r[0]);
+}
+
+#[test]
+fn test_digest() {
+    let input_value = serde_json::json!({
+        "message": "hello world",
+        "message_with_ip": "hello 192.168.1.1 world",
+        "message_with_uuid": "hello 123e4567-e89b-12d3-a456-426614174000 world",
+        "message_with_quote": "hello 'quoted text' world",
+        "message_bracket": "hello [bracketed text] world",
+        "message_with_foobar": "hello foobar world"
+    });
+
+    let pipeline_yaml = r#"
+processors:
+  - digest:
+      fields:
+        - message
+        - message_with_ip
+        - message_with_uuid
+        - message_with_quote
+        - message_bracket
+        - message_with_foobar
+      presets:
+        - ip
+        - uuid
+        - bracketed
+        - quoted
+      regex:
+        - foobar
+transform:
+  - fields:
+      - message_with_ip_digest
+      - message_with_uuid_digest
+      - message_with_quote_digest
+      - message_bracket_digest
+      - message_with_foobar_digest
+    type: string
+"#;
+
+    let yaml_content = Content::Yaml(pipeline_yaml);
+    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
+
+    let mut status = pipeline.init_intermediate_state();
+    pipeline.prepare(input_value, &mut status).unwrap();
+    let row = pipeline.exec_mut(&mut status).unwrap();
+
+    let mut r = row
+        .values
+        .into_iter()
+        .map(|v| v.value_data.unwrap())
+        .collect::<Vec<_>>();
+    r.pop(); // remove the timestamp value
+
+    let expected = vec![
+        StringValue("hello  world".into()),
+        StringValue("hello  world".into()),
+        StringValue("hello  world".into()),
+        StringValue("hello  world".into()),
+        StringValue("hello  world".into()),
     ];
 
     assert_eq!(expected, r);

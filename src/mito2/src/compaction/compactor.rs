@@ -12,15 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::num::NonZero;
 use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::region::compact_request;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{info, warn};
+use common_time::TimeToLive;
 use object_store::manager::ObjectStoreManagerRef;
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
@@ -34,19 +35,45 @@ use crate::error::{EmptyRegionDirSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Res
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::manifest_compress_type;
-use crate::memtable::time_partition::TimePartitions;
-use crate::memtable::MemtableBuilderProvider;
 use crate::read::Source;
 use crate::region::opener::new_manifest_dir;
 use crate::region::options::RegionOptions;
-use crate::region::version::{VersionBuilder, VersionRef};
+use crate::region::version::VersionRef;
 use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
 use crate::schedule::scheduler::LocalScheduler;
-use crate::sst::file::{FileMeta, IndexType};
+use crate::sst::file::FileMeta;
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::parquet::WriteOptions;
+use crate::sst::version::{SstVersion, SstVersionRef};
+
+/// Region version for compaction that does not hold memtables.
+#[derive(Clone)]
+pub struct CompactionVersion {
+    /// Metadata of the region.
+    ///
+    /// Altering metadata isn't frequent, storing metadata in Arc to allow sharing
+    /// metadata and reuse metadata when creating a new `Version`.
+    pub(crate) metadata: RegionMetadataRef,
+    /// Options of the region.
+    pub(crate) options: RegionOptions,
+    /// SSTs of the region.
+    pub(crate) ssts: SstVersionRef,
+    /// Inferred compaction time window.
+    pub(crate) compaction_time_window: Option<Duration>,
+}
+
+impl From<VersionRef> for CompactionVersion {
+    fn from(value: VersionRef) -> Self {
+        Self {
+            metadata: value.metadata.clone(),
+            options: value.options.clone(),
+            ssts: value.ssts.clone(),
+            compaction_time_window: value.compaction_time_window,
+        }
+    }
+}
 
 /// CompactionRegion represents a region that needs to be compacted.
 /// It's the subset of MitoRegion.
@@ -61,9 +88,15 @@ pub struct CompactionRegion {
     pub(crate) cache_manager: CacheManagerRef,
     pub(crate) access_layer: AccessLayerRef,
     pub(crate) manifest_ctx: Arc<ManifestContext>,
-    pub(crate) current_version: VersionRef,
+    pub(crate) current_version: CompactionVersion,
     pub(crate) file_purger: Option<Arc<LocalFilePurger>>,
-    pub(crate) ttl: Option<Duration>,
+    pub(crate) ttl: Option<TimeToLive>,
+
+    /// Controls the parallelism of this compaction task. Default is 1.
+    ///
+    /// The parallel is inside this compaction task, not across different compaction tasks.
+    /// It can be different windows of the same compaction task or something like this.
+    pub max_parallelism: usize,
 }
 
 /// OpenCompactionRegionRequest represents the request to open a compaction region.
@@ -72,6 +105,7 @@ pub struct OpenCompactionRegionRequest {
     pub region_id: RegionId,
     pub region_dir: String,
     pub region_options: RegionOptions,
+    pub max_parallelism: usize,
 }
 
 /// Open a compaction region from a compaction request.
@@ -146,30 +180,14 @@ pub async fn open_compaction_region(
     };
 
     let current_version = {
-        let memtable_builder = MemtableBuilderProvider::new(None, Arc::new(mito_config.clone()))
-            .builder_for_options(
-                req.region_options.memtable.as_ref(),
-                req.region_options.need_dedup(),
-                req.region_options.merge_mode(),
-            );
-
-        // Initial memtable id is 0.
-        let mutable = Arc::new(TimePartitions::new(
-            region_metadata.clone(),
-            memtable_builder.clone(),
-            0,
-            req.region_options.compaction.time_window(),
-        ));
-
-        let version = VersionBuilder::new(region_metadata.clone(), mutable)
-            .add_files(file_purger.clone(), manifest.files.values().cloned())
-            .flushed_entry_id(manifest.flushed_entry_id)
-            .flushed_sequence(manifest.flushed_sequence)
-            .truncated_entry_id(manifest.truncated_entry_id)
-            .compaction_time_window(manifest.compaction_time_window)
-            .options(req.region_options.clone())
-            .build();
-        Arc::new(version)
+        let mut ssts = SstVersion::new();
+        ssts.add_files(file_purger.clone(), manifest.files.values().cloned());
+        CompactionVersion {
+            metadata: region_metadata.clone(),
+            options: req.region_options.clone(),
+            ssts: Arc::new(ssts),
+            compaction_time_window: manifest.compaction_time_window,
+        }
     };
 
     let ttl = find_ttl(
@@ -180,7 +198,7 @@ pub async fn open_compaction_region(
     .await
     .unwrap_or_else(|e| {
         warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
-        None
+        TimeToLive::default()
     });
     Ok(CompactionRegion {
         region_id: req.region_id,
@@ -193,7 +211,8 @@ pub async fn open_compaction_region(
         manifest_ctx,
         current_version,
         file_purger: Some(file_purger),
-        ttl,
+        ttl: Some(ttl),
+        max_parallelism: req.max_parallelism,
     })
 }
 
@@ -255,6 +274,7 @@ impl Compactor for DefaultCompactor {
         let mut futs = Vec::with_capacity(picker_output.outputs.len());
         let mut compacted_inputs =
             Vec::with_capacity(picker_output.outputs.iter().map(|o| o.inputs.len()).sum());
+        let internal_parallelism = compaction_region.max_parallelism.max(1);
 
         for output in picker_output.outputs.drain(..) {
             compacted_inputs.extend(output.inputs.iter().map(|f| f.meta_ref().clone()));
@@ -291,6 +311,14 @@ impl Compactor for DefaultCompactor {
             let merge_mode = compaction_region.current_version.options.merge_mode();
             let inverted_index_config = compaction_region.engine_config.inverted_index.clone();
             let fulltext_index_config = compaction_region.engine_config.fulltext_index.clone();
+            let bloom_filter_index_config =
+                compaction_region.engine_config.bloom_filter_index.clone();
+            let max_sequence = output
+                .inputs
+                .iter()
+                .map(|f| f.meta_ref().sequence)
+                .max()
+                .flatten();
             futs.push(async move {
                 let reader = CompactionSstReaderBuilder {
                     metadata: region_metadata.clone(),
@@ -313,9 +341,11 @@ impl Compactor for DefaultCompactor {
                             source: Source::Reader(reader),
                             cache_manager,
                             storage,
+                            max_sequence: max_sequence.map(NonZero::get),
                             index_options,
                             inverted_index_config,
                             fulltext_index_config,
+                            bloom_filter_index_config,
                         },
                         &write_opts,
                     )
@@ -326,28 +356,19 @@ impl Compactor for DefaultCompactor {
                         time_range: sst_info.time_range,
                         level: output.output_level,
                         file_size: sst_info.file_size,
-                        available_indexes: {
-                            let mut indexes = SmallVec::new();
-                            if sst_info.index_metadata.inverted_index.is_available() {
-                                indexes.push(IndexType::InvertedIndex);
-                            }
-                            if sst_info.index_metadata.fulltext_index.is_available() {
-                                indexes.push(IndexType::FulltextIndex);
-                            }
-                            indexes
-                        },
+                        available_indexes: sst_info.index_metadata.build_available_indexes(),
                         index_file_size: sst_info.index_metadata.file_size,
                         num_rows: sst_info.num_rows as u64,
                         num_row_groups: sst_info.num_row_groups,
+                        sequence: max_sequence,
                     });
                 Ok(file_meta_opt)
             });
         }
         let mut output_files = Vec::with_capacity(futs.len());
         while !futs.is_empty() {
-            let mut task_chunk =
-                Vec::with_capacity(crate::compaction::task::MAX_PARALLEL_COMPACTION);
-            for _ in 0..crate::compaction::task::MAX_PARALLEL_COMPACTION {
+            let mut task_chunk = Vec::with_capacity(internal_parallelism);
+            for _ in 0..internal_parallelism {
                 if let Some(task) = futs.pop() {
                     task_chunk.push(common_runtime::spawn_compact(task));
                 }

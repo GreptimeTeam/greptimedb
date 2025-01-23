@@ -14,6 +14,8 @@
 
 //! Datanode configurations
 
+use core::time::Duration;
+
 use common_base::readable_size::ReadableSize;
 use common_base::secrets::{ExposeSecret, SecretString};
 use common_config::Configurable;
@@ -22,6 +24,7 @@ use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_wal::config::DatanodeWalConfig;
 use file_engine::config::EngineConfig as FileEngineConfig;
 use meta_client::MetaClientOptions;
+use metric_engine::config::EngineConfig as MetricEngineConfig;
 use mito2::config::MitoConfig;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
@@ -30,7 +33,7 @@ use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 use servers::Mode;
 
-pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::gb(1);
+pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::gb(5);
 
 /// Default data home in file storage
 const DEFAULT_DATA_HOME: &str = "/tmp/greptimedb";
@@ -56,6 +59,11 @@ impl ObjectStoreConfig {
             Self::Azblob(_) => "Azblob",
             Self::Gcs(_) => "Gcs",
         }
+    }
+
+    /// Returns true when it's a remote object storage such as AWS s3 etc.
+    pub fn is_object_storage(&self) -> bool {
+        !matches!(self, Self::File(_))
     }
 
     /// Returns the object storage configuration name, return the provider name if it's empty.
@@ -89,6 +97,13 @@ pub struct StorageConfig {
     pub providers: Vec<ObjectStoreConfig>,
 }
 
+impl StorageConfig {
+    /// Returns true when the default storage config is a remote object storage service such as AWS S3, etc.
+    pub fn is_object_storage(&self) -> bool {
+        self.store.is_object_storage()
+    }
+}
+
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
@@ -112,6 +127,38 @@ pub struct ObjectStorageCacheConfig {
     pub cache_capacity: Option<ReadableSize>,
 }
 
+/// The http client options to the storage.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct HttpClientConfig {
+    /// The maximum idle connection per host allowed in the pool.
+    pub(crate) pool_max_idle_per_host: u32,
+
+    /// The timeout for only the connect phase of a http client.
+    #[serde(with = "humantime_serde")]
+    pub(crate) connect_timeout: Duration,
+
+    /// The total request timeout, applied from when the request starts connecting until the response body has finished.
+    /// Also considered a total deadline.
+    #[serde(with = "humantime_serde")]
+    pub(crate) timeout: Duration,
+
+    /// The timeout for idle sockets being kept-alive.
+    #[serde(with = "humantime_serde")]
+    pub(crate) pool_idle_timeout: Duration,
+}
+
+impl Default for HttpClientConfig {
+    fn default() -> Self {
+        Self {
+            pool_max_idle_per_host: 1024,
+            connect_timeout: Duration::from_secs(30),
+            timeout: Duration::from_secs(30),
+            pool_idle_timeout: Duration::from_secs(90),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct S3Config {
@@ -126,6 +173,7 @@ pub struct S3Config {
     pub region: Option<String>,
     #[serde(flatten)]
     pub cache: ObjectStorageCacheConfig,
+    pub http_client: HttpClientConfig,
 }
 
 impl PartialEq for S3Config {
@@ -138,6 +186,7 @@ impl PartialEq for S3Config {
             && self.endpoint == other.endpoint
             && self.region == other.region
             && self.cache == other.cache
+            && self.http_client == other.http_client
     }
 }
 
@@ -154,6 +203,7 @@ pub struct OssConfig {
     pub endpoint: String,
     #[serde(flatten)]
     pub cache: ObjectStorageCacheConfig,
+    pub http_client: HttpClientConfig,
 }
 
 impl PartialEq for OssConfig {
@@ -165,6 +215,7 @@ impl PartialEq for OssConfig {
             && self.access_key_secret.expose_secret() == other.access_key_secret.expose_secret()
             && self.endpoint == other.endpoint
             && self.cache == other.cache
+            && self.http_client == other.http_client
     }
 }
 
@@ -182,6 +233,7 @@ pub struct AzblobConfig {
     pub sas_token: Option<String>,
     #[serde(flatten)]
     pub cache: ObjectStorageCacheConfig,
+    pub http_client: HttpClientConfig,
 }
 
 impl PartialEq for AzblobConfig {
@@ -194,6 +246,7 @@ impl PartialEq for AzblobConfig {
             && self.endpoint == other.endpoint
             && self.sas_token == other.sas_token
             && self.cache == other.cache
+            && self.http_client == other.http_client
     }
 }
 
@@ -211,6 +264,7 @@ pub struct GcsConfig {
     pub endpoint: String,
     #[serde(flatten)]
     pub cache: ObjectStorageCacheConfig,
+    pub http_client: HttpClientConfig,
 }
 
 impl PartialEq for GcsConfig {
@@ -223,6 +277,7 @@ impl PartialEq for GcsConfig {
             && self.credential.expose_secret() == other.credential.expose_secret()
             && self.endpoint == other.endpoint
             && self.cache == other.cache
+            && self.http_client == other.http_client
     }
 }
 
@@ -237,6 +292,7 @@ impl Default for S3Config {
             endpoint: Option::default(),
             region: Option::default(),
             cache: ObjectStorageCacheConfig::default(),
+            http_client: HttpClientConfig::default(),
         }
     }
 }
@@ -251,6 +307,7 @@ impl Default for OssConfig {
             access_key_secret: SecretString::from(String::default()),
             endpoint: String::default(),
             cache: ObjectStorageCacheConfig::default(),
+            http_client: HttpClientConfig::default(),
         }
     }
 }
@@ -266,6 +323,7 @@ impl Default for AzblobConfig {
             endpoint: String::default(),
             sas_token: Option::default(),
             cache: ObjectStorageCacheConfig::default(),
+            http_client: HttpClientConfig::default(),
         }
     }
 }
@@ -281,6 +339,7 @@ impl Default for GcsConfig {
             credential: SecretString::from(String::default()),
             endpoint: String::default(),
             cache: ObjectStorageCacheConfig::default(),
+            http_client: HttpClientConfig::default(),
         }
     }
 }
@@ -374,6 +433,8 @@ pub enum RegionEngineConfig {
     Mito(MitoConfig),
     #[serde(rename = "file")]
     File(FileEngineConfig),
+    #[serde(rename = "metric")]
+    Metric(MetricEngineConfig),
 }
 
 #[cfg(test)]
@@ -404,6 +465,20 @@ mod tests {
         });
         assert_eq!("test", s3_config.config_name());
         assert_eq!("S3", s3_config.provider_name());
+    }
+
+    #[test]
+    fn test_is_object_storage() {
+        let store = ObjectStoreConfig::default();
+        assert!(!store.is_object_storage());
+        let s3_config = ObjectStoreConfig::S3(S3Config::default());
+        assert!(s3_config.is_object_storage());
+        let oss_config = ObjectStoreConfig::Oss(OssConfig::default());
+        assert!(oss_config.is_object_storage());
+        let gcs_config = ObjectStoreConfig::Gcs(GcsConfig::default());
+        assert!(gcs_config.is_object_storage());
+        let azblob_config = ObjectStoreConfig::Azblob(AzblobConfig::default());
+        assert!(azblob_config.is_object_storage());
     }
 
     #[test]

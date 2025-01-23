@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use common_error::ext::ErrorExt;
 use hydroflow::scheduled::graph::Hydroflow;
 use hydroflow::scheduled::handoff::TeeingHandoff;
 use hydroflow::scheduled::port::RecvPort;
@@ -25,6 +26,7 @@ use itertools::Itertools;
 use tokio::sync::Mutex;
 
 use crate::expr::{Batch, EvalError, ScalarExpr};
+use crate::metrics::METRIC_FLOW_ERRORS;
 use crate::repr::DiffRow;
 use crate::utils::ArrangeHandler;
 
@@ -81,22 +83,6 @@ impl Arranged {
                 readers: self.readers.clone(),
                 writer: self.writer.clone(),
             })
-    }
-
-    /// Copy the full arrangement, including the future and the current updates.
-    ///
-    /// Internally `Rc-ed` so it's cheap to copy
-    pub fn try_copy_full(&self) -> Option<Self> {
-        self.arrangement
-            .clone_full_arrange()
-            .map(|arrangement| Arranged {
-                arrangement,
-                readers: self.readers.clone(),
-                writer: self.writer.clone(),
-            })
-    }
-    pub fn add_reader(&self, id: SubgraphId) {
-        self.readers.borrow_mut().push(id)
     }
 }
 
@@ -201,6 +187,9 @@ impl ErrCollector {
     }
 
     pub fn push_err(&self, err: EvalError) {
+        METRIC_FLOW_ERRORS
+            .with_label_values(&[err.status_code().as_ref()])
+            .inc();
         self.inner.blocking_lock().push_back(err)
     }
 

@@ -21,7 +21,7 @@ use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_telemetry::{debug, error};
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::SchemaRef;
-use datatypes::types::{json_type_value_to_string, vector_type_value_to_string};
+use datatypes::types::json_type_value_to_string;
 use futures::StreamExt;
 use opensrv_mysql::{
     Column, ColumnFlags, ColumnType, ErrorKind, OkResponse, QueryResultWriter, RowWriter,
@@ -217,11 +217,6 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                                 .context(ConvertSqlValueSnafu)?;
                             row_writer.write_col(s)?;
                         }
-                        ConcreteDataType::Vector(d) => {
-                            let s = vector_type_value_to_string(&v, d.dim)
-                                .context(ConvertSqlValueSnafu)?;
-                            row_writer.write_col(s)?;
-                        }
                         _ => {
                             row_writer.write_col(v.deref())?;
                         }
@@ -303,7 +298,7 @@ pub(crate) fn create_mysql_column(
         ConcreteDataType::Duration(_) => Ok(ColumnType::MYSQL_TYPE_TIME),
         ConcreteDataType::Decimal128(_) => Ok(ColumnType::MYSQL_TYPE_DECIMAL),
         ConcreteDataType::Json(_) => Ok(ColumnType::MYSQL_TYPE_JSON),
-        ConcreteDataType::Vector(_) => Ok(ColumnType::MYSQL_TYPE_STRING),
+        ConcreteDataType::Vector(_) => Ok(ColumnType::MYSQL_TYPE_BLOB),
         _ => error::UnsupportedDataTypeSnafu {
             data_type,
             reason: "not implemented",

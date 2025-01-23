@@ -35,7 +35,7 @@ use datafusion_common::{ColumnStatistics, DataFusionError, Statistics};
 use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use futures::{Stream, StreamExt};
-use store_api::region_engine::{PartitionRange, RegionScannerRef};
+use store_api::region_engine::{PartitionRange, PrepareRequest, RegionScannerRef};
 
 use crate::table::metrics::StreamMetrics;
 
@@ -112,6 +112,7 @@ impl RegionScanExec {
     pub fn with_new_partitions(
         &self,
         partitions: Vec<Vec<PartitionRange>>,
+        target_partitions: usize,
     ) -> Result<Self, BoxedError> {
         if self.is_partition_set {
             warn!("Setting partition ranges more than once for RegionScanExec");
@@ -123,8 +124,11 @@ impl RegionScanExec {
 
         {
             let mut scanner = self.scanner.lock().unwrap();
-            let distinguish_partition_range = scanner.properties().distinguish_partition_range();
-            scanner.prepare(partitions, distinguish_partition_range)?;
+            scanner.prepare(
+                PrepareRequest::default()
+                    .with_ranges(partitions)
+                    .with_target_partitions(target_partitions),
+            )?;
         }
 
         Ok(Self {
@@ -141,9 +145,10 @@ impl RegionScanExec {
 
     pub fn with_distinguish_partition_range(&self, distinguish_partition_range: bool) {
         let mut scanner = self.scanner.lock().unwrap();
-        let partition_ranges = scanner.properties().partitions.clone();
         // set distinguish_partition_range won't fail
-        let _ = scanner.prepare(partition_ranges, distinguish_partition_range);
+        let _ = scanner.prepare(
+            PrepareRequest::default().with_distinguish_partition_range(distinguish_partition_range),
+        );
     }
 
     pub fn time_index(&self) -> String {
@@ -241,6 +246,10 @@ impl ExecutionPlan for RegionScanExec {
             Statistics::new_unknown(&self.arrow_schema)
         };
         Ok(statistics)
+    }
+
+    fn name(&self) -> &str {
+        "RegionScanExec"
     }
 }
 

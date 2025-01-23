@@ -20,8 +20,11 @@ use datafusion_common::{Result, ScalarValue};
 use datafusion_expr::{Expr, LogicalPlan};
 use datafusion_optimizer::analyzer::AnalyzerRule;
 
+use crate::plan::ExtractExpr;
+
 /// StringNormalizationRule normalizes(trims) string values in logical plan.
 /// Mainly used for timestamp trimming
+#[derive(Debug)]
 pub struct StringNormalizationRule;
 
 impl AnalyzerRule for StringNormalizationRule {
@@ -30,7 +33,7 @@ impl AnalyzerRule for StringNormalizationRule {
             let mut converter = StringNormalizationConverter;
             let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
             let expr = plan
-                .expressions()
+                .expressions_consider_join()
                 .into_iter()
                 .map(|e| e.rewrite(&mut converter).map(|x| x.data))
                 .collect::<Result<Vec<_>>>()?;
@@ -112,7 +115,7 @@ mod tests {
             let expected = format!("Projection: CAST(Utf8(\"2017-07-23 13:10:11\") AS Timestamp({:#?}, None))\n  TableScan: t",
                                    time_unit
             );
-            assert_eq!(expected, format!("{:?}", result));
+            assert_eq!(expected, result.to_string());
         }
     }
 
@@ -130,7 +133,7 @@ mod tests {
         let expected = String::from(
             "Projection: CAST(Int64(158412331400600000) AS Timestamp(Nanosecond, None))\n  TableScan: t"
         );
-        assert_eq!(expected, format!("{:?}", result));
+        assert_eq!(expected, result.to_string());
 
         let proj_string_to_int = vec![Expr::Cast(Cast::new(
             Box::new(lit("  5   ")),
@@ -141,7 +144,7 @@ mod tests {
             .analyze(string_to_int_plan, &ConfigOptions::default())
             .unwrap();
         let expected = String::from("Projection: CAST(Utf8(\"  5   \") AS Int32)\n  TableScan: t");
-        assert_eq!(expected, format!("{:?}", result));
+        assert_eq!(expected, result.to_string());
     }
 
     fn create_test_plan_with_project(proj: Vec<Expr>) -> LogicalPlan {
@@ -155,7 +158,7 @@ mod tests {
     fn create_timestamp_cast_project(unit: TimeUnit, timestamp_str: &str) -> (TimeUnit, Vec<Expr>) {
         let proj = vec![Expr::Cast(Cast::new(
             Box::new(lit(timestamp_str)),
-            DataType::Timestamp(unit.clone(), None),
+            DataType::Timestamp(unit, None),
         ))];
         (unit, proj)
     }

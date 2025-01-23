@@ -33,8 +33,10 @@ use crate::dist_plan::commutativity::{
     partial_commutative_transformer, Categorizer, Commutativity,
 };
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
+use crate::plan::ExtractExpr;
 use crate::query_engine::DefaultSerializer;
 
+#[derive(Debug)]
 pub struct DistPlannerAnalyzer;
 
 impl AnalyzerRule for DistPlannerAnalyzer {
@@ -64,7 +66,7 @@ impl AnalyzerRule for DistPlannerAnalyzer {
 impl DistPlannerAnalyzer {
     fn inspect_plan_with_subquery(plan: LogicalPlan) -> DfResult<Transformed<LogicalPlan>> {
         let exprs = plan
-            .expressions()
+            .expressions_consider_join()
             .into_iter()
             .map(|e| e.transform(&Self::transform_subquery).map(|x| x.data))
             .collect::<DfResult<Vec<_>>>()?;
@@ -267,7 +269,8 @@ impl PlanRewriter {
 
         // expand stages
         for new_stage in self.stage.drain(..) {
-            node = new_stage.with_new_exprs(new_stage.expressions(), vec![node.clone()])?;
+            node = new_stage
+                .with_new_exprs(new_stage.expressions_consider_join(), vec![node.clone()])?;
         }
         self.set_expanded();
 
@@ -376,8 +379,9 @@ mod test {
     use std::sync::Arc;
 
     use datafusion::datasource::DefaultTableSource;
+    use datafusion::functions_aggregate::expr_fn::avg;
     use datafusion_common::JoinType;
-    use datafusion_expr::{avg, col, lit, Expr, LogicalPlanBuilder};
+    use datafusion_expr::{col, lit, Expr, LogicalPlanBuilder};
     use table::table::adapter::DfTableProviderAdapter;
     use table::table::numbers::NumbersTable;
 
@@ -413,7 +417,7 @@ mod test {
             "          TableScan: t",
         ]
         .join("\n");
-        assert_eq!(expected, format!("{:?}", result));
+        assert_eq!(expected, result.to_string());
     }
 
     #[test]
@@ -433,7 +437,7 @@ mod test {
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
         let expected = "MergeScan [is_placeholder=false]";
-        assert_eq!(expected, format!("{:?}", result));
+        assert_eq!(expected, result.to_string());
     }
 
     #[test]
@@ -460,7 +464,7 @@ mod test {
             "    MergeScan [is_placeholder=false]",
         ]
         .join("\n");
-        assert_eq!(expected, format!("{:?}", result));
+        assert_eq!(expected, result.to_string());
     }
 
     #[test]
@@ -480,7 +484,7 @@ mod test {
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
         let expected = "MergeScan [is_placeholder=false]";
-        assert_eq!(expected, format!("{:?}", result));
+        assert_eq!(expected, result.to_string());
     }
 
     #[test]
@@ -503,7 +507,11 @@ mod test {
 
         let plan = LogicalPlanBuilder::scan_with_filters("t", left_source, None, vec![])
             .unwrap()
-            .join_using(right_plan, JoinType::LeftSemi, vec!["number"])
+            .join_on(
+                right_plan,
+                JoinType::LeftSemi,
+                vec![col("t.number").eq(col("right.number"))],
+            )
             .unwrap()
             .limit(0, Some(1))
             .unwrap()
@@ -513,10 +521,10 @@ mod test {
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
         let expected = "Limit: skip=0, fetch=1\
-            \n  LeftSemi Join: Using t.number = right.number\
+            \n  LeftSemi Join:  Filter: t.number = right.number\
             \n    MergeScan [is_placeholder=false]\
             \n    SubqueryAlias: right\
             \n      MergeScan [is_placeholder=false]";
-        assert_eq!(expected, format!("{:?}", result));
+        assert_eq!(expected, result.to_string());
     }
 }

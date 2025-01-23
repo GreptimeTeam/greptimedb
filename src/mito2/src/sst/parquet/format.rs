@@ -42,13 +42,13 @@ use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::statistics::Statistics;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, SequenceNumber};
 
 use crate::error::{
     ConvertVectorSnafu, InvalidBatchSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
 };
 use crate::read::{Batch, BatchBuilder, BatchColumn};
-use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+use crate::row_converter::{build_primary_key_codec_with_fields, SortField};
 use crate::sst::file::{FileMeta, FileTimeRange};
 use crate::sst::to_sst_arrow_schema;
 
@@ -65,6 +65,7 @@ pub(crate) struct WriteFormat {
     metadata: RegionMetadataRef,
     /// SST file schema.
     arrow_schema: SchemaRef,
+    override_sequence: Option<SequenceNumber>,
 }
 
 impl WriteFormat {
@@ -74,7 +75,17 @@ impl WriteFormat {
         WriteFormat {
             metadata,
             arrow_schema,
+            override_sequence: None,
         }
+    }
+
+    /// Set override sequence.
+    pub(crate) fn with_override_sequence(
+        mut self,
+        override_sequence: Option<SequenceNumber>,
+    ) -> Self {
+        self.override_sequence = override_sequence;
+        self
     }
 
     /// Gets the arrow schema to store in parquet.
@@ -107,7 +118,14 @@ impl WriteFormat {
         columns.push(batch.timestamps().to_arrow_array());
         // Add internal columns: primary key, sequences, op types.
         columns.push(new_primary_key_array(batch.primary_key(), batch.num_rows()));
-        columns.push(batch.sequences().to_arrow_array());
+
+        if let Some(override_sequence) = self.override_sequence {
+            let sequence_array =
+                Arc::new(UInt64Array::from(vec![override_sequence; batch.num_rows()]));
+            columns.push(sequence_array);
+        } else {
+            columns.push(batch.sequences().to_arrow_array());
+        }
         columns.push(batch.op_types().to_arrow_array());
 
         RecordBatch::try_new(self.arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
@@ -373,6 +391,7 @@ impl ReadFormat {
         column: &ColumnMetadata,
         is_min: bool,
     ) -> Option<ArrayRef> {
+        let primary_key_encoding = self.metadata.primary_key_encoding;
         let is_first_tag = self
             .metadata
             .primary_key
@@ -384,16 +403,20 @@ impl ReadFormat {
             return None;
         }
 
-        let converter =
-            McmpRowCodec::new(vec![SortField::new(column.column_schema.data_type.clone())]);
+        let converter = build_primary_key_codec_with_fields(
+            primary_key_encoding,
+            [(
+                column.column_id,
+                SortField::new(column.column_schema.data_type.clone()),
+            )]
+            .into_iter(),
+        );
+
         let values = row_groups.iter().map(|meta| {
             let stats = meta
                 .borrow()
                 .column(self.primary_key_position())
                 .statistics()?;
-            if !stats.has_min_max_set() {
-                return None;
-            }
             match stats {
                 Statistics::Boolean(_) => None,
                 Statistics::Int32(_) => None,
@@ -402,9 +425,12 @@ impl ReadFormat {
                 Statistics::Float(_) => None,
                 Statistics::Double(_) => None,
                 Statistics::ByteArray(s) => {
-                    let bytes = if is_min { s.min_bytes() } else { s.max_bytes() };
-                    let mut values = converter.decode(bytes).ok()?;
-                    values.pop()
+                    let bytes = if is_min {
+                        s.min_bytes_opt()?
+                    } else {
+                        s.max_bytes_opt()?
+                    };
+                    converter.decode_leftmost(bytes).ok()?
                 }
                 Statistics::FixedLenByteArray(_) => None,
             }
@@ -442,39 +468,40 @@ impl ReadFormat {
             .iter()
             .map(|meta| {
                 let stats = meta.borrow().column(column_index).statistics()?;
-                if !stats.has_min_max_set() {
-                    return None;
-                }
                 match stats {
                     Statistics::Boolean(s) => Some(ScalarValue::Boolean(Some(if is_min {
-                        *s.min()
+                        *s.min_opt()?
                     } else {
-                        *s.max()
+                        *s.max_opt()?
                     }))),
                     Statistics::Int32(s) => Some(ScalarValue::Int32(Some(if is_min {
-                        *s.min()
+                        *s.min_opt()?
                     } else {
-                        *s.max()
+                        *s.max_opt()?
                     }))),
                     Statistics::Int64(s) => Some(ScalarValue::Int64(Some(if is_min {
-                        *s.min()
+                        *s.min_opt()?
                     } else {
-                        *s.max()
+                        *s.max_opt()?
                     }))),
 
                     Statistics::Int96(_) => None,
                     Statistics::Float(s) => Some(ScalarValue::Float32(Some(if is_min {
-                        *s.min()
+                        *s.min_opt()?
                     } else {
-                        *s.max()
+                        *s.max_opt()?
                     }))),
                     Statistics::Double(s) => Some(ScalarValue::Float64(Some(if is_min {
-                        *s.min()
+                        *s.min_opt()?
                     } else {
-                        *s.max()
+                        *s.max_opt()?
                     }))),
                     Statistics::ByteArray(s) => {
-                        let bytes = if is_min { s.min_bytes() } else { s.max_bytes() };
+                        let bytes = if is_min {
+                            s.min_bytes_opt()?
+                        } else {
+                            s.max_bytes_opt()?
+                        };
                         let s = String::from_utf8(bytes.to_vec()).ok();
                         Some(ScalarValue::Utf8(s))
                     }
@@ -496,7 +523,7 @@ impl ReadFormat {
         let values = row_groups.iter().map(|meta| {
             let col = meta.borrow().column(column_index);
             let stat = col.statistics()?;
-            Some(stat.null_count())
+            stat.null_count_opt()
         });
         Some(Arc::new(UInt64Array::from_iter(values)))
     }
@@ -577,31 +604,30 @@ pub(crate) fn parquet_row_group_time_range(
     let time_index_pos = num_columns - FIXED_POS_COLUMN_NUM;
 
     let stats = row_group_meta.column(time_index_pos).statistics()?;
-    if stats.has_min_max_set() {
-        // The physical type for the timestamp should be i64.
-        let (min, max) = match stats {
-            Statistics::Int64(value_stats) => (*value_stats.min(), *value_stats.max()),
-            Statistics::Int32(_)
-            | Statistics::Boolean(_)
-            | Statistics::Int96(_)
-            | Statistics::Float(_)
-            | Statistics::Double(_)
-            | Statistics::ByteArray(_)
-            | Statistics::FixedLenByteArray(_) => return None,
-        };
+    // The physical type for the timestamp should be i64.
+    let (min, max) = match stats {
+        Statistics::Int64(value_stats) => (*value_stats.min_opt()?, *value_stats.max_opt()?),
+        Statistics::Int32(_)
+        | Statistics::Boolean(_)
+        | Statistics::Int96(_)
+        | Statistics::Float(_)
+        | Statistics::Double(_)
+        | Statistics::ByteArray(_)
+        | Statistics::FixedLenByteArray(_) => {
+            common_telemetry::warn!(
+                "Invalid statistics {:?} for time index in parquet in {}",
+                stats,
+                file_meta.file_id
+            );
+            return None;
+        }
+    };
 
-        debug_assert!(
-            min >= file_meta.time_range.0.value() && min <= file_meta.time_range.1.value()
-        );
-        debug_assert!(
-            max >= file_meta.time_range.0.value() && max <= file_meta.time_range.1.value()
-        );
-        let unit = file_meta.time_range.0.unit();
+    debug_assert!(min >= file_meta.time_range.0.value() && min <= file_meta.time_range.1.value());
+    debug_assert!(max >= file_meta.time_range.0.value() && max <= file_meta.time_range.1.value());
+    let unit = file_meta.time_range.0.unit();
 
-        Some((Timestamp::new(min, unit), Timestamp::new(max, unit)))
-    } else {
-        None
-    }
+    Some((Timestamp::new(min, unit), Timestamp::new(max, unit)))
 }
 
 #[cfg(test)]
@@ -748,6 +774,27 @@ mod tests {
             Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
             build_test_pk_array(&[(b"test".to_vec(), num_rows)]), // primary key
             Arc::new(UInt64Array::from(vec![TEST_SEQUENCE; num_rows])), // sequence
+            Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
+        ];
+        let expect_record = RecordBatch::try_new(build_test_arrow_schema(), columns).unwrap();
+
+        let actual = write_format.convert_batch(&batch).unwrap();
+        assert_eq!(expect_record, actual);
+    }
+
+    #[test]
+    fn test_convert_batch_with_override_sequence() {
+        let metadata = build_test_region_metadata();
+        let write_format = WriteFormat::new(metadata).with_override_sequence(Some(415411));
+
+        let num_rows = 4;
+        let batch = new_batch(b"test", 1, 2, num_rows);
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![2; num_rows])), // field1
+            Arc::new(Int64Array::from(vec![3; num_rows])), // field0
+            Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
+            build_test_pk_array(&[(b"test".to_vec(), num_rows)]), // primary key
+            Arc::new(UInt64Array::from(vec![415411; num_rows])), // sequence
             Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
         ];
         let expect_record = RecordBatch::try_new(build_test_arrow_schema(), columns).unwrap();

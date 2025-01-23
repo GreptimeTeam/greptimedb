@@ -16,11 +16,12 @@ pub mod builder;
 mod grpc;
 mod influxdb;
 mod log_handler;
+mod logs;
 mod opentsdb;
 mod otlp;
 mod prom_store;
+mod promql;
 mod region_query;
-mod script;
 pub mod standalone;
 
 use std::sync::Arc;
@@ -47,6 +48,7 @@ use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
 use pipeline::pipeline_operator::PipelineOperator;
 use prometheus::HistogramTimer;
+use promql_parser::label::Matcher;
 use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
@@ -64,8 +66,8 @@ use servers::prometheus_handler::PrometheusHandler;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{
-    InfluxdbLineProtocolHandler, LogHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
-    PromStoreProtocolHandler, ScriptHandler,
+    InfluxdbLineProtocolHandler, LogQueryHandler, OpenTelemetryProtocolHandler,
+    OpentsdbProtocolHandler, PipelineHandler, PromStoreProtocolHandler,
 };
 use servers::server::ServerHandlers;
 use session::context::QueryContextRef;
@@ -86,7 +88,7 @@ use crate::error::{
 };
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::HeartbeatTask;
-use crate::script::ScriptExecutor;
+use crate::limiter::LimiterRef;
 
 #[async_trait]
 pub trait FrontendInstance:
@@ -96,9 +98,9 @@ pub trait FrontendInstance:
     + InfluxdbLineProtocolHandler
     + PromStoreProtocolHandler
     + OpenTelemetryProtocolHandler
-    + ScriptHandler
     + PrometheusHandler
-    + LogHandler
+    + PipelineHandler
+    + LogQueryHandler
     + Send
     + Sync
     + 'static
@@ -112,7 +114,6 @@ pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
 pub struct Instance {
     options: FrontendOptions,
     catalog_manager: CatalogManagerRef,
-    script_executor: Arc<ScriptExecutor>,
     pipeline_operator: Arc<PipelineOperator>,
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
@@ -124,6 +125,7 @@ pub struct Instance {
     export_metrics_task: Option<ExportMetricsTask>,
     table_metadata_manager: TableMetadataManagerRef,
     stats: StatementStatistics,
+    limiter: Option<LimiterRef>,
 }
 
 impl Instance {
@@ -200,8 +202,6 @@ impl FrontendInstance for Instance {
         if let Some(heartbeat_task) = &self.heartbeat_task {
             heartbeat_task.start().await?;
         }
-
-        self.script_executor.start(self)?;
 
         if let Some(t) = self.export_metrics_task.as_ref() {
             if t.send_by_handler {
@@ -452,6 +452,17 @@ impl PrometheusHandler for Instance {
         Ok(interceptor.post_execute(output, query_ctx)?)
     }
 
+    async fn query_metric_names(
+        &self,
+        matchers: Vec<Matcher>,
+        ctx: &QueryContextRef,
+    ) -> server_error::Result<Vec<String>> {
+        self.handle_query_metric_names(matchers, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)
+    }
+
     fn catalog_manager(&self) -> CatalogManagerRef {
         self.catalog_manager.clone()
     }
@@ -487,11 +498,17 @@ pub fn check_permission(
         // TODO(dennis): add a hook for admin commands.
         Statement::Admin(_) => {}
         // These are executed by query engine, and will be checked there.
-        Statement::Query(_) | Statement::Explain(_) | Statement::Tql(_) | Statement::Delete(_) => {}
+        Statement::Query(_)
+        | Statement::Explain(_)
+        | Statement::Tql(_)
+        | Statement::Delete(_)
+        | Statement::DeclareCursor(_)
+        | Statement::Copy(sql::statements::copy::Copy::CopyQueryTo(_)) => {}
         // database ops won't be checked
         Statement::CreateDatabase(_)
         | Statement::ShowDatabases(_)
         | Statement::DropDatabase(_)
+        | Statement::AlterDatabase(_)
         | Statement::DropFlow(_)
         | Statement::Use(_) => {}
         Statement::ShowCreateDatabase(stmt) => {
@@ -516,7 +533,7 @@ pub fn check_permission(
         Statement::CreateView(stmt) => {
             validate_param(&stmt.name, query_ctx)?;
         }
-        Statement::Alter(stmt) => {
+        Statement::AlterTable(stmt) => {
             validate_param(stmt.table_name(), query_ctx)?;
         }
         // set/show variable now only alter/show variable in session
@@ -561,6 +578,7 @@ pub fn check_permission(
             validate_db_permission!(stmt, query_ctx);
         }
         Statement::ShowStatus(_stmt) => {}
+        Statement::ShowSearchPath(_stmt) => {}
         Statement::DescribeTable(stmt) => {
             validate_param(stmt.name(), query_ctx)?;
         }
@@ -579,6 +597,8 @@ pub fn check_permission(
         Statement::TruncateTable(stmt) => {
             validate_param(stmt.table_name(), query_ctx)?;
         }
+        // cursor operations are always allowed once it's created
+        Statement::FetchCursor(_) | Statement::CloseCursor(_) => {}
     }
     Ok(())
 }

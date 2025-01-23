@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use common_time::Timestamp;
+use common_time::{TimeToLive, Timestamp};
 
 use crate::sst::file::{FileHandle, FileId, FileMeta, Level, MAX_LEVEL};
 use crate::sst::file_purger::FilePurgerRef;
@@ -160,12 +160,19 @@ impl LevelMeta {
     }
 
     /// Returns expired SSTs from current level.
-    pub fn get_expired_files(&self, expire_time: &Timestamp) -> Vec<FileHandle> {
+    pub fn get_expired_files(&self, now: &Timestamp, ttl: &TimeToLive) -> Vec<FileHandle> {
         self.files
             .values()
             .filter(|v| {
                 let (_, end) = v.time_range();
-                &end < expire_time
+
+                match ttl.is_expired(&end, now) {
+                    Ok(expired) => expired,
+                    Err(e) => {
+                        common_telemetry::error!(e; "Failed to calculate region TTL expire time");
+                        false
+                    }
+                }
             })
             .cloned()
             .collect()

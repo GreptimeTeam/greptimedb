@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arbitrary::{Arbitrary, Unstructured};
+use common_meta::distributed_time_constants;
 use common_telemetry::info;
 use libfuzzer_sys::fuzz_target;
 use rand::{Rng, SeedableRng};
@@ -229,6 +230,73 @@ async fn create_logical_table_and_insert_values(
     Ok(())
 }
 
+async fn wait_for_migration(ctx: &FuzzContext, migration: &Migration, procedure_id: &str) {
+    info!("Waits for migration: {migration:?}");
+    let region_id = migration.region_id.as_u64();
+    wait_condition_fn(
+        Duration::from_secs(120),
+        || {
+            let greptime = ctx.greptime.clone();
+            let procedure_id = procedure_id.to_string();
+            Box::pin(async move {
+                let output = procedure_state(&greptime, &procedure_id).await;
+                info!("Checking procedure: {procedure_id}, output: {output}");
+                (fetch_partition(&greptime, region_id).await.unwrap(), output)
+            })
+        },
+        |(partition, output)| {
+            info!("Region: {region_id},  datanode: {}", partition.datanode_id);
+            partition.datanode_id == migration.to_peer && output.contains("Done")
+        },
+        Duration::from_secs(1),
+    )
+    .await;
+}
+
+async fn migrate_regions(ctx: &FuzzContext, migrations: &[Migration]) -> Result<()> {
+    let mut procedure_ids = Vec::with_capacity(migrations.len());
+    // Triggers region migrations
+    for Migration {
+        from_peer,
+        to_peer,
+        region_id,
+    } in migrations
+    {
+        let procedure_id =
+            migrate_region(&ctx.greptime, region_id.as_u64(), *from_peer, *to_peer, 120).await;
+        info!("Migrating region: {region_id} from {from_peer} to {to_peer}, procedure: {procedure_id}");
+        procedure_ids.push(procedure_id);
+    }
+    for (migration, procedure_id) in migrations.iter().zip(procedure_ids) {
+        wait_for_migration(ctx, migration, &procedure_id).await;
+    }
+
+    tokio::time::sleep(Duration::from_secs(
+        distributed_time_constants::REGION_LEASE_SECS,
+    ))
+    .await;
+
+    Ok(())
+}
+
+async fn validate_rows(
+    ctx: &FuzzContext,
+    tables: &HashMap<Ident, (TableContextRef, InsertIntoExpr)>,
+) -> Result<()> {
+    info!("Validates num of rows");
+    for (table_ctx, insert_expr) in tables.values() {
+        let sql = format!("select count(1) as count from {}", table_ctx.name);
+        let values = count_values(&ctx.greptime, &sql).await?;
+        let expected_rows = insert_expr.values_list.len() as u64;
+        assert_eq!(
+            values.count as u64, expected_rows,
+            "Expected rows: {}, got: {}, table: {}",
+            expected_rows, values.count, table_ctx.name
+        );
+    }
+    Ok(())
+}
+
 async fn execute_migration(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     let mut rng = ChaCha20Rng::seed_from_u64(input.seed);
     // Creates a physical table.
@@ -282,57 +350,11 @@ async fn execute_migration(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         }
     }
 
-    let mut procedure_ids = Vec::with_capacity(migrations.len());
-    // Triggers region migrations
-    for Migration {
-        from_peer,
-        to_peer,
-        region_id,
-    } in &migrations
-    {
-        let procedure_id =
-            migrate_region(&ctx.greptime, region_id.as_u64(), *from_peer, *to_peer, 120).await;
-        info!("Migrating region: {region_id} from {from_peer} to {to_peer}, procedure: {procedure_id}");
-        procedure_ids.push(procedure_id);
-    }
     info!("Excepted new region distribution: {new_distribution:?}");
-    for (migration, procedure_id) in migrations.clone().into_iter().zip(procedure_ids) {
-        info!("Waits for migration: {migration:?}");
-        let region_id = migration.region_id.as_u64();
-        wait_condition_fn(
-            Duration::from_secs(120),
-            || {
-                let greptime = ctx.greptime.clone();
-                let procedure_id = procedure_id.to_string();
-                Box::pin(async move {
-                    {
-                        let output = procedure_state(&greptime, &procedure_id).await;
-                        info!("Checking procedure: {procedure_id}, output: {output}");
-                        fetch_partition(&greptime, region_id).await.unwrap()
-                    }
-                })
-            },
-            |partition| {
-                info!("Region: {region_id},  datanode: {}", partition.datanode_id);
-                partition.datanode_id == migration.to_peer
-            },
-            Duration::from_secs(1),
-        )
-        .await;
-    }
+    migrate_regions(&ctx, &migrations).await?;
 
     // Validates value rows
-    info!("Validates num of rows");
-    for (table_ctx, insert_expr) in tables.values() {
-        let sql = format!("select count(1) as count from {}", table_ctx.name);
-        let values = count_values(&ctx.greptime, &sql).await?;
-        let expected_rows = insert_expr.values_list.len() as u64;
-        assert_eq!(
-            values.count as u64, expected_rows,
-            "Expected rows: {}, got: {}, table: {}",
-            expected_rows, values.count, table_ctx.name
-        );
-    }
+    validate_rows(&ctx, &tables).await?;
 
     // Creates more logical tables and inserts values
     create_logical_table_and_insert_values(
@@ -346,17 +368,7 @@ async fn execute_migration(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     .await?;
 
     // Validates value rows
-    info!("Validates num of rows");
-    for (table_ctx, insert_expr) in tables.values() {
-        let sql = format!("select count(1) as count from {}", table_ctx.name);
-        let values = count_values(&ctx.greptime, &sql).await?;
-        let expected_rows = insert_expr.values_list.len() as u64;
-        assert_eq!(
-            values.count as u64, expected_rows,
-            "Expected rows: {}, got: {}, table: {}",
-            expected_rows, values.count, table_ctx.name
-        );
-    }
+    validate_rows(&ctx, &tables).await?;
 
     // Recovers region distribution
     let migrations = migrations
@@ -374,44 +386,7 @@ async fn execute_migration(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         )
         .collect::<Vec<_>>();
 
-    let mut procedure_ids = Vec::with_capacity(migrations.len());
-    // Triggers region migrations
-    for Migration {
-        from_peer,
-        to_peer,
-        region_id,
-    } in &migrations
-    {
-        let procedure_id =
-            migrate_region(&ctx.greptime, region_id.as_u64(), *from_peer, *to_peer, 120).await;
-        info!("Migrating region: {region_id} from {from_peer} to {to_peer}, procedure: {procedure_id}");
-        procedure_ids.push(procedure_id);
-    }
-    info!("Excepted new region distribution: {new_distribution:?}");
-    for (migration, procedure_id) in migrations.into_iter().zip(procedure_ids) {
-        info!("Waits for migration: {migration:?}");
-        let region_id = migration.region_id.as_u64();
-        wait_condition_fn(
-            Duration::from_secs(120),
-            || {
-                let greptime = ctx.greptime.clone();
-                let procedure_id = procedure_id.to_string();
-                Box::pin(async move {
-                    {
-                        let output = procedure_state(&greptime, &procedure_id).await;
-                        info!("Checking procedure: {procedure_id}, output: {output}");
-                        fetch_partition(&greptime, region_id).await.unwrap()
-                    }
-                })
-            },
-            |partition| {
-                info!("Region: {region_id},  datanode: {}", partition.datanode_id);
-                partition.datanode_id == migration.to_peer
-            },
-            Duration::from_secs(1),
-        )
-        .await;
-    }
+    migrate_regions(&ctx, &migrations).await?;
 
     // Creates more logical tables and inserts values
     create_logical_table_and_insert_values(
@@ -425,17 +400,7 @@ async fn execute_migration(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     .await?;
 
     // Validates value rows
-    info!("Validates num of rows");
-    for (table_ctx, insert_expr) in tables.values() {
-        let sql = format!("select count(1) as count from {}", table_ctx.name);
-        let values = count_values(&ctx.greptime, &sql).await?;
-        let expected_rows = insert_expr.values_list.len() as u64;
-        assert_eq!(
-            values.count as u64, expected_rows,
-            "Expected rows: {}, got: {}, table: {}",
-            expected_rows, values.count, table_ctx.name
-        );
-    }
+    validate_rows(&ctx, &tables).await?;
 
     // Clean up
     for (table_ctx, _) in tables.values() {

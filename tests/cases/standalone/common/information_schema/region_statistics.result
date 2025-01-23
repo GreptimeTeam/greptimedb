@@ -27,9 +27,9 @@ SELECT SUM(region_rows), SUM(disk_size), SUM(sst_size), SUM(index_size)
        IN (SELECT TABLE_ID FROM INFORMATION_SCHEMA.TABLES WHERE table_name = 'test' and table_schema = 'public');
 
 +-------------------------------------------------------+-----------------------------------------------------+----------------------------------------------------+------------------------------------------------------+
-| SUM(information_schema.region_statistics.region_rows) | SUM(information_schema.region_statistics.disk_size) | SUM(information_schema.region_statistics.sst_size) | SUM(information_schema.region_statistics.index_size) |
+| sum(information_schema.region_statistics.region_rows) | sum(information_schema.region_statistics.disk_size) | sum(information_schema.region_statistics.sst_size) | sum(information_schema.region_statistics.index_size) |
 +-------------------------------------------------------+-----------------------------------------------------+----------------------------------------------------+------------------------------------------------------+
-| 3                                                     | 2145                                                | 0                                                  | 0                                                    |
+| 3                                                     | 2238                                                | 0                                                  | 0                                                    |
 +-------------------------------------------------------+-----------------------------------------------------+----------------------------------------------------+------------------------------------------------------+
 
 SELECT data_length, index_length, avg_row_length, table_rows FROM INFORMATION_SCHEMA.TABLES WHERE table_name = 'test';

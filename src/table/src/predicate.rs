@@ -135,21 +135,17 @@ impl Predicate {
 // since it requires query engine to convert sql to filters.
 /// `build_time_range_predicate` extracts time range from logical exprs to facilitate fast
 /// time range pruning.
-pub fn build_time_range_predicate<'a>(
-    ts_col_name: &'a str,
+pub fn build_time_range_predicate(
+    ts_col_name: &str,
     ts_col_unit: TimeUnit,
-    filters: &'a mut Vec<Expr>,
+    filters: &[Expr],
 ) -> TimestampRange {
     let mut res = TimestampRange::min_to_max();
-    let mut filters_remain = vec![];
-    for expr in std::mem::take(filters) {
-        if let Some(range) = extract_time_range_from_expr(ts_col_name, ts_col_unit, &expr) {
+    for expr in filters {
+        if let Some(range) = extract_time_range_from_expr(ts_col_name, ts_col_unit, expr) {
             res = res.and(&range);
-        } else {
-            filters_remain.push(expr);
         }
     }
-    *filters = filters_remain;
     res
 }
 
@@ -392,7 +388,7 @@ mod tests {
     fn check_build_predicate(expr: Expr, expect: TimestampRange) {
         assert_eq!(
             expect,
-            build_time_range_predicate("ts", TimeUnit::Millisecond, &mut vec![expr])
+            build_time_range_predicate("ts", TimeUnit::Millisecond, &[expr])
         );
     }
 

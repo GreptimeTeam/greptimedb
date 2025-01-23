@@ -11,7 +11,7 @@ Affected Rows: 6
 SELECT f, SUM(i) FROM floats GROUP BY f ORDER BY f;
 
 +------+---------------+
-| f    | SUM(floats.i) |
+| f    | sum(floats.i) |
 +------+---------------+
 | -inf | 5             |
 | inf  | 8             |
@@ -21,7 +21,7 @@ SELECT f, SUM(i) FROM floats GROUP BY f ORDER BY f;
 SELECT SUM(f) FROM floats WHERE f > 0 AND f != 'nan'::FLOAT;
 
 +---------------+
-| SUM(floats.f) |
+| sum(floats.f) |
 +---------------+
 | inf           |
 +---------------+
@@ -29,7 +29,7 @@ SELECT SUM(f) FROM floats WHERE f > 0 AND f != 'nan'::FLOAT;
 SELECT SUM(f) FROM floats WHERE f < 0;
 
 +---------------+
-| SUM(floats.f) |
+| sum(floats.f) |
 +---------------+
 | -inf          |
 +---------------+
@@ -37,7 +37,7 @@ SELECT SUM(f) FROM floats WHERE f < 0;
 SELECT SUM(f) FROM floats;
 
 +---------------+
-| SUM(floats.f) |
+| sum(floats.f) |
 +---------------+
 | NaN           |
 +---------------+
@@ -58,7 +58,7 @@ Affected Rows: 6
 SELECT f, SUM(i) FROM doubles GROUP BY f ORDER BY f;
 
 +------+----------------+
-| f    | SUM(doubles.i) |
+| f    | sum(doubles.i) |
 +------+----------------+
 | -inf | 5              |
 | inf  | 8              |
@@ -68,7 +68,7 @@ SELECT f, SUM(i) FROM doubles GROUP BY f ORDER BY f;
 SELECT SUM(f) FROM doubles WHERE f > 0 AND f != 'nan'::DOUBLE;
 
 +----------------+
-| SUM(doubles.f) |
+| sum(doubles.f) |
 +----------------+
 | inf            |
 +----------------+
@@ -76,7 +76,7 @@ SELECT SUM(f) FROM doubles WHERE f > 0 AND f != 'nan'::DOUBLE;
 SELECT SUM(f) FROM doubles WHERE f < 0;
 
 +----------------+
-| SUM(doubles.f) |
+| sum(doubles.f) |
 +----------------+
 | -inf           |
 +----------------+
@@ -84,7 +84,7 @@ SELECT SUM(f) FROM doubles WHERE f < 0;
 SELECT SUM(f) FROM doubles;
 
 +----------------+
-| SUM(doubles.f) |
+| sum(doubles.f) |
 +----------------+
 | NaN            |
 +----------------+
@@ -117,7 +117,7 @@ SELECT * FROM floats_doubles;
 SELECT SUM(f) FROM floats_doubles WHERE f > 0;
 
 +-----------------------+
-| SUM(floats_doubles.f) |
+| sum(floats_doubles.f) |
 +-----------------------+
 | 3.999999872114277e38  |
 +-----------------------+
@@ -126,7 +126,7 @@ SELECT SUM(f) FROM floats_doubles WHERE f > 0;
 SELECT SUM(d) FROM floats_doubles WHERE d > 0;
 
 +-----------------------+
-| SUM(floats_doubles.d) |
+| sum(floats_doubles.d) |
 +-----------------------+
 | inf                   |
 +-----------------------+

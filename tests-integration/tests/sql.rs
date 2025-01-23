@@ -72,6 +72,7 @@ macro_rules! sql_tests {
                 test_postgres_parameter_inference,
                 test_postgres_array_types,
                 test_mysql_prepare_stmt_insert_timestamp,
+                test_declare_fetch_close_cursor,
             );
         )*
     };
@@ -215,7 +216,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         let dt: DateTime<Utc> = row.get("dt");
         let bytes: Vec<u8> = row.get("b");
         let json: serde_json::Value = row.get("j");
-        let vector: String = row.get("v");
+        let vector: Vec<u8> = row.get("v");
         assert_eq!(ret, i as i64);
         let expected_d = NaiveDate::from_yo_opt(2015, 100).unwrap();
         assert_eq!(expected_d, d);
@@ -242,7 +243,13 @@ pub async fn test_mysql_crud(store_type: StorageType) {
             }
         });
         assert_eq!(json, expected_j);
-        assert_eq!(vector, "[1,2,3]");
+        assert_eq!(
+            vector,
+            [1.0f32, 2.0, 3.0]
+                .iter()
+                .flat_map(|x| x.to_le_bytes())
+                .collect::<Vec<u8>>()
+        );
     }
 
     let rows = sqlx::query("select i from demo where i=?")
@@ -1184,6 +1191,69 @@ pub async fn test_postgres_array_types(store_type: StorageType) {
         .unwrap();
 
     assert_eq!(1, rows.len());
+
+    // Shutdown the client.
+    drop(client);
+    rx.await.unwrap();
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_declare_fetch_close_cursor(store_type: StorageType) {
+    let (addr, mut guard, fe_pg_server) = setup_pg_server(store_type, "sql_inference").await;
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+        tx.send(()).unwrap();
+    });
+
+    client
+        .execute(
+            "DECLARE c1 CURSOR FOR SELECT * FROM numbers WHERE number > 2 LIMIT 50::bigint",
+            &[],
+        )
+        .await
+        .expect("declare cursor");
+
+    // duplicated cursor
+    assert!(client
+        .execute("DECLARE c1 CURSOR FOR SELECT 1", &[],)
+        .await
+        .is_err());
+
+    let rows = client.query("FETCH 5 FROM c1", &[]).await.unwrap();
+    assert_eq!(5, rows.len());
+
+    let rows = client.query("FETCH 100 FROM c1", &[]).await.unwrap();
+    assert_eq!(45, rows.len());
+
+    let rows = client.query("FETCH 100 FROM c1", &[]).await.unwrap();
+    assert_eq!(0, rows.len());
+
+    client.execute("CLOSE c1", &[]).await.expect("close cursor");
+
+    // cursor not found
+    let result = client.query("FETCH 100 FROM c1", &[]).await;
+    assert!(result.is_err());
+
+    client
+        .execute(
+            "DECLARE c2 CURSOR FOR SELECT * FROM numbers WHERE number < 0",
+            &[],
+        )
+        .await
+        .expect("declare cursor");
+
+    let rows = client.query("FETCH 5 FROM c2", &[]).await.unwrap();
+    assert_eq!(0, rows.len());
+
+    client.execute("CLOSE c2", &[]).await.expect("close cursor");
 
     // Shutdown the client.
     drop(client);

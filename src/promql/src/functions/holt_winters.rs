@@ -73,7 +73,7 @@ impl HoltWinters {
         create_udf(
             Self::name(),
             Self::input_type(),
-            Arc::new(Self::return_type()),
+            Self::return_type(),
             Volatility::Immutable,
             Arc::new(move |input: &_| Self::new(level, trend).calc(input)) as _,
         )

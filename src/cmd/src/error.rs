@@ -114,6 +114,20 @@ pub enum Error {
         source: frontend::error::Error,
     },
 
+    #[snafu(display("Failed to build cli"))]
+    BuildCli {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to start cli"))]
+    StartCli {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to build meta server"))]
     BuildMetaServer {
         #[snafu(implicit)]
@@ -331,6 +345,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to build wal options allocator"))]
+    BuildWalOptionsAllocator {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -346,6 +367,8 @@ impl ErrorExt for Error {
             Error::ShutdownMetaServer { source, .. } => source.status_code(),
             Error::BuildMetaServer { source, .. } => source.status_code(),
             Error::UnsupportedSelectorType { source, .. } => source.status_code(),
+            Error::BuildCli { source, .. } => source.status_code(),
+            Error::StartCli { source, .. } => source.status_code(),
 
             Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {
                 source.status_code()
@@ -362,7 +385,8 @@ impl ErrorExt for Error {
 
             Error::StartProcedureManager { source, .. }
             | Error::StopProcedureManager { source, .. } => source.status_code(),
-            Error::StartWalOptionsAllocator { source, .. } => source.status_code(),
+            Error::BuildWalOptionsAllocator { source, .. }
+            | Error::StartWalOptionsAllocator { source, .. } => source.status_code(),
             Error::ReplCreation { .. } | Error::Readline { .. } | Error::HttpQuerySql { .. } => {
                 StatusCode::Internal
             }

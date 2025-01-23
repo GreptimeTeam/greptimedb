@@ -29,6 +29,9 @@ impl Indexer {
         if !self.do_update_fulltext_index(batch).await {
             self.do_abort().await;
         }
+        if !self.do_update_bloom_filter(batch).await {
+            self.do_abort().await;
+        }
     }
 
     /// Returns false if the update failed.
@@ -43,7 +46,7 @@ impl Indexer {
 
         if cfg!(any(test, feature = "test")) {
             panic!(
-                "Failed to update inverted index, region_id: {}, file_id: {}, err: {}",
+                "Failed to update inverted index, region_id: {}, file_id: {}, err: {:?}",
                 self.region_id, self.file_id, err
             );
         } else {
@@ -68,12 +71,37 @@ impl Indexer {
 
         if cfg!(any(test, feature = "test")) {
             panic!(
-                "Failed to update full-text index, region_id: {}, file_id: {}, err: {}",
+                "Failed to update full-text index, region_id: {}, file_id: {}, err: {:?}",
                 self.region_id, self.file_id, err
             );
         } else {
             warn!(
                 err; "Failed to update full-text index, region_id: {}, file_id: {}",
+                self.region_id, self.file_id,
+            );
+        }
+
+        false
+    }
+
+    /// Returns false if the update failed.
+    async fn do_update_bloom_filter(&mut self, batch: &Batch) -> bool {
+        let Some(creator) = self.bloom_filter_indexer.as_mut() else {
+            return true;
+        };
+
+        let Err(err) = creator.update(batch).await else {
+            return true;
+        };
+
+        if cfg!(any(test, feature = "test")) {
+            panic!(
+                "Failed to update bloom filter, region_id: {}, file_id: {}, err: {:?}",
+                self.region_id, self.file_id, err
+            );
+        } else {
+            warn!(
+                err; "Failed to update bloom filter, region_id: {}, file_id: {}",
                 self.region_id, self.file_id,
             );
         }

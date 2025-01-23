@@ -191,7 +191,7 @@ mod tests {
 
         let reader = manager.reader(file_name).await.unwrap();
         let blob_guard = reader.blob(blob_key).await.unwrap();
-        let mut blob_reader = blob_guard.reader().await.unwrap();
+        let blob_reader = blob_guard.reader().await.unwrap();
         let meta = blob_reader.metadata().await.unwrap();
         let bs = blob_reader.read(0..meta.content_length).await.unwrap();
         assert_eq!(&*bs, raw_data);

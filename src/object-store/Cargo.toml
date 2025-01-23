@@ -17,8 +17,9 @@ futures.workspace = true
 lazy_static.workspace = true
 md5 = "0.7"
 moka = { workspace = true, features = ["future"] }
-opendal = { version = "0.49", features = [
+opendal = { version = "0.51.1", features = [
     "layers-tracing",
+    "layers-prometheus",
     "services-azblob",
     "services-fs",
     "services-gcs",
@@ -27,6 +28,7 @@ opendal = { version = "0.49", features = [
     "services-s3",
 ] }
 prometheus.workspace = true
+tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

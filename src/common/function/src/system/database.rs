@@ -28,9 +28,11 @@ pub struct DatabaseFunction;
 
 #[derive(Clone, Debug, Default)]
 pub struct CurrentSchemaFunction;
+pub struct SessionUserFunction;
 
 const DATABASE_FUNCTION_NAME: &str = "database";
 const CURRENT_SCHEMA_FUNCTION_NAME: &str = "current_schema";
+const SESSION_USER_FUNCTION_NAME: &str = "session_user";
 
 impl Function for DatabaseFunction {
     fn name(&self) -> &str {
@@ -42,7 +44,7 @@ impl Function for DatabaseFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::uniform(0, vec![], Volatility::Immutable)
+        Signature::nullary(Volatility::Immutable)
     }
 
     fn eval(&self, func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
@@ -72,6 +74,26 @@ impl Function for CurrentSchemaFunction {
     }
 }
 
+impl Function for SessionUserFunction {
+    fn name(&self) -> &str {
+        SESSION_USER_FUNCTION_NAME
+    }
+
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::string_datatype())
+    }
+
+    fn signature(&self) -> Signature {
+        Signature::uniform(0, vec![], Volatility::Immutable)
+    }
+
+    fn eval(&self, func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+        let user = func_ctx.query_ctx.current_user();
+
+        Ok(Arc::new(StringVector::from_slice(&[user.username()])) as _)
+    }
+}
+
 impl fmt::Display for DatabaseFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "DATABASE")
@@ -84,11 +106,16 @@ impl fmt::Display for CurrentSchemaFunction {
     }
 }
 
+impl fmt::Display for SessionUserFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SESSION_USER")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use common_query::prelude::TypeSignature;
     use session::context::QueryContextBuilder;
 
     use super::*;
@@ -100,12 +127,7 @@ mod tests {
             ConcreteDataType::string_datatype(),
             build.return_type(&[]).unwrap()
         );
-        assert!(matches!(build.signature(),
-                         Signature {
-                             type_signature: TypeSignature::Uniform(0, valid_types),
-                             volatility: Volatility::Immutable
-                         } if  valid_types == vec![]
-        ));
+        assert_eq!(build.signature(), Signature::nullary(Volatility::Immutable));
 
         let query_ctx = QueryContextBuilder::default()
             .current_schema("test_db".to_string())

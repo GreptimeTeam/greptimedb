@@ -17,7 +17,6 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use common_query::{Output, OutputData};
 use common_recordbatch::{util, RecordBatch};
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::ResultExt;
@@ -27,7 +26,7 @@ use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_
 use crate::http::result::error_result::ErrorResponse;
 use crate::http::{Epoch, HttpResponse, ResponseFormat};
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SqlQuery {
     pub db: Option<String>,
     // Returns epoch timestamps with the specified precision.
@@ -37,7 +36,7 @@ pub struct SqlQuery {
     pub sql: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
 pub struct InfluxdbRecordsOutput {
     // The SQL query does not return the table name, but in InfluxDB,
     // we require the table name, so we set it to an empty string “”.
@@ -106,7 +105,7 @@ impl TryFrom<(Option<Epoch>, Vec<RecordBatch>)> for InfluxdbRecordsOutput {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
 pub struct InfluxdbOutput {
     pub statement_id: u32,
     pub series: Vec<InfluxdbRecordsOutput>,
@@ -125,7 +124,7 @@ impl InfluxdbOutput {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct InfluxdbV1Response {
     results: Vec<InfluxdbOutput>,
     execution_time_ms: u64,

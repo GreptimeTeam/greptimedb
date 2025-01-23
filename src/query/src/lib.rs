@@ -16,6 +16,8 @@
 #![feature(int_roundings)]
 #![feature(trait_upcasting)]
 #![feature(try_blocks)]
+#![feature(stmt_expr_attributes)]
+#![feature(iterator_try_collect)]
 
 mod analyze;
 pub mod dataframe;
@@ -24,6 +26,7 @@ pub mod dist_plan;
 pub mod dummy_catalog;
 pub mod error;
 pub mod executor;
+pub mod log_query;
 pub mod metrics;
 mod optimizer;
 pub mod parser;

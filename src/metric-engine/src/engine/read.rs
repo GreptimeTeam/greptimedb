@@ -86,12 +86,8 @@ impl MetricEngineInner {
     }
 
     pub async fn load_region_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef> {
-        let is_reading_physical_region = self
-            .state
-            .read()
-            .unwrap()
-            .physical_regions()
-            .contains_key(&region_id);
+        let is_reading_physical_region =
+            self.state.read().unwrap().exist_physical_region(region_id);
 
         if is_reading_physical_region {
             self.mito
@@ -107,11 +103,7 @@ impl MetricEngineInner {
 
     /// Returns true if it's a physical region.
     pub fn is_physical_region(&self, region_id: RegionId) -> bool {
-        self.state
-            .read()
-            .unwrap()
-            .physical_regions()
-            .contains_key(&region_id)
+        self.state.read().unwrap().exist_physical_region(region_id)
     }
 
     async fn get_physical_region_id(&self, logical_region_id: RegionId) -> Result<RegionId> {

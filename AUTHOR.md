@@ -7,6 +7,8 @@
 * [NiwakaDev](https://github.com/NiwakaDev)
 * [etolbakov](https://github.com/etolbakov)
 * [irenjj](https://github.com/irenjj)
+* [tisonkun](https://github.com/tisonkun)
+* [Lanqing Yang](https://github.com/lyang24)
 
 ## Team Members (in alphabetical order)
 
@@ -30,7 +32,6 @@
 * [shuiyisong](https://github.com/shuiyisong)
 * [sunchanglong](https://github.com/sunchanglong)
 * [sunng87](https://github.com/sunng87)
-* [tisonkun](https://github.com/tisonkun)
 * [v0y4g3r](https://github.com/v0y4g3r)
 * [waynexia](https://github.com/waynexia)
 * [xtang](https://github.com/xtang)

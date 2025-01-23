@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use datatypes::schema::{
     ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextOptions, COMMENT_KEY,
-    FULLTEXT_KEY, INVERTED_INDEX_KEY,
+    FULLTEXT_KEY, INVERTED_INDEX_KEY, SKIPPING_INDEX_KEY,
 };
 use greptime_proto::v1::Analyzer;
 use snafu::ResultExt;
@@ -29,13 +29,13 @@ use crate::v1::{ColumnDef, ColumnOptions, SemanticType};
 const FULLTEXT_GRPC_KEY: &str = "fulltext";
 /// Key used to store inverted index options in gRPC column options.
 const INVERTED_INDEX_GRPC_KEY: &str = "inverted_index";
+/// Key used to store skip index options in gRPC column options.
+const SKIPPING_INDEX_GRPC_KEY: &str = "skipping_index";
 
 /// Tries to construct a `ColumnSchema` from the given  `ColumnDef`.
 pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
-    let data_type = ColumnDataTypeWrapper::try_new(
-        column_def.data_type,
-        column_def.datatype_extension.clone(),
-    )?;
+    let data_type =
+        ColumnDataTypeWrapper::try_new(column_def.data_type, column_def.datatype_extension)?;
 
     let constraint = if column_def.default_constraint.is_empty() {
         None
@@ -55,10 +55,13 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
     }
     if let Some(options) = column_def.options.as_ref() {
         if let Some(fulltext) = options.options.get(FULLTEXT_GRPC_KEY) {
-            metadata.insert(FULLTEXT_KEY.to_string(), fulltext.clone());
+            metadata.insert(FULLTEXT_KEY.to_string(), fulltext.to_owned());
         }
         if let Some(inverted_index) = options.options.get(INVERTED_INDEX_GRPC_KEY) {
-            metadata.insert(INVERTED_INDEX_KEY.to_string(), inverted_index.clone());
+            metadata.insert(INVERTED_INDEX_KEY.to_string(), inverted_index.to_owned());
+        }
+        if let Some(skipping_index) = options.options.get(SKIPPING_INDEX_GRPC_KEY) {
+            metadata.insert(SKIPPING_INDEX_KEY.to_string(), skipping_index.to_owned());
         }
     }
 
@@ -77,12 +80,17 @@ pub fn options_from_column_schema(column_schema: &ColumnSchema) -> Option<Column
     if let Some(fulltext) = column_schema.metadata().get(FULLTEXT_KEY) {
         options
             .options
-            .insert(FULLTEXT_GRPC_KEY.to_string(), fulltext.clone());
+            .insert(FULLTEXT_GRPC_KEY.to_string(), fulltext.to_owned());
     }
     if let Some(inverted_index) = column_schema.metadata().get(INVERTED_INDEX_KEY) {
         options
             .options
             .insert(INVERTED_INDEX_GRPC_KEY.to_string(), inverted_index.clone());
+    }
+    if let Some(skipping_index) = column_schema.metadata().get(SKIPPING_INDEX_KEY) {
+        options
+            .options
+            .insert(SKIPPING_INDEX_GRPC_KEY.to_string(), skipping_index.clone());
     }
 
     (!options.options.is_empty()).then_some(options)
@@ -171,14 +179,14 @@ mod tests {
         let options = options_from_column_schema(&schema);
         assert!(options.is_none());
 
-        let schema = ColumnSchema::new("test", ConcreteDataType::string_datatype(), true)
+        let mut schema = ColumnSchema::new("test", ConcreteDataType::string_datatype(), true)
             .with_fulltext_options(FulltextOptions {
                 enable: true,
                 analyzer: FulltextAnalyzer::English,
                 case_sensitive: false,
             })
-            .unwrap()
-            .set_inverted_index(true);
+            .unwrap();
+        schema.set_inverted_index(true);
         let options = options_from_column_schema(&schema).unwrap();
         assert_eq!(
             options.options.get(FULLTEXT_GRPC_KEY).unwrap(),

@@ -19,10 +19,11 @@ use object_store::util::{join_dir, with_instrument_layers};
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
+use store_api::storage::SequenceNumber;
 
 use crate::cache::write_cache::SstUploadRequest;
 use crate::cache::CacheManagerRef;
-use crate::config::{FulltextIndexConfig, InvertedIndexConfig};
+use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
 use crate::read::Source;
 use crate::region::options::IndexOptions;
@@ -154,6 +155,7 @@ impl AccessLayer {
                 index_options: request.index_options,
                 inverted_index_config: request.inverted_index_config,
                 fulltext_index_config: request.fulltext_index_config,
+                bloom_filter_index_config: request.bloom_filter_index_config,
             }
             .build()
             .await;
@@ -163,7 +165,9 @@ impl AccessLayer {
                 request.metadata,
                 indexer,
             );
-            writer.write_all(request.source, write_opts).await?
+            writer
+                .write_all(request.source, request.max_sequence, write_opts)
+                .await?
         };
 
         // Put parquet metadata to cache manager.
@@ -193,11 +197,13 @@ pub(crate) struct SstWriteRequest {
     pub(crate) cache_manager: CacheManagerRef,
     #[allow(dead_code)]
     pub(crate) storage: Option<String>,
+    pub(crate) max_sequence: Option<SequenceNumber>,
 
     /// Configs for index
     pub(crate) index_options: IndexOptions,
     pub(crate) inverted_index_config: InvertedIndexConfig,
     pub(crate) fulltext_index_config: FulltextIndexConfig,
+    pub(crate) bloom_filter_index_config: BloomFilterConfig,
 }
 
 pub(crate) async fn new_fs_cache_store(root: &str) -> Result<ObjectStore> {

@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_query::Output;
 use datafusion_expr::LogicalPlan;
+use log_query::LogQuery;
 use query::parser::PromQuery;
 use serde_json::Value;
 use session::context::QueryContextRef;
@@ -253,31 +254,6 @@ where
     }
 }
 
-/// ScriptInterceptor can track life cycle of a script request and customize or
-/// abort its execution at given point.
-pub trait ScriptInterceptor {
-    type Error: ErrorExt;
-
-    /// Called before script request is actually executed.
-    fn pre_execute(&self, _name: &str, _query_ctx: QueryContextRef) -> Result<(), Self::Error> {
-        Ok(())
-    }
-}
-
-pub type ScriptInterceptorRef<E> = Arc<dyn ScriptInterceptor<Error = E> + Send + Sync + 'static>;
-
-impl<E: ErrorExt> ScriptInterceptor for Option<ScriptInterceptorRef<E>> {
-    type Error = E;
-
-    fn pre_execute(&self, name: &str, query_ctx: QueryContextRef) -> Result<(), Self::Error> {
-        if let Some(this) = self {
-            this.pre_execute(name, query_ctx)
-        } else {
-            Ok(())
-        }
-    }
-}
-
 /// LineProtocolInterceptor can track life cycle of a line protocol request
 /// and customize or abort its execution at given point.
 #[async_trait]
@@ -455,6 +431,57 @@ where
             this.pre_ingest(request, query_ctx)
         } else {
             Ok(request)
+        }
+    }
+}
+
+/// LogQueryInterceptor can track life cycle of a log query request
+/// and customize or abort its execution at given point.
+pub trait LogQueryInterceptor {
+    type Error: ErrorExt;
+
+    /// Called before query is actually executed.
+    fn pre_query(&self, _query: &LogQuery, _query_ctx: QueryContextRef) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Called after execution finished. The implementation can modify the
+    /// output if needed.
+    fn post_query(
+        &self,
+        output: Output,
+        _query_ctx: QueryContextRef,
+    ) -> Result<Output, Self::Error> {
+        Ok(output)
+    }
+}
+
+pub type LogQueryInterceptorRef<E> =
+    Arc<dyn LogQueryInterceptor<Error = E> + Send + Sync + 'static>;
+
+impl<E> LogQueryInterceptor for Option<&LogQueryInterceptorRef<E>>
+where
+    E: ErrorExt,
+{
+    type Error = E;
+
+    fn pre_query(&self, query: &LogQuery, query_ctx: QueryContextRef) -> Result<(), Self::Error> {
+        if let Some(this) = self {
+            this.pre_query(query, query_ctx)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn post_query(
+        &self,
+        output: Output,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output, Self::Error> {
+        if let Some(this) = self {
+            this.post_query(output, query_ctx)
+        } else {
+            Ok(output)
         }
     }
 }

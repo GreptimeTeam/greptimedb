@@ -23,7 +23,7 @@ mod test {
     use api::v1::query_request::Query;
     use api::v1::region::QueryRequest as RegionQueryRequest;
     use api::v1::{
-        alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType,
+        alter_table_expr, AddColumn, AddColumns, AlterTableExpr, Column, ColumnDataType,
         ColumnDataTypeExtension, ColumnDef, CreateDatabaseExpr, CreateTableExpr, DdlRequest,
         DeleteRequest, DeleteRequests, DropTableExpr, InsertRequest, InsertRequests, QueryRequest,
         SemanticType, VectorTypeExtension,
@@ -66,10 +66,188 @@ mod test {
         test_handle_ddl_request(instance.as_ref()).await;
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_distributed_handle_multi_ddl_request() {
+        common_telemetry::init_default_ut_logging();
+        let instance =
+            tests::create_distributed_instance("test_distributed_handle_multi_ddl_request").await;
+
+        test_handle_multi_ddl_request(instance.frontend().as_ref()).await;
+
+        verify_table_is_dropped(&instance).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_standalone_handle_multi_ddl_request() {
+        let standalone =
+            GreptimeDbStandaloneBuilder::new("test_standalone_handle_multi_ddl_request")
+                .build()
+                .await;
+        let instance = &standalone.instance;
+
+        test_handle_multi_ddl_request(instance.as_ref()).await;
+    }
+
     async fn query(instance: &Instance, request: Request) -> Output {
         GrpcQueryHandler::do_query(instance, request, QueryContext::arc())
             .await
             .unwrap()
+    }
+
+    async fn test_handle_multi_ddl_request(instance: &Instance) {
+        let request = Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "database_created_through_grpc".to_string(),
+                create_if_not_exists: true,
+                options: Default::default(),
+            })),
+        });
+        let output = query(instance, request).await;
+        assert!(matches!(output.data, OutputData::AffectedRows(1)));
+
+        let request = Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::CreateTable(CreateTableExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "database_created_through_grpc".to_string(),
+                table_name: "table_created_through_grpc".to_string(),
+                column_defs: vec![
+                    ColumnDef {
+                        name: "a".to_string(),
+                        data_type: ColumnDataType::String as _,
+                        is_nullable: true,
+                        default_constraint: vec![],
+                        semantic_type: SemanticType::Field as i32,
+                        ..Default::default()
+                    },
+                    ColumnDef {
+                        name: "ts".to_string(),
+                        data_type: ColumnDataType::TimestampMillisecond as _,
+                        is_nullable: false,
+                        default_constraint: vec![],
+                        semantic_type: SemanticType::Timestamp as i32,
+                        ..Default::default()
+                    },
+                ],
+                time_index: "ts".to_string(),
+                engine: MITO_ENGINE.to_string(),
+                ..Default::default()
+            })),
+        });
+        let output = query(instance, request).await;
+        assert!(matches!(output.data, OutputData::AffectedRows(0)));
+
+        let request = Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::AlterTable(AlterTableExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "database_created_through_grpc".to_string(),
+                table_name: "table_created_through_grpc".to_string(),
+                kind: Some(alter_table_expr::Kind::AddColumns(AddColumns {
+                    add_columns: vec![
+                        AddColumn {
+                            column_def: Some(ColumnDef {
+                                name: "b".to_string(),
+                                data_type: ColumnDataType::Int32 as _,
+                                is_nullable: true,
+                                default_constraint: vec![],
+                                semantic_type: SemanticType::Field as i32,
+                                ..Default::default()
+                            }),
+                            location: None,
+                            add_if_not_exists: true,
+                        },
+                        AddColumn {
+                            column_def: Some(ColumnDef {
+                                name: "a".to_string(),
+                                data_type: ColumnDataType::String as _,
+                                is_nullable: true,
+                                default_constraint: vec![],
+                                semantic_type: SemanticType::Field as i32,
+                                ..Default::default()
+                            }),
+                            location: None,
+                            add_if_not_exists: true,
+                        },
+                    ],
+                })),
+            })),
+        });
+        let output = query(instance, request).await;
+        assert!(matches!(output.data, OutputData::AffectedRows(0)));
+
+        let request = Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::AlterTable(AlterTableExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "database_created_through_grpc".to_string(),
+                table_name: "table_created_through_grpc".to_string(),
+                kind: Some(alter_table_expr::Kind::AddColumns(AddColumns {
+                    add_columns: vec![
+                        AddColumn {
+                            column_def: Some(ColumnDef {
+                                name: "c".to_string(),
+                                data_type: ColumnDataType::Int32 as _,
+                                is_nullable: true,
+                                default_constraint: vec![],
+                                semantic_type: SemanticType::Field as i32,
+                                ..Default::default()
+                            }),
+                            location: None,
+                            add_if_not_exists: true,
+                        },
+                        AddColumn {
+                            column_def: Some(ColumnDef {
+                                name: "d".to_string(),
+                                data_type: ColumnDataType::Int32 as _,
+                                is_nullable: true,
+                                default_constraint: vec![],
+                                semantic_type: SemanticType::Field as i32,
+                                ..Default::default()
+                            }),
+                            location: None,
+                            add_if_not_exists: true,
+                        },
+                    ],
+                })),
+            })),
+        });
+        let output = query(instance, request).await;
+        assert!(matches!(output.data, OutputData::AffectedRows(0)));
+
+        let request = Request::Query(QueryRequest {
+            query: Some(Query::Sql("INSERT INTO database_created_through_grpc.table_created_through_grpc (a, b, c, d, ts) VALUES ('s', 1, 1, 1, 1672816466000)".to_string()))
+        });
+        let output = query(instance, request).await;
+        assert!(matches!(output.data, OutputData::AffectedRows(1)));
+
+        let request = Request::Query(QueryRequest {
+            query: Some(Query::Sql(
+                "SELECT ts, a, b FROM database_created_through_grpc.table_created_through_grpc"
+                    .to_string(),
+            )),
+        });
+        let output = query(instance, request).await;
+        let OutputData::Stream(stream) = output.data else {
+            unreachable!()
+        };
+        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+        let expected = "\
++---------------------+---+---+
+| ts                  | a | b |
++---------------------+---+---+
+| 2023-01-04T07:14:26 | s | 1 |
++---------------------+---+---+";
+        assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+
+        let request = Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::DropTable(DropTableExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "database_created_through_grpc".to_string(),
+                table_name: "table_created_through_grpc".to_string(),
+                ..Default::default()
+            })),
+        });
+        let output = query(instance, request).await;
+        assert!(matches!(output.data, OutputData::AffectedRows(0)));
     }
 
     async fn test_handle_ddl_request(instance: &Instance) {
@@ -116,11 +294,11 @@ mod test {
         assert!(matches!(output.data, OutputData::AffectedRows(0)));
 
         let request = Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::Alter(AlterExpr {
+            expr: Some(DdlExpr::AlterTable(AlterTableExpr {
                 catalog_name: "greptime".to_string(),
                 schema_name: "database_created_through_grpc".to_string(),
                 table_name: "table_created_through_grpc".to_string(),
-                kind: Some(alter_expr::Kind::AddColumns(AddColumns {
+                kind: Some(alter_table_expr::Kind::AddColumns(AddColumns {
                     add_columns: vec![AddColumn {
                         column_def: Some(ColumnDef {
                             name: "b".to_string(),
@@ -131,6 +309,7 @@ mod test {
                             ..Default::default()
                         }),
                         location: None,
+                        add_if_not_exists: false,
                     }],
                 })),
             })),

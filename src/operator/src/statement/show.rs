@@ -127,7 +127,8 @@ impl StatementExecutor {
                 schema: &table_name.schema_name,
             })
             .await
-            .context(TableMetadataManagerSnafu)?;
+            .context(TableMetadataManagerSnafu)?
+            .map(|v| v.into_inner());
 
         let partitions = self
             .partition_manager
@@ -140,6 +141,26 @@ impl StatementExecutor {
         let partitions = create_partitions_stmt(partitions)?;
 
         query::sql::show_create_table(table, schema_options, partitions, query_ctx)
+            .context(ExecuteStatementSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn show_create_table_for_pg(
+        &self,
+        table_name: TableName,
+        table: TableRef,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let table_info = table.table_info();
+        if table_info.table_type != TableType::Base {
+            return error::ShowCreateTableBaseOnlySnafu {
+                table_name: table_name.to_string(),
+                table_type: table_info.table_type,
+            }
+            .fail();
+        }
+
+        query::sql::show_create_foreign_table_for_pg(table, query_ctx)
             .context(ExecuteStatementSnafu)
     }
 
@@ -265,6 +286,11 @@ impl StatementExecutor {
     #[tracing::instrument(skip_all)]
     pub async fn show_status(&self, query_ctx: QueryContextRef) -> Result<Output> {
         query::sql::show_status(query_ctx)
+            .await
+            .context(error::ExecuteStatementSnafu)
+    }
+    pub async fn show_search_path(&self, query_ctx: QueryContextRef) -> Result<Output> {
+        query::sql::show_search_path(query_ctx)
             .await
             .context(error::ExecuteStatementSnafu)
     }

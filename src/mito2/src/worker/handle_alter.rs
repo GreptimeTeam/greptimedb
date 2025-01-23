@@ -22,11 +22,11 @@ use common_telemetry::{debug, info};
 use humantime_serde::re::humantime;
 use snafu::ResultExt;
 use store_api::metadata::{
-    InvalidRegionOptionChangeRequestSnafu, MetadataError, RegionMetadata, RegionMetadataBuilder,
+    InvalidSetRegionOptionRequestSnafu, MetadataError, RegionMetadata, RegionMetadataBuilder,
     RegionMetadataRef,
 };
 use store_api::mito_engine_options;
-use store_api::region_request::{AlterKind, ChangeOption, RegionAlterRequest};
+use store_api::region_request::{AlterKind, RegionAlterRequest, SetRegionOption};
 use store_api::storage::RegionId;
 
 use crate::error::{
@@ -58,12 +58,29 @@ impl<S> RegionWorkerLoop<S> {
         let version = region.version();
 
         // fast path for memory state changes like options.
-        if let AlterKind::ChangeRegionOptions { options } = request.kind {
-            match self.handle_alter_region_options(region, version, options) {
-                Ok(_) => sender.send(Ok(0)),
-                Err(e) => sender.send(Err(e).context(InvalidMetadataSnafu)),
+        match request.kind {
+            AlterKind::SetRegionOptions { options } => {
+                match self.handle_alter_region_options(region, version, options) {
+                    Ok(_) => sender.send(Ok(0)),
+                    Err(e) => sender.send(Err(e).context(InvalidMetadataSnafu)),
+                }
+                return;
             }
-            return;
+            AlterKind::UnsetRegionOptions { keys } => {
+                // Converts the keys to SetRegionOption.
+                //
+                // It passes an empty string to achieve the purpose of unset
+                match self.handle_alter_region_options(
+                    region,
+                    version,
+                    keys.iter().map(Into::into).collect(),
+                ) {
+                    Ok(_) => sender.send(Ok(0)),
+                    Err(e) => sender.send(Err(e).context(InvalidMetadataSnafu)),
+                }
+                return;
+            }
+            _ => {}
         }
 
         if version.metadata.schema_version != request.schema_version {
@@ -128,10 +145,8 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         info!(
-            "Try to alter region {} from version {} to {}",
-            region_id,
-            version.metadata.schema_version,
-            region.metadata().schema_version
+            "Try to alter region {}, version.metadata: {:?}, request: {:?}",
+            region_id, version.metadata, request,
         );
         self.handle_alter_region_metadata(region, version, request, sender);
     }
@@ -162,25 +177,21 @@ impl<S> RegionWorkerLoop<S> {
         &mut self,
         region: MitoRegionRef,
         version: VersionRef,
-        options: Vec<ChangeOption>,
+        options: Vec<SetRegionOption>,
     ) -> std::result::Result<(), MetadataError> {
         let mut current_options = version.options.clone();
         for option in options {
             match option {
-                ChangeOption::TTL(new_ttl) => {
+                SetRegionOption::Ttl(new_ttl) => {
                     info!(
                         "Update region ttl: {}, previous: {:?} new: {:?}",
                         region.region_id, current_options.ttl, new_ttl
                     );
-                    if new_ttl.is_zero() {
-                        current_options.ttl = None;
-                    } else {
-                        current_options.ttl = Some(new_ttl);
-                    }
+                    current_options.ttl = new_ttl;
                 }
-                ChangeOption::Twsc(key, value) => {
+                SetRegionOption::Twsc(key, value) => {
                     let Twcs(options) = &mut current_options.compaction;
-                    change_twcs_options(
+                    set_twcs_options(
                         options,
                         &TwcsOptions::default(),
                         &key,
@@ -213,7 +224,7 @@ fn metadata_after_alteration(
     Ok(Arc::new(new_meta))
 }
 
-fn change_twcs_options(
+fn set_twcs_options(
     options: &mut TwcsOptions,
     default_option: &TwcsOptions,
     key: &str,
@@ -245,30 +256,30 @@ fn change_twcs_options(
             options.max_inactive_window_files = files;
         }
         mito_engine_options::TWCS_MAX_OUTPUT_FILE_SIZE => {
-            let size =
-                if value.is_empty() {
-                    default_option.max_output_file_size
-                } else {
-                    Some(ReadableSize::from_str(value).map_err(|_| {
-                        InvalidRegionOptionChangeRequestSnafu { key, value }.build()
-                    })?)
-                };
+            let size = if value.is_empty() {
+                default_option.max_output_file_size
+            } else {
+                Some(
+                    ReadableSize::from_str(value)
+                        .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?,
+                )
+            };
             log_option_update(region_id, key, options.max_output_file_size, size);
             options.max_output_file_size = size;
         }
         mito_engine_options::TWCS_TIME_WINDOW => {
-            let window =
-                if value.is_empty() {
-                    default_option.time_window
-                } else {
-                    Some(humantime::parse_duration(value).map_err(|_| {
-                        InvalidRegionOptionChangeRequestSnafu { key, value }.build()
-                    })?)
-                };
+            let window = if value.is_empty() {
+                default_option.time_window
+            } else {
+                Some(
+                    humantime::parse_duration(value)
+                        .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?,
+                )
+            };
             log_option_update(region_id, key, options.time_window, window);
             options.time_window = window;
         }
-        _ => return InvalidRegionOptionChangeRequestSnafu { key, value }.fail(),
+        _ => return InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
     }
     Ok(())
 }
@@ -283,7 +294,7 @@ fn parse_usize_with_default(
     } else {
         value
             .parse::<usize>()
-            .map_err(|_| InvalidRegionOptionChangeRequestSnafu { key, value }.build())
+            .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())
     }
 }
 

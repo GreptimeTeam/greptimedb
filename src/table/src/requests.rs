@@ -17,20 +17,22 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
-use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_datasource::object_store::s3::is_supported_in_s3;
 use common_query::AddColumnLocation;
 use common_time::range::TimestampRange;
+use common_time::TimeToLive;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, FulltextOptions};
 use greptime_proto::v1::region::compact_request;
 use serde::{Deserialize, Serialize};
-use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY};
+use store_api::metric_engine_consts::{
+    is_metric_engine_option_key, LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY,
+};
 use store_api::mito_engine_options::is_mito_engine_option_key;
-use store_api::region_request::ChangeOption;
+use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 
 use crate::error::{ParseTableOptionSnafu, Result};
 use crate::metadata::{TableId, TableVersion};
@@ -48,6 +50,10 @@ pub fn validate_table_option(key: &str) -> bool {
     }
 
     if is_mito_engine_option_key(key) {
+        return true;
+    }
+
+    if is_metric_engine_option_key(key) {
         return true;
     }
 
@@ -74,8 +80,7 @@ pub struct TableOptions {
     /// Memtable size of memtable.
     pub write_buffer_size: Option<ReadableSize>,
     /// Time-to-live of table. Expired data will be automatically purged.
-    #[serde(with = "humantime_serde")]
-    pub ttl: Option<Duration>,
+    pub ttl: Option<TimeToLive>,
     /// Extra options that may not applicable to all table engines.
     pub extra_options: HashMap<String, String>,
 }
@@ -109,16 +114,13 @@ impl TableOptions {
         }
 
         if let Some(ttl) = kvs.get(TTL_KEY) {
-            let ttl_value = ttl
-                .parse::<humantime::Duration>()
-                .map_err(|_| {
-                    ParseTableOptionSnafu {
-                        key: TTL_KEY,
-                        value: ttl,
-                    }
-                    .build()
-                })?
-                .into();
+            let ttl_value = TimeToLive::from_humantime_or_str(ttl).map_err(|_| {
+                ParseTableOptionSnafu {
+                    key: TTL_KEY,
+                    value: ttl,
+                }
+                .build()
+            })?;
             options.ttl = Some(ttl_value);
         }
 
@@ -138,8 +140,8 @@ impl fmt::Display for TableOptions {
             key_vals.push(format!("{}={}", WRITE_BUFFER_SIZE_KEY, size));
         }
 
-        if let Some(ttl) = self.ttl {
-            key_vals.push(format!("{}={}", TTL_KEY, humantime::Duration::from(ttl)));
+        if let Some(ttl) = self.ttl.map(|ttl| ttl.to_string()) {
+            key_vals.push(format!("{}={}", TTL_KEY, ttl));
         }
 
         for (k, v) in &self.extra_options {
@@ -159,8 +161,7 @@ impl From<&TableOptions> for HashMap<String, String> {
                 write_buffer_size.to_string(),
             );
         }
-        if let Some(ttl) = opts.ttl {
-            let ttl_str = humantime::format_duration(ttl).to_string();
+        if let Some(ttl_str) = opts.ttl.map(|ttl| ttl.to_string()) {
             let _ = res.insert(TTL_KEY.to_string(), ttl_str);
         }
         res.extend(
@@ -190,6 +191,8 @@ pub struct AddColumnRequest {
     pub column_schema: ColumnSchema,
     pub is_key: bool,
     pub location: Option<AddColumnLocation>,
+    /// Add column if not exists.
+    pub add_if_not_exists: bool,
 }
 
 /// Change column datatype request
@@ -213,41 +216,36 @@ pub enum AlterKind {
     RenameTable {
         new_table_name: String,
     },
-    ChangeTableOptions {
-        options: Vec<ChangeOption>,
+    SetTableOptions {
+        options: Vec<SetRegionOption>,
     },
-    SetColumnFulltext {
+    UnsetTableOptions {
+        keys: Vec<UnsetRegionOption>,
+    },
+    SetIndex {
+        options: SetIndexOptions,
+    },
+    UnsetIndex {
+        options: UnsetIndexOptions,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SetIndexOptions {
+    Fulltext {
         column_name: String,
         options: FulltextOptions,
     },
-    UnsetColumnFulltext {
+    Inverted {
         column_name: String,
     },
 }
 
-// #[derive(Debug, Clone, Serialize, Deserialize)]
-// pub enum ChangeTableOptionRequest {
-//     TTL(Duration),
-// }
-
-// impl TryFrom<&ChangeTableOption> for ChangeTableOptionRequest {
-//     type Error = Error;
-//
-//     fn try_from(value: &ChangeTableOption) -> std::result::Result<Self, Self::Error> {
-//         let ChangeTableOption { key, value } = value;
-//         if key == TTL_KEY {
-//             let ttl = if value.is_empty() {
-//                 Duration::from_secs(0)
-//             } else {
-//                 humantime::parse_duration(value)
-//                     .map_err(|_| error::InvalidTableOptionValueSnafu { key, value }.build())?
-//             };
-//             Ok(Self::TTL(ttl))
-//         } else {
-//             UnsupportedTableOptionChangeSnafu { key }.fail()
-//         }
-//     }
-// }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum UnsetIndexOptions {
+    Fulltext { column_name: String },
+    Inverted { column_name: String },
+}
 
 #[derive(Debug)]
 pub struct InsertRequest {
@@ -345,8 +343,17 @@ pub struct CopyDatabaseRequest {
     pub time_range: Option<TimestampRange>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct CopyQueryToRequest {
+    pub location: String,
+    pub with: HashMap<String, String>,
+    pub connection: HashMap<String, String>,
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -364,7 +371,7 @@ mod tests {
     fn test_serialize_table_options() {
         let options = TableOptions {
             write_buffer_size: None,
-            ttl: Some(Duration::from_secs(1000)),
+            ttl: Some(Duration::from_secs(1000).into()),
             extra_options: HashMap::new(),
         };
         let serialized = serde_json::to_string(&options).unwrap();
@@ -376,7 +383,7 @@ mod tests {
     fn test_convert_hashmap_between_table_options() {
         let options = TableOptions {
             write_buffer_size: Some(ReadableSize::mb(128)),
-            ttl: Some(Duration::from_secs(1000)),
+            ttl: Some(Duration::from_secs(1000).into()),
             extra_options: HashMap::new(),
         };
         let serialized_map = HashMap::from(&options);
@@ -385,7 +392,7 @@ mod tests {
 
         let options = TableOptions {
             write_buffer_size: None,
-            ttl: None,
+            ttl: Default::default(),
             extra_options: HashMap::new(),
         };
         let serialized_map = HashMap::from(&options);
@@ -394,7 +401,7 @@ mod tests {
 
         let options = TableOptions {
             write_buffer_size: Some(ReadableSize::mb(128)),
-            ttl: Some(Duration::from_secs(1000)),
+            ttl: Some(Duration::from_secs(1000).into()),
             extra_options: HashMap::from([("a".to_string(), "A".to_string())]),
         };
         let serialized_map = HashMap::from(&options);
@@ -406,7 +413,7 @@ mod tests {
     fn test_table_options_to_string() {
         let options = TableOptions {
             write_buffer_size: Some(ReadableSize::mb(128)),
-            ttl: Some(Duration::from_secs(1000)),
+            ttl: Some(Duration::from_secs(1000).into()),
             extra_options: HashMap::new(),
         };
 
@@ -417,7 +424,7 @@ mod tests {
 
         let options = TableOptions {
             write_buffer_size: Some(ReadableSize::mb(128)),
-            ttl: Some(Duration::from_secs(1000)),
+            ttl: Some(Duration::from_secs(1000).into()),
             extra_options: HashMap::from([("a".to_string(), "A".to_string())]),
         };
 

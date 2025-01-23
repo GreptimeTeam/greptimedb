@@ -102,7 +102,7 @@ impl LeaderCachedKvBackend {
                 self.store.clone(),
                 RangeRequest::new().with_prefix(prefix.as_bytes()),
                 DEFAULT_PAGE_SIZE,
-                Arc::new(Ok),
+                Ok,
             )
             .into_stream();
 
@@ -385,6 +385,10 @@ impl TxnService for LeaderCachedKvBackend {
 impl ResettableKvBackend for LeaderCachedKvBackend {
     fn reset(&self) {
         self.cache.reset()
+    }
+
+    fn as_kv_backend_ref(self: Arc<Self>) -> KvBackendRef<Self::Error> {
+        self
     }
 }
 

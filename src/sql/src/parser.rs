@@ -50,7 +50,7 @@ impl ParserContext<'_> {
 
     /// Parses parser context to Query.
     pub fn parser_query(&mut self) -> Result<Box<Query>> {
-        Ok(Box::new(self.parser.parse_query().context(SyntaxSnafu)?))
+        self.parser.parse_query().context(SyntaxSnafu)
     }
 
     /// Parses SQL with given dialect
@@ -167,6 +167,12 @@ impl ParserContext<'_> {
                         self.parse_tql()
                     }
 
+                    Keyword::DECLARE => self.parse_declare_cursor(),
+
+                    Keyword::FETCH => self.parse_fetch_cursor(),
+
+                    Keyword::CLOSE => self.parse_close_cursor(),
+
                     Keyword::USE => {
                         let _ = self.parser.next_token();
 
@@ -277,8 +283,8 @@ impl ParserContext<'_> {
     /// but with constant argument "false".
     /// Because the argument is always "false" for us (it's introduced by BigQuery),
     /// we don't want to write it again and again.
-    pub(crate) fn parse_identifier(&mut self) -> std::result::Result<Ident, ParserError> {
-        self.parser.parse_identifier(false)
+    pub(crate) fn parse_identifier(parser: &mut Parser) -> std::result::Result<Ident, ParserError> {
+        parser.parse_identifier(false)
     }
 }
 

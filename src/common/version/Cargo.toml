@@ -8,11 +8,10 @@ license.workspace = true
 workspace = true
 
 [features]
-codec = ["dep:serde", "dep:schemars"]
+codec = ["dep:serde"]
 
 [dependencies]
 const_format = "0.2"
-schemars = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 shadow-rs.workspace = true
 

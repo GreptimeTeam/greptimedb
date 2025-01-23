@@ -23,7 +23,9 @@ use crate::key::table_info::TableInfoValue;
 use crate::key::{DeserializedValueWithBytes, RegionDistribution};
 
 impl AlterTableProcedure {
-    /// Builds new_meta
+    /// Builds new table info after alteration.
+    /// It bumps the column id of the table by the number of the add column requests.
+    /// So there may be holes in the column id sequence.
     pub(crate) fn build_new_table_info(&self, table_info: &RawTableInfo) -> Result<TableInfo> {
         let table_info =
             TableInfo::try_from(table_info.clone()).context(error::ConvertRawTableInfoSnafu)?;
@@ -34,7 +36,7 @@ impl AlterTableProcedure {
 
         let new_meta = table_info
             .meta
-            .builder_with_alter_kind(table_ref.table, &request.alter_kind, false)
+            .builder_with_alter_kind(table_ref.table, &request.alter_kind)
             .context(error::TableSnafu)?
             .build()
             .with_context(|_| error::BuildTableMetaSnafu {
@@ -46,6 +48,9 @@ impl AlterTableProcedure {
         new_info.ident.version = table_info.ident.version + 1;
         match request.alter_kind {
             AlterKind::AddColumns { columns } => {
+                // Bumps the column id for the new columns.
+                // It may bump more than the actual number of columns added if there are
+                // existing columns, but it's fine.
                 new_info.meta.next_column_id += columns.len() as u32;
             }
             AlterKind::RenameTable { new_table_name } => {
@@ -53,9 +58,10 @@ impl AlterTableProcedure {
             }
             AlterKind::DropColumns { .. }
             | AlterKind::ModifyColumnTypes { .. }
-            | AlterKind::ChangeTableOptions { .. }
-            | AlterKind::SetColumnFulltext { .. }
-            | AlterKind::UnsetColumnFulltext { .. } => {}
+            | AlterKind::SetTableOptions { .. }
+            | AlterKind::UnsetTableOptions { .. }
+            | AlterKind::SetIndex { .. }
+            | AlterKind::UnsetIndex { .. } => {}
         }
 
         Ok(new_info)

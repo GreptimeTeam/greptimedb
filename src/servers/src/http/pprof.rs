@@ -22,14 +22,13 @@ pub mod handler {
     use axum::response::IntoResponse;
     use common_pprof::Profiling;
     use common_telemetry::info;
-    use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
     use snafu::ResultExt;
 
     use crate::error::{DumpPprofSnafu, Result};
 
     /// Output format.
-    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+    #[derive(Debug, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
     pub enum Output {
         /// google’s pprof format report in protobuf.
@@ -40,7 +39,7 @@ pub mod handler {
         Flamegraph,
     }
 
-    #[derive(Serialize, Deserialize, Debug, JsonSchema)]
+    #[derive(Serialize, Deserialize, Debug)]
     #[serde(default)]
     pub struct PprofQuery {
         seconds: u64,

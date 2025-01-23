@@ -18,10 +18,11 @@ use api::v1;
 use common_query::AddColumnLocation;
 use datatypes::schema::FulltextOptions;
 use itertools::Itertools;
+use serde::Serialize;
 use sqlparser::ast::{ColumnDef, DataType, Ident, ObjectName, TableConstraint};
 use sqlparser_derive::{Visit, VisitMut};
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct AlterTable {
     pub table_name: ObjectName,
     pub alter_operation: AlterTableOperation,
@@ -56,14 +57,13 @@ impl Display for AlterTable {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum AlterTableOperation {
     /// `ADD <table_constraint>`
     AddConstraint(TableConstraint),
     /// `ADD [ COLUMN ] <column_def> [location]`
-    AddColumn {
-        column_def: ColumnDef,
-        location: Option<AddColumnLocation>,
+    AddColumns {
+        add_columns: Vec<AddColumn>,
     },
     /// `MODIFY <column_name> [target_type]`
     ModifyColumnType {
@@ -71,33 +71,76 @@ pub enum AlterTableOperation {
         target_type: DataType,
     },
     /// `SET <table attrs key> = <table attr value>`
-    ChangeTableOptions { options: Vec<ChangeTableOption> },
+    SetTableOptions {
+        options: Vec<KeyValueOption>,
+    },
+    /// `UNSET <table attrs key>`
+    UnsetTableOptions {
+        keys: Vec<String>,
+    },
     /// `DROP COLUMN <name>`
-    DropColumn { name: Ident },
+    DropColumn {
+        name: Ident,
+    },
     /// `RENAME <new_table_name>`
-    RenameTable { new_table_name: String },
+    RenameTable {
+        new_table_name: String,
+    },
+    SetIndex {
+        options: SetIndexOperation,
+    },
+    UnsetIndex {
+        options: UnsetIndexOperation,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub enum SetIndexOperation {
     /// `MODIFY COLUMN <column_name> SET FULLTEXT [WITH <options>]`
-    SetColumnFulltext {
+    Fulltext {
         column_name: Ident,
         options: FulltextOptions,
     },
+    /// `MODIFY COLUMN <column_name> SET INVERTED INDEX`
+    Inverted { column_name: Ident },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub enum UnsetIndexOperation {
     /// `MODIFY COLUMN <column_name> UNSET FULLTEXT`
-    UnsetColumnFulltext { column_name: Ident },
+    Fulltext { column_name: Ident },
+
+    /// `MODIFY COLUMN <column_name> UNSET INVERTED INDEX`
+    Inverted { column_name: Ident },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub struct AddColumn {
+    pub column_def: ColumnDef,
+    pub location: Option<AddColumnLocation>,
+    pub add_if_not_exists: bool,
+}
+
+impl Display for AddColumn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(location) = &self.location {
+            write!(f, "{} {location}", self.column_def)
+        } else {
+            write!(f, "{}", self.column_def)
+        }
+    }
 }
 
 impl Display for AlterTableOperation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AlterTableOperation::AddConstraint(constraint) => write!(f, r#"ADD {constraint}"#),
-            AlterTableOperation::AddColumn {
-                column_def,
-                location,
-            } => {
-                if let Some(location) = location {
-                    write!(f, r#"ADD COLUMN {column_def} {location}"#)
-                } else {
-                    write!(f, r#"ADD COLUMN {column_def}"#)
-                }
+            AlterTableOperation::AddColumns { add_columns } => {
+                let columns = add_columns
+                    .iter()
+                    .map(|add_column| format!("ADD COLUMN {add_column}"))
+                    .join(", ");
+                write!(f, "{columns}")
             }
             AlterTableOperation::DropColumn { name } => write!(f, r#"DROP COLUMN {name}"#),
             AlterTableOperation::RenameTable { new_table_name } => {
@@ -109,10 +152,106 @@ impl Display for AlterTableOperation {
             } => {
                 write!(f, r#"MODIFY COLUMN {column_name} {target_type}"#)
             }
-            AlterTableOperation::ChangeTableOptions { options } => {
+            AlterTableOperation::SetTableOptions { options } => {
                 let kvs = options
                     .iter()
-                    .map(|ChangeTableOption { key, value }| {
+                    .map(|KeyValueOption { key, value }| {
+                        if !value.is_empty() {
+                            format!("'{key}'='{value}'")
+                        } else {
+                            format!("'{key}'=NULL")
+                        }
+                    })
+                    .join(",");
+
+                write!(f, "SET {kvs}")
+            }
+            AlterTableOperation::UnsetTableOptions { keys } => {
+                let keys = keys.iter().map(|k| format!("'{k}'")).join(",");
+                write!(f, "UNSET {keys}")
+            }
+            AlterTableOperation::SetIndex { options } => match options {
+                SetIndexOperation::Fulltext {
+                    column_name,
+                    options,
+                } => {
+                    write!(f, "MODIFY COLUMN {column_name} SET FULLTEXT WITH(analyzer={0}, case_sensitive={1})", options.analyzer, options.case_sensitive)
+                }
+                SetIndexOperation::Inverted { column_name } => {
+                    write!(f, "MODIFY COLUMN {column_name} SET INVERTED INDEX")
+                }
+            },
+            AlterTableOperation::UnsetIndex { options } => match options {
+                UnsetIndexOperation::Fulltext { column_name } => {
+                    write!(f, "MODIFY COLUMN {column_name} UNSET FULLTEXT")
+                }
+                UnsetIndexOperation::Inverted { column_name } => {
+                    write!(f, "MODIFY COLUMN {column_name} UNSET INVERTED INDEX")
+                }
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub struct KeyValueOption {
+    pub key: String,
+    pub value: String,
+}
+
+impl From<KeyValueOption> for v1::Option {
+    fn from(c: KeyValueOption) -> Self {
+        v1::Option {
+            key: c.key,
+            value: c.value,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub struct AlterDatabase {
+    pub database_name: ObjectName,
+    pub alter_operation: AlterDatabaseOperation,
+}
+
+impl AlterDatabase {
+    pub(crate) fn new(database_name: ObjectName, alter_operation: AlterDatabaseOperation) -> Self {
+        Self {
+            database_name,
+            alter_operation,
+        }
+    }
+
+    pub fn database_name(&self) -> &ObjectName {
+        &self.database_name
+    }
+
+    pub fn alter_operation(&self) -> &AlterDatabaseOperation {
+        &self.alter_operation
+    }
+}
+
+impl Display for AlterDatabase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let database_name = self.database_name();
+        let alter_operation = self.alter_operation();
+        write!(f, r#"ALTER DATABASE {database_name} {alter_operation}"#)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub enum AlterDatabaseOperation {
+    SetDatabaseOption { options: Vec<KeyValueOption> },
+    UnsetDatabaseOption { keys: Vec<String> },
+}
+
+impl Display for AlterDatabaseOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AlterDatabaseOperation::SetDatabaseOption { options } => {
+                let kvs = options
+                    .iter()
+                    .map(|KeyValueOption { key, value }| {
                         if !value.is_empty() {
                             format!("'{key}'='{value}'")
                         } else {
@@ -125,30 +264,12 @@ impl Display for AlterTableOperation {
 
                 Ok(())
             }
-            AlterTableOperation::SetColumnFulltext {
-                column_name,
-                options,
-            } => {
-                write!(f, "MODIFY COLUMN {column_name} SET FULLTEXT WITH(analyzer={0}, case_sensitive={1})", options.analyzer, options.case_sensitive)
-            }
-            AlterTableOperation::UnsetColumnFulltext { column_name } => {
-                write!(f, "MODIFY COLUMN {column_name} UNSET FULLTEXT")
-            }
-        }
-    }
-}
+            AlterDatabaseOperation::UnsetDatabaseOption { keys } => {
+                let keys = keys.iter().map(|key| format!("'{key}'")).join(",");
+                write!(f, "UNSET {keys}")?;
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
-pub struct ChangeTableOption {
-    pub key: String,
-    pub value: String,
-}
-
-impl From<ChangeTableOption> for v1::ChangeTableOption {
-    fn from(c: ChangeTableOption) -> Self {
-        v1::ChangeTableOption {
-            key: c.key,
-            value: c.value,
+                Ok(())
+            }
         }
     }
 }
@@ -163,19 +284,61 @@ mod tests {
 
     #[test]
     fn test_display_alter() {
-        let sql = r"alter table monitor add column app string default 'shop' primary key;";
+        let sql = r"ALTER DATABASE db SET 'a' = 'b', 'c' = 'd'";
         let stmts =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
         assert_eq!(1, stmts.len());
-        assert_matches!(&stmts[0], Statement::Alter { .. });
+        assert_matches!(&stmts[0], Statement::AlterDatabase { .. });
 
         match &stmts[0] {
-            Statement::Alter(set) => {
+            Statement::AlterDatabase(set) => {
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
-ALTER TABLE monitor ADD COLUMN app STRING DEFAULT 'shop' PRIMARY KEY"#,
+ALTER DATABASE db SET 'a'='b','c'='d'"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = r"ALTER DATABASE db UNSET 'a', 'c'";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+
+        match &stmts[0] {
+            Statement::AlterDatabase(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+ALTER DATABASE db UNSET 'a','c'"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql =
+            r"alter table monitor add column app string default 'shop' primary key, add foo INT;";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::AlterTable { .. });
+
+        match &stmts[0] {
+            Statement::AlterTable(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+ALTER TABLE monitor ADD COLUMN app STRING DEFAULT 'shop' PRIMARY KEY, ADD COLUMN foo INT"#,
                     &new_sql
                 );
             }
@@ -189,10 +352,10 @@ ALTER TABLE monitor ADD COLUMN app STRING DEFAULT 'shop' PRIMARY KEY"#,
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
         assert_eq!(1, stmts.len());
-        assert_matches!(&stmts[0], Statement::Alter { .. });
+        assert_matches!(&stmts[0], Statement::AlterTable { .. });
 
         match &stmts[0] {
-            Statement::Alter(set) => {
+            Statement::AlterTable(set) => {
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
@@ -210,10 +373,10 @@ ALTER TABLE monitor MODIFY COLUMN load_15 STRING"#,
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
         assert_eq!(1, stmts.len());
-        assert_matches!(&stmts[0], Statement::Alter { .. });
+        assert_matches!(&stmts[0], Statement::AlterTable { .. });
 
         match &stmts[0] {
-            Statement::Alter(set) => {
+            Statement::AlterTable(set) => {
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
@@ -231,10 +394,10 @@ ALTER TABLE monitor DROP COLUMN load_15"#,
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
         assert_eq!(1, stmts.len());
-        assert_matches!(&stmts[0], Statement::Alter { .. });
+        assert_matches!(&stmts[0], Statement::AlterTable { .. });
 
         match &stmts[0] {
-            Statement::Alter(set) => {
+            Statement::AlterTable(set) => {
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
@@ -252,10 +415,10 @@ ALTER TABLE monitor RENAME monitor_new"#,
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
         assert_eq!(1, stmts.len());
-        assert_matches!(&stmts[0], Statement::Alter { .. });
+        assert_matches!(&stmts[0], Statement::AlterTable { .. });
 
         match &stmts[0] {
-            Statement::Alter(set) => {
+            Statement::AlterTable(set) => {
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
@@ -273,14 +436,35 @@ ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT WITH(analyzer=English, case_sen
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
         assert_eq!(1, stmts.len());
-        assert_matches!(&stmts[0], Statement::Alter { .. });
+        assert_matches!(&stmts[0], Statement::AlterTable { .. });
 
         match &stmts[0] {
-            Statement::Alter(set) => {
+            Statement::AlterTable(set) => {
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
 ALTER TABLE monitor MODIFY COLUMN a UNSET FULLTEXT"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = "ALTER TABLE monitor MODIFY COLUMN a SET INVERTED INDEX";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::AlterTable { .. });
+
+        match &stmts[0] {
+            Statement::AlterTable(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+ALTER TABLE monitor MODIFY COLUMN a SET INVERTED INDEX"#,
                     &new_sql
                 );
             }

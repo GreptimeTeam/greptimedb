@@ -19,14 +19,18 @@ use std::time::Duration;
 
 use api::v1::region::region_server::RegionServer;
 use arrow_flight::flight_service_server::FlightServiceServer;
-use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
-use catalog::kvbackend::{CachedMetaKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
+use cache::{
+    build_datanode_cache_registry, build_fundamental_cache_registry,
+    with_default_composite_cache_registry,
+};
+use catalog::information_extension::DistributedInformationExtension;
+use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
 use client::client_manager::NodeClients;
 use client::Client;
-use cmd::DistributedInformationExtension;
 use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
+use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
@@ -42,10 +46,10 @@ use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::config::{DatanodeOptions, ObjectStoreConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder, ProcedureConfig};
 use frontend::frontend::FrontendOptions;
-use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
+use hyper_util::rt::TokioIo;
 use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
 use meta_srv::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
@@ -182,6 +186,7 @@ impl GreptimeDbClusterBuilder {
                 max_metadata_value_size: None,
             },
             wal: self.metasrv_wal_config.clone(),
+            server_addr: "127.0.0.1:3002".to_string(),
             ..Default::default()
         };
 
@@ -190,6 +195,7 @@ impl GreptimeDbClusterBuilder {
             self.kv_backend.clone(),
             self.meta_selector.clone(),
             Some(datanode_clients.clone()),
+            None,
         )
         .await;
 
@@ -327,8 +333,15 @@ impl GreptimeDbClusterBuilder {
             client: meta_client.clone(),
         });
 
+        let layered_cache_registry = Arc::new(
+            LayeredCacheRegistryBuilder::default()
+                .add_cache_registry(build_datanode_cache_registry(meta_backend.clone()))
+                .build(),
+        );
+
         let mut datanode = DatanodeBuilder::new(opts, Plugins::default())
             .with_kv_backend(meta_backend)
+            .with_cache_registry(layered_cache_registry)
             .with_meta_client(meta_client)
             .build()
             .await
@@ -351,8 +364,9 @@ impl GreptimeDbClusterBuilder {
         meta_client.start(&[&metasrv.server_addr]).await.unwrap();
         let meta_client = Arc::new(meta_client);
 
-        let cached_meta_backend =
-            Arc::new(CachedMetaKvBackendBuilder::new(meta_client.clone()).build());
+        let cached_meta_backend = Arc::new(
+            CachedKvBackendBuilder::new(Arc::new(MetaKvBackend::new(meta_client.clone()))).build(),
+        );
 
         let layered_cache_builder = LayeredCacheRegistryBuilder::default().add_cache_registry(
             CacheRegistryBuilder::default()
@@ -380,7 +394,7 @@ impl GreptimeDbClusterBuilder {
 
         let handlers_executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
-            Arc::new(InvalidateTableCacheHandler::new(cache_registry.clone())),
+            Arc::new(InvalidateCacheHandler::new(cache_registry.clone())),
         ]);
 
         let options = FrontendOptions::default();
@@ -473,7 +487,7 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
 
                 async move {
                     if let Some(client) = client {
-                        Ok(client)
+                        Ok(TokioIo::new(client))
                     } else {
                         Err(std::io::Error::new(
                             std::io::ErrorKind::Other,

@@ -34,12 +34,13 @@ use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use common_query::Output;
 use headers::HeaderValue;
+use log_query::LogQuery;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use pipeline::{GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion, PipelineWay};
 use serde_json::Value;
-use session::context::QueryContextRef;
+use session::context::{QueryContext, QueryContextRef};
 
 use crate::error::Result;
 use crate::influxdb::InfluxdbRequest;
@@ -50,24 +51,8 @@ pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + S
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
 pub type PromStoreProtocolHandlerRef = Arc<dyn PromStoreProtocolHandler + Send + Sync>;
 pub type OpenTelemetryProtocolHandlerRef = Arc<dyn OpenTelemetryProtocolHandler + Send + Sync>;
-pub type ScriptHandlerRef = Arc<dyn ScriptHandler + Send + Sync>;
-pub type LogHandlerRef = Arc<dyn LogHandler + Send + Sync>;
-
-#[async_trait]
-pub trait ScriptHandler {
-    async fn insert_script(
-        &self,
-        query_ctx: QueryContextRef,
-        name: &str,
-        script: &str,
-    ) -> Result<()>;
-    async fn execute_script(
-        &self,
-        query_ctx: QueryContextRef,
-        name: &str,
-        params: HashMap<String, String>,
-    ) -> Result<Output>;
-}
+pub type PipelineHandlerRef = Arc<dyn PipelineHandler + Send + Sync>;
+pub type LogQueryHandlerRef = Arc<dyn LogQueryHandler + Send + Sync>;
 
 #[async_trait]
 pub trait InfluxdbLineProtocolHandler {
@@ -107,7 +92,7 @@ pub trait PromStoreProtocolHandler {
 }
 
 #[async_trait]
-pub trait OpenTelemetryProtocolHandler: LogHandler {
+pub trait OpenTelemetryProtocolHandler: PipelineHandler {
     /// Handling opentelemetry metrics request
     async fn metrics(
         &self,
@@ -132,14 +117,16 @@ pub trait OpenTelemetryProtocolHandler: LogHandler {
     ) -> Result<Output>;
 }
 
-/// LogHandler is responsible for handling log related requests.
+/// PipelineHandler is responsible for handling pipeline related requests.
 ///
-/// It should be able to insert logs and manage pipelines.
-/// The pipeline is a series of transformations that can be applied to logs.
-/// The pipeline is stored in the database and can be retrieved by name.
+/// The "Pipeline" is a series of transformations that can be applied to unstructured
+/// data like logs. This handler is responsible to manage pipelines and accept data for
+/// processing.
+///
+/// The pipeline is stored in the database and can be retrieved by its name.
 #[async_trait]
-pub trait LogHandler {
-    async fn insert_logs(&self, log: RowInsertRequests, ctx: QueryContextRef) -> Result<Output>;
+pub trait PipelineHandler {
+    async fn insert(&self, input: RowInsertRequests, ctx: QueryContextRef) -> Result<Output>;
 
     async fn get_pipeline(
         &self,
@@ -162,4 +149,19 @@ pub trait LogHandler {
         version: PipelineVersion,
         query_ctx: QueryContextRef,
     ) -> Result<Option<()>>;
+
+    async fn get_table(
+        &self,
+        table: &str,
+        query_ctx: &QueryContext,
+    ) -> std::result::Result<Option<Arc<table::Table>>, catalog::error::Error>;
+
+    //// Build a pipeline from a string.
+    fn build_pipeline(&self, pipeline: &str) -> Result<Pipeline<GreptimeTransformer>>;
+}
+
+/// Handle log query requests.
+#[async_trait]
+pub trait LogQueryHandler {
+    async fn query(&self, query: LogQuery, ctx: QueryContextRef) -> Result<Output>;
 }

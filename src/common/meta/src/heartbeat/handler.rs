@@ -21,6 +21,7 @@ use common_telemetry::error;
 use crate::error::Result;
 use crate::heartbeat::mailbox::{IncomingMessage, MailboxRef};
 
+pub mod invalidate_table_cache;
 pub mod parse_mailbox_message;
 #[cfg(test)]
 mod tests;

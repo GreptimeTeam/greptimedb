@@ -7,10 +7,8 @@ ARG OUTPUT_DIR
 ENV LANG en_US.utf8
 WORKDIR /greptimedb
 
-# Add PPA for Python 3.10.
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common && \
-    add-apt-repository ppa:deadsnakes/ppa -y
+    DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common
 
 # Install dependencies.
 RUN --mount=type=cache,target=/var/cache/apt \
@@ -20,10 +18,7 @@ RUN --mount=type=cache,target=/var/cache/apt \
     curl \
     git \
     build-essential \
-    pkg-config \
-    python3.10 \
-    python3.10-dev \
-    python3-pip
+    pkg-config
 
 # Install Rust.
 SHELL ["/bin/bash", "-c"]
@@ -46,14 +41,7 @@ ARG OUTPUT_DIR
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get \
     -y install ca-certificates \
-    python3.10 \
-    python3.10-dev \
-    python3-pip \
     curl
-
-COPY ./docker/python/requirements.txt /etc/greptime/requirements.txt
-
-RUN python3 -m pip install -r /etc/greptime/requirements.txt
 
 WORKDIR /greptime
 COPY --from=builder /out/target/${OUTPUT_DIR}/greptime /greptime/bin/

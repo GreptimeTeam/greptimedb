@@ -168,8 +168,11 @@ impl TimePartitions {
         Ok(())
     }
 
-    /// Forks latest partition.
-    pub fn fork(&self, metadata: &RegionMetadataRef) -> Self {
+    /// Forks latest partition and updates the partition duration if `part_duration` is Some.
+    pub fn fork(&self, metadata: &RegionMetadataRef, part_duration: Option<Duration>) -> Self {
+        // Fall back to the existing partition duration.
+        let part_duration = part_duration.or(self.part_duration);
+
         let mut inner = self.inner.lock().unwrap();
         let latest_part = inner
             .parts
@@ -178,24 +181,39 @@ impl TimePartitions {
             .cloned();
 
         let Some(old_part) = latest_part else {
+            // If there is no partition, then we create a new partition with the new duration.
             return Self::new(
                 metadata.clone(),
                 self.builder.clone(),
                 inner.next_memtable_id,
-                self.part_duration,
+                part_duration,
             );
         };
+
+        let old_stats = old_part.memtable.stats();
+        // Use the max timestamp to compute the new time range for the memtable.
+        // If `part_duration` is None, the new range will be None.
+        let new_time_range =
+            old_stats
+                .time_range()
+                .zip(part_duration)
+                .and_then(|(range, bucket)| {
+                    partition_start_timestamp(range.1, bucket)
+                        .and_then(|start| PartTimeRange::from_start_duration(start, bucket))
+                });
+        // Forks the latest partition, but compute the time range based on the new duration.
         let memtable = old_part.memtable.fork(inner.alloc_memtable_id(), metadata);
         let new_part = TimePartition {
             memtable,
-            time_range: old_part.time_range,
+            time_range: new_time_range,
         };
+
         Self {
             inner: Mutex::new(PartitionsInner::with_partition(
                 new_part,
                 inner.next_memtable_id,
             )),
-            part_duration: self.part_duration,
+            part_duration,
             metadata: metadata.clone(),
             builder: self.builder.clone(),
         }
@@ -236,6 +254,19 @@ impl TimePartitions {
     pub(crate) fn next_memtable_id(&self) -> MemtableId {
         let inner = self.inner.lock().unwrap();
         inner.next_memtable_id
+    }
+
+    /// Creates a new empty partition list from this list and a `part_duration`.
+    /// It falls back to the old partition duration if `part_duration` is `None`.
+    pub(crate) fn new_with_part_duration(&self, part_duration: Option<Duration>) -> Self {
+        debug_assert!(self.is_empty());
+
+        Self::new(
+            self.metadata.clone(),
+            self.builder.clone(),
+            self.next_memtable_id(),
+            part_duration.or(self.part_duration),
+        )
     }
 
     /// Returns all partitions.
@@ -447,11 +478,11 @@ mod tests {
 
         assert_eq!(1, partitions.num_partitions());
         assert!(!partitions.is_empty());
-        assert!(!partitions.is_empty());
         let mut memtables = Vec::new();
         partitions.list_memtables(&mut memtables);
+        assert_eq!(0, memtables[0].id());
 
-        let iter = memtables[0].iter(None, None).unwrap();
+        let iter = memtables[0].iter(None, None, None).unwrap();
         let timestamps = collect_iter_timestamps(iter);
         assert_eq!(&[1000, 3000, 5000, 6000, 7000], &timestamps[..]);
     }
@@ -489,7 +520,7 @@ mod tests {
 
         let mut memtables = Vec::new();
         partitions.list_memtables(&mut memtables);
-        let iter = memtables[0].iter(None, None).unwrap();
+        let iter = memtables[0].iter(None, None, None).unwrap();
         let timestamps = collect_iter_timestamps(iter);
         assert_eq!(&[0, 2000, 3000, 4000, 5000, 7000], &timestamps[..]);
         let parts = partitions.list_partitions();
@@ -503,16 +534,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_write_multi_parts() {
-        let metadata = memtable_util::metadata_for_test();
+    fn new_multi_partitions(metadata: &RegionMetadataRef) -> TimePartitions {
         let builder = Arc::new(PartitionTreeMemtableBuilder::default());
         let partitions =
             TimePartitions::new(metadata.clone(), builder, 0, Some(Duration::from_secs(5)));
         assert_eq!(0, partitions.num_partitions());
 
         let kvs = memtable_util::build_key_values(
-            &metadata,
+            metadata,
             "hello".to_string(),
             0,
             &[2000, 0],
@@ -524,7 +553,7 @@ mod tests {
         assert!(!partitions.is_empty());
 
         let kvs = memtable_util::build_key_values(
-            &metadata,
+            metadata,
             "hello".to_string(),
             0,
             &[3000, 7000, 4000, 5000],
@@ -534,9 +563,18 @@ mod tests {
         partitions.write(&kvs).unwrap();
         assert_eq!(2, partitions.num_partitions());
 
+        partitions
+    }
+
+    #[test]
+    fn test_write_multi_parts() {
+        let metadata = memtable_util::metadata_for_test();
+        let partitions = new_multi_partitions(&metadata);
+
         let parts = partitions.list_partitions();
-        let iter = parts[0].memtable.iter(None, None).unwrap();
+        let iter = parts[0].memtable.iter(None, None, None).unwrap();
         let timestamps = collect_iter_timestamps(iter);
+        assert_eq!(0, parts[0].memtable.id());
         assert_eq!(
             Timestamp::new_millisecond(0),
             parts[0].time_range.unwrap().min_timestamp
@@ -546,7 +584,8 @@ mod tests {
             parts[0].time_range.unwrap().max_timestamp
         );
         assert_eq!(&[0, 2000, 3000, 4000], &timestamps[..]);
-        let iter = parts[1].memtable.iter(None, None).unwrap();
+        let iter = parts[1].memtable.iter(None, None, None).unwrap();
+        assert_eq!(1, parts[1].memtable.id());
         let timestamps = collect_iter_timestamps(iter);
         assert_eq!(&[5000, 7000], &timestamps[..]);
         assert_eq!(
@@ -557,5 +596,86 @@ mod tests {
             Timestamp::new_millisecond(10000),
             parts[1].time_range.unwrap().max_timestamp
         );
+    }
+
+    #[test]
+    fn test_new_with_part_duration() {
+        let metadata = memtable_util::metadata_for_test();
+        let builder = Arc::new(PartitionTreeMemtableBuilder::default());
+        let partitions = TimePartitions::new(metadata.clone(), builder.clone(), 0, None);
+
+        let new_parts = partitions.new_with_part_duration(Some(Duration::from_secs(5)));
+        assert_eq!(Duration::from_secs(5), new_parts.part_duration().unwrap());
+        assert_eq!(1, new_parts.next_memtable_id());
+
+        // Won't update the duration if it's None.
+        let new_parts = new_parts.new_with_part_duration(None);
+        assert_eq!(Duration::from_secs(5), new_parts.part_duration().unwrap());
+        // Don't need to create new memtables.
+        assert_eq!(1, new_parts.next_memtable_id());
+
+        let new_parts = new_parts.new_with_part_duration(Some(Duration::from_secs(10)));
+        assert_eq!(Duration::from_secs(10), new_parts.part_duration().unwrap());
+        // Don't need to create new memtables.
+        assert_eq!(1, new_parts.next_memtable_id());
+
+        let builder = Arc::new(PartitionTreeMemtableBuilder::default());
+        let partitions = TimePartitions::new(metadata.clone(), builder.clone(), 0, None);
+        // Need to build a new memtable as duration is still None.
+        let new_parts = partitions.new_with_part_duration(None);
+        assert!(new_parts.part_duration().is_none());
+        assert_eq!(2, new_parts.next_memtable_id());
+    }
+
+    #[test]
+    fn test_fork_empty() {
+        let metadata = memtable_util::metadata_for_test();
+        let builder = Arc::new(PartitionTreeMemtableBuilder::default());
+        let partitions = TimePartitions::new(metadata.clone(), builder, 0, None);
+        partitions.freeze().unwrap();
+        let new_parts = partitions.fork(&metadata, None);
+        assert!(new_parts.part_duration().is_none());
+        assert_eq!(1, new_parts.list_partitions()[0].memtable.id());
+        assert_eq!(2, new_parts.next_memtable_id());
+
+        new_parts.freeze().unwrap();
+        let new_parts = new_parts.fork(&metadata, Some(Duration::from_secs(5)));
+        assert_eq!(Duration::from_secs(5), new_parts.part_duration().unwrap());
+        assert_eq!(2, new_parts.list_partitions()[0].memtable.id());
+        assert_eq!(3, new_parts.next_memtable_id());
+
+        new_parts.freeze().unwrap();
+        let new_parts = new_parts.fork(&metadata, None);
+        // Won't update the duration.
+        assert_eq!(Duration::from_secs(5), new_parts.part_duration().unwrap());
+        assert_eq!(3, new_parts.list_partitions()[0].memtable.id());
+        assert_eq!(4, new_parts.next_memtable_id());
+
+        new_parts.freeze().unwrap();
+        let new_parts = new_parts.fork(&metadata, Some(Duration::from_secs(10)));
+        assert_eq!(Duration::from_secs(10), new_parts.part_duration().unwrap());
+        assert_eq!(4, new_parts.list_partitions()[0].memtable.id());
+        assert_eq!(5, new_parts.next_memtable_id());
+    }
+
+    #[test]
+    fn test_fork_non_empty_none() {
+        let metadata = memtable_util::metadata_for_test();
+        let partitions = new_multi_partitions(&metadata);
+        partitions.freeze().unwrap();
+
+        // Won't update the duration.
+        let new_parts = partitions.fork(&metadata, None);
+        assert!(new_parts.is_empty());
+        assert_eq!(Duration::from_secs(5), new_parts.part_duration().unwrap());
+        assert_eq!(2, new_parts.list_partitions()[0].memtable.id());
+        assert_eq!(3, new_parts.next_memtable_id());
+
+        // Although we don't fork a memtable multiple times, we still add a test for it.
+        let new_parts = partitions.fork(&metadata, Some(Duration::from_secs(10)));
+        assert!(new_parts.is_empty());
+        assert_eq!(Duration::from_secs(10), new_parts.part_duration().unwrap());
+        assert_eq!(3, new_parts.list_partitions()[0].memtable.id());
+        assert_eq!(4, new_parts.next_memtable_id());
     }
 }

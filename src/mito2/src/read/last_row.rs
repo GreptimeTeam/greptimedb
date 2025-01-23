@@ -17,16 +17,17 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use datatypes::vectors::UInt32Vector;
 use store_api::storage::TimeSeriesRowSelector;
 
 use crate::cache::{
-    selector_result_cache_hit, selector_result_cache_miss, CacheManagerRef, SelectorResultKey,
+    selector_result_cache_hit, selector_result_cache_miss, CacheStrategy, SelectorResultKey,
     SelectorResultValue,
 };
 use crate::error::Result;
 use crate::read::{Batch, BatchReader, BoxedBatchReader};
 use crate::sst::file::FileId;
-use crate::sst::parquet::reader::RowGroupReader;
+use crate::sst::parquet::reader::{ReaderMetrics, RowGroupReader};
 
 /// Reader to keep the last row for each time series.
 /// It assumes that batches from the input reader are
@@ -85,7 +86,7 @@ impl RowGroupLastRowCachedReader {
     pub(crate) fn new(
         file_id: FileId,
         row_group_idx: usize,
-        cache_manager: CacheManagerRef,
+        cache_strategy: CacheStrategy,
         row_group_reader: RowGroupReader,
     ) -> Self {
         let key = SelectorResultKey {
@@ -94,20 +95,25 @@ impl RowGroupLastRowCachedReader {
             selector: TimeSeriesRowSelector::LastRow,
         };
 
-        if let Some(value) = cache_manager.get_selector_result(&key) {
-            let schema_matches = value.projection
-                == row_group_reader
-                    .context()
-                    .read_format()
-                    .projection_indices();
+        if let Some(value) = cache_strategy.get_selector_result(&key) {
+            let schema_matches =
+                value.projection == row_group_reader.read_format().projection_indices();
             if schema_matches {
                 // Schema matches, use cache batches.
                 Self::new_hit(value)
             } else {
-                Self::new_miss(key, row_group_reader, Some(cache_manager))
+                Self::new_miss(key, row_group_reader, cache_strategy)
             }
         } else {
-            Self::new_miss(key, row_group_reader, Some(cache_manager))
+            Self::new_miss(key, row_group_reader, cache_strategy)
+        }
+    }
+
+    /// Gets the underlying reader metrics if uncached.
+    pub(crate) fn metrics(&self) -> Option<&ReaderMetrics> {
+        match self {
+            RowGroupLastRowCachedReader::Hit(_) => None,
+            RowGroupLastRowCachedReader::Miss(reader) => Some(reader.metrics()),
         }
     }
 
@@ -121,13 +127,13 @@ impl RowGroupLastRowCachedReader {
     fn new_miss(
         key: SelectorResultKey,
         row_group_reader: RowGroupReader,
-        cache_manager: Option<CacheManagerRef>,
+        cache_strategy: CacheStrategy,
     ) -> Self {
         selector_result_cache_miss();
         Self::Miss(RowGroupLastRowReader::new(
             key,
             row_group_reader,
-            cache_manager,
+            cache_strategy,
         ))
     }
 }
@@ -166,37 +172,36 @@ pub(crate) struct RowGroupLastRowReader {
     reader: RowGroupReader,
     selector: LastRowSelector,
     yielded_batches: Vec<Batch>,
-    cache_manager: Option<CacheManagerRef>,
+    cache_strategy: CacheStrategy,
+    /// Index buffer to take a new batch from the last row.
+    take_index: UInt32Vector,
 }
 
 impl RowGroupLastRowReader {
-    fn new(
-        key: SelectorResultKey,
-        reader: RowGroupReader,
-        cache_manager: Option<CacheManagerRef>,
-    ) -> Self {
+    fn new(key: SelectorResultKey, reader: RowGroupReader, cache_strategy: CacheStrategy) -> Self {
         Self {
             key,
             reader,
             selector: LastRowSelector::default(),
             yielded_batches: vec![],
-            cache_manager,
+            cache_strategy,
+            take_index: UInt32Vector::from_vec(vec![0]),
         }
     }
 
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
         while let Some(batch) = self.reader.next_batch().await? {
             if let Some(yielded) = self.selector.on_next(batch) {
-                if self.cache_manager.is_some() {
-                    self.yielded_batches.push(yielded.clone());
-                }
+                push_yielded_batches(yielded.clone(), &self.take_index, &mut self.yielded_batches)?;
                 return Ok(Some(yielded));
             }
         }
         let last_batch = if let Some(last_batch) = self.selector.finish() {
-            if self.cache_manager.is_some() {
-                self.yielded_batches.push(last_batch.clone());
-            }
+            push_yielded_batches(
+                last_batch.clone(),
+                &self.take_index,
+                &mut self.yielded_batches,
+            )?;
             Some(last_batch)
         } else {
             None
@@ -209,23 +214,33 @@ impl RowGroupLastRowReader {
 
     /// Updates row group's last row cache if cache manager is present.
     fn maybe_update_cache(&mut self) {
-        if let Some(cache) = &self.cache_manager {
-            if self.yielded_batches.is_empty() {
-                // we always expect that row groups yields batches.
-                return;
-            }
-            let value = Arc::new(SelectorResultValue {
-                result: std::mem::take(&mut self.yielded_batches),
-                projection: self
-                    .reader
-                    .context()
-                    .read_format()
-                    .projection_indices()
-                    .to_vec(),
-            });
-            cache.put_selector_result(self.key, value)
+        if self.yielded_batches.is_empty() {
+            // we always expect that row groups yields batches.
+            return;
         }
+        let value = Arc::new(SelectorResultValue {
+            result: std::mem::take(&mut self.yielded_batches),
+            projection: self.reader.read_format().projection_indices().to_vec(),
+        });
+        self.cache_strategy.put_selector_result(self.key, value);
     }
+
+    fn metrics(&self) -> &ReaderMetrics {
+        self.reader.metrics()
+    }
+}
+
+/// Push last row into `yielded_batches`.
+fn push_yielded_batches(
+    mut batch: Batch,
+    take_index: &UInt32Vector,
+    yielded_batches: &mut Vec<Batch>,
+) -> Result<()> {
+    assert_eq!(1, batch.num_rows());
+    batch.take_in_place(take_index)?;
+    yielded_batches.push(batch);
+
+    Ok(())
 }
 
 /// Common struct that selects only the last row of each time series.

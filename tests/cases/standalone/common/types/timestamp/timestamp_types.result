@@ -20,7 +20,7 @@ SELECT extract(YEAR from sec),extract( YEAR from milli),extract(YEAR from nano) 
 +---------------------------------------+-----------------------------------------+----------------------------------------+
 | date_part(Utf8("YEAR"),timestamp.sec) | date_part(Utf8("YEAR"),timestamp.milli) | date_part(Utf8("YEAR"),timestamp.nano) |
 +---------------------------------------+-----------------------------------------+----------------------------------------+
-| 2008.0                                | 2008.0                                  | 2008.0                                 |
+| 2008                                  | 2008                                    | 2008                                   |
 +---------------------------------------+-----------------------------------------+----------------------------------------+
 
 SELECT nano::TIMESTAMP, milli::TIMESTAMP,sec::TIMESTAMP from timestamp;
@@ -212,7 +212,7 @@ Affected Rows: 1
 select count(*), nano from timestamp group by nano order by nano;
 
 +----------+-------------------------------+
-| COUNT(*) | nano                          |
+| count(*) | nano                          |
 +----------+-------------------------------+
 | 1        | 2008-01-01T00:00:01.889268321 |
 | 2        | 2008-01-01T00:00:01.899268321 |
@@ -222,7 +222,7 @@ select count(*), nano from timestamp group by nano order by nano;
 select count(*), sec from timestamp group by sec order by sec;
 
 +----------+---------------------+
-| COUNT(*) | sec                 |
+| count(*) | sec                 |
 +----------+---------------------+
 | 1        | 2008-01-01T00:00:01 |
 | 2        | 2008-01-01T00:00:11 |
@@ -232,7 +232,7 @@ select count(*), sec from timestamp group by sec order by sec;
 select count(*), milli from timestamp group by milli order by milli;
 
 +----------+-------------------------+
-| COUNT(*) | milli                   |
+| count(*) | milli                   |
 +----------+-------------------------+
 | 1        | 2008-01-01T00:00:01.594 |
 | 2        | 2008-01-01T00:00:01.794 |

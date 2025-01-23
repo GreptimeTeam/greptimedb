@@ -109,7 +109,7 @@ impl Requester {
             .map(|partition| {
                 RegionRequestBody::Compact(CompactRequest {
                     region_id: partition.id.into(),
-                    options: Some(request.compact_options.clone()),
+                    options: Some(request.compact_options),
                 })
             })
             .collect();

@@ -50,9 +50,9 @@ use crate::dataframe::DataFrame;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::error::{
-    CatalogSnafu, ConvertSchemaSnafu, CreateRecordBatchSnafu, DataFusionSnafu,
-    MissingTableMutationHandlerSnafu, MissingTimestampColumnSnafu, QueryExecutionSnafu, Result,
-    TableMutationSnafu, TableNotFoundSnafu, TableReadOnlySnafu, UnsupportedExprSnafu,
+    CatalogSnafu, ConvertSchemaSnafu, CreateRecordBatchSnafu, MissingTableMutationHandlerSnafu,
+    MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, TableMutationSnafu,
+    TableNotFoundSnafu, TableReadOnlySnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
 use crate::metrics::{OnDone, QUERY_STAGE_ELAPSED};
@@ -102,7 +102,7 @@ impl DatafusionQueryEngine {
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         ensure!(
-            matches!(dml.op, WriteOp::InsertInto | WriteOp::Delete),
+            matches!(dml.op, WriteOp::Insert(_) | WriteOp::Delete),
             UnsupportedExprSnafu {
                 name: format!("DML op {}", dml.op),
             }
@@ -137,7 +137,8 @@ impl DatafusionQueryEngine {
                 .context(QueryExecutionSnafu)?;
 
             match dml.op {
-                WriteOp::InsertInto => {
+                WriteOp::Insert(_) => {
+                    // We ignore the insert op.
                     let output = self
                         .insert(&table_name, column_vectors, query_ctx.clone())
                         .await?;
@@ -283,6 +284,7 @@ impl DatafusionQueryEngine {
             .context(error::DatafusionSnafu)
             .map_err(BoxedError::new)
             .context(QueryExecutionSnafu)?;
+
         // skip optimize for MergeScan
         let optimized_plan = if let DfLogicalPlan::Extension(ext) = &analyzed_plan
             && ext.node.name() == MergeScanLogicalPlan::name()
@@ -339,31 +341,36 @@ impl DatafusionQueryEngine {
     #[tracing::instrument(skip_all)]
     fn optimize_physical_plan(
         &self,
-        ctx: &mut QueryEngineContext,
+        _ctx: &mut QueryEngineContext,
         plan: Arc<dyn ExecutionPlan>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let _timer = metrics::OPTIMIZE_PHYSICAL_ELAPSED.start_timer();
 
-        let state = ctx.state();
-        let config = state.config_options();
+        // TODO(ruihang): `self.create_physical_plan()` already optimize the plan, check
+        // if we need to optimize it again here.
+        // let state = ctx.state();
+        // let config = state.config_options();
+
         // skip optimize AnalyzeExec plan
         let optimized_plan = if let Some(analyze_plan) = plan.as_any().downcast_ref::<AnalyzeExec>()
         {
-            let mut new_plan = analyze_plan.input().clone();
-            for optimizer in state.physical_optimizers() {
-                new_plan = optimizer
-                    .optimize(new_plan, config)
-                    .context(DataFusionSnafu)?;
-            }
-            Arc::new(DistAnalyzeExec::new(new_plan))
+            Arc::new(DistAnalyzeExec::new(analyze_plan.input().clone()))
+            // let mut new_plan = analyze_plan.input().clone();
+            // for optimizer in state.physical_optimizers() {
+            //     new_plan = optimizer
+            //         .optimize(new_plan, config)
+            //         .context(DataFusionSnafu)?;
+            // }
+            // Arc::new(DistAnalyzeExec::new(new_plan))
         } else {
-            let mut new_plan = plan;
-            for optimizer in state.physical_optimizers() {
-                new_plan = optimizer
-                    .optimize(new_plan, config)
-                    .context(DataFusionSnafu)?;
-            }
-            new_plan
+            plan
+            // let mut new_plan = plan;
+            // for optimizer in state.physical_optimizers() {
+            //     new_plan = optimizer
+            //         .optimize(new_plan, config)
+            //         .context(DataFusionSnafu)?;
+            // }
+            // new_plan
         };
 
         Ok(optimized_plan)
@@ -574,12 +581,11 @@ mod tests {
             .await
             .unwrap();
 
-        // TODO(sunng87): do not rely on to_string for compare
         assert_eq!(
-            format!("{plan:?}"),
+            plan.to_string(),
             r#"Limit: skip=0, fetch=20
-  Projection: SUM(numbers.number)
-    Aggregate: groupBy=[[]], aggr=[[SUM(numbers.number)]]
+  Projection: sum(numbers.number)
+    Aggregate: groupBy=[[]], aggr=[[sum(numbers.number)]]
       TableScan: numbers"#
         );
     }
@@ -605,7 +611,7 @@ mod tests {
                 assert_eq!(numbers[0].num_columns(), 1);
                 assert_eq!(1, numbers[0].schema.num_columns());
                 assert_eq!(
-                    "SUM(numbers.number)",
+                    "sum(numbers.number)",
                     numbers[0].schema.column_schemas()[0].name
                 );
 
@@ -683,11 +689,11 @@ mod tests {
         assert_eq!(
             schema.column_schemas()[0],
             ColumnSchema::new(
-                "SUM(numbers.number)",
+                "sum(numbers.number)",
                 ConcreteDataType::uint64_datatype(),
                 true
             )
         );
-        assert_eq!("Limit: skip=0, fetch=20\n  Aggregate: groupBy=[[]], aggr=[[SUM(CAST(numbers.number AS UInt64))]]\n    TableScan: numbers projection=[number]", format!("{}", logical_plan.display_indent()));
+        assert_eq!("Limit: skip=0, fetch=20\n  Aggregate: groupBy=[[]], aggr=[[sum(CAST(numbers.number AS UInt64))]]\n    TableScan: numbers projection=[number]", format!("{}", logical_plan.display_indent()));
     }
 }

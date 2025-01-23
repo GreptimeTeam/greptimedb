@@ -19,9 +19,9 @@ use std::collections::HashMap;
 use common_meta::SchemaOptions;
 use datatypes::schema::{
     ColumnDefaultConstraint, ColumnSchema, SchemaRef, COLUMN_FULLTEXT_OPT_KEY_ANALYZER,
-    COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COMMENT_KEY,
+    COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY,
+    COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE, COMMENT_KEY,
 };
-use humantime::format_duration;
 use snafu::ResultExt;
 use sql::ast::{ColumnDef, ColumnOption, ColumnOptionDef, Expr, Ident, ObjectName};
 use sql::dialect::GreptimeDbDialect;
@@ -33,7 +33,8 @@ use table::metadata::{TableInfoRef, TableMeta};
 use table::requests::{FILE_TABLE_META_KEY, TTL_KEY, WRITE_BUFFER_SIZE_KEY};
 
 use crate::error::{
-    ConvertSqlTypeSnafu, ConvertSqlValueSnafu, GetFulltextOptionsSnafu, Result, SqlSnafu,
+    ConvertSqlTypeSnafu, ConvertSqlValueSnafu, GetFulltextOptionsSnafu,
+    GetSkippingIndexOptionsSnafu, Result, SqlSnafu,
 };
 
 /// Generates CREATE TABLE options from given table metadata and schema-level options.
@@ -46,13 +47,13 @@ fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptio
             write_buffer_size.to_string(),
         );
     }
-    if let Some(ttl) = table_opts.ttl {
-        options.insert(TTL_KEY.to_string(), format_duration(ttl).to_string());
-    } else if let Some(database_ttl) = schema_options.and_then(|o| o.ttl) {
-        options.insert(
-            TTL_KEY.to_string(),
-            format_duration(database_ttl).to_string(),
-        );
+    if let Some(ttl) = table_opts.ttl.map(|t| t.to_string()) {
+        options.insert(TTL_KEY.to_string(), ttl);
+    } else if let Some(database_ttl) = schema_options
+        .and_then(|o| o.ttl)
+        .map(|ttl| ttl.to_string())
+    {
+        options.insert(TTL_KEY.to_string(), database_ttl);
     };
     for (k, v) in table_opts
         .extra_options
@@ -116,6 +117,23 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
         extensions.fulltext_options = Some(map.into());
     }
 
+    if let Some(opt) = column_schema
+        .skipping_index_options()
+        .context(GetSkippingIndexOptionsSnafu)?
+    {
+        let map = HashMap::from([
+            (
+                COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY.to_string(),
+                opt.granularity.to_string(),
+            ),
+            (
+                COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE.to_string(),
+                opt.index_type.to_string(),
+            ),
+        ]);
+        extensions.skipping_index_options = Some(map.into());
+    }
+
     Ok(Column {
         column_def: ColumnDef {
             name: Ident::with_quote(quote_style, name),
@@ -128,6 +146,43 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
         },
         extensions,
     })
+}
+
+/// Returns the column schemas for `SHOW CREATE TABLE` statement.
+///
+/// For metric engine, it will only return the column schemas that are not internal columns.
+fn column_schemas_for_show_create<'a>(
+    schema: &'a SchemaRef,
+    engine: &str,
+) -> Vec<&'a ColumnSchema> {
+    let is_metric_engine = is_metric_engine(engine);
+    if is_metric_engine {
+        schema
+            .column_schemas()
+            .iter()
+            .filter(|c| !is_metric_engine_internal_column(&c.name))
+            .collect()
+    } else {
+        schema.column_schemas().iter().collect()
+    }
+}
+
+/// Returns the primary key columns for `SHOW CREATE TABLE` statement.
+///
+/// For metric engine, it will only return the primary key columns that are not internal columns.
+fn primary_key_columns_for_show_create<'a>(
+    table_meta: &'a TableMeta,
+    engine: &str,
+) -> Vec<&'a String> {
+    let is_metric_engine = is_metric_engine(engine);
+    if is_metric_engine {
+        table_meta
+            .row_key_column_names()
+            .filter(|name| !is_metric_engine_internal_column(name))
+            .collect()
+    } else {
+        table_meta.row_key_column_names().collect()
+    }
 }
 
 fn create_table_constraints(
@@ -144,31 +199,22 @@ fn create_table_constraints(
         });
     }
     if !table_meta.primary_key_indices.is_empty() {
-        let is_metric_engine = is_metric_engine(engine);
-        let columns = table_meta
-            .row_key_column_names()
-            .flat_map(|name| {
-                if is_metric_engine && is_metric_engine_internal_column(name) {
-                    None
-                } else {
-                    Some(Ident::with_quote(quote_style, name))
-                }
-            })
+        let columns = primary_key_columns_for_show_create(table_meta, engine)
+            .into_iter()
+            .map(|name| Ident::with_quote(quote_style, name))
             .collect();
         constraints.push(TableConstraint::PrimaryKey { columns });
     }
 
-    let inverted_index_set = schema
-        .column_schemas()
-        .iter()
-        .any(|c| c.has_inverted_index_key());
+    let column_schemas = column_schemas_for_show_create(schema, engine);
+    let inverted_index_set = column_schemas.iter().any(|c| c.has_inverted_index_key());
     if inverted_index_set {
-        let inverted_index_cols = schema
-            .column_schemas()
+        let inverted_index_cols = column_schemas
             .iter()
             .filter(|c| c.is_inverted_indexed())
             .map(|c| Ident::with_quote(quote_style, &c.name))
             .collect::<Vec<_>>();
+
         constraints.push(TableConstraint::InvertedIndex {
             columns: inverted_index_cols,
         });
@@ -216,10 +262,11 @@ pub fn create_table_stmt(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use common_time::timestamp::TimeUnit;
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{FulltextOptions, Schema, SchemaRef};
+    use datatypes::schema::{FulltextOptions, Schema, SchemaRef, SkippingIndexOptions};
     use table::metadata::*;
     use table::requests::{
         TableOptions, FILE_TABLE_FORMAT_KEY, FILE_TABLE_LOCATION_KEY, FILE_TABLE_META_KEY,
@@ -230,9 +277,14 @@ mod tests {
     #[test]
     fn test_show_create_table_sql() {
         let schema = vec![
-            ColumnSchema::new("id", ConcreteDataType::uint32_datatype(), true),
+            ColumnSchema::new("id", ConcreteDataType::uint32_datatype(), true)
+                .with_skipping_options(SkippingIndexOptions {
+                    granularity: 4096,
+                    ..Default::default()
+                })
+                .unwrap(),
             ColumnSchema::new("host", ConcreteDataType::string_datatype(), true)
-                .set_inverted_index(true),
+                .with_inverted_index(true),
             ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
             ColumnSchema::new("disk", ConcreteDataType::float32_datatype(), true),
             ColumnSchema::new("msg", ConcreteDataType::string_datatype(), true)
@@ -259,13 +311,22 @@ mod tests {
         let catalog_name = "greptime".to_string();
         let regions = vec![0, 1, 2];
 
+        let mut options = table::requests::TableOptions {
+            ttl: Some(Duration::from_secs(30).into()),
+            ..Default::default()
+        };
+
+        let _ = options
+            .extra_options
+            .insert("compaction.type".to_string(), "twcs".to_string());
+
         let meta = TableMetaBuilder::default()
             .schema(table_schema)
             .primary_key_indices(vec![0, 1])
             .value_indices(vec![2, 3])
             .engine("mito".to_string())
             .next_column_id(0)
-            .options(Default::default())
+            .options(options)
             .created_on(Default::default())
             .region_numbers(regions)
             .build()
@@ -291,7 +352,7 @@ mod tests {
         assert_eq!(
             r#"
 CREATE TABLE IF NOT EXISTS "system_metrics" (
-  "id" INT UNSIGNED NULL,
+  "id" INT UNSIGNED NULL SKIPPING INDEX WITH(granularity = '4096', type = 'BLOOM'),
   "host" STRING NULL,
   "cpu" DOUBLE NULL,
   "disk" FLOAT NULL,
@@ -302,7 +363,10 @@ CREATE TABLE IF NOT EXISTS "system_metrics" (
   INVERTED INDEX ("host")
 )
 ENGINE=mito
-"#,
+WITH(
+  'compaction.type' = 'twcs',
+  ttl = '30s'
+)"#,
             sql
         );
     }

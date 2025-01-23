@@ -103,6 +103,7 @@ impl VersionControlBuilder {
                 index_file_size: 0,
                 num_rows: 0,
                 num_row_groups: 0,
+                sequence: None,
             },
         );
         self
@@ -164,6 +165,7 @@ pub(crate) fn write_rows_to_version(
         op_type: OpType::Put as i32,
         sequence: start_ts as u64, // The sequence may be incorrect, but it's fine in test.
         rows: Some(rows),
+        write_hint: None,
     };
     let key_values = KeyValues::new(&version.metadata, mutation).unwrap();
     version.memtables.mutable.write(&key_values).unwrap();
@@ -194,6 +196,7 @@ pub(crate) fn apply_edit(
                 index_file_size: 0,
                 num_rows: 0,
                 num_row_groups: 0,
+                sequence: None,
             }
         })
         .collect();

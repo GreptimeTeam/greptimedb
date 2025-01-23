@@ -24,14 +24,14 @@ use crate::sst::index::IndexOutput;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
 pub(crate) mod file_range;
-pub(crate) mod format;
+pub mod format;
 pub(crate) mod helper;
 pub(crate) mod metadata;
-mod page_reader;
+pub(crate) mod page_reader;
 pub mod reader;
 pub mod row_group;
 mod row_selection;
-mod stats;
+pub(crate) mod stats;
 pub mod writer;
 
 /// Key of metadata in parquet SST.
@@ -95,7 +95,7 @@ mod tests {
     use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
     use super::*;
-    use crate::cache::{CacheManager, PageKey};
+    use crate::cache::{CacheManager, CacheStrategy, PageKey};
     use crate::sst::index::Indexer;
     use crate::sst::parquet::format::WriteFormat;
     use crate::sst::parquet::reader::ParquetReaderBuilder;
@@ -134,7 +134,7 @@ mod tests {
         );
 
         let info = writer
-            .write_all(source, &write_opts)
+            .write_all(source, None, &write_opts)
             .await
             .unwrap()
             .unwrap();
@@ -189,17 +189,17 @@ mod tests {
         );
 
         writer
-            .write_all(source, &write_opts)
+            .write_all(source, None, &write_opts)
             .await
             .unwrap()
             .unwrap();
 
         // Enable page cache.
-        let cache = Arc::new(
+        let cache = CacheStrategy::EnableAll(Arc::new(
             CacheManager::builder()
                 .page_cache_size(64 * 1024 * 1024)
                 .build(),
-        );
+        ));
         let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store)
             .cache(cache.clone());
         for _ in 0..3 {
@@ -258,7 +258,7 @@ mod tests {
         );
 
         let sst_info = writer
-            .write_all(source, &write_opts)
+            .write_all(source, None, &write_opts)
             .await
             .unwrap()
             .expect("write_all should return sst info");
@@ -297,7 +297,7 @@ mod tests {
             Indexer::default(),
         );
         writer
-            .write_all(source, &write_opts)
+            .write_all(source, None, &write_opts)
             .await
             .unwrap()
             .unwrap();
@@ -350,7 +350,7 @@ mod tests {
             Indexer::default(),
         );
         writer
-            .write_all(source, &write_opts)
+            .write_all(source, None, &write_opts)
             .await
             .unwrap()
             .unwrap();
@@ -386,7 +386,7 @@ mod tests {
         );
 
         writer
-            .write_all(source, &write_opts)
+            .write_all(source, None, &write_opts)
             .await
             .unwrap()
             .unwrap();

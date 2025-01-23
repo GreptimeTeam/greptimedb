@@ -18,7 +18,7 @@ use api::v1::greptime_database_client::GreptimeDatabaseClient;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
-    AlterExpr, AuthHeader, CreateTableExpr, DdlRequest, GreptimeRequest, InsertRequests,
+    AlterTableExpr, AuthHeader, CreateTableExpr, DdlRequest, GreptimeRequest, InsertRequests,
     QueryRequest, RequestHeader,
 };
 use arrow_flight::Ticket;
@@ -211,9 +211,9 @@ impl Database {
         .await
     }
 
-    pub async fn alter(&self, expr: AlterExpr) -> Result<Output> {
+    pub async fn alter(&self, expr: AlterTableExpr) -> Result<Output> {
         self.do_get(Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::Alter(expr)),
+            expr: Some(DdlExpr::AlterTable(expr)),
         }))
         .await
     }

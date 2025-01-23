@@ -16,14 +16,13 @@ use axum::response::IntoResponse;
 use axum::Json;
 use http::header::CONTENT_TYPE;
 use http::HeaderValue;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
 
 /// Greptimedb Manage Api Response struct
 /// Currently we have `Pipelines` and `Scripts` as control panel api
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct GreptimedbManageResponse {
     #[serde(flatten)]
     pub(crate) manage_result: ManageResult,
@@ -57,7 +56,7 @@ impl GreptimedbManageResponse {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
 pub enum ManageResult {
     Pipelines { pipelines: Vec<PipelineOutput> },
@@ -65,7 +64,7 @@ pub enum ManageResult {
     Scripts(),
 }
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct PipelineOutput {
     name: String,
     version: String,
@@ -98,10 +97,8 @@ impl IntoResponse for GreptimedbManageResponse {
 
 #[cfg(test)]
 mod tests {
-
     use arrow::datatypes::ToByteSlice;
-    use http_body::Body;
-    use hyper::body::to_bytes;
+    use axum::body::to_bytes;
 
     use super::*;
 
@@ -117,16 +114,14 @@ mod tests {
             execution_time_ms: 42,
         };
 
-        let mut re = resp.into_response();
-        let data = re.data();
-
-        let data_str = format!("{:?}", data);
+        let re = resp.into_response();
+        let data_str = format!("{:?}", re);
         assert_eq!(
             data_str,
-            r#"Data(Response { status: 200, version: HTTP/1.1, headers: {"content-type": "application/json", "x-greptime-format": "greptimedb_manage", "x-greptime-execution-time": "42"}, body: UnsyncBoxBody })"#
+            r#"Response { status: 200, version: HTTP/1.1, headers: {"content-type": "application/json", "x-greptime-format": "greptimedb_manage", "x-greptime-execution-time": "42"}, body: Body(UnsyncBoxBody) }"#
         );
 
-        let body_bytes = to_bytes(re.into_body()).await.unwrap();
+        let body_bytes = to_bytes(re.into_body(), usize::MAX).await.unwrap();
         let body_str = String::from_utf8_lossy(body_bytes.to_byte_slice());
         assert_eq!(
             body_str,

@@ -33,7 +33,7 @@ use crate::read::compat::CompatBatch;
 use crate::read::last_row::RowGroupLastRowCachedReader;
 use crate::read::prune::PruneReader;
 use crate::read::Batch;
-use crate::row_converter::{McmpRowCodec, RowCodec};
+use crate::row_converter::{CompositeValues, PrimaryKeyCodec};
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext};
@@ -114,7 +114,7 @@ impl FileRange {
             let reader = RowGroupLastRowCachedReader::new(
                 self.file_handle().file_id(),
                 self.row_group_idx,
-                self.context.reader_builder.cache_manager().clone(),
+                self.context.reader_builder.cache_strategy().clone(),
                 RowGroupReader::new(self.context.clone(), parquet_reader),
             );
             PruneReader::new_with_last_row_reader(self.context.clone(), reader)
@@ -156,7 +156,7 @@ impl FileRangeContext {
         reader_builder: RowGroupReaderBuilder,
         filters: Vec<SimpleFilterContext>,
         read_format: ReadFormat,
-        codec: McmpRowCodec,
+        codec: Arc<dyn PrimaryKeyCodec>,
     ) -> Self {
         Self {
             reader_builder,
@@ -215,22 +215,18 @@ impl FileRangeContext {
         let stats = column_metadata.statistics().context(StatsNotPresentSnafu {
             file_path: self.reader_builder.file_path(),
         })?;
-        if stats.has_min_max_set() {
-            stats
-                .min_bytes()
-                .try_into()
-                .map(i32::from_le_bytes)
-                .map(|min_op_type| min_op_type == OpType::Delete as i32)
-                .ok()
-                .context(DecodeStatsSnafu {
-                    file_path: self.reader_builder.file_path(),
-                })
-        } else {
-            DecodeStatsSnafu {
+        stats
+            .min_bytes_opt()
+            .context(StatsNotPresentSnafu {
                 file_path: self.reader_builder.file_path(),
-            }
-            .fail()
-        }
+            })?
+            .try_into()
+            .map(i32::from_le_bytes)
+            .map(|min_op_type| min_op_type == OpType::Delete as i32)
+            .ok()
+            .context(DecodeStatsSnafu {
+                file_path: self.reader_builder.file_path(),
+            })
     }
 }
 
@@ -241,7 +237,7 @@ pub(crate) struct RangeBase {
     /// Helper to read the SST.
     pub(crate) read_format: ReadFormat,
     /// Decoder for primary keys
-    pub(crate) codec: McmpRowCodec,
+    pub(crate) codec: Arc<dyn PrimaryKeyCodec>,
     /// Optional helper to compat batches.
     pub(crate) compat_batch: Option<CompatBatch>,
 }
@@ -268,15 +264,25 @@ impl RangeBase {
                         input.set_pk_values(self.codec.decode(input.primary_key())?);
                         input.pk_values().unwrap()
                     };
-                    // Safety: this is a primary key
-                    let pk_index = self
-                        .read_format
-                        .metadata()
-                        .primary_key_index(filter.column_id())
-                        .unwrap();
-                    let pk_value = pk_values[pk_index]
-                        .try_to_scalar_value(filter.data_type())
-                        .context(FieldTypeMismatchSnafu)?;
+                    let pk_value = match pk_values {
+                        CompositeValues::Dense(v) => {
+                            // Safety: this is a primary key
+                            let pk_index = self
+                                .read_format
+                                .metadata()
+                                .primary_key_index(filter.column_id())
+                                .unwrap();
+                            v[pk_index]
+                                .1
+                                .try_to_scalar_value(filter.data_type())
+                                .context(FieldTypeMismatchSnafu)?
+                        }
+                        CompositeValues::Sparse(v) => {
+                            let v = v.get_or_null(filter.column_id());
+                            v.try_to_scalar_value(filter.data_type())
+                                .context(FieldTypeMismatchSnafu)?
+                        }
+                    };
                     if filter
                         .filter()
                         .evaluate_scalar(&pk_value)

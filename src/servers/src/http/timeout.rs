@@ -20,10 +20,10 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::Request;
 use axum::response::Response;
+use http::StatusCode;
 use pin_project::pin_project;
-use tokio::time::Sleep;
-use tower::timeout::error::Elapsed;
-use tower::{BoxError, Layer, Service};
+use tokio::time::{Instant, Sleep};
+use tower::{Layer, Service};
 
 use crate::http::header::constants::GREPTIME_DB_HEADER_TIMEOUT;
 
@@ -31,49 +31,44 @@ use crate::http::header::constants::GREPTIME_DB_HEADER_TIMEOUT;
 ///
 /// [`Timeout`]: crate::timeout::Timeout
 ///
-/// Modified from https://github.com/tower-rs/tower/blob/8b84b98d93a2493422a0ecddb6251f292a904cff/tower/src/timeout/future.rs
+/// Modified from https://github.com/tower-rs/tower-http/blob/tower-http-0.5.2/tower-http/src/timeout/service.rs
 #[derive(Debug)]
 #[pin_project]
 pub struct ResponseFuture<T> {
     #[pin]
-    response: T,
+    inner: T,
     #[pin]
     sleep: Sleep,
 }
 
 impl<T> ResponseFuture<T> {
-    pub(crate) fn new(response: T, sleep: Sleep) -> Self {
-        ResponseFuture { response, sleep }
+    pub(crate) fn new(inner: T, sleep: Sleep) -> Self {
+        ResponseFuture { inner, sleep }
     }
 }
 
-impl<F, T, E> Future for ResponseFuture<F>
+impl<F, E> Future for ResponseFuture<F>
 where
-    F: Future<Output = Result<T, E>>,
-    E: Into<BoxError>,
+    F: Future<Output = Result<Response, E>>,
 {
-    type Output = Result<T, BoxError>;
+    type Output = Result<Response, E>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
 
-        // First, try polling the future
-        match this.response.poll(cx) {
-            Poll::Ready(v) => return Poll::Ready(v.map_err(Into::into)),
-            Poll::Pending => {}
+        if this.sleep.poll(cx).is_ready() {
+            let mut res = Response::default();
+            *res.status_mut() = StatusCode::REQUEST_TIMEOUT;
+            return Poll::Ready(Ok(res));
         }
 
-        // Now check the sleep
-        match this.sleep.poll(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(_) => Poll::Ready(Err(Elapsed::new().into())),
-        }
+        this.inner.poll(cx)
     }
 }
 
 /// Applies a timeout to requests via the supplied inner service.
 ///
-/// Modified from https://github.com/tower-rs/tower/blob/8b84b98d93a2493422a0ecddb6251f292a904cff/tower/src/timeout/layer.rs
+/// Modified from https://github.com/tower-rs/tower-http/blob/tower-http-0.5.2/tower-http/src/timeout/service.rs
 #[derive(Debug, Clone)]
 pub struct DynamicTimeoutLayer {
     default_timeout: Duration,
@@ -94,7 +89,7 @@ impl<S> Layer<S> for DynamicTimeoutLayer {
     }
 }
 
-/// Modified from https://github.com/tower-rs/tower/blob/8b84b98d93a2493422a0ecddb6251f292a904cff/tower/src/timeout/mod.rs
+/// Modified from https://github.com/tower-rs/tower-http/blob/tower-http-0.5.2/tower-http/src/timeout/service.rs
 #[derive(Clone)]
 pub struct DynamicTimeout<S> {
     inner: S,
@@ -114,10 +109,9 @@ impl<S> DynamicTimeout<S> {
 impl<S> Service<Request<Body>> for DynamicTimeout<S>
 where
     S: Service<Request<Body>, Response = Response> + Send + 'static,
-    S::Error: Into<BoxError>,
 {
     type Response = S::Response;
-    type Error = BoxError;
+    type Error = S::Error;
     type Future = ResponseFuture<S::Future>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -128,7 +122,7 @@ where
     }
 
     fn call(&mut self, request: Request<Body>) -> Self::Future {
-        let user_timeout = request
+        let timeout = request
             .headers()
             .get(GREPTIME_DB_HEADER_TIMEOUT)
             .and_then(|value| {
@@ -136,9 +130,17 @@ where
                     .to_str()
                     .ok()
                     .and_then(|value| humantime::parse_duration(value).ok())
-            });
+            })
+            .unwrap_or(self.default_timeout);
         let response = self.inner.call(request);
-        let sleep = tokio::time::sleep(user_timeout.unwrap_or(self.default_timeout));
-        ResponseFuture::new(response, sleep)
+
+        if timeout.is_zero() {
+            // 30 years. See `Instant::far_future`.
+            let far_future = Instant::now() + Duration::from_secs(86400 * 365 * 30);
+            ResponseFuture::new(response, tokio::time::sleep_until(far_future))
+        } else {
+            let sleep = tokio::time::sleep(timeout);
+            ResponseFuture::new(response, sleep)
+        }
     }
 }

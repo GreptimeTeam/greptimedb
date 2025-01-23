@@ -13,10 +13,12 @@
 // limitations under the License.
 
 //! Bulk part encoder/decoder.
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 
 use api::v1::Mutation;
+use bytes::Bytes;
 use common_time::timestamp::TimeUnit;
 use datafusion::arrow::array::{TimestampNanosecondArray, UInt64Builder};
 use datatypes::arrow;
@@ -26,93 +28,150 @@ use datatypes::arrow::array::{
     UInt8Builder,
 };
 use datatypes::arrow::compute::TakeOptions;
-use datatypes::arrow::datatypes::{DataType as ArrowDataType, SchemaRef};
+use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow_array::BinaryArray;
 use datatypes::data_type::DataType;
 use datatypes::prelude::{MutableVector, ScalarVectorBuilder, Vector};
-use datatypes::types::TimestampType;
+use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
 use parquet::arrow::ArrowWriter;
 use parquet::data_type::AsBytes;
+use parquet::file::metadata::ParquetMetaData;
+use parquet::file::properties::WriterProperties;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
+use store_api::storage::{ColumnId, SequenceNumber};
+use table::predicate::Predicate;
 
+use crate::error;
 use crate::error::{ComputeArrowSnafu, EncodeMemtableSnafu, NewRecordBatchSnafu, Result};
+use crate::memtable::bulk::context::BulkIterContextRef;
+use crate::memtable::bulk::part_reader::BulkPartIter;
 use crate::memtable::key_values::KeyValuesRef;
-use crate::read::Batch;
-use crate::row_converter::{McmpRowCodec, RowCodec};
-use crate::sst::parquet::format::PrimaryKeyArray;
+use crate::memtable::BoxedBatchIterator;
+use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt};
+use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
+use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::to_sst_arrow_schema;
 
 #[derive(Debug)]
 pub struct BulkPart {
-    data: Vec<u8>,
+    data: Bytes,
     metadata: BulkPartMeta,
 }
 
 impl BulkPart {
-    pub fn new(data: Vec<u8>, metadata: BulkPartMeta) -> Self {
+    pub fn new(data: Bytes, metadata: BulkPartMeta) -> Self {
         Self { data, metadata }
     }
 
     pub(crate) fn metadata(&self) -> &BulkPartMeta {
         &self.metadata
     }
+
+    pub(crate) fn read(
+        &self,
+        context: BulkIterContextRef,
+        sequence: Option<SequenceNumber>,
+    ) -> Result<Option<BoxedBatchIterator>> {
+        // use predicate to find row groups to read.
+        let row_groups_to_read = context.row_groups_to_read(&self.metadata.parquet_metadata);
+
+        if row_groups_to_read.is_empty() {
+            // All row groups are filtered.
+            return Ok(None);
+        }
+
+        let iter = BulkPartIter::try_new(
+            context,
+            row_groups_to_read,
+            self.metadata.parquet_metadata.clone(),
+            self.data.clone(),
+            sequence,
+        )?;
+        Ok(Some(Box::new(iter) as BoxedBatchIterator))
+    }
 }
 
 #[derive(Debug)]
 pub struct BulkPartMeta {
+    /// Total rows in part.
     pub num_rows: usize,
+    /// Max timestamp in part.
     pub max_timestamp: i64,
+    /// Min timestamp in part.
     pub min_timestamp: i64,
-}
-
-impl Default for BulkPartMeta {
-    fn default() -> Self {
-        Self {
-            num_rows: 0,
-            max_timestamp: i64::MIN,
-            min_timestamp: i64::MAX,
-        }
-    }
+    /// Part file metadata.
+    pub parquet_metadata: Arc<ParquetMetaData>,
+    /// Part region schema.
+    pub region_metadata: RegionMetadataRef,
 }
 
 pub struct BulkPartEncoder {
     metadata: RegionMetadataRef,
-    arrow_schema: SchemaRef,
-    pk_encoder: McmpRowCodec,
+    pk_encoder: DensePrimaryKeyCodec,
+    row_group_size: usize,
     dedup: bool,
+    writer_props: Option<WriterProperties>,
+}
+
+impl BulkPartEncoder {
+    pub(crate) fn new(
+        metadata: RegionMetadataRef,
+        dedup: bool,
+        row_group_size: usize,
+    ) -> BulkPartEncoder {
+        let codec = DensePrimaryKeyCodec::new(&metadata);
+        let writer_props = Some(
+            WriterProperties::builder()
+                .set_write_batch_size(row_group_size)
+                .set_max_row_group_size(row_group_size)
+                .build(),
+        );
+        Self {
+            metadata,
+            pk_encoder: codec,
+            row_group_size,
+            dedup,
+            writer_props,
+        }
+    }
 }
 
 impl BulkPartEncoder {
     /// Encodes mutations to a [BulkPart], returns true if encoded data has been written to `dest`.
-    fn encode_mutations(&self, mutations: &[Mutation], dest: &mut BulkPart) -> Result<bool> {
+    fn encode_mutations(&self, mutations: &[Mutation]) -> Result<Option<BulkPart>> {
         let Some((arrow_record_batch, min_ts, max_ts)) =
-            mutations_to_record_batch(mutations, &self.metadata, &self.pk_encoder, false)?
+            mutations_to_record_batch(mutations, &self.metadata, &self.pk_encoder, self.dedup)?
         else {
-            return Ok(false);
+            return Ok(None);
         };
 
+        let mut buf = Vec::with_capacity(4096);
         let arrow_schema = arrow_record_batch.schema();
-        {
-            let mut writer = ArrowWriter::try_new(&mut dest.data, arrow_schema, None)
-                .context(EncodeMemtableSnafu)?;
+
+        let file_metadata = {
+            let mut writer =
+                ArrowWriter::try_new(&mut buf, arrow_schema, self.writer_props.clone())
+                    .context(EncodeMemtableSnafu)?;
             writer
                 .write(&arrow_record_batch)
                 .context(EncodeMemtableSnafu)?;
-            let _metadata = writer.finish().context(EncodeMemtableSnafu)?;
-        }
-
-        dest.metadata = BulkPartMeta {
-            num_rows: arrow_record_batch.num_rows(),
-            max_timestamp: max_ts,
-            min_timestamp: min_ts,
+            writer.finish().context(EncodeMemtableSnafu)?
         };
-        Ok(true)
-    }
 
-    /// Decodes [BulkPart] to [Batch]es.
-    fn decode_to_batches(&self, _part: &BulkPart, _dest: &mut VecDeque<Batch>) -> Result<()> {
-        todo!()
+        let buf = Bytes::from(buf);
+        let parquet_metadata = Arc::new(parse_parquet_metadata(file_metadata)?);
+
+        Ok(Some(BulkPart {
+            data: buf,
+            metadata: BulkPartMeta {
+                num_rows: arrow_record_batch.num_rows(),
+                max_timestamp: max_ts,
+                min_timestamp: min_ts,
+                parquet_metadata,
+                region_metadata: self.metadata.clone(),
+            },
+        }))
     }
 }
 
@@ -120,7 +179,7 @@ impl BulkPartEncoder {
 fn mutations_to_record_batch(
     mutations: &[Mutation],
     metadata: &RegionMetadataRef,
-    pk_encoder: &McmpRowCodec,
+    pk_encoder: &DensePrimaryKeyCodec,
     dedup: bool,
 ) -> Result<Option<(RecordBatch, i64, i64)>> {
     let total_rows: usize = mutations
@@ -379,10 +438,12 @@ fn binary_array_to_dictionary(input: &BinaryArray) -> Result<PrimaryKeyArray> {
 mod tests {
     use std::collections::VecDeque;
 
+    use datafusion_common::ScalarValue;
     use datatypes::prelude::{ScalarVector, Value};
     use datatypes::vectors::{Float64Vector, TimestampMillisecondVector};
 
     use super::*;
+    use crate::memtable::bulk::context::BulkIterContext;
     use crate::sst::parquet::format::ReadFormat;
     use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
 
@@ -444,7 +505,7 @@ mod tests {
         k0: &'a str,
         k1: u32,
         timestamps: &'a [i64],
-        v0: &'a [Option<f64>],
+        v1: &'a [Option<f64>],
         sequence: u64,
     }
 
@@ -452,7 +513,7 @@ mod tests {
     struct BatchOutput<'a> {
         pk_values: &'a [Value],
         timestamps: &'a [i64],
-        v0: &'a [Option<f64>],
+        v1: &'a [Option<f64>],
     }
 
     fn check_mutations_to_record_batches(
@@ -470,7 +531,7 @@ mod tests {
                     m.k0.to_string(),
                     m.k1,
                     m.timestamps.iter().copied(),
-                    m.v0.iter().copied(),
+                    m.v1.iter().copied(),
                     m.sequence,
                 )
                 .mutation
@@ -482,7 +543,7 @@ mod tests {
             .map(|r| r.rows.len())
             .sum();
 
-        let pk_encoder = McmpRowCodec::new_with_primary_keys(&metadata);
+        let pk_encoder = DensePrimaryKeyCodec::new(&metadata);
 
         let (batch, _, _) = mutations_to_record_batch(&mutations, &metadata, &pk_encoder, dedup)
             .unwrap()
@@ -501,7 +562,7 @@ mod tests {
         let batch_values = batches
             .into_iter()
             .map(|b| {
-                let pk_values = pk_encoder.decode(b.primary_key()).unwrap();
+                let pk_values = pk_encoder.decode(b.primary_key()).unwrap().into_dense();
                 let timestamps = b
                     .timestamps()
                     .as_any()
@@ -526,7 +587,7 @@ mod tests {
         for idx in 0..expected.len() {
             assert_eq!(expected[idx].pk_values, &batch_values[idx].0);
             assert_eq!(expected[idx].timestamps, &batch_values[idx].1);
-            assert_eq!(expected[idx].v0, &batch_values[idx].2);
+            assert_eq!(expected[idx].v1, &batch_values[idx].2);
         }
     }
 
@@ -537,13 +598,13 @@ mod tests {
                 k0: "a",
                 k1: 0,
                 timestamps: &[0],
-                v0: &[Some(0.1)],
+                v1: &[Some(0.1)],
                 sequence: 0,
             }],
             &[BatchOutput {
                 pk_values: &[Value::String("a".into()), Value::UInt32(0)],
                 timestamps: &[0],
-                v0: &[Some(0.1)],
+                v1: &[Some(0.1)],
             }],
             (0, 0),
             true,
@@ -555,28 +616,28 @@ mod tests {
                     k0: "a",
                     k1: 0,
                     timestamps: &[0],
-                    v0: &[Some(0.1)],
+                    v1: &[Some(0.1)],
                     sequence: 0,
                 },
                 MutationInput {
                     k0: "b",
                     k1: 0,
                     timestamps: &[0],
-                    v0: &[Some(0.0)],
+                    v1: &[Some(0.0)],
                     sequence: 0,
                 },
                 MutationInput {
                     k0: "a",
                     k1: 0,
                     timestamps: &[1],
-                    v0: &[Some(0.2)],
+                    v1: &[Some(0.2)],
                     sequence: 1,
                 },
                 MutationInput {
                     k0: "a",
                     k1: 1,
                     timestamps: &[1],
-                    v0: &[Some(0.3)],
+                    v1: &[Some(0.3)],
                     sequence: 2,
                 },
             ],
@@ -584,17 +645,17 @@ mod tests {
                 BatchOutput {
                     pk_values: &[Value::String("a".into()), Value::UInt32(0)],
                     timestamps: &[0, 1],
-                    v0: &[Some(0.1), Some(0.2)],
+                    v1: &[Some(0.1), Some(0.2)],
                 },
                 BatchOutput {
                     pk_values: &[Value::String("a".into()), Value::UInt32(1)],
                     timestamps: &[1],
-                    v0: &[Some(0.3)],
+                    v1: &[Some(0.3)],
                 },
                 BatchOutput {
                     pk_values: &[Value::String("b".into()), Value::UInt32(0)],
                     timestamps: &[0],
-                    v0: &[Some(0.0)],
+                    v1: &[Some(0.0)],
                 },
             ],
             (0, 1),
@@ -607,21 +668,21 @@ mod tests {
                     k0: "a",
                     k1: 0,
                     timestamps: &[0],
-                    v0: &[Some(0.1)],
+                    v1: &[Some(0.1)],
                     sequence: 0,
                 },
                 MutationInput {
                     k0: "b",
                     k1: 0,
                     timestamps: &[0],
-                    v0: &[Some(0.0)],
+                    v1: &[Some(0.0)],
                     sequence: 0,
                 },
                 MutationInput {
                     k0: "a",
                     k1: 0,
                     timestamps: &[0],
-                    v0: &[Some(0.2)],
+                    v1: &[Some(0.2)],
                     sequence: 1,
                 },
             ],
@@ -629,12 +690,12 @@ mod tests {
                 BatchOutput {
                     pk_values: &[Value::String("a".into()), Value::UInt32(0)],
                     timestamps: &[0],
-                    v0: &[Some(0.2)],
+                    v1: &[Some(0.2)],
                 },
                 BatchOutput {
                     pk_values: &[Value::String("b".into()), Value::UInt32(0)],
                     timestamps: &[0],
-                    v0: &[Some(0.0)],
+                    v1: &[Some(0.0)],
                 },
             ],
             (0, 0),
@@ -646,21 +707,21 @@ mod tests {
                     k0: "a",
                     k1: 0,
                     timestamps: &[0],
-                    v0: &[Some(0.1)],
+                    v1: &[Some(0.1)],
                     sequence: 0,
                 },
                 MutationInput {
                     k0: "b",
                     k1: 0,
                     timestamps: &[0],
-                    v0: &[Some(0.0)],
+                    v1: &[Some(0.0)],
                     sequence: 0,
                 },
                 MutationInput {
                     k0: "a",
                     k1: 0,
                     timestamps: &[0],
-                    v0: &[Some(0.2)],
+                    v1: &[Some(0.2)],
                     sequence: 1,
                 },
             ],
@@ -668,16 +729,197 @@ mod tests {
                 BatchOutput {
                     pk_values: &[Value::String("a".into()), Value::UInt32(0)],
                     timestamps: &[0, 0],
-                    v0: &[Some(0.2), Some(0.1)],
+                    v1: &[Some(0.2), Some(0.1)],
                 },
                 BatchOutput {
                     pk_values: &[Value::String("b".into()), Value::UInt32(0)],
                     timestamps: &[0],
-                    v0: &[Some(0.0)],
+                    v1: &[Some(0.0)],
                 },
             ],
             (0, 0),
             false,
+        );
+    }
+
+    fn encode(input: &[MutationInput]) -> BulkPart {
+        let metadata = metadata_for_test();
+        let mutations = input
+            .iter()
+            .map(|m| {
+                build_key_values_with_ts_seq_values(
+                    &metadata,
+                    m.k0.to_string(),
+                    m.k1,
+                    m.timestamps.iter().copied(),
+                    m.v1.iter().copied(),
+                    m.sequence,
+                )
+                .mutation
+            })
+            .collect::<Vec<_>>();
+        let encoder = BulkPartEncoder::new(metadata, true, 1024);
+        encoder.encode_mutations(&mutations).unwrap().unwrap()
+    }
+
+    #[test]
+    fn test_write_and_read_part_projection() {
+        let part = encode(&[
+            MutationInput {
+                k0: "a",
+                k1: 0,
+                timestamps: &[1],
+                v1: &[Some(0.1)],
+                sequence: 0,
+            },
+            MutationInput {
+                k0: "b",
+                k1: 0,
+                timestamps: &[1],
+                v1: &[Some(0.0)],
+                sequence: 0,
+            },
+            MutationInput {
+                k0: "a",
+                k1: 0,
+                timestamps: &[2],
+                v1: &[Some(0.2)],
+                sequence: 1,
+            },
+        ]);
+
+        let projection = &[4u32];
+
+        let mut reader = part
+            .read(
+                Arc::new(BulkIterContext::new(
+                    part.metadata.region_metadata.clone(),
+                    &Some(projection.as_slice()),
+                    None,
+                )),
+                None,
+            )
+            .unwrap()
+            .expect("expect at least one row group");
+
+        let mut total_rows_read = 0;
+        let mut field = vec![];
+        for res in reader {
+            let batch = res.unwrap();
+            assert_eq!(1, batch.fields().len());
+            assert_eq!(4, batch.fields()[0].column_id);
+            field.extend(
+                batch.fields()[0]
+                    .data
+                    .as_any()
+                    .downcast_ref::<Float64Vector>()
+                    .unwrap()
+                    .iter_data()
+                    .map(|v| v.unwrap()),
+            );
+            total_rows_read += batch.num_rows();
+        }
+        assert_eq!(3, total_rows_read);
+        assert_eq!(vec![0.1, 0.2, 0.0], field);
+    }
+
+    fn prepare(key_values: Vec<(&str, u32, (i64, i64), u64)>) -> BulkPart {
+        let metadata = metadata_for_test();
+        let mutations = key_values
+            .into_iter()
+            .map(|(k0, k1, (start, end), sequence)| {
+                let ts = (start..end);
+                let v1 = (start..end).map(|_| None);
+                build_key_values_with_ts_seq_values(&metadata, k0.to_string(), k1, ts, v1, sequence)
+                    .mutation
+            })
+            .collect::<Vec<_>>();
+        let encoder = BulkPartEncoder::new(metadata, true, 100);
+        encoder.encode_mutations(&mutations).unwrap().unwrap()
+    }
+
+    fn check_prune_row_group(part: &BulkPart, predicate: Option<Predicate>, expected_rows: usize) {
+        let context = Arc::new(BulkIterContext::new(
+            part.metadata.region_metadata.clone(),
+            &None,
+            predicate,
+        ));
+        let mut reader = part
+            .read(context, None)
+            .unwrap()
+            .expect("expect at least one row group");
+        let mut total_rows_read = 0;
+        for res in reader {
+            let batch = res.unwrap();
+            total_rows_read += batch.num_rows();
+        }
+        // Should only read row group 1.
+        assert_eq!(expected_rows, total_rows_read);
+    }
+
+    #[test]
+    fn test_prune_row_groups() {
+        let part = prepare(vec![
+            ("a", 0, (0, 40), 1),
+            ("a", 1, (0, 60), 1),
+            ("b", 0, (0, 100), 2),
+            ("b", 1, (100, 180), 3),
+            ("b", 1, (180, 210), 4),
+        ]);
+
+        let context = Arc::new(BulkIterContext::new(
+            part.metadata.region_metadata.clone(),
+            &None,
+            Some(Predicate::new(vec![datafusion_expr::col("ts").eq(
+                datafusion_expr::lit(ScalarValue::TimestampMillisecond(Some(300), None)),
+            )])),
+        ));
+        assert!(part.read(context, None).unwrap().is_none());
+
+        check_prune_row_group(&part, None, 310);
+
+        check_prune_row_group(
+            &part,
+            Some(Predicate::new(vec![
+                datafusion_expr::col("k0").eq(datafusion_expr::lit("a")),
+                datafusion_expr::col("k1").eq(datafusion_expr::lit(0u32)),
+            ])),
+            40,
+        );
+
+        check_prune_row_group(
+            &part,
+            Some(Predicate::new(vec![
+                datafusion_expr::col("k0").eq(datafusion_expr::lit("a")),
+                datafusion_expr::col("k1").eq(datafusion_expr::lit(1u32)),
+            ])),
+            60,
+        );
+
+        check_prune_row_group(
+            &part,
+            Some(Predicate::new(vec![
+                datafusion_expr::col("k0").eq(datafusion_expr::lit("a"))
+            ])),
+            100,
+        );
+
+        check_prune_row_group(
+            &part,
+            Some(Predicate::new(vec![
+                datafusion_expr::col("k0").eq(datafusion_expr::lit("b")),
+                datafusion_expr::col("k1").eq(datafusion_expr::lit(0u32)),
+            ])),
+            100,
+        );
+
+        /// Predicates over field column can do precise filtering.
+        check_prune_row_group(
+            &part,
+            Some(Predicate::new(vec![
+                datafusion_expr::col("v0").eq(datafusion_expr::lit(150i64))
+            ])),
+            1,
         );
     }
 }

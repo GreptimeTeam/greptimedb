@@ -115,9 +115,9 @@ struct TimeRangeTester {
 impl TimeRangeTester {
     async fn check(&self, sql: &str, expect: TimestampRange) {
         let _ = exec_selection(self.engine.clone(), sql).await;
-        let mut filters = self.take_filters();
+        let filters = self.take_filters();
 
-        let range = build_time_range_predicate("ts", TimeUnit::Millisecond, &mut filters);
+        let range = build_time_range_predicate("ts", TimeUnit::Millisecond, &filters);
         assert_eq!(expect, range);
     }
 

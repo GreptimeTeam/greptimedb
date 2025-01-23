@@ -13,10 +13,11 @@
 // limitations under the License.
 
 //! Transform Substrait into execution plan
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use common_error::ext::BoxedError;
+use datafusion_substrait::extensions::Extensions;
 use datatypes::data_type::ConcreteDataType as CDT;
 use query::QueryEngine;
 use serde::{Deserialize, Serialize};
@@ -92,8 +93,15 @@ impl FunctionExtensions {
         self.anchor_to_name.get(anchor)
     }
 
-    pub fn inner_ref(&self) -> HashMap<u32, &String> {
-        self.anchor_to_name.iter().map(|(k, v)| (*k, v)).collect()
+    pub fn to_extensions(&self) -> Extensions {
+        Extensions {
+            functions: self
+                .anchor_to_name
+                .iter()
+                .map(|(k, v)| (*k, v.clone()))
+                .collect(),
+            ..Default::default()
+        }
     }
 }
 
@@ -173,13 +181,13 @@ mod test {
 
     use super::*;
     use crate::adapter::node_context::IdToNameMap;
+    use crate::adapter::table_source::test::FlowDummyTableSource;
     use crate::df_optimizer::apply_df_optimizer;
     use crate::expr::GlobalId;
-    use crate::repr::{ColumnType, RelationType};
 
     pub fn create_test_ctx() -> FlownodeContext {
-        let mut schemas = HashMap::new();
         let mut tri_map = IdToNameMap::new();
+        // FIXME(discord9): deprecated, use `numbers_with_ts` instead since this table has no timestamp column
         {
             let gid = GlobalId::User(0);
             let name = [
@@ -187,10 +195,7 @@ mod test {
                 "public".to_string(),
                 "numbers".to_string(),
             ];
-            let schema = RelationType::new(vec![ColumnType::new(CDT::uint32_datatype(), false)]);
-
             tri_map.insert(Some(name.clone()), Some(1024), gid);
-            schemas.insert(gid, schema.into_named(vec![Some("number".to_string())]));
         }
 
         {
@@ -200,23 +205,16 @@ mod test {
                 "public".to_string(),
                 "numbers_with_ts".to_string(),
             ];
-            let schema = RelationType::new(vec![
-                ColumnType::new(CDT::uint32_datatype(), false),
-                ColumnType::new(CDT::timestamp_millisecond_datatype(), false),
-            ]);
-            schemas.insert(
-                gid,
-                schema.into_named(vec![Some("number".to_string()), Some("ts".to_string())]),
-            );
             tri_map.insert(Some(name.clone()), Some(1025), gid);
         }
 
-        FlownodeContext {
-            schema: schemas,
-            table_repr: tri_map,
-            query_context: Some(Arc::new(QueryContext::with("greptime", "public"))),
-            ..Default::default()
-        }
+        let dummy_source = FlowDummyTableSource::default();
+
+        let mut ctx = FlownodeContext::new(Box::new(dummy_source));
+        ctx.table_repr = tri_map;
+        ctx.query_context = Some(Arc::new(QueryContext::with("greptime", "public")));
+
+        ctx
     }
 
     pub fn create_test_query_engine() -> Arc<dyn QueryEngine> {
