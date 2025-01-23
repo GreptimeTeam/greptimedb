@@ -394,6 +394,7 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
             ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()),
             None,
         )
+        .with_logs_handler(instance.instance.clone())
         .with_metrics_handler(MetricsHandler)
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
         .build();
@@ -429,6 +430,7 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
             Some(instance.instance.clone()),
         )
         .with_log_ingest_handler(instance.instance.clone(), None, None)
+        .with_logs_handler(instance.instance.clone())
         .with_otlp_handler(instance.instance.clone())
         .with_greptime_config_options(instance.opts.to_toml().unwrap());
 
@@ -467,6 +469,7 @@ pub async fn setup_test_prom_app_with_frontend(
             ServerSqlQueryHandlerAdapter::arc(frontend_ref.clone()),
             Some(frontend_ref.clone()),
         )
+        .with_logs_handler(instance.instance.clone())
         .with_prom_handler(frontend_ref.clone(), true, is_strict_mode)
         .with_prometheus_handler(frontend_ref)
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
