@@ -66,6 +66,11 @@ jobs:
     steps:
       - run: 'echo "No action required"'
 
+  test:
+    runs-on: ubuntu-20.04
+    steps:
+      - run: 'echo "No action required"'
+
   sqlness:
     name: Sqlness Test (${{ matrix.mode.name }})
     runs-on: ${{ matrix.os }}
