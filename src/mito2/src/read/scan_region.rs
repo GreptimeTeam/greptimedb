@@ -767,7 +767,7 @@ impl ScanInput {
                 }
             }
         };
-        if !compat::has_same_columns(
+        if !compat::has_same_columns_and_pk_encoding(
             self.mapper.metadata(),
             file_range_ctx.read_format().metadata(),
         ) {

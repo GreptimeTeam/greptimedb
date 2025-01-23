@@ -15,25 +15,30 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{Value, ValueRef};
 use memcomparable::{Deserializer, Serializer};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::ColumnId;
 
-use crate::error::{DeserializeFieldSnafu, Result, SerializeFieldSnafu};
+use crate::error::{DeserializeFieldSnafu, Result, SerializeFieldSnafu, UnsupportedOperationSnafu};
+use crate::memtable::key_values::KeyValue;
+use crate::memtable::partition_tree::SparsePrimaryKeyFilter;
 use crate::row_converter::dense::SortField;
-use crate::row_converter::PrimaryKeyCodec;
+use crate::row_converter::{CompositeValues, PrimaryKeyCodec, PrimaryKeyFilter};
 
 /// A codec for sparse key of metrics.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SparsePrimaryKeyCodec {
     inner: Arc<SparsePrimaryKeyCodecInner>,
 }
 
+#[derive(Debug)]
 struct SparsePrimaryKeyCodecInner {
     // Internal fields
     table_id_field: SortField,
@@ -64,6 +69,11 @@ impl SparseValues {
     /// Returns the value of the given column, or [`Value::Null`] if the column is not present.
     pub fn get_or_null(&self, column_id: ColumnId) -> &Value {
         self.values.get(&column_id).unwrap_or(&Value::Null)
+    }
+
+    /// Returns the value of the given column, or [`None`] if the column is not present.
+    pub fn get(&self, column_id: &ColumnId) -> Option<&Value> {
+        self.values.get(column_id)
     }
 
     /// Inserts a new value into the [`SparseValues`].
@@ -107,6 +117,17 @@ impl SparsePrimaryKeyCodec {
                 tsid_field: SortField::new(ConcreteDataType::uint64_datatype()),
                 label_field: SortField::new(ConcreteDataType::string_datatype()),
                 columns: None,
+            }),
+        }
+    }
+
+    pub fn with_fields(fields: Vec<(ColumnId, SortField)>) -> Self {
+        Self {
+            inner: Arc::new(SparsePrimaryKeyCodecInner {
+                columns: Some(fields.iter().map(|f| f.0).collect()),
+                table_id_field: SortField::new(ConcreteDataType::uint32_datatype()),
+                tsid_field: SortField::new(ConcreteDataType::uint64_datatype()),
+                label_field: SortField::new(ConcreteDataType::string_datatype()),
             }),
         }
     }
@@ -221,6 +242,59 @@ impl SparsePrimaryKeyCodec {
         // Safety: checked by `has_column`
         let field = self.get_field(column_id).unwrap();
         field.deserialize(&mut deserializer)
+    }
+}
+
+impl PrimaryKeyCodec for SparsePrimaryKeyCodec {
+    fn encode_key_value(&self, _key_value: &KeyValue, _buffer: &mut Vec<u8>) -> Result<()> {
+        UnsupportedOperationSnafu {
+            err_msg: "The encode_key_value method is not supported in SparsePrimaryKeyCodec.",
+        }
+        .fail()
+    }
+
+    fn encode_values(&self, values: &[(ColumnId, Value)], buffer: &mut Vec<u8>) -> Result<()> {
+        self.encode_to_vec(values.iter().map(|v| (v.0, v.1.as_value_ref())), buffer)
+    }
+
+    fn encode_value_refs(
+        &self,
+        values: &[(ColumnId, ValueRef)],
+        buffer: &mut Vec<u8>,
+    ) -> Result<()> {
+        self.encode_to_vec(values.iter().map(|v| (v.0, v.1)), buffer)
+    }
+
+    fn estimated_size(&self) -> Option<usize> {
+        None
+    }
+
+    fn num_fields(&self) -> Option<usize> {
+        None
+    }
+
+    fn encoding(&self) -> PrimaryKeyEncoding {
+        PrimaryKeyEncoding::Sparse
+    }
+
+    fn primary_key_filter(
+        &self,
+        metadata: &RegionMetadataRef,
+        filters: Arc<Vec<SimpleFilterEvaluator>>,
+    ) -> Box<dyn PrimaryKeyFilter> {
+        Box::new(SparsePrimaryKeyFilter::new(
+            metadata.clone(),
+            filters,
+            self.clone(),
+        ))
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Result<CompositeValues> {
+        Ok(CompositeValues::Sparse(self.decode_sparse(bytes)?))
+    }
+
+    fn decode_leftmost(&self, bytes: &[u8]) -> Result<Option<Value>> {
+        self.decode_leftmost(bytes)
     }
 }
 

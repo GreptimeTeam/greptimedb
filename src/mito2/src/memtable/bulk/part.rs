@@ -562,7 +562,7 @@ mod tests {
         let batch_values = batches
             .into_iter()
             .map(|b| {
-                let pk_values = pk_encoder.decode_dense(b.primary_key()).unwrap();
+                let pk_values = pk_encoder.decode(b.primary_key()).unwrap().into_dense();
                 let timestamps = b
                     .timestamps()
                     .as_any()
