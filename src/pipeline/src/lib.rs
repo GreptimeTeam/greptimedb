@@ -19,7 +19,9 @@ mod metrics;
 
 pub use etl::error::Result;
 pub use etl::processor::Processor;
-pub use etl::transform::transformer::greptime::SchemaInfo;
+pub use etl::transform::transformer::greptime::{
+    GreptimePipelineParams, SchemaInfo, GREPTIME_PIPELINE_PARAMS_HEADER,
+};
 pub use etl::transform::transformer::identity_pipeline;
 pub use etl::transform::{GreptimeTransformer, Transformer};
 pub use etl::value::{Array, Map, Value};

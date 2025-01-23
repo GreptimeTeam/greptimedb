@@ -96,6 +96,21 @@ impl PartitionTree {
         }
     }
 
+    fn verify_primary_key_length(&self, kv: &KeyValue) -> Result<()> {
+        // The sparse primary key codec does not have a fixed number of fields.
+        if let Some(expected_num_fields) = self.row_codec.num_fields() {
+            ensure!(
+                expected_num_fields == kv.num_primary_keys(),
+                PrimaryKeyLengthMismatchSnafu {
+                    expect: expected_num_fields,
+                    actual: kv.num_primary_keys(),
+                }
+            );
+        }
+        // TODO(weny): verify the primary key length for sparse primary key codec.
+        Ok(())
+    }
+
     // TODO(yingwen): The size computed from values is inaccurate.
     /// Write key-values into the tree.
     ///
@@ -110,13 +125,7 @@ impl PartitionTree {
         let has_pk = !self.metadata.primary_key.is_empty();
 
         for kv in kvs.iter() {
-            ensure!(
-                kv.num_primary_keys() == self.row_codec.num_fields(),
-                PrimaryKeyLengthMismatchSnafu {
-                    expect: self.row_codec.num_fields(),
-                    actual: kv.num_primary_keys(),
-                }
-            );
+            self.verify_primary_key_length(&kv)?;
             // Safety: timestamp of kv must be both present and a valid timestamp value.
             let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
             metrics.min_ts = metrics.min_ts.min(ts);
@@ -161,13 +170,7 @@ impl PartitionTree {
     ) -> Result<()> {
         let has_pk = !self.metadata.primary_key.is_empty();
 
-        ensure!(
-            kv.num_primary_keys() == self.row_codec.num_fields(),
-            PrimaryKeyLengthMismatchSnafu {
-                expect: self.row_codec.num_fields(),
-                actual: kv.num_primary_keys(),
-            }
-        );
+        self.verify_primary_key_length(&kv)?;
         // Safety: timestamp of kv must be both present and a valid timestamp value.
         let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
         metrics.min_ts = metrics.min_ts.min(ts);

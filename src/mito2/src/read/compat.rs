@@ -15,6 +15,7 @@
 //! Utilities to adapt readers with different schema.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
@@ -26,7 +27,10 @@ use store_api::storage::ColumnId;
 use crate::error::{CompatReaderSnafu, CreateDefaultSnafu, Result};
 use crate::read::projection::ProjectionMapper;
 use crate::read::{Batch, BatchColumn, BatchReader};
-use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, SortField};
+use crate::row_converter::{
+    build_primary_key_codec, build_primary_key_codec_with_fields, CompositeValues, PrimaryKeyCodec,
+    SortField,
+};
 
 /// Reader to adapt schema of underlying reader to expected schema.
 pub struct CompatReader<R> {
@@ -69,6 +73,8 @@ impl<R: BatchReader> BatchReader for CompatReader<R> {
 /// A helper struct to adapt schema of the batch to an expected schema.
 pub(crate) struct CompatBatch {
     /// Optional primary key adapter.
+    rewrite_pk: Option<RewritePrimaryKey>,
+    /// Optional primary key adapter.
     compat_pk: Option<CompatPrimaryKey>,
     /// Optional fields adapter.
     compat_fields: Option<CompatFields>,
@@ -79,10 +85,12 @@ impl CompatBatch {
     /// - `mapper` is built from the metadata users expect to see.
     /// - `reader_meta` is the metadata of the input reader.
     pub(crate) fn new(mapper: &ProjectionMapper, reader_meta: RegionMetadataRef) -> Result<Self> {
+        let rewrite_pk = may_rewrite_primary_key(mapper.metadata(), &reader_meta);
         let compat_pk = may_compat_primary_key(mapper.metadata(), &reader_meta)?;
         let compat_fields = may_compat_fields(mapper, &reader_meta)?;
 
         Ok(Self {
+            rewrite_pk,
             compat_pk,
             compat_fields,
         })
@@ -90,6 +98,9 @@ impl CompatBatch {
 
     /// Adapts the `batch` to the expected schema.
     pub(crate) fn compat_batch(&self, mut batch: Batch) -> Result<Batch> {
+        if let Some(rewrite_pk) = &self.rewrite_pk {
+            batch = rewrite_pk.compat(batch)?;
+        }
         if let Some(compat_pk) = &self.compat_pk {
             batch = compat_pk.compat(batch)?;
         }
@@ -101,10 +112,15 @@ impl CompatBatch {
     }
 }
 
-/// Returns true if `left` and `right` have same columns to read.
-///
-/// It only consider column ids.
-pub(crate) fn has_same_columns(left: &RegionMetadata, right: &RegionMetadata) -> bool {
+/// Returns true if `left` and `right` have same columns and primary key encoding.
+pub(crate) fn has_same_columns_and_pk_encoding(
+    left: &RegionMetadata,
+    right: &RegionMetadata,
+) -> bool {
+    if left.primary_key_encoding != right.primary_key_encoding {
+        return false;
+    }
+
     if left.column_metadatas.len() != right.column_metadatas.len() {
         return false;
     }
@@ -127,16 +143,17 @@ pub(crate) fn has_same_columns(left: &RegionMetadata, right: &RegionMetadata) ->
 #[derive(Debug)]
 struct CompatPrimaryKey {
     /// Row converter to append values to primary keys.
-    converter: DensePrimaryKeyCodec,
+    converter: Arc<dyn PrimaryKeyCodec>,
     /// Default values to append.
-    values: Vec<Value>,
+    values: Vec<(ColumnId, Value)>,
 }
 
 impl CompatPrimaryKey {
     /// Make primary key of the `batch` compatible.
     fn compat(&self, mut batch: Batch) -> Result<Batch> {
-        let mut buffer =
-            Vec::with_capacity(batch.primary_key().len() + self.converter.estimated_size());
+        let mut buffer = Vec::with_capacity(
+            batch.primary_key().len() + self.converter.estimated_size().unwrap_or_default(),
+        );
         buffer.extend_from_slice(batch.primary_key());
         self.converter.encode_values(&self.values, &mut buffer)?;
 
@@ -144,9 +161,7 @@ impl CompatPrimaryKey {
 
         // update cache
         if let Some(pk_values) = &mut batch.pk_values {
-            for value in &self.values {
-                pk_values.push(value.clone());
-            }
+            pk_values.extend(&self.values);
         }
 
         Ok(batch)
@@ -211,6 +226,25 @@ impl CompatFields {
     }
 }
 
+fn may_rewrite_primary_key(
+    expect: &RegionMetadata,
+    actual: &RegionMetadata,
+) -> Option<RewritePrimaryKey> {
+    if expect.primary_key_encoding == actual.primary_key_encoding {
+        return None;
+    }
+
+    let fields = expect.primary_key.clone();
+    let original = build_primary_key_codec(actual);
+    let new = build_primary_key_codec(expect);
+
+    Some(RewritePrimaryKey {
+        original,
+        new,
+        fields,
+    })
+}
+
 /// Creates a [CompatPrimaryKey] if needed.
 fn may_compat_primary_key(
     expect: &RegionMetadata,
@@ -248,7 +282,10 @@ fn may_compat_primary_key(
     for column_id in to_add {
         // Safety: The id comes from expect region metadata.
         let column = expect.column_by_id(*column_id).unwrap();
-        fields.push(SortField::new(column.column_schema.data_type.clone()));
+        fields.push((
+            *column_id,
+            SortField::new(column.column_schema.data_type.clone()),
+        ));
         let default_value = column
             .column_schema
             .create_default()
@@ -263,9 +300,11 @@ fn may_compat_primary_key(
                     column.column_schema.name
                 ),
             })?;
-        values.push(default_value);
+        values.push((*column_id, default_value));
     }
-    let converter = DensePrimaryKeyCodec::with_fields(fields);
+    // Using expect primary key encoding to build the converter
+    let converter =
+        build_primary_key_codec_with_fields(expect.primary_key_encoding, fields.into_iter());
 
     Ok(Some(CompatPrimaryKey { converter, values }))
 }
@@ -350,6 +389,53 @@ enum IndexOrDefault {
     },
 }
 
+/// Adapter to rewrite primary key.
+struct RewritePrimaryKey {
+    /// Original primary key codec.
+    original: Arc<dyn PrimaryKeyCodec>,
+    /// New primary key codec.
+    new: Arc<dyn PrimaryKeyCodec>,
+    /// Order of the fields in the new primary key.
+    fields: Vec<ColumnId>,
+}
+
+impl RewritePrimaryKey {
+    /// Make primary key of the `batch` compatible.
+    fn compat(&self, mut batch: Batch) -> Result<Batch> {
+        let values = if let Some(pk_values) = batch.pk_values() {
+            pk_values
+        } else {
+            let new_pk_values = self.original.decode(batch.primary_key())?;
+            batch.set_pk_values(new_pk_values);
+            // Safety: We ensure pk_values is not None.
+            batch.pk_values().as_ref().unwrap()
+        };
+
+        let mut buffer = Vec::with_capacity(
+            batch.primary_key().len() + self.new.estimated_size().unwrap_or_default(),
+        );
+        match values {
+            CompositeValues::Dense(values) => {
+                self.new.encode_values(values.as_slice(), &mut buffer)?;
+            }
+            CompositeValues::Sparse(values) => {
+                let values = self
+                    .fields
+                    .iter()
+                    .map(|id| {
+                        let value = values.get_or_null(*id);
+                        (*id, value.as_value_ref())
+                    })
+                    .collect::<Vec<_>>();
+                self.new.encode_value_refs(&values, &mut buffer)?;
+            }
+        }
+        batch.set_primary_key(buffer);
+
+        Ok(batch)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -359,11 +445,12 @@ mod tests {
     use datatypes::schema::ColumnSchema;
     use datatypes::value::ValueRef;
     use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, UInt64Vector, UInt8Vector};
+    use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::row_converter::PrimaryKeyCodecExt;
+    use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SparsePrimaryKeyCodec};
     use crate::test_util::{check_reader_result, VecBatchReader};
 
     /// Creates a new [RegionMetadata].
@@ -396,7 +483,7 @@ mod tests {
     /// Encode primary key.
     fn encode_key(keys: &[Option<&str>]) -> Vec<u8> {
         let fields = (0..keys.len())
-            .map(|_| SortField::new(ConcreteDataType::string_datatype()))
+            .map(|_| (0, SortField::new(ConcreteDataType::string_datatype())))
             .collect();
         let converter = DensePrimaryKeyCodec::with_fields(fields);
         let row = keys.iter().map(|str_opt| match str_opt {
@@ -405,6 +492,24 @@ mod tests {
         });
 
         converter.encode(row).unwrap()
+    }
+
+    /// Encode sparse primary key.
+    fn encode_sparse_key(keys: &[(ColumnId, Option<&str>)]) -> Vec<u8> {
+        let fields = (0..keys.len())
+            .map(|_| (1, SortField::new(ConcreteDataType::string_datatype())))
+            .collect();
+        let converter = SparsePrimaryKeyCodec::with_fields(fields);
+        let row = keys
+            .iter()
+            .map(|(id, str_opt)| match str_opt {
+                Some(v) => (*id, ValueRef::String(v)),
+                None => (*id, ValueRef::Null),
+            })
+            .collect::<Vec<_>>();
+        let mut buffer = vec![];
+        converter.encode_value_refs(&row, &mut buffer).unwrap();
+        buffer
     }
 
     /// Creates a batch for specific primary `key`.
@@ -521,6 +626,25 @@ mod tests {
             ],
             &[1],
         );
+        assert!(may_compat_primary_key(&reader_meta, &reader_meta)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_same_pk_encoding() {
+        let reader_meta = Arc::new(new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+            ],
+            &[1],
+        ));
+
         assert!(may_compat_primary_key(&reader_meta, &reader_meta)
             .unwrap()
             .is_none());
@@ -744,6 +868,60 @@ mod tests {
         check_reader_result(
             &mut compat_reader,
             &[new_batch(&k1, &[(3, true), (4, true)], 1000, 3)],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_compat_reader_different_pk_encoding() {
+        let mut reader_meta = new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[1],
+        );
+        reader_meta.primary_key_encoding = PrimaryKeyEncoding::Dense;
+        let reader_meta = Arc::new(reader_meta);
+        let mut expect_meta = new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+                (3, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (4, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[1, 3],
+        );
+        expect_meta.primary_key_encoding = PrimaryKeyEncoding::Sparse;
+        let expect_meta = Arc::new(expect_meta);
+
+        let mapper = ProjectionMapper::all(&expect_meta).unwrap();
+        let k1 = encode_key(&[Some("a")]);
+        let k2 = encode_key(&[Some("b")]);
+        let source_reader = VecBatchReader::new(&[
+            new_batch(&k1, &[(2, false)], 1000, 3),
+            new_batch(&k2, &[(2, false)], 1000, 3),
+        ]);
+
+        let mut compat_reader = CompatReader::new(&mapper, reader_meta, source_reader).unwrap();
+        let k1 = encode_sparse_key(&[(1, Some("a")), (3, None)]);
+        let k2 = encode_sparse_key(&[(1, Some("b")), (3, None)]);
+        check_reader_result(
+            &mut compat_reader,
+            &[
+                new_batch(&k1, &[(2, false), (4, true)], 1000, 3),
+                new_batch(&k2, &[(2, false), (4, true)], 1000, 3),
+            ],
         )
         .await;
     }

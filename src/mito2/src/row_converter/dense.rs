@@ -30,8 +30,9 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
+use store_api::storage::ColumnId;
 
-use super::PrimaryKeyFilter;
+use super::{CompositeValues, PrimaryKeyFilter};
 use crate::error::{
     self, FieldTypeMismatchSnafu, NotSupportedFieldSnafu, Result, SerializeFieldSnafu,
 };
@@ -312,34 +313,31 @@ impl PrimaryKeyCodecExt for DensePrimaryKeyCodec {
     {
         self.encode_dense(row, buffer)
     }
-
-    fn decode(&self, bytes: &[u8]) -> Result<Vec<Value>> {
-        self.decode_dense(bytes)
-    }
 }
 
 /// A memory-comparable row [`Value`] encoder/decoder.
 #[derive(Clone, Debug)]
 pub struct DensePrimaryKeyCodec {
     /// Primary key fields.
-    ordered_primary_key_columns: Arc<Vec<SortField>>,
+    ordered_primary_key_columns: Arc<Vec<(ColumnId, SortField)>>,
 }
 
 impl DensePrimaryKeyCodec {
     pub fn new(metadata: &RegionMetadata) -> Self {
-        let ordered_primary_key_columns = Arc::new(
-            metadata
-                .primary_key_columns()
-                .map(|c| SortField::new(c.column_schema.data_type.clone()))
-                .collect::<Vec<_>>(),
-        );
+        let ordered_primary_key_columns = metadata
+            .primary_key_columns()
+            .map(|c| {
+                (
+                    c.column_id,
+                    SortField::new(c.column_schema.data_type.clone()),
+                )
+            })
+            .collect::<Vec<_>>();
 
-        Self {
-            ordered_primary_key_columns,
-        }
+        Self::with_fields(ordered_primary_key_columns)
     }
 
-    pub fn with_fields(fields: Vec<SortField>) -> Self {
+    pub fn with_fields(fields: Vec<(ColumnId, SortField)>) -> Self {
         Self {
             ordered_primary_key_columns: Arc::new(fields),
         }
@@ -350,10 +348,40 @@ impl DensePrimaryKeyCodec {
         I: Iterator<Item = ValueRef<'a>>,
     {
         let mut serializer = Serializer::new(buffer);
-        for (value, field) in row.zip(self.ordered_primary_key_columns.iter()) {
+        for (value, (_, field)) in row.zip(self.ordered_primary_key_columns.iter()) {
             field.serialize(&mut serializer, &value)?;
         }
         Ok(())
+    }
+
+    /// Decode primary key values from bytes.
+    pub fn decode_dense(&self, bytes: &[u8]) -> Result<Vec<(ColumnId, Value)>> {
+        let mut deserializer = Deserializer::new(bytes);
+        let mut values = Vec::with_capacity(self.ordered_primary_key_columns.len());
+        for (column_id, field) in self.ordered_primary_key_columns.iter() {
+            let value = field.deserialize(&mut deserializer)?;
+            values.push((*column_id, value));
+        }
+        Ok(values)
+    }
+
+    /// Decode primary key values from bytes without column id.
+    pub fn decode_dense_without_column_id(&self, bytes: &[u8]) -> Result<Vec<Value>> {
+        let mut deserializer = Deserializer::new(bytes);
+        let mut values = Vec::with_capacity(self.ordered_primary_key_columns.len());
+        for (_, field) in self.ordered_primary_key_columns.iter() {
+            let value = field.deserialize(&mut deserializer)?;
+            values.push(value);
+        }
+        Ok(values)
+    }
+
+    /// Returns the field at `pos`.
+    ///
+    /// # Panics
+    /// Panics if `pos` is out of bounds.
+    fn field_at(&self, pos: usize) -> &SortField {
+        &self.ordered_primary_key_columns[pos].1
     }
 
     /// Decode value at `pos` in `bytes`.
@@ -370,7 +398,7 @@ impl DensePrimaryKeyCodec {
             // We computed the offset before.
             let to_skip = offsets_buf[pos];
             deserializer.advance(to_skip);
-            return self.ordered_primary_key_columns[pos].deserialize(&mut deserializer);
+            return self.field_at(pos).deserialize(&mut deserializer);
         }
 
         if offsets_buf.is_empty() {
@@ -379,7 +407,8 @@ impl DensePrimaryKeyCodec {
             for i in 0..pos {
                 // Offset to skip before reading value i.
                 offsets_buf.push(offset);
-                let skip = self.ordered_primary_key_columns[i]
+                let skip = self
+                    .field_at(i)
                     .skip_deserialize(bytes, &mut deserializer)?;
                 offset += skip;
             }
@@ -393,7 +422,8 @@ impl DensePrimaryKeyCodec {
             deserializer.advance(offset);
             for i in value_start..pos {
                 // Skip value i.
-                let skip = self.ordered_primary_key_columns[i]
+                let skip = self
+                    .field_at(i)
                     .skip_deserialize(bytes, &mut deserializer)?;
                 // Offset for the value at i + 1.
                 offset += skip;
@@ -401,14 +431,18 @@ impl DensePrimaryKeyCodec {
             }
         }
 
-        self.ordered_primary_key_columns[pos].deserialize(&mut deserializer)
+        self.field_at(pos).deserialize(&mut deserializer)
     }
 
     pub fn estimated_size(&self) -> usize {
         self.ordered_primary_key_columns
             .iter()
-            .map(|f| f.estimated_size())
+            .map(|(_, f)| f.estimated_size())
             .sum()
+    }
+
+    pub fn num_fields(&self) -> usize {
+        self.ordered_primary_key_columns.len()
     }
 }
 
@@ -417,16 +451,25 @@ impl PrimaryKeyCodec for DensePrimaryKeyCodec {
         self.encode_dense(key_value.primary_keys(), buffer)
     }
 
-    fn encode_values(&self, values: &[Value], buffer: &mut Vec<u8>) -> Result<()> {
-        self.encode_dense(values.iter().map(|v| v.as_value_ref()), buffer)
+    fn encode_values(&self, values: &[(ColumnId, Value)], buffer: &mut Vec<u8>) -> Result<()> {
+        self.encode_dense(values.iter().map(|(_, v)| v.as_value_ref()), buffer)
+    }
+
+    fn encode_value_refs(
+        &self,
+        values: &[(ColumnId, ValueRef)],
+        buffer: &mut Vec<u8>,
+    ) -> Result<()> {
+        let iter = values.iter().map(|(_, v)| *v);
+        self.encode_dense(iter, buffer)
     }
 
     fn estimated_size(&self) -> Option<usize> {
         Some(self.estimated_size())
     }
 
-    fn num_fields(&self) -> usize {
-        self.ordered_primary_key_columns.len()
+    fn num_fields(&self) -> Option<usize> {
+        Some(self.num_fields())
     }
 
     fn encoding(&self) -> PrimaryKeyEncoding {
@@ -445,20 +488,14 @@ impl PrimaryKeyCodec for DensePrimaryKeyCodec {
         ))
     }
 
-    fn decode_dense(&self, bytes: &[u8]) -> Result<Vec<Value>> {
-        let mut deserializer = Deserializer::new(bytes);
-        let mut values = Vec::with_capacity(self.ordered_primary_key_columns.len());
-        for f in self.ordered_primary_key_columns.iter() {
-            let value = f.deserialize(&mut deserializer)?;
-            values.push(value);
-        }
-        Ok(values)
+    fn decode(&self, bytes: &[u8]) -> Result<CompositeValues> {
+        Ok(CompositeValues::Dense(self.decode_dense(bytes)?))
     }
 
     fn decode_leftmost(&self, bytes: &[u8]) -> Result<Option<Value>> {
         // TODO(weny, yinwen): avoid decoding the whole primary key.
         let mut values = self.decode_dense(bytes)?;
-        Ok(values.pop())
+        Ok(values.pop().map(|(_, v)| v))
     }
 }
 
@@ -476,14 +513,14 @@ mod tests {
         let encoder = DensePrimaryKeyCodec::with_fields(
             data_types
                 .iter()
-                .map(|t| SortField::new(t.clone()))
+                .map(|t| (0, SortField::new(t.clone())))
                 .collect::<Vec<_>>(),
         );
 
         let value_ref = row.iter().map(|v| v.as_value_ref()).collect::<Vec<_>>();
 
         let result = encoder.encode(value_ref.iter().cloned()).unwrap();
-        let decoded = encoder.decode(&result).unwrap();
+        let decoded = encoder.decode(&result).unwrap().into_dense();
         assert_eq!(decoded, row);
         let mut decoded = Vec::new();
         let mut offsets = Vec::new();
@@ -502,14 +539,14 @@ mod tests {
     #[test]
     fn test_memcmp() {
         let encoder = DensePrimaryKeyCodec::with_fields(vec![
-            SortField::new(ConcreteDataType::string_datatype()),
-            SortField::new(ConcreteDataType::int64_datatype()),
+            (0, SortField::new(ConcreteDataType::string_datatype())),
+            (1, SortField::new(ConcreteDataType::int64_datatype())),
         ]);
         let values = [Value::String("abcdefgh".into()), Value::Int64(128)];
         let value_ref = values.iter().map(|v| v.as_value_ref()).collect::<Vec<_>>();
         let result = encoder.encode(value_ref.iter().cloned()).unwrap();
 
-        let decoded = encoder.decode(&result).unwrap();
+        let decoded = encoder.decode(&result).unwrap().into_dense();
         assert_eq!(&values, &decoded as &[Value]);
     }
 

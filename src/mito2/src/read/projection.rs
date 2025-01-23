@@ -33,7 +33,7 @@ use store_api::storage::ColumnId;
 use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, Result};
 use crate::read::Batch;
-use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec};
+use crate::row_converter::{build_primary_key_codec, CompositeValues, PrimaryKeyCodec};
 
 /// Only cache vector when its length `<=` this value.
 const MAX_VECTOR_LENGTH_TO_CACHE: usize = 16384;
@@ -47,7 +47,7 @@ pub struct ProjectionMapper {
     /// Output record batch contains tags.
     has_tags: bool,
     /// Decoder for primary key.
-    codec: DensePrimaryKeyCodec,
+    codec: Arc<dyn PrimaryKeyCodec>,
     /// Schema for converted [RecordBatch].
     output_schema: SchemaRef,
     /// Ids of columns to project. It keeps ids in the same order as the `projection`
@@ -92,8 +92,8 @@ impl ProjectionMapper {
             // Safety: idx is valid.
             column_schemas.push(metadata.schema.column_schemas()[*idx].clone());
         }
-        let codec = DensePrimaryKeyCodec::new(metadata);
 
+        let codec = build_primary_key_codec(metadata);
         if is_empty_projection {
             // If projection is empty, we don't output any column.
             return Ok(ProjectionMapper {
@@ -134,7 +134,7 @@ impl ProjectionMapper {
                     has_tags = true;
                     // We always read all primary key so the column always exists and the tag
                     // index is always valid.
-                    BatchIndex::Tag(index)
+                    BatchIndex::Tag((index, column.column_id))
                 }
                 SemanticType::Timestamp => BatchIndex::Timestamp,
                 SemanticType::Field => {
@@ -213,15 +213,15 @@ impl ProjectionMapper {
         // Skips decoding pk if we don't need to output it.
         let pk_values = if self.has_tags {
             match batch.pk_values() {
-                Some(v) => v.to_vec(),
+                Some(v) => v.clone(),
                 None => self
                     .codec
-                    .decode_dense(batch.primary_key())
+                    .decode(batch.primary_key())
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?,
             }
         } else {
-            Vec::new()
+            CompositeValues::Dense(vec![])
         };
 
         let mut columns = Vec::with_capacity(self.output_schema.num_columns());
@@ -232,8 +232,11 @@ impl ProjectionMapper {
             .zip(self.output_schema.column_schemas())
         {
             match index {
-                BatchIndex::Tag(idx) => {
-                    let value = &pk_values[*idx];
+                BatchIndex::Tag((idx, column_id)) => {
+                    let value = match &pk_values {
+                        CompositeValues::Dense(v) => &v[*idx].1,
+                        CompositeValues::Sparse(v) => v.get_or_null(*column_id),
+                    };
                     let vector = repeated_vector_with_cache(
                         &column_schema.data_type,
                         value,
@@ -259,7 +262,7 @@ impl ProjectionMapper {
 #[derive(Debug, Clone, Copy)]
 enum BatchIndex {
     /// Index in primary keys.
-    Tag(usize),
+    Tag((usize, ColumnId)),
     /// The time index column.
     Timestamp,
     /// Index in fields.
@@ -321,7 +324,7 @@ mod tests {
     use super::*;
     use crate::cache::CacheManager;
     use crate::read::BatchBuilder;
-    use crate::row_converter::{PrimaryKeyCodecExt, SortField};
+    use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
     use crate::test_util::meta_util::TestRegionMetadataBuilder;
 
     fn new_batch(
@@ -332,7 +335,12 @@ mod tests {
     ) -> Batch {
         let converter = DensePrimaryKeyCodec::with_fields(
             (0..tags.len())
-                .map(|_| SortField::new(ConcreteDataType::int64_datatype()))
+                .map(|idx| {
+                    (
+                        idx as u32,
+                        SortField::new(ConcreteDataType::int64_datatype()),
+                    )
+                })
                 .collect(),
         );
         let primary_key = converter
