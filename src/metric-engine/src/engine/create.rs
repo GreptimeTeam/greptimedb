@@ -130,7 +130,7 @@ impl MetricEngineInner {
             },
         )?;
 
-        info!("Created physical metric region {region_id}, physical_region_options={physical_region_options:?}");
+        info!("Created physical metric region {region_id}, primary key encoding={primary_key_encoding}, physical_region_options={physical_region_options:?}");
         PHYSICAL_REGION_COUNT.inc();
 
         // remember this table
