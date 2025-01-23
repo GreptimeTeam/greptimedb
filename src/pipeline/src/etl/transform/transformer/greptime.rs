@@ -22,21 +22,19 @@ use api::helper::proto_value_type;
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnDataTypeExtension, JsonTypeExtension, SemanticType};
-use coerce::{coerce_columns, coerce_value};
+use coerce::coerce_columns;
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
 use serde_json::{Map, Number, Value as JsonValue};
-use snafu::ensure;
 
 use crate::etl::error::{
-    IdentifyPipelineColumnTypeMismatchSnafu, KeyValueLengthMismatchSnafu,
-    ReachedMaxNestedLevelsSnafu, Result, TransformColumnNameMustBeUniqueSnafu, TransformEmptySnafu,
+    IdentifyPipelineColumnTypeMismatchSnafu, ReachedMaxNestedLevelsSnafu, Result,
+    TransformColumnNameMustBeUniqueSnafu, TransformEmptySnafu,
     TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu,
     UnsupportedNumberTypeSnafu,
 };
-use crate::etl::field::{InputFieldInfo, OneInputOneOutputField};
 use crate::etl::transform::index::Index;
-use crate::etl::transform::{Transform, Transformer, Transforms};
+use crate::etl::transform::{Transformer, Transforms};
 use crate::etl::value::{Timestamp, Value};
 
 /// The header key that contains the pipeline params.
@@ -329,23 +327,13 @@ fn resolve_number_schema(
     )
 }
 
-fn values_to_row(schema_info: &mut SchemaInfo, values: Vec<Value>, keys: &[String]) -> Result<Row> {
-    ensure!(
-        values.len() == keys.len(),
-        KeyValueLengthMismatchSnafu {
-            keys: keys.len(),
-            values: values.len(),
-        }
-    );
-
+fn values_to_row(schema_info: &mut SchemaInfo, values: BTreeMap<String, Value>) -> Result<Row> {
     let mut row: Vec<GreptimeValue> = Vec::with_capacity(schema_info.schema.len());
     for _ in 0..schema_info.schema.len() {
         row.push(GreptimeValue { value_data: None });
     }
 
-    for (idx, value) in values.into_iter().enumerate() {
-        // ensured by previous check
-        let column_name = keys[idx].clone();
+    for (column_name, value) in values.into_iter() {
         if column_name == DEFAULT_GREPTIME_TIMESTAMP_COLUMN {
             continue;
         }
@@ -524,107 +512,17 @@ fn values_to_row(schema_info: &mut SchemaInfo, values: Vec<Value>, keys: &[Strin
     Ok(Row { values: row })
 }
 
-fn json_value_to_row(
-    schema_info: &mut SchemaInfo,
-    map: Map<String, serde_json::Value>,
-) -> Result<Row> {
-    let mut row: Vec<GreptimeValue> = Vec::with_capacity(schema_info.schema.len());
-    for _ in 0..schema_info.schema.len() {
-        row.push(GreptimeValue { value_data: None });
-    }
-    for (column_name, value) in map {
-        if column_name == DEFAULT_GREPTIME_TIMESTAMP_COLUMN {
-            continue;
-        }
-        let index = schema_info.index.get(&column_name).copied();
-        match value {
-            serde_json::Value::Null => {
-                // do nothing
-            }
-            serde_json::Value::String(s) => {
-                resolve_schema(
-                    index,
-                    ValueData::StringValue(s),
-                    ColumnSchema {
-                        column_name,
-                        datatype: ColumnDataType::String as i32,
-                        semantic_type: SemanticType::Field as i32,
-                        datatype_extension: None,
-                        options: None,
-                    },
-                    &mut row,
-                    schema_info,
-                )?;
-            }
-            serde_json::Value::Bool(b) => {
-                resolve_schema(
-                    index,
-                    ValueData::BoolValue(b),
-                    ColumnSchema {
-                        column_name,
-                        datatype: ColumnDataType::Boolean as i32,
-                        semantic_type: SemanticType::Field as i32,
-                        datatype_extension: None,
-                        options: None,
-                    },
-                    &mut row,
-                    schema_info,
-                )?;
-            }
-            serde_json::Value::Number(n) => {
-                resolve_number_schema(n, column_name, index, &mut row, schema_info)?;
-            }
-            serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-                resolve_schema(
-                    index,
-                    ValueData::BinaryValue(jsonb::Value::from(value).to_vec()),
-                    ColumnSchema {
-                        column_name,
-                        datatype: ColumnDataType::Binary as i32,
-                        semantic_type: SemanticType::Field as i32,
-                        datatype_extension: Some(ColumnDataTypeExtension {
-                            type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
-                        }),
-                        options: None,
-                    },
-                    &mut row,
-                    schema_info,
-                )?;
-            }
-        }
-    }
-    Ok(Row { values: row })
-}
-
 fn identity_pipeline_inner<'a>(
-    array: PipelineExecInput,
+    array: Vec<BTreeMap<String, Value>>,
     tag_column_names: Option<impl Iterator<Item = &'a String>>,
-    params: &GreptimePipelineParams,
+    _params: &GreptimePipelineParams,
 ) -> Result<Rows> {
     let mut rows = Vec::with_capacity(array.len());
     let mut schema_info = SchemaInfo::default();
 
-    match array {
-        PipelineExecInput::Original(array) => {
-            for value in array {
-                if let serde_json::Value::Object(map) = value {
-                    let object = if params.flatten_json_object() {
-                        flatten_json_object(map, DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING)?
-                    } else {
-                        map
-                    };
-
-                    let row = json_value_to_row(&mut schema_info, object)?;
-                    rows.push(row);
-                }
-            }
-        }
-        PipelineExecInput::Intermediate { keys, array } => {
-            for values in array {
-                let row = values_to_row(&mut schema_info, values, &keys)?;
-                rows.push(row);
-            }
-        }
+    for values in array {
+        let row = values_to_row(&mut schema_info, values)?;
+        rows.push(row);
     }
 
     let greptime_timestamp_schema = ColumnSchema {
@@ -662,36 +560,6 @@ fn identity_pipeline_inner<'a>(
     })
 }
 
-/// The input data format for pipeline
-///
-/// It can either be raw input as in `serde_json::Value` or intermediate `Vec<Value>`
-pub enum PipelineExecInput {
-    // multiple row values as a value object
-    Original(Vec<serde_json::Value>),
-    // 2-dimension row values by column
-    Intermediate {
-        array: Vec<Vec<Value>>,
-        keys: Vec<String>,
-    },
-}
-
-impl PipelineExecInput {
-    /// return the length of internal array
-    pub fn len(&self) -> usize {
-        match self {
-            PipelineExecInput::Original(array) => array.len(),
-            PipelineExecInput::Intermediate { array, .. } => array.len(),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        match self {
-            PipelineExecInput::Original(array) => array.is_empty(),
-            PipelineExecInput::Intermediate { array, .. } => array.is_empty(),
-        }
-    }
-}
-
 /// Identity pipeline for Greptime
 /// This pipeline will convert the input JSON array to Greptime Rows
 /// params table is used to set the semantic type of the row key column to Tag
@@ -701,7 +569,7 @@ impl PipelineExecInput {
 /// 4. The pipeline will return an error if the same column datatype is mismatched
 /// 5. The pipeline will analyze the schema of each json record and merge them to get the final schema.
 pub fn identity_pipeline(
-    array: PipelineExecInput,
+    array: Vec<BTreeMap<String, Value>>,
     table: Option<Arc<table::Table>>,
     params: &GreptimePipelineParams,
 ) -> Result<Rows> {
@@ -773,9 +641,9 @@ mod tests {
     use api::v1::SemanticType;
 
     use crate::etl::transform::transformer::greptime::{
-        flatten_json_object, identity_pipeline_inner, GreptimePipelineParams, PipelineExecInput,
+        flatten_json_object, identity_pipeline_inner, GreptimePipelineParams,
     };
-    use crate::identity_pipeline;
+    use crate::{identity_pipeline, Pipeline};
 
     #[test]
     fn test_identify_pipeline() {
@@ -800,11 +668,8 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let rows = identity_pipeline(
-                PipelineExecInput::Original(array),
-                None,
-                &GreptimePipelineParams::default(),
-            );
+            let array = Pipeline::prepare(array).unwrap();
+            let rows = identity_pipeline(array, None, &GreptimePipelineParams::default());
             assert!(rows.is_err());
             assert_eq!(
                 rows.err().unwrap().to_string(),
@@ -833,7 +698,7 @@ mod tests {
                 }),
             ];
             let rows = identity_pipeline(
-                PipelineExecInput::Original(array),
+                Pipeline::prepare(array).unwrap(),
                 None,
                 &GreptimePipelineParams::default(),
             );
@@ -865,7 +730,7 @@ mod tests {
                 }),
             ];
             let rows = identity_pipeline(
-                PipelineExecInput::Original(array),
+                Pipeline::prepare(array).unwrap(),
                 None,
                 &GreptimePipelineParams::default(),
             );
@@ -899,7 +764,7 @@ mod tests {
             ];
             let tag_column_names = ["name".to_string(), "address".to_string()];
             let rows = identity_pipeline_inner(
-                PipelineExecInput::Original(array),
+                Pipeline::prepare(array).uwnrap(),
                 Some(tag_column_names.iter()),
                 &GreptimePipelineParams::default(),
             );

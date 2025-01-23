@@ -594,13 +594,6 @@ pub enum Error {
     TablePartRequiredForDispatcherRule,
     #[snafu(display("Value is required for dispatcher rule"))]
     ValueRequiredForDispatcherRule,
-    #[snafu(display("Keys and values length mismatch, values: {values}, keys: {keys}"))]
-    KeyValueLengthMismatch {
-        #[snafu(implicit)]
-        location: Location,
-        keys: usize,
-        values: usize,
-    },
     #[snafu(display(
         "Reached max nested levels when flattening JSON object: {max_nested_levels}"
     ))]
