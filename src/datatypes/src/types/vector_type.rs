@@ -115,7 +115,7 @@ pub fn parse_string_to_vector_type_value(s: &str, dim: Option<u32>) -> Result<Ve
     let content = trimmed[1..trimmed.len() - 1].trim();
 
     if content.is_empty() {
-        if dim.map_or(false, |d| d != 0) {
+        if dim.is_some_and(|d| d != 0) {
             return InvalidVectorSnafu {
                 msg: format!("Failed to parse {s} to Vector value: wrong dimension"),
             }
@@ -139,7 +139,7 @@ pub fn parse_string_to_vector_type_value(s: &str, dim: Option<u32>) -> Result<Ve
         .collect::<Result<Vec<f32>>>()?;
 
     // Check dimension
-    if dim.map_or(false, |d| d as usize != elements.len()) {
+    if dim.is_some_and(|d| d as usize != elements.len()) {
         return InvalidVectorSnafu {
             msg: format!("Failed to parse {s} to Vector value: wrong dimension"),
         }

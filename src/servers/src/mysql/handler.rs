@@ -244,11 +244,11 @@ impl MysqlInstanceShim {
         Ok((params, columns))
     }
 
-    async fn do_execute<'a>(
+    async fn do_execute(
         &mut self,
         query_ctx: QueryContextRef,
         stmt_key: String,
-        params: Params<'a>,
+        params: Params<'_>,
     ) -> Result<Vec<std::result::Result<Output, error::Error>>> {
         let sql_plan = match self.plan(&stmt_key) {
             None => {
