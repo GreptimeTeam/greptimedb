@@ -177,7 +177,7 @@ impl KeyValue<'_> {
 
     /// Returns the partition key.
     pub fn partition_key(&self) -> u32 {
-        // TODO(yinwen): refactor this code
+        // TODO(yingwen): refactor this code
         if self.primary_key_encoding == PrimaryKeyEncoding::Sparse {
             let Some(primary_key) = self.primary_keys().next() else {
                 return 0;
@@ -278,6 +278,8 @@ impl SparseReadRowHelper {
         primary_key_encoding: PrimaryKeyEncoding,
     ) -> SparseReadRowHelper {
         if primary_key_encoding == PrimaryKeyEncoding::Sparse {
+            // We can skip build the indices for sparse primary key encoding.
+            // The order of the columns is encoded primary key, timestamp, field columns.
             let indices = rows
                 .schema
                 .iter()

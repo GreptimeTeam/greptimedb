@@ -48,8 +48,7 @@ impl MetricEngineInner {
     ) -> Result<AffectedRows> {
         if request.is_physical_table() {
             // open physical region and recover states
-            let physical_region_options: PhysicalRegionOptions =
-                PhysicalRegionOptions::try_from(&request.options)?;
+            let physical_region_options = PhysicalRegionOptions::try_from(&request.options)?;
             self.open_physical_region(region_id, request).await?;
             let data_region_id = utils::to_data_region_id(region_id);
             let primary_key_encoding = self.mito.get_primary_key_encoding(data_region_id).context(

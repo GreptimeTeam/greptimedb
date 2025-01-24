@@ -49,7 +49,7 @@ pub enum IndexOptions {
 /// Sets data region specific options.
 pub fn set_data_region_options(
     options: &mut HashMap<String, String>,
-    sparse_primary_key_encoding: bool,
+    sparse_primary_key_encoding_if_absent: bool,
 ) {
     options.remove(METRIC_ENGINE_INDEX_TYPE_OPTION);
     options.remove(METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION);
@@ -59,7 +59,7 @@ pub fn set_data_region_options(
     );
     // Set memtable options for the data region.
     options.insert("memtable.type".to_string(), "partition_tree".to_string());
-    if sparse_primary_key_encoding
+    if sparse_primary_key_encoding_if_absent
         && !options.contains_key(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING)
     {
         options.insert(
