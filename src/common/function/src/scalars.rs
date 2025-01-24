@@ -21,6 +21,7 @@ pub mod json;
 pub mod matches;
 pub mod math;
 pub mod numpy;
+pub mod sleep;
 pub mod vector;
 
 #[cfg(test)]

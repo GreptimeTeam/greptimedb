@@ -1,0 +1,22 @@
+select sleep(0.1);
+
++---------------------+
+| sleep(Float64(0.1)) |
++---------------------+
+| 0                   |
++---------------------+
+
+select sleep(1) as a;
+
++---+
+| a |
++---+
+| 1 |
++---+
+
+-- should fail it is for postgres
+select pg_sleep(0.1);
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Invalid function 'pg_sleep'.
+Did you mean 'sleep'?
+

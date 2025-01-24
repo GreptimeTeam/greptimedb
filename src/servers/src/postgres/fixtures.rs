@@ -117,9 +117,17 @@ pub(crate) fn process<'a>(query: &str, query_ctx: QueryContextRef) -> Option<Vec
 
 static LIMIT_CAST_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)(LIMIT\\s+\\d+)::bigint").unwrap());
+
+static PG_SLEEP_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new("(?i)pg_sleep\\s*\\((.*?)\\)").unwrap());
+
 pub(crate) fn rewrite_sql(query: &str) -> Cow<'_, str> {
     //TODO(sunng87): remove this when we upgraded datafusion to 43 or newer
     let query = LIMIT_CAST_PATTERN.replace_all(query, "$1");
+
+    // tricky way to support both sleep in mysql and pg_sleep in postgres
+    let query = PG_SLEEP_PATTERN.replace_all(&query, "sleep($1)");
+
     // DBeaver tricky replacement for datafusion not support sql
     // TODO: add more here
     query
