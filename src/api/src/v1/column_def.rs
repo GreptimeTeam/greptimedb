@@ -100,7 +100,7 @@ pub fn options_from_column_schema(column_schema: &ColumnSchema) -> Option<Column
 pub fn contains_fulltext(options: &Option<ColumnOptions>) -> bool {
     options
         .as_ref()
-        .map_or(false, |o| o.options.contains_key(FULLTEXT_GRPC_KEY))
+        .is_some_and(|o| o.options.contains_key(FULLTEXT_GRPC_KEY))
 }
 
 /// Tries to construct a `ColumnOptions` from the given `FulltextOptions`.

@@ -182,7 +182,7 @@ pub(crate) struct IndexerBuilder<'a> {
     pub(crate) bloom_filter_index_config: BloomFilterConfig,
 }
 
-impl<'a> IndexerBuilder<'a> {
+impl IndexerBuilder<'_> {
     /// Sanity check for arguments and create a new [Indexer] if arguments are valid.
     pub(crate) async fn build(self) -> Indexer {
         let mut indexer = Indexer {

@@ -32,7 +32,7 @@
             mold
             (fenix.packages.${system}.fromToolchainFile {
               dir = ./.;
-              sha256 = "sha256-9GnMWM2pjzawUuVU7EbnPMn79rMknaA4EaxipyTgqig=";
+              sha256 = "sha256-f/CVA1EC61EWbh0SjaRNhLL0Ypx2ObupbzigZp8NmL4=";
             })
             cargo-nextest
             cargo-llvm-cov
