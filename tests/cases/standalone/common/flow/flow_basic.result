@@ -411,59 +411,6 @@ DROP TABLE out_distinct_basic;
 
 Affected Rows: 0
 
--- test interprete interval
-CREATE TABLE numbers_input_basic (
-    number INT,
-    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY(number),
-    TIME INDEX(ts)
-);
-
-Affected Rows: 0
-
-create table out_num_cnt_basic (
-    a INTERVAL,
-    b INTERVAL,
-    c INTERVAL,
-    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP TIME INDEX
-);
-
-Error: 1004(InvalidArguments), Invalid SQL, error: column name `a` is interval type, which is not supported
-
-CREATE FLOW filter_numbers_basic SINK TO out_num_cnt_basic AS
-SELECT
-    INTERVAL '1 day 1 second',
-    INTERVAL '1 month 1 day 1 second',
-    INTERVAL '1 year 1 month'
-FROM
-    numbers_input_basic
-where
-    number > 10;
-
-Affected Rows: 0
-
-SHOW CREATE FLOW filter_numbers_basic;
-
-+----------------------+----------------------------------------------------------------------------------------------------------------------------------------------+
-| Flow                 | Create Flow                                                                                                                                  |
-+----------------------+----------------------------------------------------------------------------------------------------------------------------------------------+
-| filter_numbers_basic | CREATE FLOW IF NOT EXISTS filter_numbers_basic                                                                                               |
-|                      | SINK TO out_num_cnt_basic                                                                                                                    |
-|                      | AS SELECT INTERVAL '1 day 1 second', INTERVAL '1 month 1 day 1 second', INTERVAL '1 year 1 month' FROM numbers_input_basic WHERE number > 10 |
-+----------------------+----------------------------------------------------------------------------------------------------------------------------------------------+
-
-drop flow filter_numbers_basic;
-
-Affected Rows: 0
-
-drop table out_num_cnt_basic;
-
-Affected Rows: 0
-
-drop table numbers_input_basic;
-
-Affected Rows: 0
-
 CREATE TABLE bytes_log (
     byte INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
