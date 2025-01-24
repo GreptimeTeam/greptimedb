@@ -765,7 +765,7 @@ impl HttpServer {
                     .allow_headers(Any),
             )
         } else {
-            info!("HTTP server corss-origin is disabled");
+            info!("HTTP server cross-origin is disabled");
             None
         };
 
