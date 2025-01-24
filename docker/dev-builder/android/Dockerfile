@@ -9,11 +9,20 @@ RUN cp ${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/lib64/clang/14.0.7/lib/
 # Install dependencies.
 RUN apt-get update && apt-get install -y \
     libssl-dev \
-    protobuf-compiler \
     curl \
     git \
+    unzip \
     build-essential \
     pkg-config
+
+# Install protoc
+ARG PROTOBUF_VERSION=29.3
+
+RUN curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOBUF_VERSION}/protoc-${PROTOBUF_VERSION}-linux-aarch_64.zip && \
+    unzip protoc-${PROTOBUF_VERSION}-linux-aarch_64.zip -d protoc3;
+    
+RUN mv protoc3/bin/* /usr/local/bin/
+RUN mv protoc3/include/* /usr/local/include/
 
 # Trust workdir
 RUN git config --global --add safe.directory /greptimedb
