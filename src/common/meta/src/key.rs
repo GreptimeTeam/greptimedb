@@ -1663,7 +1663,7 @@ mod tests {
             &table_metadata_manager,
             table_info.clone(),
             region_routes.clone(),
-            HashMap::new(),
+            create_mock_region_wal_options(),
         )
         .await
         .unwrap();
@@ -1721,11 +1721,11 @@ mod tests {
         // Logical delete does not remove the topic region mapping.
         let regions = table_metadata_manager
             .topic_region_manager
-            .regions("topic1")
+            .regions("greptimedb_topic1")
             .await
             .unwrap();
         assert_eq!(regions.len(), 1);
-        assert_eq!(regions[0], RegionId::new(table_id, 10));
+        assert_eq!(regions[0], RegionId::new(table_id, 1));
     }
 
     #[tokio::test]
