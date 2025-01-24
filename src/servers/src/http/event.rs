@@ -30,10 +30,11 @@ use common_telemetry::{error, warn};
 use datatypes::value::column_data_to_json;
 use headers::ContentType;
 use lazy_static::lazy_static;
+use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
 use pipeline::{
-    GreptimePipelineParams, GreptimeTransformer, PipelineDefinition, PipelineExecInput,
-    PipelineVersion, GREPTIME_PIPELINE_PARAMS_HEADER,
+    GreptimePipelineParams, GreptimeTransformer, PipelineDefinition, PipelineVersion,
+    GREPTIME_PIPELINE_PARAMS_HEADER,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Map, Value};
@@ -275,14 +276,15 @@ async fn dryrun_pipeline_inner(
     pipeline_handler: PipelineHandlerRef,
     query_ctx: &QueryContextRef,
 ) -> Result<Response> {
-    let db = query_ctx.get_db_string();
     let params = GreptimePipelineParams::default();
 
     let results = run_pipeline(
         &pipeline_handler,
         PipelineDefinition::Resolved(pipeline),
         &params,
-        Pipeline::prepare(value)?,
+        pipeline::json_array_to_intermediate_state(value)
+            .context(PipelineTransformSnafu)
+            .context(PipelineSnafu)?,
         "dry_run".to_owned(),
         query_ctx,
         true,
@@ -603,7 +605,9 @@ pub(crate) async fn ingest_logs_inner(
             &state,
             PipelineDefinition::from_name(&pipeline_name, version),
             &pipeline_params,
-            Pipeline::prepare(request.values),
+            pipeline::json_array_to_intermediate_state(request.values)
+                .context(PipelineTransformSnafu)
+                .context(PipelineSnafu)?,
             request.table,
             &query_ctx,
             true,
