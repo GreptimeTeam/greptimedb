@@ -27,8 +27,7 @@ pub struct PuffinMetadataCache {
     cache: moka::sync::Cache<String, Arc<FileMetadata>>,
 }
 
-#[allow(clippy::ptr_arg)]
-fn puffin_metadata_weight(k: &String, v: &Arc<FileMetadata>) -> u32 {
+fn puffin_metadata_weight(k: &str, v: &Arc<FileMetadata>) -> u32 {
     (k.len() + v.memory_usage()) as u32
 }
 
@@ -38,7 +37,7 @@ impl PuffinMetadataCache {
         Self {
             cache: moka::sync::CacheBuilder::new(capacity)
                 .name("puffin_metadata")
-                .weigher(puffin_metadata_weight)
+                .weigher(|k: &String, v| puffin_metadata_weight(k, v))
                 .eviction_listener(|k, v, _cause| {
                     let size = puffin_metadata_weight(&k, &v);
                     cache_bytes
