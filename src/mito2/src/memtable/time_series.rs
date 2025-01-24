@@ -154,9 +154,8 @@ impl TimeSeriesMemtable {
         );
 
         let primary_key_encoded = self.row_codec.encode(kv.primary_keys())?;
-        let fields = kv.fields().collect::<Vec<_>>();
 
-        stats.value_bytes += fields.iter().map(|v| v.data_size()).sum::<usize>();
+        stats.value_bytes += kv.fields().map(|v| v.data_size()).sum::<usize>();
         let (series, series_allocated) = self.series_set.get_or_add_series(primary_key_encoded);
         stats.key_bytes += series_allocated;
 
@@ -166,7 +165,7 @@ impl TimeSeriesMemtable {
         stats.max_ts = stats.max_ts.max(ts);
 
         let mut guard = series.write().unwrap();
-        guard.push(kv.timestamp(), kv.sequence(), kv.op_type(), fields);
+        guard.push(kv.timestamp(), kv.sequence(), kv.op_type(), kv.fields());
 
         Ok(())
     }
@@ -631,7 +630,13 @@ impl Series {
     }
 
     /// Pushes a row of values into Series.
-    fn push(&mut self, ts: ValueRef, sequence: u64, op_type: OpType, values: Vec<ValueRef>) {
+    fn push<'a>(
+        &mut self,
+        ts: ValueRef<'a>,
+        sequence: u64,
+        op_type: OpType,
+        values: impl Iterator<Item = ValueRef<'a>>,
+    ) {
         if self.active.len() > INITIAL_BUILDER_CAPACITY / 2 {
             let region_metadata = self.region_metadata.clone();
             self.freeze(&region_metadata);
@@ -731,51 +736,37 @@ impl ValueBuilder {
 
     /// Pushes a new row to `ValueBuilder`.
     /// We don't need primary keys since they've already be encoded.
-    fn push(&mut self, ts: ValueRef, sequence: u64, op_type: u8, fields: Vec<ValueRef>) {
-        debug_assert_eq!(fields.len(), self.fields.len());
+    fn push<'a>(
+        &mut self,
+        ts: ValueRef,
+        sequence: u64,
+        op_type: u8,
+        fields: impl Iterator<Item = ValueRef<'a>>,
+    ) {
+        #[cfg(debug_assertions)]
+        let fields = {
+            let field_vec = fields.collect::<Vec<_>>();
+            debug_assert_eq!(field_vec.len(), self.fields.len());
+            field_vec.into_iter()
+        };
+
         self.timestamp.push_value_ref(ts);
         self.sequence.push_value_ref(ValueRef::UInt64(sequence));
         self.op_type.push_value_ref(ValueRef::UInt8(op_type));
         let num_rows = self.timestamp.len();
-        for ((idx, field_value), field) in
-            fields.into_iter().enumerate().zip(self.fields.iter_mut())
-        {
-            if !field_value.is_null() || field.is_some() {
-                // self.fields[idx]
-                //     .get_or_insert_with(|| {
-                //         // lazy initialize on first non-null value
-                //         let mut mutable_vector = self.field_types[idx]
-                //             .create_mutable_vector(num_rows.max(INITIAL_BUILDER_CAPACITY));
-                //         // fill previous rows with nulls
-                //         mutable_vector.push_nulls(num_rows - 1);
-                //         mutable_vector
-                //     })
-                //     .push_value_ref(field_value);
-                if let Some(field) = field {
+        for (idx, field_value) in fields.enumerate() {
+            if !field_value.is_null() || self.fields[idx].is_some() {
+                if let Some(field) = self.fields[idx].as_mut() {
                     field.push_value_ref(field_value);
                 } else {
                     let mut mutable_vector = self.field_types[idx]
                         .create_mutable_vector(num_rows.max(INITIAL_BUILDER_CAPACITY));
                     mutable_vector.push_nulls(num_rows - 1);
                     mutable_vector.push_value_ref(field_value);
-                    *field = Some(mutable_vector);
+                    self.fields[idx] = Some(mutable_vector);
                 }
             }
         }
-        // for (field_value, field) in fields.into_iter().zip(self.fields.iter_mut()) {
-        //     if !field_value.is_null() || field.is_some() {
-        //         field
-        //             .get_or_insert_with(|| {
-        //                 // lazy initialize on first non-null value
-        //                 let mut mutable_vector = self.field_types[idx]
-        //                     .create_mutable_vector(num_rows.max(INITIAL_BUILDER_CAPACITY));
-        //                 // fill previous rows with nulls
-        //                 mutable_vector.push_nulls(num_rows - 1);
-        //                 mutable_vector
-        //             })
-        //             .push_value_ref(field_value);
-        //     }
-        // }
     }
 
     /// Returns the length of [ValueBuilder]
@@ -982,8 +973,8 @@ mod tests {
         ValueRef::Timestamp(Timestamp::new_millisecond(val))
     }
 
-    fn field_value_ref(v0: i64, v1: f64) -> Vec<ValueRef<'static>> {
-        vec![ValueRef::Int64(v0), ValueRef::Float64(OrderedFloat(v1))]
+    fn field_value_ref(v0: i64, v1: f64) -> impl Iterator<Item = ValueRef<'static>> {
+        vec![ValueRef::Int64(v0), ValueRef::Float64(OrderedFloat(v1))].into_iter()
     }
 
     fn check_values(values: Values, expect: &[(i64, u64, u8, i64, f64)]) {
@@ -1045,20 +1036,20 @@ mod tests {
             ts_value_ref(1),
             0,
             OpType::Put,
-            vec![ValueRef::Null, ValueRef::Null],
+            vec![ValueRef::Null, ValueRef::Null].into_iter(),
         );
         series.push(
             ts_value_ref(1),
             0,
             OpType::Put,
-            vec![ValueRef::Int64(1), ValueRef::Null],
+            vec![ValueRef::Int64(1), ValueRef::Null].into_iter(),
         );
         series.push(ts_value_ref(1), 2, OpType::Put, field_value_ref(2, 10.2));
         series.push(
             ts_value_ref(1),
             3,
             OpType::Put,
-            vec![ValueRef::Int64(2), ValueRef::Null],
+            vec![ValueRef::Int64(2), ValueRef::Null].into_iter(),
         );
         assert_eq!(4, series.active.timestamp.len());
         assert_eq!(0, series.frozen.len());
