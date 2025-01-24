@@ -366,7 +366,7 @@ fn intersect_ranges(lhs: &[Range<usize>], rhs: &[Range<usize>]) -> Vec<Range<usi
 fn is_blob_not_found(err: &Error) -> bool {
     matches!(
         err,
-        Error::PuffinBuildReader {
+        Error::PuffinReadBlob {
             source: puffin::error::Error::BlobNotFound { .. },
             ..
         }
