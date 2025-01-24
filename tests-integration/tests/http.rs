@@ -163,6 +163,33 @@ pub async fn test_cors() {
         "*"
     );
 
+    let res = client
+        .options("/health")
+        .header("Access-Control-Request-Headers", "x-greptime-auth")
+        .header("Access-Control-Request-Method", "DELETE")
+        .header("Origin", "https://example.com")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .expect("expect cors header origin"),
+        "*"
+    );
+    assert_eq!(
+        res.headers()
+            .get(http::header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .expect("expect cors header headers"),
+        "*"
+    );
+    assert_eq!(
+        res.headers()
+            .get(http::header::ACCESS_CONTROL_ALLOW_METHODS)
+            .expect("expect cors header methods"),
+        "GET,POST,PUT,DELETE,HEAD"
+    );
+
     guard.remove_all().await;
 }
 
