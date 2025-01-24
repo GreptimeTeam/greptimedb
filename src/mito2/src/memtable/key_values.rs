@@ -177,6 +177,7 @@ impl KeyValue<'_> {
 
     /// Returns the partition key.
     pub fn partition_key(&self) -> u32 {
+        // TODO(yinwen): refactor this code
         if self.primary_key_encoding == PrimaryKeyEncoding::Sparse {
             let Some(primary_key) = self.primary_keys().next() else {
                 return 0;

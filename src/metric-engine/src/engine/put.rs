@@ -59,25 +59,24 @@ impl MetricEngineInner {
             .with_label_values(&["put"])
             .start_timer();
 
-        let physical_region_id = *self
-            .state
-            .read()
-            .unwrap()
-            .logical_regions()
-            .get(&logical_region_id)
-            .with_context(|| LogicalRegionNotFoundSnafu {
-                region_id: logical_region_id,
-            })?;
-        let data_region_id = to_data_region_id(physical_region_id);
+        let (physical_region_id, data_region_id, primary_key_encoding) = {
+            let state = self.state.read().unwrap();
+            let physical_region_id = *state
+                .logical_regions()
+                .get(&logical_region_id)
+                .with_context(|| LogicalRegionNotFoundSnafu {
+                    region_id: logical_region_id,
+                })?;
+            let data_region_id = to_data_region_id(physical_region_id);
 
-        let primary_key_encoding = self
-            .state
-            .read()
-            .unwrap()
-            .get_primary_key_encoding(data_region_id)
-            .context(PhysicalRegionNotFoundSnafu {
-                region_id: data_region_id,
-            })?;
+            let primary_key_encoding = state.get_primary_key_encoding(data_region_id).context(
+                PhysicalRegionNotFoundSnafu {
+                    region_id: data_region_id,
+                },
+            )?;
+
+            (physical_region_id, data_region_id, primary_key_encoding)
+        };
 
         self.verify_put_request(logical_region_id, physical_region_id, &request)
             .await?;
