@@ -110,7 +110,7 @@ impl FulltextIndexer {
     }
 
     /// Updates the index with the given batch.
-    pub async fn update(&mut self, batch: &Batch) -> Result<()> {
+    pub async fn update(&mut self, batch: &mut Batch) -> Result<()> {
         ensure!(!self.aborted, OperateAbortedIndexSnafu);
 
         if let Err(update_err) = self.do_update(batch).await {
@@ -170,7 +170,7 @@ impl FulltextIndexer {
 }
 
 impl FulltextIndexer {
-    async fn do_update(&mut self, batch: &Batch) -> Result<()> {
+    async fn do_update(&mut self, batch: &mut Batch) -> Result<()> {
         let mut guard = self.stats.record_update();
         guard.inc_row_count(batch.num_rows());
 
@@ -217,7 +217,7 @@ struct SingleCreator {
 }
 
 impl SingleCreator {
-    async fn update(&mut self, batch: &Batch) -> Result<()> {
+    async fn update(&mut self, batch: &mut Batch) -> Result<()> {
         let text_column = batch
             .fields()
             .iter()
@@ -511,8 +511,8 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        let batch = new_batch(rows);
-        indexer.update(&batch).await.unwrap();
+        let mut batch = new_batch(rows);
+        indexer.update(&mut batch).await.unwrap();
 
         let puffin_manager = factory.build(object_store.clone());
         let mut writer = puffin_manager.writer(&file_path).await.unwrap();

@@ -309,8 +309,6 @@ struct MetricEngineInner {
     metadata_region: MetadataRegion,
     data_region: DataRegion,
     state: RwLock<MetricEngineState>,
-    /// TODO(weny): remove it after the config is used.
-    #[allow(unused)]
     config: EngineConfig,
     row_modifier: RowModifier,
 }

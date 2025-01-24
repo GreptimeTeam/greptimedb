@@ -119,7 +119,7 @@ impl InvertedIndexer {
 
     /// Updates index with a batch of rows.
     /// Garbage will be cleaned up if failed to update.
-    pub async fn update(&mut self, batch: &Batch) -> Result<()> {
+    pub async fn update(&mut self, batch: &mut Batch) -> Result<()> {
         ensure!(!self.aborted, OperateAbortedIndexSnafu);
 
         if batch.is_empty() {
@@ -177,14 +177,20 @@ impl InvertedIndexer {
         self.do_cleanup().await
     }
 
-    async fn do_update(&mut self, batch: &Batch) -> Result<()> {
+    async fn do_update(&mut self, batch: &mut Batch) -> Result<()> {
         let mut guard = self.stats.record_update();
 
         let n = batch.num_rows();
         guard.inc_row_count(n);
 
         // TODO(weny, zhenchi): lazy decode
-        let values = self.codec.decode(batch.primary_key())?;
+        if batch.pk_values().is_none() {
+            let values = self.codec.decode(batch.primary_key())?;
+            batch.set_pk_values(values);
+        }
+
+        // Safety: the primary key is decoded
+        let values = batch.pk_values().unwrap();
         for (idx, (col_id, field)) in self.codec.fields().iter().enumerate() {
             if !self.indexed_column_ids.contains(col_id) {
                 continue;
@@ -455,8 +461,8 @@ mod tests {
         );
 
         for (str_tag, i32_tag, u64_field) in &rows {
-            let batch = new_batch(str_tag, *i32_tag, u64_field.iter().copied());
-            creator.update(&batch).await.unwrap();
+            let mut batch = new_batch(str_tag, *i32_tag, u64_field.iter().copied());
+            creator.update(&mut batch).await.unwrap();
         }
 
         let puffin_manager = factory.build(object_store.clone());

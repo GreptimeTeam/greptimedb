@@ -43,6 +43,20 @@ pub const TWCS_TIME_WINDOW: &str = "compaction.twcs.time_window";
 pub const REMOTE_COMPACTION: &str = "compaction.twcs.remote_compaction";
 /// Option key for twcs fallback to local.
 pub const TWCS_FALLBACK_TO_LOCAL: &str = "compaction.twcs.fallback_to_local";
+/// Option key for memtable type.
+pub const MEMTABLE_TYPE: &str = "memtable.type";
+/// Option key for memtable partition tree primary key encoding.
+pub const MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING: &str =
+    "memtable.partition_tree.primary_key_encoding";
+/// Option key for memtable partition tree index max keys per shard.
+pub const MEMTABLE_PARTITION_TREE_INDEX_MAX_KEYS_PER_SHARD: &str =
+    "memtable.partition_tree.index_max_keys_per_shard";
+/// Option key for memtable partition tree data freeze threshold.
+pub const MEMTABLE_PARTITION_TREE_DATA_FREEZE_THRESHOLD: &str =
+    "memtable.partition_tree.data_freeze_threshold";
+/// Option key for memtable partition tree fork dictionary bytes.
+pub const MEMTABLE_PARTITION_TREE_FORK_DICTIONARY_BYTES: &str =
+    "memtable.partition_tree.fork_dictionary_bytes";
 
 /// Returns true if the `key` is a valid option key for the mito engine.
 pub fn is_mito_engine_option_key(key: &str) -> bool {
@@ -61,10 +75,11 @@ pub fn is_mito_engine_option_key(key: &str) -> bool {
         "index.inverted_index.ignore_column_ids",
         "index.inverted_index.segment_row_count",
         WAL_OPTIONS_KEY,
-        "memtable.type",
-        "memtable.partition_tree.index_max_keys_per_shard",
-        "memtable.partition_tree.data_freeze_threshold",
-        "memtable.partition_tree.fork_dictionary_bytes",
+        MEMTABLE_TYPE,
+        MEMTABLE_PARTITION_TREE_INDEX_MAX_KEYS_PER_SHARD,
+        MEMTABLE_PARTITION_TREE_DATA_FREEZE_THRESHOLD,
+        MEMTABLE_PARTITION_TREE_FORK_DICTIONARY_BYTES,
+        MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING,
         APPEND_MODE_KEY,
         MERGE_MODE_KEY,
     ]

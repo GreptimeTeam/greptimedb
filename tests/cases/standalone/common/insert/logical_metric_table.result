@@ -77,3 +77,107 @@ DROP TABLE phy;
 
 Affected Rows: 0
 
+CREATE TABLE phy (
+    ts timestamp time index,
+    val double
+) engine = metric with (
+    "physical_metric_table" = "",   
+    "memtable.type" = "partition_tree",
+    "memtable.partition_tree.primary_key_encoding" = "sparse"
+);
+
+Affected Rows: 0
+
+CREATE TABLE t1 (ts timestamp time index, val double, host string primary key) engine = metric with ("on_physical_table" = "phy");
+
+Affected Rows: 0
+
+INSERT INTO t1 VALUES ('host1',0, 0), ('host2', 1, 1,);
+
+Affected Rows: 2
+
+SELECT * from t1;
+
++-------+-------------------------+-----+
+| host  | ts                      | val |
++-------+-------------------------+-----+
+| host2 | 1970-01-01T00:00:00.001 | 1.0 |
+| host1 | 1970-01-01T00:00:00     | 0.0 |
++-------+-------------------------+-----+
+
+CREATE TABLE t2 (ts timestamp time index, job string primary key, val double) engine = metric with ("on_physical_table" = "phy");
+
+Affected Rows: 0
+
+SELECT * from t2;
+
+++
+++
+
+INSERT INTO t2 VALUES ('job1', 0, 0), ('job2', 1, 1);
+
+Affected Rows: 2
+
+SELECT * from t2;
+
++------+-------------------------+-----+
+| job  | ts                      | val |
++------+-------------------------+-----+
+| job2 | 1970-01-01T00:00:00.001 | 1.0 |
+| job1 | 1970-01-01T00:00:00     | 0.0 |
++------+-------------------------+-----+
+
+ADMIN flush_table("phy");
+
+Error: 1004(InvalidArguments), Failed to build admin function args: unsupported function arg "phy"
+
+-- SQLNESS ARG restart=true
+INSERT INTO t2 VALUES ('job3', 0, 0), ('job4', 1, 1);
+
+Affected Rows: 2
+
+SELECT * from t1;
+
++-------+-------------------------+-----+
+| host  | ts                      | val |
++-------+-------------------------+-----+
+| host2 | 1970-01-01T00:00:00.001 | 1.0 |
+| host1 | 1970-01-01T00:00:00     | 0.0 |
++-------+-------------------------+-----+
+
+SELECT * from t2;
+
++------+-------------------------+-----+
+| job  | ts                      | val |
++------+-------------------------+-----+
+| job2 | 1970-01-01T00:00:00.001 | 1.0 |
+| job3 | 1970-01-01T00:00:00     | 0.0 |
+| job4 | 1970-01-01T00:00:00.001 | 1.0 |
+| job1 | 1970-01-01T00:00:00     | 0.0 |
++------+-------------------------+-----+
+
+DROP TABLE t1;
+
+Affected Rows: 0
+
+DROP TABLE t2;
+
+Affected Rows: 0
+
+DESC TABLE phy;
+
++------------+----------------------+-----+------+---------+---------------+
+| Column     | Type                 | Key | Null | Default | Semantic Type |
++------------+----------------------+-----+------+---------+---------------+
+| ts         | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| val        | Float64              |     | YES  |         | FIELD         |
+| __table_id | UInt32               | PRI | NO   |         | TAG           |
+| __tsid     | UInt64               | PRI | NO   |         | TAG           |
+| host       | String               | PRI | YES  |         | TAG           |
+| job        | String               | PRI | YES  |         | TAG           |
++------------+----------------------+-----+------+---------+---------------+
+
+DROP TABLE phy;
+
+Affected Rows: 0
+
