@@ -747,7 +747,6 @@ impl HttpServer {
                                 Method::PUT,
                                 Method::DELETE,
                                 Method::HEAD,
-                                Method::OPTIONS,
                             ])
                             .allow_origin(Any)
                             .allow_headers(Any),

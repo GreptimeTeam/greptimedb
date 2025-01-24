@@ -86,6 +86,7 @@ zstd.workspace = true
 datafusion.workspace = true
 datafusion-expr.workspace = true
 hex.workspace = true
+http.workspace = true
 itertools.workspace = true
 opentelemetry-proto.workspace = true
 partition.workspace = true

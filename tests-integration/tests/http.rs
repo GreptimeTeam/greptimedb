@@ -148,6 +148,24 @@ pub async fn test_http_auth(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+#[tokio::test]
+pub async fn test_cors() {
+    let (app, mut guard) = setup_test_http_app_with_frontend(StorageType::File, "test_cors").await;
+    let client = TestClient::new(app).await;
+
+    let res = client.get("/health").send().await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .expect("expect cors header origin"),
+        "*"
+    );
+
+    guard.remove_all().await;
+}
+
 pub async fn test_sql_api(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
     let client = TestClient::new(app).await;
