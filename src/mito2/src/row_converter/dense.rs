@@ -348,8 +348,8 @@ impl DensePrimaryKeyCodec {
         I: Iterator<Item = ValueRef<'a>>,
     {
         let mut serializer = Serializer::new(buffer);
-        for (value, (_, field)) in row.zip(self.ordered_primary_key_columns.iter()) {
-            field.serialize(&mut serializer, &value)?;
+        for (idx, value) in row.enumerate() {
+            self.field_at(idx).serialize(&mut serializer, &value)?;
         }
         Ok(())
     }

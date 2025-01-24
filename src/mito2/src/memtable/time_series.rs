@@ -155,7 +155,6 @@ impl TimeSeriesMemtable {
 
         let primary_key_encoded = self.row_codec.encode(kv.primary_keys())?;
 
-        stats.value_bytes += kv.fields().map(|v| v.data_size()).sum::<usize>();
         let (series, series_allocated) = self.series_set.get_or_add_series(primary_key_encoded);
         stats.key_bytes += series_allocated;
 
@@ -165,7 +164,8 @@ impl TimeSeriesMemtable {
         stats.max_ts = stats.max_ts.max(ts);
 
         let mut guard = series.write().unwrap();
-        guard.push(kv.timestamp(), kv.sequence(), kv.op_type(), kv.fields());
+        let size = guard.push(kv.timestamp(), kv.sequence(), kv.op_type(), kv.fields());
+        stats.value_bytes += size;
 
         Ok(())
     }
@@ -629,19 +629,19 @@ impl Series {
         }
     }
 
-    /// Pushes a row of values into Series.
+    /// Pushes a row of values into Series. Return the size of values.
     fn push<'a>(
         &mut self,
         ts: ValueRef<'a>,
         sequence: u64,
         op_type: OpType,
         values: impl Iterator<Item = ValueRef<'a>>,
-    ) {
+    ) -> usize {
         if self.active.len() > INITIAL_BUILDER_CAPACITY / 2 {
             let region_metadata = self.region_metadata.clone();
             self.freeze(&region_metadata);
         }
-        self.active.push(ts, sequence, op_type as u8, values);
+        self.active.push(ts, sequence, op_type as u8, values)
     }
 
     fn update_pk_cache(&mut self, pk_values: Vec<Value>) {
@@ -736,13 +736,14 @@ impl ValueBuilder {
 
     /// Pushes a new row to `ValueBuilder`.
     /// We don't need primary keys since they've already be encoded.
+    /// Returns the size of field values.
     fn push<'a>(
         &mut self,
         ts: ValueRef,
         sequence: u64,
         op_type: u8,
         fields: impl Iterator<Item = ValueRef<'a>>,
-    ) {
+    ) -> usize {
         #[cfg(debug_assertions)]
         let fields = {
             let field_vec = fields.collect::<Vec<_>>();
@@ -754,7 +755,9 @@ impl ValueBuilder {
         self.sequence.push_value_ref(ValueRef::UInt64(sequence));
         self.op_type.push_value_ref(ValueRef::UInt8(op_type));
         let num_rows = self.timestamp.len();
+        let mut size = 0;
         for (idx, field_value) in fields.enumerate() {
+            size += field_value.data_size();
             if !field_value.is_null() || self.fields[idx].is_some() {
                 if let Some(field) = self.fields[idx].as_mut() {
                     field.push_value_ref(field_value);
@@ -767,6 +770,8 @@ impl ValueBuilder {
                 }
             }
         }
+
+        size
     }
 
     /// Returns the length of [ValueBuilder]
