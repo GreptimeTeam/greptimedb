@@ -17,7 +17,8 @@
 use common_telemetry::info;
 use mito2::engine::MITO_ENGINE_NAME;
 use object_store::util::join_dir;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metric_engine_consts::{DATA_REGION_SUBDIR, METADATA_REGION_SUBDIR};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
@@ -26,7 +27,7 @@ use store_api::storage::RegionId;
 use super::MetricEngineInner;
 use crate::engine::create::region_options_for_metadata_region;
 use crate::engine::options::{set_data_region_options, PhysicalRegionOptions};
-use crate::error::{OpenMitoRegionSnafu, Result};
+use crate::error::{OpenMitoRegionSnafu, PhysicalRegionNotFoundSnafu, Result};
 use crate::metrics::{LOGICAL_REGION_COUNT, PHYSICAL_REGION_COUNT};
 use crate::utils;
 
@@ -49,7 +50,13 @@ impl MetricEngineInner {
             // open physical region and recover states
             let physical_region_options = PhysicalRegionOptions::try_from(&request.options)?;
             self.open_physical_region(region_id, request).await?;
-            self.recover_states(region_id, physical_region_options)
+            let data_region_id = utils::to_data_region_id(region_id);
+            let primary_key_encoding = self.mito.get_primary_key_encoding(data_region_id).context(
+                PhysicalRegionNotFoundSnafu {
+                    region_id: data_region_id,
+                },
+            )?;
+            self.recover_states(region_id, primary_key_encoding, physical_region_options)
                 .await?;
 
             Ok(0)
@@ -80,7 +87,10 @@ impl MetricEngineInner {
         };
 
         let mut data_region_options = request.options;
-        set_data_region_options(&mut data_region_options);
+        set_data_region_options(
+            &mut data_region_options,
+            self.config.experimental_sparse_primary_key_encoding,
+        );
         let open_data_region_request = RegionOpenRequest {
             region_dir: data_region_dir,
             options: data_region_options,
@@ -125,6 +135,7 @@ impl MetricEngineInner {
     pub(crate) async fn recover_states(
         &self,
         physical_region_id: RegionId,
+        primary_key_encoding: PrimaryKeyEncoding,
         physical_region_options: PhysicalRegionOptions,
     ) -> Result<()> {
         // load logical regions and physical column names
@@ -148,6 +159,7 @@ impl MetricEngineInner {
             state.add_physical_region(
                 physical_region_id,
                 physical_columns,
+                primary_key_encoding,
                 physical_region_options,
             );
             // recover logical regions

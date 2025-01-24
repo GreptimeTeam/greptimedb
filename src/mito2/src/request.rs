@@ -23,13 +23,14 @@ use api::helper::{
     ColumnDataTypeWrapper,
 };
 use api::v1::column_def::options_from_column_schema;
-use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value};
+use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value, WriteHint};
 use common_telemetry::info;
 use datatypes::prelude::DataType;
 use prometheus::HistogramTimer;
 use prost::Message;
 use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::codec::{infer_primary_key_encoding_from_hint, PrimaryKeyEncoding};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{
@@ -63,6 +64,8 @@ pub struct WriteRequest {
     name_to_index: HashMap<String, usize>,
     /// Whether each column has null.
     has_null: Vec<bool>,
+    /// Write hint.
+    pub hint: Option<WriteHint>,
 }
 
 impl WriteRequest {
@@ -112,7 +115,19 @@ impl WriteRequest {
             rows,
             name_to_index,
             has_null,
+            hint: None,
         })
+    }
+
+    /// Sets the write hint.
+    pub fn with_hint(mut self, hint: Option<WriteHint>) -> Self {
+        self.hint = hint;
+        self
+    }
+
+    /// Returns the encoding hint.
+    pub fn primary_key_encoding(&self) -> PrimaryKeyEncoding {
+        infer_primary_key_encoding_from_hint(self.hint.as_ref())
     }
 
     /// Returns estimated size of the request.
@@ -548,7 +563,8 @@ impl WorkerRequest {
         let (sender, receiver) = oneshot::channel();
         let worker_request = match value {
             RegionRequest::Put(v) => {
-                let write_request = WriteRequest::new(region_id, OpType::Put, v.rows)?;
+                let write_request =
+                    WriteRequest::new(region_id, OpType::Put, v.rows)?.with_hint(v.hint);
                 WorkerRequest::Write(SenderWriteRequest {
                     sender: sender.into(),
                     request: write_request,

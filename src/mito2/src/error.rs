@@ -42,6 +42,13 @@ use crate::worker::WorkerId;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to encode sparse primary key, reason: {}", reason))]
+    EncodeSparsePrimaryKey {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
     "Failed to set region {} to writable, it was expected to replayed to {}, but actually replayed to {}",
     region_id, expected_last_entry_id, replayed_last_entry_id
@@ -1024,7 +1031,7 @@ impl ErrorExt for Error {
             WriteGroup { source, .. } => source.status_code(),
             FieldTypeMismatch { source, .. } => source.status_code(),
             NotSupportedField { .. } => StatusCode::Unsupported,
-            DeserializeField { .. } => StatusCode::Unexpected,
+            DeserializeField { .. } | EncodeSparsePrimaryKey { .. } => StatusCode::Unexpected,
             InvalidBatch { .. } => StatusCode::InvalidArguments,
             InvalidRecordBatch { .. } => StatusCode::InvalidArguments,
             ConvertVector { source, .. } => source.status_code(),

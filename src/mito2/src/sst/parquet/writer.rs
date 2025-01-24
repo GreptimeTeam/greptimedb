@@ -126,9 +126,9 @@ where
             .transpose()
         {
             match res {
-                Ok(batch) => {
+                Ok(mut batch) => {
                     stats.update(&batch);
-                    self.indexer.update(&batch).await;
+                    self.indexer.update(&mut batch).await;
                 }
                 Err(e) => {
                     self.indexer.abort().await;
