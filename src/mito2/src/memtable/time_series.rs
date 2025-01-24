@@ -54,7 +54,7 @@ use crate::region::options::MergeMode;
 use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
 
 /// Initial vector builder capacity.
-const INITIAL_BUILDER_CAPACITY: usize = 1024;
+const BUILDER_CAPACITY: usize = 512;
 
 /// Builder to build [TimeSeriesMemtable].
 #[derive(Debug, Default)]
@@ -623,7 +623,7 @@ impl Series {
     fn new(region_metadata: &RegionMetadataRef) -> Self {
         Self {
             pk_cache: None,
-            active: ValueBuilder::new(region_metadata, INITIAL_BUILDER_CAPACITY),
+            active: ValueBuilder::new(region_metadata, BUILDER_CAPACITY),
             frozen: vec![],
             region_metadata: region_metadata.clone(),
         }
@@ -637,7 +637,8 @@ impl Series {
         op_type: OpType,
         values: impl Iterator<Item = ValueRef<'a>>,
     ) -> usize {
-        if self.active.len() > INITIAL_BUILDER_CAPACITY / 2 {
+        // + 10 to avoid potential reallocation.
+        if self.active.len() + 10 > BUILDER_CAPACITY {
             let region_metadata = self.region_metadata.clone();
             self.freeze(&region_metadata);
         }
@@ -651,7 +652,7 @@ impl Series {
     /// Freezes the active part and push it to `frozen`.
     fn freeze(&mut self, region_metadata: &RegionMetadataRef) {
         if self.active.len() != 0 {
-            let mut builder = ValueBuilder::new(region_metadata, INITIAL_BUILDER_CAPACITY);
+            let mut builder = ValueBuilder::new(region_metadata, BUILDER_CAPACITY);
             std::mem::swap(&mut self.active, &mut builder);
             self.frozen.push(Values::from(builder));
         }
@@ -762,8 +763,8 @@ impl ValueBuilder {
                 if let Some(field) = self.fields[idx].as_mut() {
                     field.push_value_ref(field_value);
                 } else {
-                    let mut mutable_vector = self.field_types[idx]
-                        .create_mutable_vector(num_rows.max(INITIAL_BUILDER_CAPACITY));
+                    let mut mutable_vector =
+                        self.field_types[idx].create_mutable_vector(num_rows.max(BUILDER_CAPACITY));
                     mutable_vector.push_nulls(num_rows - 1);
                     mutable_vector.push_value_ref(field_value);
                     self.fields[idx] = Some(mutable_vector);
