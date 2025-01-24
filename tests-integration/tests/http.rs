@@ -881,6 +881,8 @@ addr = "127.0.0.1:4000"
 timeout = "30s"
 body_limit = "64MiB"
 is_strict_mode = false
+cors_allowed_origins = []
+disable_cors = false
 
 [grpc]
 addr = "127.0.0.1:4001"
