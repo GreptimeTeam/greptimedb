@@ -22,7 +22,7 @@ use api::helper::proto_value_type;
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnDataTypeExtension, JsonTypeExtension, SemanticType};
-use coerce::coerce_columns;
+use coerce::{coerce_columns, coerce_value};
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
 use serde_json::{Map, Number, Value as JsonValue};
@@ -33,6 +33,7 @@ use crate::etl::error::{
     TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu,
     UnsupportedNumberTypeSnafu,
 };
+use crate::etl::processor::IntermediateStatus;
 use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transformer, Transforms};
 use crate::etl::value::{Timestamp, Value};
@@ -142,9 +143,9 @@ impl Transformer for GreptimeTransformer {
 
         for transform in transforms.iter() {
             let target_fields_set = transform
-                .real_fields
+                .fields
                 .iter()
-                .map(|f| f.output_name())
+                .map(|f| f.target_or_input_field())
                 .collect::<HashSet<_>>();
 
             let intersections: Vec<_> = column_names_set.intersection(&target_fields_set).collect();
@@ -157,16 +158,17 @@ impl Transformer for GreptimeTransformer {
 
             if let Some(idx) = transform.index {
                 if idx == Index::Time {
-                    match transform.real_fields.len() {
+                    match transform.fields.len() {
                         //Safety unwrap is fine here because we have checked the length of real_fields
-                        1 => timestamp_columns
-                            .push(transform.real_fields.first().unwrap().input_name()),
+                        1 => {
+                            timestamp_columns.push(transform.fields.first().unwrap().input_field())
+                        }
                         _ => {
                             return TransformMultipleTimestampIndexSnafu {
                                 columns: transform
-                                    .real_fields
+                                    .fields
                                     .iter()
-                                    .map(|x| x.input_name())
+                                    .map(|x| x.input_field())
                                     .join(", "),
                             }
                             .fail();
@@ -195,31 +197,31 @@ impl Transformer for GreptimeTransformer {
         }
     }
 
-    fn transform_mut(&self, val: &mut BTreeMap<String, Value>) -> Result<Self::VecOutput> {
-        // let mut values = vec![GreptimeValue { value_data: None }; self.schema.len()];
-        // for transform in self.transforms.iter() {
-        //     for field in transform.real_fields.iter() {
-        //         let index = field.input_index();
-        //         let output_index = field.output_index();
-        //         match val.get(index) {
-        //             Some(v) => {
-        //                 let value_data = coerce_value(v, transform)?;
-        //                 // every transform fields has only one output field
-        //                 values[output_index] = GreptimeValue { value_data };
-        //             }
-        //             None => {
-        //                 let default = transform.get_default();
-        //                 let value_data = match default {
-        //                     Some(default) => coerce_value(default, transform)?,
-        //                     None => None,
-        //                 };
-        //                 values[output_index] = GreptimeValue { value_data };
-        //             }
-        //         }
-        //     }
-        // }
-        // Ok(Row { values })
-        todo!()
+    fn transform_mut(&self, val: &mut IntermediateStatus) -> Result<Self::VecOutput> {
+        let mut values = vec![GreptimeValue { value_data: None }; self.schema.len()];
+        let mut output_index = 0;
+        for transform in self.transforms.iter() {
+            for field in transform.fields.iter() {
+                let index = field.input_field();
+                match val.get(index) {
+                    Some(v) => {
+                        let value_data = coerce_value(v, transform)?;
+                        // every transform fields has only one output field
+                        values[output_index] = GreptimeValue { value_data };
+                    }
+                    None => {
+                        let default = transform.get_default();
+                        let value_data = match default {
+                            Some(default) => coerce_value(default, transform)?,
+                            None => None,
+                        };
+                        values[output_index] = GreptimeValue { value_data };
+                    }
+                }
+                output_index += 1;
+            }
+        }
+        Ok(Row { values })
     }
 
     fn transforms(&self) -> &Transforms {
@@ -643,6 +645,7 @@ mod tests {
     use crate::etl::transform::transformer::greptime::{
         flatten_json_object, identity_pipeline_inner, GreptimePipelineParams,
     };
+    use crate::etl::{json_array_to_intermediate_state, json_to_intermediate_state};
     use crate::{identity_pipeline, Pipeline};
 
     #[test]
@@ -668,7 +671,7 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let array = Pipeline::prepare(array).unwrap();
+            let array = json_array_to_intermediate_state(array).unwrap();
             let rows = identity_pipeline(array, None, &GreptimePipelineParams::default());
             assert!(rows.is_err());
             assert_eq!(
@@ -698,7 +701,7 @@ mod tests {
                 }),
             ];
             let rows = identity_pipeline(
-                Pipeline::prepare(array).unwrap(),
+                json_array_to_intermediate_state(array).unwrap(),
                 None,
                 &GreptimePipelineParams::default(),
             );
@@ -730,7 +733,7 @@ mod tests {
                 }),
             ];
             let rows = identity_pipeline(
-                Pipeline::prepare(array).unwrap(),
+                json_array_to_intermediate_state(array).unwrap(),
                 None,
                 &GreptimePipelineParams::default(),
             );
@@ -764,7 +767,7 @@ mod tests {
             ];
             let tag_column_names = ["name".to_string(), "address".to_string()];
             let rows = identity_pipeline_inner(
-                Pipeline::prepare(array).uwnrap(),
+                json_array_to_intermediate_state(array).unwrap(),
                 Some(tag_column_names.iter()),
                 &GreptimePipelineParams::default(),
             );

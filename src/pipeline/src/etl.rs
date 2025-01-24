@@ -23,11 +23,11 @@ pub mod value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use ahash::HashSet;
-use common_telemetry::debug;
-use error::{IntermediateKeyIndexSnafu, PrepareValueMustBeObjectSnafu, YamlLoadSnafu};
+use error::{
+    IntermediateKeyIndexSnafu, PrepareValueMustBeObjectSnafu, YamlLoadSnafu, YamlParseSnafu,
+};
 use itertools::Itertools;
-use processor::{Processor, ProcessorBuilder, Processors};
+use processor::{IntermediateStatus, Processor, Processors};
 use snafu::{OptionExt, ResultExt};
 use transform::{Transformer, Transforms};
 use value::Value;
@@ -55,6 +55,10 @@ where
     match input {
         Content::Yaml(str) => {
             let docs = YamlLoader::load_from_str(str).context(YamlLoadSnafu)?;
+
+            if docs.len() != 1 {
+                return YamlParseSnafu.fail();
+            }
 
             let doc = &docs[0];
 
@@ -144,6 +148,25 @@ impl<O> PipelineExecOutput<O> {
     }
 }
 
+pub fn json_to_intermediate_state(val: serde_json::Value) -> Result<IntermediateStatus> {
+    match val {
+        serde_json::Value::Object(map) => {
+            let mut intermediate_state = BTreeMap::new();
+            for (k, v) in map {
+                intermediate_state.insert(k, Value::try_from(v)?);
+            }
+            Ok(intermediate_state)
+        }
+        _ => PrepareValueMustBeObjectSnafu.fail(),
+    }
+}
+
+pub fn json_array_to_intermediate_state(
+    val: Vec<serde_json::Value>,
+) -> Result<Vec<IntermediateStatus>> {
+    val.into_iter().map(json_to_intermediate_state).collect()
+}
+
 impl<T> Pipeline<T>
 where
     T: Transformer,
@@ -152,27 +175,22 @@ where
         &self,
         val: &mut BTreeMap<String, Value>,
     ) -> Result<PipelineExecOutput<T::VecOutput>> {
-        // for processor in self.processors.iter() {
-        //     processor.exec_mut(val)?;
-        // }
+        for processor in self.processors.iter() {
+            processor.exec_mut(val)?;
+        }
 
-        // let matched_rule = self
-        //     .dispatcher
-        //     .as_ref()
-        //     .and_then(|dispatcher| dispatcher.exec(&self.intermediate_keys, val));
+        let matched_rule = self
+            .dispatcher
+            .as_ref()
+            .and_then(|dispatcher| dispatcher.exec(val));
 
-        // match matched_rule {
-        //     None => self
-        //         .transformer
-        //         .transform_mut(val)
-        //         .map(PipelineExecOutput::Transformed),
-        //     Some(rule) => Ok(PipelineExecOutput::DispatchedTo(rule.into())),
-        // }
-        todo!()
-    }
-
-    pub fn prepare(&self, val: serde_json::Value) -> Result<BTreeMap<String, Value>> {
-        todo!()
+        match matched_rule {
+            None => self
+                .transformer
+                .transform_mut(val)
+                .map(PipelineExecOutput::Transformed),
+            Some(rule) => Ok(PipelineExecOutput::DispatchedTo(rule.into())),
+        }
     }
 
     pub fn processors(&self) -> &processor::Processors {
@@ -254,242 +272,242 @@ mod tests {
     use super::*;
     use crate::etl::transform::GreptimeTransformer;
 
-//     #[test]
-//     fn test_pipeline_prepare() {
-//         let input_value_str = r#"
-//                 {
-//                     "my_field": "1,2",
-//                     "foo": "bar"
-//                 }
-//             "#;
-//         let input_value: serde_json::Value = serde_json::from_str(input_value_str).unwrap();
+    //     #[test]
+    //     fn test_pipeline_prepare() {
+    //         let input_value_str = r#"
+    //                 {
+    //                     "my_field": "1,2",
+    //                     "foo": "bar"
+    //                 }
+    //             "#;
+    //         let input_value: serde_json::Value = serde_json::from_str(input_value_str).unwrap();
 
-//         let pipeline_yaml = r#"description: 'Pipeline for Apache Tomcat'
-// processors:
-//   - csv:
-//       field: my_field
-//       target_fields: field1, field2
-// transform:
-//   - field: field1
-//     type: uint32
-//   - field: field2
-//     type: uint32
-// "#;
-//         let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_yaml)).unwrap();
-//         let mut payload = pipeline.init_intermediate_state();
-//         pipeline.prepare(input_value, &mut payload).unwrap();
-//         assert_eq!(&["my_field"].to_vec(), pipeline.required_keys());
-//         assert_eq!(
-//             payload,
-//             vec![Value::String("1,2".to_string()), Value::Null, Value::Null]
-//         );
-//         let result = pipeline
-//             .exec_mut(&mut payload)
-//             .unwrap()
-//             .into_transformed()
-//             .unwrap();
+    //         let pipeline_yaml = r#"description: 'Pipeline for Apache Tomcat'
+    // processors:
+    //   - csv:
+    //       field: my_field
+    //       target_fields: field1, field2
+    // transform:
+    //   - field: field1
+    //     type: uint32
+    //   - field: field2
+    //     type: uint32
+    // "#;
+    //         let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+    //         let mut payload = pipeline.init_intermediate_state();
+    //         pipeline.prepare(input_value, &mut payload).unwrap();
+    //         assert_eq!(&["my_field"].to_vec(), pipeline.required_keys());
+    //         assert_eq!(
+    //             payload,
+    //             vec![Value::String("1,2".to_string()), Value::Null, Value::Null]
+    //         );
+    //         let result = pipeline
+    //             .exec_mut(&mut payload)
+    //             .unwrap()
+    //             .into_transformed()
+    //             .unwrap();
 
-//         assert_eq!(result.values[0].value_data, Some(ValueData::U32Value(1)));
-//         assert_eq!(result.values[1].value_data, Some(ValueData::U32Value(2)));
-//         match &result.values[2].value_data {
-//             Some(ValueData::TimestampNanosecondValue(v)) => {
-//                 assert_ne!(*v, 0);
-//             }
-//             _ => panic!("expect null value"),
-//         }
-//     }
+    //         assert_eq!(result.values[0].value_data, Some(ValueData::U32Value(1)));
+    //         assert_eq!(result.values[1].value_data, Some(ValueData::U32Value(2)));
+    //         match &result.values[2].value_data {
+    //             Some(ValueData::TimestampNanosecondValue(v)) => {
+    //                 assert_ne!(*v, 0);
+    //             }
+    //             _ => panic!("expect null value"),
+    //         }
+    //     }
 
-//     #[test]
-//     fn test_dissect_pipeline() {
-//         let message = r#"129.37.245.88 - meln1ks [01/Aug/2024:14:22:47 +0800] "PATCH /observability/metrics/production HTTP/1.0" 501 33085"#.to_string();
-//         let pipeline_str = r#"processors:
-//   - dissect:
-//       fields:
-//         - message
-//       patterns:
-//         - "%{ip} %{?ignored} %{username} [%{ts}] \"%{method} %{path} %{proto}\" %{status} %{bytes}"
-//   - timestamp:
-//       fields:
-//         - ts
-//       formats:
-//         - "%d/%b/%Y:%H:%M:%S %z"
+    //     #[test]
+    //     fn test_dissect_pipeline() {
+    //         let message = r#"129.37.245.88 - meln1ks [01/Aug/2024:14:22:47 +0800] "PATCH /observability/metrics/production HTTP/1.0" 501 33085"#.to_string();
+    //         let pipeline_str = r#"processors:
+    //   - dissect:
+    //       fields:
+    //         - message
+    //       patterns:
+    //         - "%{ip} %{?ignored} %{username} [%{ts}] \"%{method} %{path} %{proto}\" %{status} %{bytes}"
+    //   - timestamp:
+    //       fields:
+    //         - ts
+    //       formats:
+    //         - "%d/%b/%Y:%H:%M:%S %z"
 
-// transform:
-//   - fields:
-//       - ip
-//       - username
-//       - method
-//       - path
-//       - proto
-//     type: string
-//   - fields:
-//       - status
-//     type: uint16
-//   - fields:
-//       - bytes
-//     type: uint32
-//   - field: ts
-//     type: timestamp, ns
-//     index: time"#;
-//         let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_str)).unwrap();
-//         let mut payload = pipeline.init_intermediate_state();
-//         pipeline
-//             .prepare(serde_json::Value::String(message), &mut payload)
-//             .unwrap();
-//         let result = pipeline
-//             .exec_mut(&mut payload)
-//             .unwrap()
-//             .into_transformed()
-//             .unwrap();
-//         let sechema = pipeline.schemas();
+    // transform:
+    //   - fields:
+    //       - ip
+    //       - username
+    //       - method
+    //       - path
+    //       - proto
+    //     type: string
+    //   - fields:
+    //       - status
+    //     type: uint16
+    //   - fields:
+    //       - bytes
+    //     type: uint32
+    //   - field: ts
+    //     type: timestamp, ns
+    //     index: time"#;
+    //         let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_str)).unwrap();
+    //         let mut payload = pipeline.init_intermediate_state();
+    //         pipeline
+    //             .prepare(serde_json::Value::String(message), &mut payload)
+    //             .unwrap();
+    //         let result = pipeline
+    //             .exec_mut(&mut payload)
+    //             .unwrap()
+    //             .into_transformed()
+    //             .unwrap();
+    //         let sechema = pipeline.schemas();
 
-//         assert_eq!(sechema.len(), result.values.len());
-//         let test = vec![
-//             (
-//                 ColumnDataType::String as i32,
-//                 Some(ValueData::StringValue("129.37.245.88".into())),
-//             ),
-//             (
-//                 ColumnDataType::String as i32,
-//                 Some(ValueData::StringValue("meln1ks".into())),
-//             ),
-//             (
-//                 ColumnDataType::String as i32,
-//                 Some(ValueData::StringValue("PATCH".into())),
-//             ),
-//             (
-//                 ColumnDataType::String as i32,
-//                 Some(ValueData::StringValue(
-//                     "/observability/metrics/production".into(),
-//                 )),
-//             ),
-//             (
-//                 ColumnDataType::String as i32,
-//                 Some(ValueData::StringValue("HTTP/1.0".into())),
-//             ),
-//             (
-//                 ColumnDataType::Uint16 as i32,
-//                 Some(ValueData::U16Value(501)),
-//             ),
-//             (
-//                 ColumnDataType::Uint32 as i32,
-//                 Some(ValueData::U32Value(33085)),
-//             ),
-//             (
-//                 ColumnDataType::TimestampNanosecond as i32,
-//                 Some(ValueData::TimestampNanosecondValue(1722493367000000000)),
-//             ),
-//         ];
-//         for i in 0..sechema.len() {
-//             let schema = &sechema[i];
-//             let value = &result.values[i];
-//             assert_eq!(schema.datatype, test[i].0);
-//             assert_eq!(value.value_data, test[i].1);
-//         }
-//     }
+    //         assert_eq!(sechema.len(), result.values.len());
+    //         let test = vec![
+    //             (
+    //                 ColumnDataType::String as i32,
+    //                 Some(ValueData::StringValue("129.37.245.88".into())),
+    //             ),
+    //             (
+    //                 ColumnDataType::String as i32,
+    //                 Some(ValueData::StringValue("meln1ks".into())),
+    //             ),
+    //             (
+    //                 ColumnDataType::String as i32,
+    //                 Some(ValueData::StringValue("PATCH".into())),
+    //             ),
+    //             (
+    //                 ColumnDataType::String as i32,
+    //                 Some(ValueData::StringValue(
+    //                     "/observability/metrics/production".into(),
+    //                 )),
+    //             ),
+    //             (
+    //                 ColumnDataType::String as i32,
+    //                 Some(ValueData::StringValue("HTTP/1.0".into())),
+    //             ),
+    //             (
+    //                 ColumnDataType::Uint16 as i32,
+    //                 Some(ValueData::U16Value(501)),
+    //             ),
+    //             (
+    //                 ColumnDataType::Uint32 as i32,
+    //                 Some(ValueData::U32Value(33085)),
+    //             ),
+    //             (
+    //                 ColumnDataType::TimestampNanosecond as i32,
+    //                 Some(ValueData::TimestampNanosecondValue(1722493367000000000)),
+    //             ),
+    //         ];
+    //         for i in 0..sechema.len() {
+    //             let schema = &sechema[i];
+    //             let value = &result.values[i];
+    //             assert_eq!(schema.datatype, test[i].0);
+    //             assert_eq!(value.value_data, test[i].1);
+    //         }
+    //     }
 
-//     #[test]
-//     fn test_csv_pipeline() {
-//         let input_value_str = r#"
-//                 {
-//                     "my_field": "1,2",
-//                     "foo": "bar"
-//                 }
-//             "#;
-//         let input_value: serde_json::Value = serde_json::from_str(input_value_str).unwrap();
+    //     #[test]
+    //     fn test_csv_pipeline() {
+    //         let input_value_str = r#"
+    //                 {
+    //                     "my_field": "1,2",
+    //                     "foo": "bar"
+    //                 }
+    //             "#;
+    //         let input_value: serde_json::Value = serde_json::from_str(input_value_str).unwrap();
 
-//         let pipeline_yaml = r#"
-// description: Pipeline for Apache Tomcat
-// processors:
-//   - csv:
-//       field: my_field
-//       target_fields: field1, field2
-// transform:
-//   - field: field1
-//     type: uint32
-//   - field: field2
-//     type: uint32
-// "#;
+    //         let pipeline_yaml = r#"
+    // description: Pipeline for Apache Tomcat
+    // processors:
+    //   - csv:
+    //       field: my_field
+    //       target_fields: field1, field2
+    // transform:
+    //   - field: field1
+    //     type: uint32
+    //   - field: field2
+    //     type: uint32
+    // "#;
 
-//         let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_yaml)).unwrap();
-//         let mut payload = pipeline.init_intermediate_state();
-//         pipeline.prepare(input_value, &mut payload).unwrap();
-//         assert_eq!(&["my_field"].to_vec(), pipeline.required_keys());
-//         assert_eq!(
-//             payload,
-//             vec![Value::String("1,2".to_string()), Value::Null, Value::Null]
-//         );
-//         let result = pipeline
-//             .exec_mut(&mut payload)
-//             .unwrap()
-//             .into_transformed()
-//             .unwrap();
-//         assert_eq!(result.values[0].value_data, Some(ValueData::U32Value(1)));
-//         assert_eq!(result.values[1].value_data, Some(ValueData::U32Value(2)));
-//         match &result.values[2].value_data {
-//             Some(ValueData::TimestampNanosecondValue(v)) => {
-//                 assert_ne!(*v, 0);
-//             }
-//             _ => panic!("expect null value"),
-//         }
-//     }
+    //         let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+    //         let mut payload = pipeline.init_intermediate_state();
+    //         pipeline.prepare(input_value, &mut payload).unwrap();
+    //         assert_eq!(&["my_field"].to_vec(), pipeline.required_keys());
+    //         assert_eq!(
+    //             payload,
+    //             vec![Value::String("1,2".to_string()), Value::Null, Value::Null]
+    //         );
+    //         let result = pipeline
+    //             .exec_mut(&mut payload)
+    //             .unwrap()
+    //             .into_transformed()
+    //             .unwrap();
+    //         assert_eq!(result.values[0].value_data, Some(ValueData::U32Value(1)));
+    //         assert_eq!(result.values[1].value_data, Some(ValueData::U32Value(2)));
+    //         match &result.values[2].value_data {
+    //             Some(ValueData::TimestampNanosecondValue(v)) => {
+    //                 assert_ne!(*v, 0);
+    //             }
+    //             _ => panic!("expect null value"),
+    //         }
+    //     }
 
-//     #[test]
-//     fn test_date_pipeline() {
-//         let input_value_str = r#"
-//             {
-//                 "my_field": "1,2",
-//                 "foo": "bar",
-//                 "test_time": "2014-5-17T04:34:56+00:00"
-//             }
-//         "#;
-//         let input_value: serde_json::Value = serde_json::from_str(input_value_str).unwrap();
+    //     #[test]
+    //     fn test_date_pipeline() {
+    //         let input_value_str = r#"
+    //             {
+    //                 "my_field": "1,2",
+    //                 "foo": "bar",
+    //                 "test_time": "2014-5-17T04:34:56+00:00"
+    //             }
+    //         "#;
+    //         let input_value: serde_json::Value = serde_json::from_str(input_value_str).unwrap();
 
-//         let pipeline_yaml = r#"
-// ---
-// description: Pipeline for Apache Tomcat
+    //         let pipeline_yaml = r#"
+    // ---
+    // description: Pipeline for Apache Tomcat
 
-// processors:
-//   - timestamp:
-//       field: test_time
+    // processors:
+    //   - timestamp:
+    //       field: test_time
 
-// transform:
-//   - field: test_time
-//     type: timestamp, ns
-//     index: time
-// "#;
+    // transform:
+    //   - field: test_time
+    //     type: timestamp, ns
+    //     index: time
+    // "#;
 
-//         let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_yaml)).unwrap();
-//         let schema = pipeline.schemas().clone();
-//         let mut result = pipeline.init_intermediate_state();
-//         pipeline.prepare(input_value, &mut result).unwrap();
-//         let row = pipeline
-//             .exec_mut(&mut result)
-//             .unwrap()
-//             .into_transformed()
-//             .unwrap();
-//         let output = Rows {
-//             schema,
-//             rows: vec![row],
-//         };
-//         let schemas = output.schema;
+    //         let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+    //         let schema = pipeline.schemas().clone();
+    //         let mut result = pipeline.init_intermediate_state();
+    //         pipeline.prepare(input_value, &mut result).unwrap();
+    //         let row = pipeline
+    //             .exec_mut(&mut result)
+    //             .unwrap()
+    //             .into_transformed()
+    //             .unwrap();
+    //         let output = Rows {
+    //             schema,
+    //             rows: vec![row],
+    //         };
+    //         let schemas = output.schema;
 
-//         assert_eq!(schemas.len(), 1);
-//         let schema = schemas[0].clone();
-//         assert_eq!("test_time", schema.column_name);
-//         assert_eq!(ColumnDataType::TimestampNanosecond as i32, schema.datatype);
-//         assert_eq!(SemanticType::Timestamp as i32, schema.semantic_type);
+    //         assert_eq!(schemas.len(), 1);
+    //         let schema = schemas[0].clone();
+    //         assert_eq!("test_time", schema.column_name);
+    //         assert_eq!(ColumnDataType::TimestampNanosecond as i32, schema.datatype);
+    //         assert_eq!(SemanticType::Timestamp as i32, schema.semantic_type);
 
-//         let row = output.rows[0].clone();
-//         assert_eq!(1, row.values.len());
-//         let value_data = row.values[0].clone().value_data;
-//         assert_eq!(
-//             Some(v1::value::ValueData::TimestampNanosecondValue(
-//                 1400301296000000000
-//             )),
-//             value_data
-//         );
-//     }
+    //         let row = output.rows[0].clone();
+    //         assert_eq!(1, row.values.len());
+    //         let value_data = row.values[0].clone().value_data;
+    //         assert_eq!(
+    //             Some(v1::value::ValueData::TimestampNanosecondValue(
+    //                 1400301296000000000
+    //             )),
+    //             value_data
+    //         );
+    //     }
 
     #[test]
     fn test_dispatcher() {

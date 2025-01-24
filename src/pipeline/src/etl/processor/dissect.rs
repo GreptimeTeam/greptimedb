@@ -25,7 +25,7 @@ use crate::etl::error::{
     DissectOrderOnlyAppendSnafu, DissectSplitExceedsInputSnafu, DissectSplitNotMatchInputSnafu,
     Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, Result,
 };
-use crate::etl::field::{Fields, InputFieldInfo, OneInputMultiOutputField};
+use crate::etl::field::{Fields, InputField, OneInputMultiOutputField};
 use crate::etl::find_key_index;
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_parse_string, yaml_parse_strings, yaml_string,
@@ -612,7 +612,7 @@ impl ProcessorBuilder for DissectProcessorBuilder {
         for field in self.fields.into_iter() {
             let input_index = find_key_index(intermediate_keys, field.input_field(), "dissect")?;
 
-            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
+            let input_field_info = InputField::new(field.input_field(), input_index);
 
             let real_field = OneInputMultiOutputField::new(input_field_info, field.target_field);
             real_fields.push(real_field);

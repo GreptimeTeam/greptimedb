@@ -12,49 +12,48 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod cmcd;
-pub mod csv;
+// pub mod cmcd;
+// pub mod csv;
 pub mod date;
 pub mod decolorize;
 pub mod digest;
-pub mod dissect;
+// pub mod dissect;
 pub mod epoch;
 pub mod gsub;
 pub mod join;
 pub mod json_path;
 pub mod letter;
-pub mod regex;
+// pub mod regex;
 pub mod timestamp;
 pub mod urlencoding;
 
 use std::collections::BTreeMap;
 
-use ahash::{HashSet, HashSetExt};
-use cmcd::{CmcdProcessor, CmcdProcessorBuilder};
-use csv::{CsvProcessor, CsvProcessorBuilder};
-use date::{DateProcessor, DateProcessorBuilder};
-use decolorize::{DecolorizeProcessor, DecolorizeProcessorBuilder};
-use digest::{DigestProcessor, DigestProcessorBuilder};
-use dissect::{DissectProcessor, DissectProcessorBuilder};
+// use cmcd::CmcdProcessor;
+// use csv::CsvProcessor;
+use date::DateProcessor;
+use decolorize::DecolorizeProcessor;
+use digest::DigestProcessor;
+// use dissect::DissectProcessor;
 use enum_dispatch::enum_dispatch;
-use epoch::{EpochProcessor, EpochProcessorBuilder};
-use gsub::{GsubProcessor, GsubProcessorBuilder};
-use itertools::Itertools;
-use join::{JoinProcessor, JoinProcessorBuilder};
-use json_path::{JsonPathProcessor, JsonPathProcessorBuilder};
-use letter::{LetterProcessor, LetterProcessorBuilder};
-use regex::{RegexProcessor, RegexProcessorBuilder};
+use epoch::EpochProcessor;
+use gsub::GsubProcessor;
+use join::JoinProcessor;
+use json_path::JsonPathProcessor;
+use letter::LetterProcessor;
+// use regex::RegexProcessor;
 use snafu::{OptionExt, ResultExt};
-use timestamp::{TimestampProcessor, TimestampProcessorBuilder};
-use urlencoding::{UrlEncodingProcessor, UrlEncodingProcessorBuilder};
+use timestamp::TimestampProcessor;
+use urlencoding::UrlEncodingProcessor;
 
 use super::error::{
     FailedParseFieldFromStringSnafu, FieldMustBeTypeSnafu, ProcessorKeyMustBeStringSnafu,
-    ProcessorMustBeMapSnafu, ProcessorMustHaveStringKeySnafu, UnsupportedProcessorSnafu,
+    ProcessorMustBeMapSnafu, ProcessorMustHaveStringKeySnafu,
 };
 use super::field::{Field, Fields};
 use crate::etl::error::{Error, Result};
 use crate::etl::value::Value;
+use crate::etl_error::UnsupportedProcessorSnafu;
 
 const FIELD_NAME: &str = "field";
 const FIELDS_NAME: &str = "fields";
@@ -66,6 +65,8 @@ const SEPARATOR_NAME: &str = "separator";
 const TARGET_FIELDS_NAME: &str = "target_fields";
 const JSON_PATH_NAME: &str = "json_path";
 const JSON_PATH_RESULT_INDEX_NAME: &str = "result_index";
+
+pub type IntermediateStatus = BTreeMap<String, Value>;
 
 /// Processor trait defines the interface for all processors.
 ///
@@ -82,19 +83,19 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
     fn ignore_missing(&self) -> bool;
 
     /// Execute the processor on a vector which be preprocessed by the pipeline
-    fn exec_mut(&self, val: &mut BTreeMap<String, Value>) -> Result<()>;
+    fn exec_mut(&self, val: &mut IntermediateStatus) -> Result<()>;
 }
 
 #[derive(Debug)]
 #[enum_dispatch]
 pub enum ProcessorKind {
-    Cmcd(CmcdProcessor),
-    Csv(CsvProcessor),
-    Dissect(DissectProcessor),
+    // Cmcd(CmcdProcessor),
+    // Csv(CsvProcessor),
+    // Dissect(DissectProcessor),
     Gsub(GsubProcessor),
     Join(JoinProcessor),
     Letter(LetterProcessor),
-    Regex(RegexProcessor),
+    // Regex(RegexProcessor),
     Timestamp(TimestampProcessor),
     UrlEncoding(UrlEncodingProcessor),
     Epoch(EpochProcessor),
@@ -102,18 +103,6 @@ pub enum ProcessorKind {
     JsonPath(JsonPathProcessor),
     Decolorize(DecolorizeProcessor),
     Digest(DigestProcessor),
-}
-
-/// ProcessorBuilder trait defines the interface for all processor builders
-/// A processor builder is used to create a processor
-#[enum_dispatch(ProcessorBuilders)]
-pub trait ProcessorBuilder: std::fmt::Debug + Send + Sync + 'static {
-    /// Get the processor's output keys
-    fn output_keys(&self) -> HashSet<&str>;
-    /// Get the processor's input keys
-    fn input_keys(&self) -> HashSet<&str>;
-    /// Build the processor
-    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind>;
 }
 
 #[derive(Debug, Default)]
@@ -166,7 +155,33 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorKind> {
 
     let str_key = key.as_str().context(ProcessorKeyMustBeStringSnafu)?;
 
-    todo!()
+    let processor = match str_key {
+        // cmcd::PROCESSOR_CMCD => ProcessorKind::Cmcd(CmcdProcessor::try_from(value)?),
+        // csv::PROCESSOR_CSV => ProcessorKind::Csv(CsvProcessor::try_from(value)?),
+        // dissect::PROCESSOR_DISSECT => ProcessorKind::Dissect(DissectProcessor::try_from(value)?),
+        epoch::PROCESSOR_EPOCH => ProcessorKind::Epoch(EpochProcessor::try_from(value)?),
+        date::PROCESSOR_DATE => ProcessorKind::Date(DateProcessor::try_from(value)?),
+        gsub::PROCESSOR_GSUB => ProcessorKind::Gsub(GsubProcessor::try_from(value)?),
+        join::PROCESSOR_JOIN => ProcessorKind::Join(JoinProcessor::try_from(value)?),
+        letter::PROCESSOR_LETTER => ProcessorKind::Letter(LetterProcessor::try_from(value)?),
+        // regex::PROCESSOR_REGEX => ProcessorKind::Regex(RegexProcessor::try_from(value)?),
+        timestamp::PROCESSOR_TIMESTAMP => {
+            ProcessorKind::Timestamp(TimestampProcessor::try_from(value)?)
+        }
+        urlencoding::PROCESSOR_URL_ENCODING => {
+            ProcessorKind::UrlEncoding(UrlEncodingProcessor::try_from(value)?)
+        }
+        json_path::PROCESSOR_JSON_PATH => {
+            ProcessorKind::JsonPath(json_path::JsonPathProcessor::try_from(value)?)
+        }
+        decolorize::PROCESSOR_DECOLORIZE => {
+            ProcessorKind::Decolorize(DecolorizeProcessor::try_from(value)?)
+        }
+        digest::PROCESSOR_DIGEST => ProcessorKind::Digest(DigestProcessor::try_from(value)?),
+        _ => return UnsupportedProcessorSnafu { processor: str_key }.fail(),
+    };
+
+    Ok(processor)
 }
 
 pub(crate) fn yaml_string(v: &yaml_rust::Yaml, field: &str) -> Result<String> {

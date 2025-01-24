@@ -24,7 +24,7 @@ use crate::etl::error::{
     CsvNoRecordSnafu, CsvQuoteNameSnafu, CsvReadSnafu, CsvSeparatorNameSnafu, Error,
     KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, Result,
 };
-use crate::etl::field::{Fields, InputFieldInfo, OneInputMultiOutputField};
+use crate::etl::field::{Fields, InputField, OneInputMultiOutputField};
 use crate::etl::find_key_index;
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, ProcessorBuilder,
@@ -64,7 +64,7 @@ impl CsvProcessorBuilder {
         for field in self.fields {
             let input_index = find_key_index(intermediate_keys, field.input_field(), "csv")?;
 
-            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
+            let input_field_info = InputField::new(field.input_field(), input_index);
             let real_field = OneInputMultiOutputField::new(input_field_info, None);
             real_fields.push(real_field);
         }

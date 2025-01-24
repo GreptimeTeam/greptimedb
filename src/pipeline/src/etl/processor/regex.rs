@@ -28,7 +28,7 @@ use crate::etl::error::{
     RegexNamedGroupNotFoundSnafu, RegexNoValidFieldSnafu, RegexNoValidPatternSnafu, RegexSnafu,
     Result,
 };
-use crate::etl::field::{Fields, InputFieldInfo, OneInputMultiOutputField};
+use crate::etl::field::{Fields, InputField, OneInputMultiOutputField};
 use crate::etl::find_key_index;
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, Processor,
@@ -173,7 +173,7 @@ impl RegexProcessorBuilder {
         let mut real_fields = vec![];
         for field in self.fields.into_iter() {
             let input_index = find_key_index(intermediate_keys, field.input_field(), "regex")?;
-            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
+            let input_field_info = InputField::new(field.input_field(), input_index);
 
             let input = OneInputMultiOutputField::new(input_field_info, field.target_field);
             real_fields.push(input);

@@ -543,6 +543,11 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("Yaml parse error."))]
+    YamlParse {
+        #[snafu(implicit)]
+        location: Location,
+    },
     #[snafu(display("Prepare value must be an object"))]
     PrepareValueMustBeObject {
         #[snafu(implicit)]
