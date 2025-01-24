@@ -396,7 +396,10 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
         .with_metrics_handler(MetricsHandler)
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
         .build();
-    (http_server.build(http_server.make_app()), instance.guard)
+    (
+        http_server.build(http_server.make_app()).unwrap(),
+        instance.guard,
+    )
 }
 
 pub async fn setup_test_http_app_with_frontend(
@@ -434,7 +437,7 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
 
     let http_server = http_server.build();
 
-    let app = http_server.build(http_server.make_app());
+    let app = http_server.build(http_server.make_app()).unwrap();
     (app, instance.guard)
 }
 
@@ -478,7 +481,7 @@ pub async fn setup_test_prom_app_with_frontend(
         .with_prometheus_handler(frontend_ref)
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
         .build();
-    let app = http_server.build(http_server.make_app());
+    let app = http_server.build(http_server.make_app()).unwrap();
     (app, instance.guard)
 }
 

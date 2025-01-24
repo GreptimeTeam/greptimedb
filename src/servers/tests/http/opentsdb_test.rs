@@ -112,7 +112,7 @@ fn make_test_app(tx: mpsc::Sender<String>) -> Router {
         .with_sql_handler(instance.clone())
         .with_opentsdb_handler(instance)
         .build();
-    server.build(server.make_app())
+    server.build(server.make_app()).unwrap()
 }
 
 #[tokio::test]

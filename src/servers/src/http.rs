@@ -36,14 +36,14 @@ use datatypes::schema::SchemaRef;
 use datatypes::value::transform_value_ref_to_json_value;
 use event::{LogState, LogValidatorRef};
 use futures::FutureExt;
-use http::Method;
+use http::{HeaderValue, Method};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ensure, ResultExt};
 use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
 use tower::ServiceBuilder;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::decompression::RequestDecompressionLayer;
 use tower_http::trace::TraceLayer;
 
@@ -52,7 +52,8 @@ use self::result::table_result::TableResponse;
 use crate::configurator::ConfiguratorRef;
 use crate::elasticsearch;
 use crate::error::{
-    AddressBindSnafu, AlreadyStartedSnafu, Error, InternalIoSnafu, Result, ToJsonSnafu,
+    AddressBindSnafu, AlreadyStartedSnafu, Error, InternalIoSnafu, InvalidHeaderValueSnafu, Result,
+    ToJsonSnafu,
 };
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::prometheus::{
@@ -140,6 +141,10 @@ pub struct HttpOptions {
     pub body_limit: ReadableSize,
 
     pub is_strict_mode: bool,
+
+    pub cors_allowed_origins: Vec<String>,
+
+    pub disable_cors: bool,
 }
 
 impl Default for HttpOptions {
@@ -150,6 +155,8 @@ impl Default for HttpOptions {
             disable_dashboard: false,
             body_limit: DEFAULT_BODY_LIMIT,
             is_strict_mode: false,
+            cors_allowed_origins: Vec::new(),
+            disable_cors: false,
         }
     }
 }
@@ -715,7 +722,7 @@ impl HttpServer {
 
     /// Attaches middlewares and debug routes to the router.
     /// Callers should call this method after [HttpServer::make_app()].
-    pub fn build(&self, router: Router) -> Router {
+    pub fn build(&self, router: Router) -> Result<Router> {
         let timeout_layer = if self.options.timeout != Duration::default() {
             Some(ServiceBuilder::new().layer(DynamicTimeoutLayer::new(self.options.timeout)))
         } else {
@@ -731,26 +738,45 @@ impl HttpServer {
             info!("HTTP server body limit is disabled");
             None
         };
+        let cors_layer = if !self.options.disable_cors {
+            Some(
+                CorsLayer::new()
+                    .allow_methods([
+                        Method::GET,
+                        Method::POST,
+                        Method::PUT,
+                        Method::DELETE,
+                        Method::HEAD,
+                    ])
+                    .allow_origin(if self.options.cors_allowed_origins.is_empty() {
+                        AllowOrigin::from(Any)
+                    } else {
+                        AllowOrigin::from(
+                            self.options
+                                .cors_allowed_origins
+                                .iter()
+                                .map(|s| {
+                                    HeaderValue::from_str(s.as_str())
+                                        .context(InvalidHeaderValueSnafu)
+                                })
+                                .collect::<Result<Vec<HeaderValue>>>()?,
+                        )
+                    })
+                    .allow_headers(Any),
+            )
+        } else {
+            info!("HTTP server corss-origin is disabled");
+            None
+        };
 
-        router
+        Ok(router
             // middlewares
             .layer(
                 ServiceBuilder::new()
                     // disable on failure tracing. because printing out isn't very helpful,
                     // and we have impl IntoResponse for Error. It will print out more detailed error messages
                     .layer(TraceLayer::new_for_http().on_failure(()))
-                    .layer(
-                        CorsLayer::new()
-                            .allow_methods([
-                                Method::GET,
-                                Method::POST,
-                                Method::PUT,
-                                Method::DELETE,
-                                Method::HEAD,
-                            ])
-                            .allow_origin(Any)
-                            .allow_headers(Any),
-                    )
+                    .option_layer(cors_layer)
                     .option_layer(timeout_layer)
                     .option_layer(body_limit_layer)
                     // auth layer
@@ -772,7 +798,7 @@ impl HttpServer {
                             .route("/cpu", routing::post(pprof::pprof_handler))
                             .route("/mem", routing::post(mem_prof::mem_prof_handler)),
                     ),
-            )
+            ))
     }
 
     fn route_metrics<S>(metrics_handler: MetricsHandler) -> Router<S> {
@@ -1032,7 +1058,7 @@ impl Server for HttpServer {
             if let Some(configurator) = self.plugins.get::<ConfiguratorRef>() {
                 app = configurator.config_http(app);
             }
-            let app = self.build(app);
+            let app = self.build(app)?;
             let listener = tokio::net::TcpListener::bind(listening)
                 .await
                 .context(AddressBindSnafu { addr: listening })?
@@ -1177,15 +1203,121 @@ mod test {
     }
 
     fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
+        make_test_app_custom(tx, HttpOptions::default())
+    }
+
+    fn make_test_app_custom(tx: mpsc::Sender<(String, Vec<u8>)>, options: HttpOptions) -> Router {
         let instance = Arc::new(DummyInstance { _tx: tx });
         let sql_instance = ServerSqlQueryHandlerAdapter::arc(instance.clone());
-        let server = HttpServerBuilder::new(HttpOptions::default())
+        let server = HttpServerBuilder::new(options)
             .with_sql_handler(sql_instance)
             .build();
-        server.build(server.make_app()).route(
+        server.build(server.make_app()).unwrap().route(
             "/test/timeout",
             get(forever.layer(ServiceBuilder::new().layer(timeout()))),
         )
+    }
+
+    #[tokio::test]
+    pub async fn test_cors() {
+        // cors is on by default
+        let (tx, _rx) = mpsc::channel(100);
+        let app = make_test_app(tx);
+        let client = TestClient::new(app).await;
+
+        let res = client.get("/health").send().await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .expect("expect cors header origin"),
+            "*"
+        );
+
+        let res = client
+            .options("/health")
+            .header("Access-Control-Request-Headers", "x-greptime-auth")
+            .header("Access-Control-Request-Method", "DELETE")
+            .header("Origin", "https://example.com")
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .expect("expect cors header origin"),
+            "*"
+        );
+        assert_eq!(
+            res.headers()
+                .get(http::header::ACCESS_CONTROL_ALLOW_HEADERS)
+                .expect("expect cors header headers"),
+            "*"
+        );
+        assert_eq!(
+            res.headers()
+                .get(http::header::ACCESS_CONTROL_ALLOW_METHODS)
+                .expect("expect cors header methods"),
+            "GET,POST,PUT,DELETE,HEAD"
+        );
+    }
+
+    #[tokio::test]
+    pub async fn test_cors_custom_origins() {
+        // cors is on by default
+        let (tx, _rx) = mpsc::channel(100);
+        let origin = "https://example.com";
+
+        let options = HttpOptions {
+            cors_allowed_origins: vec![origin.to_string()],
+            ..Default::default()
+        };
+
+        let app = make_test_app_custom(tx, options);
+        let client = TestClient::new(app).await;
+
+        let res = client.get("/health").header("Origin", origin).send().await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .expect("expect cors header origin"),
+            origin
+        );
+
+        let res = client
+            .get("/health")
+            .header("Origin", "https://notallowed.com")
+            .send()
+            .await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(!res
+            .headers()
+            .contains_key(http::header::ACCESS_CONTROL_ALLOW_ORIGIN));
+    }
+
+    #[tokio::test]
+    pub async fn test_cors_disabled() {
+        // cors is on by default
+        let (tx, _rx) = mpsc::channel(100);
+
+        let options = HttpOptions {
+            disable_cors: true,
+            ..Default::default()
+        };
+
+        let app = make_test_app_custom(tx, options);
+        let client = TestClient::new(app).await;
+
+        let res = client.get("/health").send().await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(!res
+            .headers()
+            .contains_key(http::header::ACCESS_CONTROL_ALLOW_ORIGIN));
     }
 
     #[test]
