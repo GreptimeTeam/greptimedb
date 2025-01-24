@@ -15,7 +15,7 @@
 use std::mem;
 use std::sync::Arc;
 
-use api::v1::{Mutation, OpType, Rows, WalEntry};
+use api::v1::{Mutation, OpType, Rows, WalEntry, WriteHint};
 use snafu::ResultExt;
 use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
@@ -131,13 +131,19 @@ impl RegionWriteCtx {
     }
 
     /// Push mutation to the context.
-    pub(crate) fn push_mutation(&mut self, op_type: i32, rows: Option<Rows>, tx: OptionOutputTx) {
+    pub(crate) fn push_mutation(
+        &mut self,
+        op_type: i32,
+        rows: Option<Rows>,
+        write_hint: Option<WriteHint>,
+        tx: OptionOutputTx,
+    ) {
         let num_rows = rows.as_ref().map(|rows| rows.rows.len()).unwrap_or(0);
         self.wal_entry.mutations.push(Mutation {
             op_type,
             sequence: self.next_sequence,
             rows,
-            write_hint: None,
+            write_hint,
         });
 
         let notify = WriteNotify::new(tx, num_rows);

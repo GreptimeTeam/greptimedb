@@ -78,7 +78,7 @@ impl DropTableProcedure {
         })
     }
 
-    pub(crate) async fn on_prepare<'a>(&mut self) -> Result<Status> {
+    pub(crate) async fn on_prepare(&mut self) -> Result<Status> {
         if self.executor.on_prepare(&self.context).await?.stop() {
             return Ok(Status::done());
         }

@@ -80,7 +80,7 @@ impl heartbeat_server::Heartbeat for Metasrv {
                             .await
                             .map_err(|e| e.into());
 
-                        is_not_leader = res.as_ref().map_or(false, |r| r.is_not_leader());
+                        is_not_leader = res.as_ref().is_ok_and(|r| r.is_not_leader());
 
                         debug!("Sending heartbeat response: {:?}", res);
 

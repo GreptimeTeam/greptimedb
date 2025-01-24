@@ -73,6 +73,7 @@ use common_wal::options::{WalOptions, WAL_OPTIONS_KEY};
 use futures::future::{join_all, try_join_all};
 use object_store::manager::ObjectStoreManagerRef;
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
@@ -149,6 +150,14 @@ impl MitoEngine {
             .workers
             .get_region(region_id)
             .map(|region| region.region_statistic())
+    }
+
+    /// Returns primary key encoding of the region.
+    pub fn get_primary_key_encoding(&self, region_id: RegionId) -> Option<PrimaryKeyEncoding> {
+        self.inner
+            .workers
+            .get_region(region_id)
+            .map(|r| r.primary_key_encoding())
     }
 
     /// Handle substrait query and return a stream of record batches

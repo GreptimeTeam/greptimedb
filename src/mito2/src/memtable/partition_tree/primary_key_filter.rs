@@ -34,7 +34,6 @@ struct PrimaryKeyFilterInner {
 impl PrimaryKeyFilterInner {
     fn evaluate_filters(
         &self,
-        pk: &[u8],
         mut decode_fn: impl FnMut(ColumnId, &RegionMetadataRef) -> Result<Value>,
     ) -> bool {
         if self.filters.is_empty() || self.metadata.primary_key.is_empty() {
@@ -101,7 +100,7 @@ impl DensePrimaryKeyFilter {
 impl PrimaryKeyFilter for DensePrimaryKeyFilter {
     fn matches(&mut self, pk: &[u8]) -> bool {
         self.offsets_buf.clear();
-        self.inner.evaluate_filters(pk, |column_id, metadata| {
+        self.inner.evaluate_filters(|column_id, metadata| {
             // index of tag column in primary key
             // Safety: A tag column is always in primary key.
             let index = metadata.primary_key_index(column_id).unwrap();
@@ -135,7 +134,7 @@ impl SparsePrimaryKeyFilter {
 impl PrimaryKeyFilter for SparsePrimaryKeyFilter {
     fn matches(&mut self, pk: &[u8]) -> bool {
         self.offsets_map.clear();
-        self.inner.evaluate_filters(pk, |column_id, _| {
+        self.inner.evaluate_filters(|column_id, _| {
             if let Some(offset) = self.codec.has_column(pk, &mut self.offsets_map, column_id) {
                 self.codec.decode_value_at(pk, offset, column_id)
             } else {
@@ -150,22 +149,13 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::SemanticType;
-    use common_time::timestamp::TimeUnit;
-    use common_time::Timestamp;
-    use datafusion::execution::context::ExecutionProps;
-    use datafusion::logical_expr::{col, lit, BinaryExpr};
-    use datafusion::physical_expr::create_physical_expr;
-    use datafusion_common::{Column, DFSchema, ScalarValue};
+    use datafusion::logical_expr::BinaryExpr;
+    use datafusion_common::{Column, ScalarValue};
     use datafusion_expr::{Expr, Operator};
-    use datatypes::arrow::datatypes::{DataType, Field, Schema};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
-    use datatypes::value::{OrderedFloat, Value, ValueRef};
+    use datatypes::value::ValueRef;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::metric_engine_consts::{
-        DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
-    };
-    use store_api::storage::consts::ReservedColumnId;
     use store_api::storage::{ColumnId, RegionId};
 
     use super::*;

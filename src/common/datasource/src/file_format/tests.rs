@@ -42,7 +42,7 @@ struct Test<'a, T: FileOpener> {
     expected: Vec<&'a str>,
 }
 
-impl<'a, T: FileOpener> Test<'a, T> {
+impl<T: FileOpener> Test<'_, T> {
     pub async fn run(self) {
         let result = FileStream::new(
             &self.config,

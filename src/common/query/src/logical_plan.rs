@@ -92,10 +92,7 @@ pub fn rename_logical_plan_columns(
         };
 
         let (qualifier_rename, field_rename) =
-            match plan.schema().qualified_field_from_column(&old_column) {
-                Ok(qualifier_and_field) => qualifier_and_field,
-                Err(err) => return Err(err),
-            };
+            plan.schema().qualified_field_from_column(&old_column)?;
 
         for (qualifier, field) in plan.schema().iter() {
             if qualifier.eq(&qualifier_rename) && field.as_ref() == field_rename {

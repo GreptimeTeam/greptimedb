@@ -358,7 +358,7 @@ impl RegionSupervisor {
         }
 
         let migrating_regions = regions
-            .extract_if(|(_, _, region_id)| {
+            .extract_if(.., |(_, _, region_id)| {
                 self.region_migration_manager.tracker().contains(*region_id)
             })
             .collect::<Vec<_>>();
