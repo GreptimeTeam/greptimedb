@@ -54,7 +54,7 @@ use crate::region::options::MergeMode;
 use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
 
 /// Initial vector builder capacity.
-const INITIAL_BUILDER_CAPACITY: usize = 0;
+const INITIAL_BUILDER_CAPACITY: usize = 1024;
 
 /// Builder to build [TimeSeriesMemtable].
 #[derive(Debug, Default)]
@@ -617,6 +617,7 @@ struct Series {
     pk_cache: Option<Vec<Value>>,
     active: ValueBuilder,
     frozen: Vec<Values>,
+    region_metadata: RegionMetadataRef,
 }
 
 impl Series {
@@ -625,11 +626,16 @@ impl Series {
             pk_cache: None,
             active: ValueBuilder::new(region_metadata, INITIAL_BUILDER_CAPACITY),
             frozen: vec![],
+            region_metadata: region_metadata.clone(),
         }
     }
 
     /// Pushes a row of values into Series.
     fn push(&mut self, ts: ValueRef, sequence: u64, op_type: OpType, values: Vec<ValueRef>) {
+        if self.active.len() > INITIAL_BUILDER_CAPACITY / 2 {
+            let region_metadata = self.region_metadata.clone();
+            self.freeze(&region_metadata);
+        }
         self.active.push(ts, sequence, op_type as u8, values);
     }
 
@@ -731,20 +737,45 @@ impl ValueBuilder {
         self.sequence.push_value_ref(ValueRef::UInt64(sequence));
         self.op_type.push_value_ref(ValueRef::UInt8(op_type));
         let num_rows = self.timestamp.len();
-        for (idx, field_value) in fields.into_iter().enumerate() {
-            if !field_value.is_null() || self.fields[idx].is_some() {
-                self.fields[idx]
-                    .get_or_insert_with(|| {
-                        // lazy initialize on first non-null value
-                        let mut mutable_vector =
-                            self.field_types[idx].create_mutable_vector(num_rows);
-                        // fill previous rows with nulls
-                        mutable_vector.push_nulls(num_rows - 1);
-                        mutable_vector
-                    })
-                    .push_value_ref(field_value);
+        for ((idx, field_value), field) in
+            fields.into_iter().enumerate().zip(self.fields.iter_mut())
+        {
+            if !field_value.is_null() || field.is_some() {
+                // self.fields[idx]
+                //     .get_or_insert_with(|| {
+                //         // lazy initialize on first non-null value
+                //         let mut mutable_vector = self.field_types[idx]
+                //             .create_mutable_vector(num_rows.max(INITIAL_BUILDER_CAPACITY));
+                //         // fill previous rows with nulls
+                //         mutable_vector.push_nulls(num_rows - 1);
+                //         mutable_vector
+                //     })
+                //     .push_value_ref(field_value);
+                if let Some(field) = field {
+                    field.push_value_ref(field_value);
+                } else {
+                    let mut mutable_vector = self.field_types[idx]
+                        .create_mutable_vector(num_rows.max(INITIAL_BUILDER_CAPACITY));
+                    mutable_vector.push_nulls(num_rows - 1);
+                    mutable_vector.push_value_ref(field_value);
+                    *field = Some(mutable_vector);
+                }
             }
         }
+        // for (field_value, field) in fields.into_iter().zip(self.fields.iter_mut()) {
+        //     if !field_value.is_null() || field.is_some() {
+        //         field
+        //             .get_or_insert_with(|| {
+        //                 // lazy initialize on first non-null value
+        //                 let mut mutable_vector = self.field_types[idx]
+        //                     .create_mutable_vector(num_rows.max(INITIAL_BUILDER_CAPACITY));
+        //                 // fill previous rows with nulls
+        //                 mutable_vector.push_nulls(num_rows - 1);
+        //                 mutable_vector
+        //             })
+        //             .push_value_ref(field_value);
+        //     }
+        // }
     }
 
     /// Returns the length of [ValueBuilder]
