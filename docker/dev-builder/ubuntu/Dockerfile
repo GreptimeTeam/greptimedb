@@ -22,13 +22,15 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
 ARG TARGETPLATFORM
 RUN echo "target platform: $TARGETPLATFORM"
 
+ARG PROTOBUF_VERSION=29.3
+
 # Install protobuf, because the one in the apt is too old (v3.12).
 RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-    curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-aarch_64.zip && \
-    unzip protoc-29.1-linux-aarch_64.zip -d protoc3; \
+    curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOBUF_VERSION}/protoc-${PROTOBUF_VERSION}-linux-aarch_64.zip && \
+    unzip protoc-${PROTOBUF_VERSION}-linux-aarch_64.zip -d protoc3; \
 elif [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
-    curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip && \
-    unzip protoc-29.1-linux-x86_64.zip -d protoc3; \
+    curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOBUF_VERSION}/protoc-${PROTOBUF_VERSION}-linux-x86_64.zip && \
+    unzip protoc-${PROTOBUF_VERSION}-linux-x86_64.zip -d protoc3; \
 fi
 RUN mv protoc3/bin/* /usr/local/bin/
 RUN mv protoc3/include/* /usr/local/include/

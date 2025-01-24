@@ -21,7 +21,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     pkg-config
 
 # Install protoc.
-ENV PROTOC_VERSION=25.1
+ENV PROTOC_VERSION=29.3
 RUN if [ "$(uname -m)" = "x86_64" ]; then \
         PROTOC_ZIP=protoc-${PROTOC_VERSION}-linux-x86_64.zip; \
     elif [ "$(uname -m)" = "aarch64" ]; then \

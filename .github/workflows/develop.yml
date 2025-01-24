@@ -631,7 +631,7 @@ jobs:
 
   test:
     if: github.event_name != 'merge_group'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-22.04-arm
     timeout-minutes: 60
     needs:  [conflict-check, clippy, fmt]
     steps:
@@ -661,6 +661,7 @@ jobs:
         env:
           CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
           RUST_BACKTRACE: 1
+          RUST_MIN_STACK: 8388608 # 8MB
           CARGO_INCREMENTAL: 0
           GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
           GT_S3_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
