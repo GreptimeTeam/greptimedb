@@ -12,17 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ahash::HashSet;
 use snafu::OptionExt;
 
+use super::IntermediateStatus;
 use crate::etl::error::{
     Error, KeyMustBeStringSnafu, LetterInvalidMethodSnafu, ProcessorExpectStringSnafu,
     ProcessorMissingFieldSnafu, Result,
 };
-use crate::etl::field::{Fields, OneInputOneOutputField};
+use crate::etl::field::Fields;
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, ProcessorBuilder,
-    ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, METHOD_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
+    IGNORE_MISSING_NAME, METHOD_NAME,
 };
 use crate::etl::value::Value;
 
@@ -59,55 +59,10 @@ impl std::str::FromStr for Method {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct LetterProcessorBuilder {
-    fields: Fields,
-    method: Method,
-    ignore_missing: bool,
-}
-
-impl ProcessorBuilder for LetterProcessorBuilder {
-    fn output_keys(&self) -> HashSet<&str> {
-        self.fields
-            .iter()
-            .map(|f| f.target_or_input_field())
-            .collect()
-    }
-
-    fn input_keys(&self) -> HashSet<&str> {
-        self.fields.iter().map(|f| f.input_field()).collect()
-    }
-
-    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind> {
-        self.build(intermediate_keys).map(ProcessorKind::Letter)
-    }
-}
-
-impl LetterProcessorBuilder {
-    pub fn build(self, intermediate_keys: &[String]) -> Result<LetterProcessor> {
-        let mut real_fields = vec![];
-        for field in self.fields.into_iter() {
-            let input = OneInputOneOutputField::build(
-                "letter",
-                intermediate_keys,
-                field.input_field(),
-                field.target_or_input_field(),
-            )?;
-            real_fields.push(input);
-        }
-
-        Ok(LetterProcessor {
-            fields: real_fields,
-            method: self.method,
-            ignore_missing: self.ignore_missing,
-        })
-    }
-}
-
 /// only support string value
 #[derive(Debug, Default)]
 pub struct LetterProcessor {
-    fields: Vec<OneInputOneOutputField>,
+    fields: Fields,
     method: Method,
     ignore_missing: bool,
 }
@@ -125,7 +80,7 @@ impl LetterProcessor {
     }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for LetterProcessorBuilder {
+impl TryFrom<&yaml_rust::yaml::Hash> for LetterProcessor {
     type Error = Error;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self> {
@@ -154,7 +109,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for LetterProcessorBuilder {
             }
         }
 
-        Ok(LetterProcessorBuilder {
+        Ok(LetterProcessor {
             fields,
             method,
             ignore_missing,
@@ -171,20 +126,20 @@ impl Processor for LetterProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<()> {
+    fn exec_mut(&self, val: &mut IntermediateStatus) -> Result<()> {
         for field in self.fields.iter() {
-            let index = field.input_index();
+            let index = field.input_field();
             match val.get(index) {
                 Some(Value::String(s)) => {
                     let result = self.process_field(s)?;
-                    let (_, output_index) = field.output();
-                    val[*output_index] = result;
+                    let output_key = field.target_or_input_field();
+                    val.insert(output_key.to_string(), result);
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
                         return ProcessorMissingFieldSnafu {
                             processor: self.kind(),
-                            field: field.input_name(),
+                            field: field.input_field(),
                         }
                         .fail();
                     }

@@ -27,13 +27,15 @@ use crate::etl::error::{
     FailedToParseIntKeySnafu, KeyMustBeStringSnafu, ProcessorExpectStringSnafu,
     ProcessorMissingFieldSnafu, Result,
 };
-use crate::etl::field::{Field, Fields, InputFieldInfo, OneInputMultiOutputField};
+use crate::etl::field::{Field, Fields, InputField, OneInputMultiOutputField};
 use crate::etl::find_key_index;
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, Processor, ProcessorBuilder, ProcessorKind,
     FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::Value;
+
+use super::IntermediateStatus;
 
 pub(crate) const PROCESSOR_CMCD: &str = "cmcd";
 
@@ -135,7 +137,7 @@ impl CmcdProcessorBuilder {
         for field in self.fields.into_iter() {
             let input_index = find_key_index(intermediate_keys, field.input_field(), "cmcd")?;
 
-            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
+            let input_field_info = InputField::new(field.input_field(), input_index);
 
             let (_, cmcd_field_outputs) = Self::build_cmcd_outputs(&field, intermediate_keys)?;
 
@@ -372,7 +374,7 @@ impl Processor for CmcdProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<()> {
+    fn exec_mut(&self, val: &mut IntermediateStatus) -> Result<()> {
         for (field_index, field) in self.fields.iter().enumerate() {
             let field_value_index = field.input_index();
             match val.get(field_value_index) {
