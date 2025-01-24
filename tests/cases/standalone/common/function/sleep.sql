@@ -6,7 +6,7 @@ select sleep(1) as a;
 select pg_sleep(0.1);
 
 -- SQLNESS PROTOCOL POSTGRES
-select pg_sleep(0.5); 
+select pg_sleep(0.5);
 
 -- SQLNESS PROTOCOL POSTGRES
-select pg_sleep(2) as b; 
+select pg_sleep(2) as b;

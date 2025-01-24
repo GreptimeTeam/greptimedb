@@ -20,3 +20,21 @@ select pg_sleep(0.1);
 Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Invalid function 'pg_sleep'.
 Did you mean 'sleep'?
 
+-- SQLNESS PROTOCOL POSTGRES
+select pg_sleep(0.5);
+
++---------------------+
+| sleep(Float64(0.5)) |
++---------------------+
+| 0                   |
++---------------------+
+
+-- SQLNESS PROTOCOL POSTGRES
+select pg_sleep(2) as b;
+
++---+
+| b |
++---+
+| 2 |
++---+
+
