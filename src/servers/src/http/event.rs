@@ -20,7 +20,7 @@ use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
 use async_trait::async_trait;
 use axum::extract::{FromRequest, Multipart, Path, Query, Request, State};
 use axum::http::header::CONTENT_TYPE;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use axum_extra::TypedHeader;
@@ -32,7 +32,9 @@ use headers::ContentType;
 use lazy_static::lazy_static;
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
-use pipeline::{GreptimeTransformer, PipelineVersion};
+use pipeline::{
+    GreptimePipelineParams, GreptimeTransformer, PipelineVersion, GREPTIME_PIPELINE_PARAMS_HEADER,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Map, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -479,6 +481,7 @@ pub async fn log_ingester(
     Query(query_params): Query<LogIngesterQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
     TypedHeader(content_type): TypedHeader<ContentType>,
+    headers: HeaderMap,
     payload: String,
 ) -> Result<HttpResponse> {
     // validate source and payload
@@ -523,6 +526,7 @@ pub async fn log_ingester(
             values: value,
         }],
         query_ctx,
+        headers,
     )
     .await
 }
@@ -552,11 +556,18 @@ pub(crate) async fn ingest_logs_inner(
     version: PipelineVersion,
     log_ingest_requests: Vec<LogIngestRequest>,
     query_ctx: QueryContextRef,
+    headers: HeaderMap,
 ) -> Result<HttpResponse> {
     let db = query_ctx.get_db_string();
     let exec_timer = std::time::Instant::now();
 
     let mut insert_requests = Vec::with_capacity(log_ingest_requests.len());
+
+    let pipeline_params = GreptimePipelineParams::from_params(
+        headers
+            .get(GREPTIME_PIPELINE_PARAMS_HEADER)
+            .and_then(|v| v.to_str().ok()),
+    );
 
     for request in log_ingest_requests {
         let transformed_data: Rows = if pipeline_name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME {
@@ -564,7 +575,7 @@ pub(crate) async fn ingest_logs_inner(
                 .get_table(&request.table, &query_ctx)
                 .await
                 .context(CatalogSnafu)?;
-            pipeline::identity_pipeline(request.values, table)
+            pipeline::identity_pipeline(request.values, table, &pipeline_params)
                 .context(PipelineTransformSnafu)
                 .context(PipelineSnafu)?
         } else {

@@ -40,7 +40,7 @@ use datatypes::arrow::compute::SortOptions;
 use datatypes::arrow::row::{RowConverter, SortField};
 use datatypes::prelude::{ConcreteDataType, DataType, ScalarVector};
 use datatypes::types::TimestampType;
-use datatypes::value::{Value, ValueRef};
+use datatypes::value::ValueRef;
 use datatypes::vectors::{
     BooleanVector, Helper, TimestampMicrosecondVector, TimestampMillisecondVector,
     TimestampNanosecondVector, TimestampSecondVector, UInt32Vector, UInt64Vector, UInt8Vector,
@@ -58,6 +58,7 @@ use crate::error::{
 use crate::memtable::BoxedBatchIterator;
 use crate::metrics::{READ_BATCHES_RETURN, READ_ROWS_RETURN, READ_STAGE_ELAPSED};
 use crate::read::prune::PruneReader;
+use crate::row_converter::CompositeValues;
 
 /// Storage internal representation of a batch of rows for a primary key (time series).
 ///
@@ -68,7 +69,7 @@ pub struct Batch {
     /// Primary key encoded in a comparable form.
     primary_key: Vec<u8>,
     /// Possibly decoded `primary_key` values. Some places would decode it in advance.
-    pk_values: Option<Vec<Value>>,
+    pk_values: Option<CompositeValues>,
     /// Timestamps of rows, should be sorted and not null.
     timestamps: VectorRef,
     /// Sequences of rows
@@ -114,12 +115,12 @@ impl Batch {
     }
 
     /// Returns possibly decoded primary-key values.
-    pub fn pk_values(&self) -> Option<&[Value]> {
-        self.pk_values.as_deref()
+    pub fn pk_values(&self) -> Option<&CompositeValues> {
+        self.pk_values.as_ref()
     }
 
     /// Sets possibly decoded primary-key values.
-    pub fn set_pk_values(&mut self, pk_values: Vec<Value>) {
+    pub fn set_pk_values(&mut self, pk_values: CompositeValues) {
         self.pk_values = Some(pk_values);
     }
 

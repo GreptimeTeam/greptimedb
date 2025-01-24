@@ -38,7 +38,7 @@ pub async fn logs(
     query_ctx.set_channel(Channel::Http);
     let query_ctx = Arc::new(query_ctx);
 
-    let _timer = crate::metrics::METRIC_HTTP_LOGS_INGESTION_ELAPSED
+    let _timer = crate::metrics::METRIC_HTTP_LOGS_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
 

@@ -594,6 +594,14 @@ pub enum Error {
     TablePartRequiredForDispatcherRule,
     #[snafu(display("value is required for dispatcher rule"))]
     ValueRequiredForDispatcherRule,
+    #[snafu(display(
+        "Reached max nested levels when flattening JSON object: {max_nested_levels}"
+    ))]
+    ReachedMaxNestedLevels {
+        max_nested_levels: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -49,7 +49,7 @@ use crate::metrics::{
 };
 use crate::read::prune::{PruneReader, Source};
 use crate::read::{Batch, BatchReader};
-use crate::row_converter::DensePrimaryKeyCodec;
+use crate::row_converter::build_primary_key_codec;
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierRef;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
@@ -253,7 +253,7 @@ impl ParquetReaderBuilder {
             vec![]
         };
 
-        let codec = DensePrimaryKeyCodec::new(read_format.metadata());
+        let codec = build_primary_key_codec(read_format.metadata());
 
         let context = FileRangeContext::new(reader_builder, filters, read_format, codec);
 
