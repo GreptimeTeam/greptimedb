@@ -15,13 +15,14 @@
 use std::sync::Arc;
 
 use api::v1::SemanticType;
+use common_error::ext::BoxedError;
 use common_telemetry::{error, info, tracing};
 use datafusion::logical_expr::{self, Expr};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadataBuilder, RegionMetadataRef};
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::region_engine::{RegionEngine, RegionScannerRef};
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
 use crate::engine::MetricEngineInner;
 use crate::error::{
@@ -81,6 +82,20 @@ impl MetricEngineInner {
             .await?;
         self.mito
             .handle_query(data_region_id, request)
+            .await
+            .context(MitoReadOperationSnafu)
+    }
+
+    pub async fn get_last_seq_num(&self, region_id: RegionId) -> Result<Option<SequenceNumber>> {
+        let region_id = if self.is_physical_region(region_id) {
+            region_id
+        } else {
+            let physical_region_id = self.get_physical_region_id(region_id).await?;
+            let data_region_id = utils::to_data_region_id(physical_region_id);
+            data_region_id
+        };
+        self.mito
+            .get_last_seq_num(region_id)
             .await
             .context(MitoReadOperationSnafu)
     }

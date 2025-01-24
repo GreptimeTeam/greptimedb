@@ -35,7 +35,7 @@ use tokio::sync::Semaphore;
 use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
 use crate::region_request::{BatchRegionDdlRequest, RegionOpenRequest, RegionRequest};
-use crate::storage::{RegionId, ScanRequest};
+use crate::storage::{RegionId, ScanRequest,SequenceNumber};
 
 /// The settable region role state.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -435,6 +435,15 @@ pub trait RegionEngine: Send + Sync {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<RegionResponse, BoxedError>;
+
+    /// Returns the last sequence number of the region.
+    #[allow(unused)]
+    async fn get_last_seq_num(
+        &self,
+        region_id: RegionId,
+    ) -> Result<Option<SequenceNumber>, BoxedError> {
+        Ok(None)
+    }
 
     /// Handles query and return a scanner that can be used to scan the region concurrently.
     async fn handle_query(

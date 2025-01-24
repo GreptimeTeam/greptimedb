@@ -43,7 +43,7 @@ use store_api::region_engine::{
     SettableRegionRoleState,
 };
 use store_api::region_request::{BatchRegionDdlRequest, RegionRequest};
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
 use self::state::MetricEngineState;
 use crate::config::EngineConfig;
@@ -228,6 +228,16 @@ impl RegionEngine for MetricEngine {
         request: ScanRequest,
     ) -> Result<RegionScannerRef, BoxedError> {
         self.handle_query(region_id, request).await
+    }
+
+    async fn get_last_seq_num(
+        &self,
+        region_id: RegionId,
+    ) -> Result<Option<SequenceNumber>, BoxedError> {
+        self.inner
+            .get_last_seq_num(region_id)
+            .await
+            .map_err(BoxedError::new)
     }
 
     /// Retrieves region's metadata.
