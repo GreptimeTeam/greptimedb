@@ -19,14 +19,6 @@ use build_data::{format_timestamp, get_source_time};
 use shadow_rs::{CARGO_METADATA, CARGO_TREE};
 
 fn main() -> shadow_rs::SdResult<()> {
-    // The "CARGO_WORKSPACE_DIR" is set manually (not by Rust itself) in Cargo config file, to
-    // solve the problem where the "CARGO_MANIFEST_DIR" is not what we want when this repo is
-    // made as a submodule in another repo.
-    let src_path = env::var("CARGO_WORKSPACE_DIR").or_else(|_| env::var("CARGO_MANIFEST_DIR"))?;
-
-    // `CARGO_RUSTC_CURRENT_DIR` is removed, use `src_path` instead.
-    println!("cargo:rerun-if-changed={}/.git/refs/heads", src_path);
-
     println!(
         "cargo:rustc-env=SOURCE_TIMESTAMP={}",
         if let Ok(t) = get_source_time() {
@@ -37,6 +29,10 @@ fn main() -> shadow_rs::SdResult<()> {
     );
     build_data::set_BUILD_TIMESTAMP();
 
+    // The "CARGO_WORKSPACE_DIR" is set manually (not by Rust itself) in Cargo config file, to
+    // solve the problem where the "CARGO_MANIFEST_DIR" is not what we want when this repo is
+    // made as a submodule in another repo.
+    let src_path = env::var("CARGO_WORKSPACE_DIR").or_else(|_| env::var("CARGO_MANIFEST_DIR"))?;
     let out_path = env::var("OUT_DIR")?;
     let _ = shadow_rs::Shadow::build_with(
         src_path,
