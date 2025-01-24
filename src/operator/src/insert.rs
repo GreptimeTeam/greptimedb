@@ -819,7 +819,7 @@ struct CreateAlterTableResult {
 }
 
 struct FlowMirrorTask {
-    reqeusts: HashMap<Peer, RegionInsertRequests>,
+    requests: HashMap<Peer, RegionInsertRequests>,
     num_rows: usize,
 }
 
@@ -892,14 +892,14 @@ impl FlowMirrorTask {
         }
 
         Ok(Self {
-            reqeusts: inserts,
+            requests: inserts,
             num_rows,
         })
     }
 
     fn detach(self, node_manager: NodeManagerRef) -> Result<()> {
         crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.add(self.num_rows as i64);
-        for (peer, inserts) in self.reqeusts {
+        for (peer, inserts) in self.requests {
             let node_manager = node_manager.clone();
             common_runtime::spawn_global(async move {
                 let result = node_manager
