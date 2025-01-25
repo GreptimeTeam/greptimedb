@@ -229,7 +229,7 @@ impl PrometheusJsonResponse {
         let metric_name = (METRIC_NAME, metric_name.as_str());
         let mut buffer = BTreeMap::<Vec<(&str, &str)>, Vec<(f64, String)>>::new();
 
-        let shcema = batches.schema();
+        let schema = batches.schema();
         for batch in batches.iter() {
             // prepare things...
             let tag_columns = tag_column_indices
@@ -244,7 +244,7 @@ impl PrometheusJsonResponse {
                 .collect::<Vec<_>>();
             let tag_names = tag_column_indices
                 .iter()
-                .map(|c| shcema.column_name_by_index(*c))
+                .map(|c| schema.column_name_by_index(*c))
                 .collect::<Vec<_>>();
             let timestamp_column = batch
                 .column(timestamp_column_index)
