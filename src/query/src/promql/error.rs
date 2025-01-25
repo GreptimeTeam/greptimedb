@@ -128,6 +128,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "End time must greater than start time start: {:?}, end: {:?}",
+        start,
+        end
+    ))]
+    InvalidTimeRange {
+        start: i64,
+        end: i64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Cannot find column {col}"))]
     ColumnNotFound {
         col: String,
@@ -193,6 +205,7 @@ impl ErrorExt for Error {
             | MultipleVector { .. }
             | ExpectRangeSelector { .. }
             | ZeroRangeSelector { .. }
+            | InvalidTimeRange { .. }
             | ColumnNotFound { .. }
             | FunctionInvalidArgument { .. }
             | UnsupportedVectorMatch { .. }
