@@ -26,11 +26,14 @@ use datatypes::prelude::ValueRef;
 use memcomparable::Serializer;
 use serde::Serialize;
 use snafu::{ensure, ResultExt};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
 
-use crate::error::{PrimaryKeyLengthMismatchSnafu, Result, SerializeFieldSnafu};
+use crate::error::{
+    EncodeSparsePrimaryKeySnafu, PrimaryKeyLengthMismatchSnafu, Result, SerializeFieldSnafu,
+};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::partition::{
@@ -96,6 +99,41 @@ impl PartitionTree {
         }
     }
 
+    fn verify_primary_key_length(&self, kv: &KeyValue) -> Result<()> {
+        // The sparse primary key codec does not have a fixed number of fields.
+        if let Some(expected_num_fields) = self.row_codec.num_fields() {
+            ensure!(
+                expected_num_fields == kv.num_primary_keys(),
+                PrimaryKeyLengthMismatchSnafu {
+                    expect: expected_num_fields,
+                    actual: kv.num_primary_keys(),
+                }
+            );
+        }
+        // TODO(weny): verify the primary key length for sparse primary key codec.
+        Ok(())
+    }
+
+    /// Encodes the given key value into a sparse primary key.
+    fn encode_sparse_primary_key(&self, kv: &KeyValue, buffer: &mut Vec<u8>) -> Result<()> {
+        if kv.primary_key_encoding() == PrimaryKeyEncoding::Sparse {
+            // If the primary key encoding is sparse and already encoded in the metric engine,
+            // we only need to copy the encoded primary key into the destination buffer.
+            let ValueRef::Binary(primary_key) = kv.primary_keys().next().unwrap() else {
+                return EncodeSparsePrimaryKeySnafu {
+                    reason: "sparse primary key is not binary".to_string(),
+                }
+                .fail();
+            };
+            buffer.extend_from_slice(primary_key);
+        } else {
+            // For compatibility, use the sparse encoder for dense primary key.
+            self.sparse_encoder
+                .encode_to_vec(kv.primary_keys(), buffer)?;
+        }
+        Ok(())
+    }
+
     // TODO(yingwen): The size computed from values is inaccurate.
     /// Write key-values into the tree.
     ///
@@ -110,13 +148,7 @@ impl PartitionTree {
         let has_pk = !self.metadata.primary_key.is_empty();
 
         for kv in kvs.iter() {
-            ensure!(
-                kv.num_primary_keys() == self.row_codec.num_fields(),
-                PrimaryKeyLengthMismatchSnafu {
-                    expect: self.row_codec.num_fields(),
-                    actual: kv.num_primary_keys(),
-                }
-            );
+            self.verify_primary_key_length(&kv)?;
             // Safety: timestamp of kv must be both present and a valid timestamp value.
             let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
             metrics.min_ts = metrics.min_ts.min(ts);
@@ -132,9 +164,7 @@ impl PartitionTree {
             // Encode primary key.
             pk_buffer.clear();
             if self.is_partitioned {
-                // Use sparse encoder for metric engine.
-                self.sparse_encoder
-                    .encode_to_vec(kv.primary_keys(), pk_buffer)?;
+                self.encode_sparse_primary_key(&kv, pk_buffer)?;
             } else {
                 self.row_codec.encode_key_value(&kv, pk_buffer)?;
             }
@@ -161,13 +191,7 @@ impl PartitionTree {
     ) -> Result<()> {
         let has_pk = !self.metadata.primary_key.is_empty();
 
-        ensure!(
-            kv.num_primary_keys() == self.row_codec.num_fields(),
-            PrimaryKeyLengthMismatchSnafu {
-                expect: self.row_codec.num_fields(),
-                actual: kv.num_primary_keys(),
-            }
-        );
+        self.verify_primary_key_length(&kv)?;
         // Safety: timestamp of kv must be both present and a valid timestamp value.
         let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
         metrics.min_ts = metrics.min_ts.min(ts);
@@ -182,9 +206,7 @@ impl PartitionTree {
         // Encode primary key.
         pk_buffer.clear();
         if self.is_partitioned {
-            // Use sparse encoder for metric engine.
-            self.sparse_encoder
-                .encode_to_vec(kv.primary_keys(), pk_buffer)?;
+            self.encode_sparse_primary_key(&kv, pk_buffer)?;
         } else {
             self.row_codec.encode_key_value(&kv, pk_buffer)?;
         }

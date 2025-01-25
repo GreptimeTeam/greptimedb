@@ -22,6 +22,7 @@ use axum::http::{HeaderName, HeaderValue, StatusCode};
 use common_error::status_code::StatusCode as ErrorCode;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use log_query::{Context, Limit, LogQuery, TimeFilter};
 use loki_api::logproto::{EntryAdapter, PushRequest, StreamAdapter};
 use loki_api::prost_types::Timestamp;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
@@ -39,6 +40,7 @@ use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Respon
 use servers::http::test_helpers::{TestClient, TestResponse};
 use servers::http::GreptimeQueryOutput;
 use servers::prom_store;
+use table::table_name::TableName;
 use tests_integration::test_util::{
     setup_test_http_app, setup_test_http_app_with_frontend,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
@@ -90,6 +92,7 @@ macro_rules! http_tests {
                 test_test_pipeline_api,
                 test_plain_text_ingestion,
                 test_identify_pipeline,
+                test_identify_pipeline_with_flatten,
 
                 test_otlp_metrics,
                 test_otlp_traces,
@@ -98,6 +101,7 @@ macro_rules! http_tests {
                 test_loki_json_logs,
                 test_elasticsearch_logs,
                 test_elasticsearch_logs_with_index,
+                test_log_query,
             );
         )*
     };
@@ -144,6 +148,51 @@ pub async fn test_http_auth(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
+    guard.remove_all().await;
+}
+
+#[tokio::test]
+pub async fn test_cors() {
+    let (app, mut guard) = setup_test_http_app_with_frontend(StorageType::File, "test_cors").await;
+    let client = TestClient::new(app).await;
+
+    let res = client.get("/health").send().await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .expect("expect cors header origin"),
+        "*"
+    );
+
+    let res = client
+        .options("/health")
+        .header("Access-Control-Request-Headers", "x-greptime-auth")
+        .header("Access-Control-Request-Method", "DELETE")
+        .header("Origin", "https://example.com")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .expect("expect cors header origin"),
+        "*"
+    );
+    assert_eq!(
+        res.headers()
+            .get(http::header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .expect("expect cors header headers"),
+        "*"
+    );
+    assert_eq!(
+        res.headers()
+            .get(http::header::ACCESS_CONTROL_ALLOW_METHODS)
+            .expect("expect cors header methods"),
+        "GET,POST,PUT,DELETE,HEAD"
+    );
+
     guard.remove_all().await;
 }
 
@@ -1256,7 +1305,8 @@ transform:
 
 pub async fn test_identify_pipeline(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_pipeline_api").await;
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_identify_pipeline").await;
 
     // handshake
     let client = TestClient::new(app).await;
@@ -1305,6 +1355,55 @@ pub async fn test_identify_pipeline(store_type: StorageType) {
 
     let expected = r#"[["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"],["dongdongdong","String","","YES","","FIELD"],["hasagei","String","","YES","","FIELD"],["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"]]"#;
     validate_data("identity_schema", &client, "desc logs", expected).await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_identify_pipeline_with_flatten(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_identify_pipeline_with_flatten").await;
+
+    let client = TestClient::new(app).await;
+    let body = r#"{"__time__":1453809242,"__topic__":"","__source__":"10.170.***.***","ip":"10.200.**.***","time":"26/Jan/2016:19:54:02 +0800","url":"POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","status":"200","user-agent":"aliyun-sdk-java","custom_map":{"value_a":["a","b","c"],"value_b":"b"}}"#;
+
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/json"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-pipeline-params"),
+                HeaderValue::from_static("flatten_json_object=true"),
+            ),
+        ],
+        "/v1/events/logs?table=logs&pipeline_name=greptime_identity",
+        body.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+
+    assert_eq!(StatusCode::OK, res.status());
+
+    let expected = r#"[["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["custom_map.value_a","Json","","YES","","FIELD"],["custom_map.value_b","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"],["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"]]"#;
+    validate_data(
+        "test_identify_pipeline_with_flatten_desc_logs",
+        &client,
+        "desc logs",
+        expected,
+    )
+    .await;
+
+    let expected = "[[[\"a\",\"b\",\"c\"]]]";
+    validate_data(
+        "test_identify_pipeline_with_flatten_select_json",
+        &client,
+        "select `custom_map.value_a` from logs",
+        expected,
+    )
+    .await;
 
     guard.remove_all().await;
 }
@@ -2085,6 +2184,61 @@ pub async fn test_elasticsearch_logs_with_index(store_type: StorageType) {
         expected,
     )
     .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_log_query(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_log_query").await;
+
+    let client = TestClient::new(app).await;
+
+    // prepare data with SQL API
+    let res = client
+        .get("/v1/sql?sql=create table logs (`ts` timestamp time index, message string);")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+    let res = client
+        .post("/v1/sql?sql=insert into logs values ('2024-11-07 10:53:50', 'hello');")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+
+    // test log query
+    let log_query = LogQuery {
+        table: TableName {
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            table_name: "logs".to_string(),
+        },
+        time_filter: TimeFilter {
+            start: Some("2024-11-07".to_string()),
+            end: None,
+            span: None,
+        },
+        limit: Limit {
+            skip: None,
+            fetch: Some(1),
+        },
+        columns: vec!["ts".to_string(), "message".to_string()],
+        filters: vec![],
+        context: Context::None,
+        exprs: vec![],
+    };
+    let res = client
+        .post("/v1/logs")
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&log_query).unwrap())
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+    let resp = res.text().await;
+    let v = get_rows_from_output(&resp);
+    assert_eq!(v, "[[1730976830000,\"hello\"]]");
 
     guard.remove_all().await;
 }

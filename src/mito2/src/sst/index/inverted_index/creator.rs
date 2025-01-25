@@ -34,7 +34,7 @@ use crate::error::{
     PushIndexValueSnafu, Result,
 };
 use crate::read::Batch;
-use crate::row_converter::SortField;
+use crate::row_converter::{CompositeValues, SortField};
 use crate::sst::file::FileId;
 use crate::sst::index::codec::{IndexValueCodec, IndexValuesCodec};
 use crate::sst::index::intermediate::{
@@ -101,7 +101,10 @@ impl InvertedIndexer {
         );
         let index_creator = Box::new(SortIndexCreator::new(sorter, segment_row_count));
 
-        let codec = IndexValuesCodec::from_tag_columns(metadata.primary_key_columns());
+        let codec = IndexValuesCodec::from_tag_columns(
+            metadata.primary_key_encoding,
+            metadata.primary_key_columns(),
+        );
         Self {
             codec,
             index_creator,
@@ -116,7 +119,7 @@ impl InvertedIndexer {
 
     /// Updates index with a batch of rows.
     /// Garbage will be cleaned up if failed to update.
-    pub async fn update(&mut self, batch: &Batch) -> Result<()> {
+    pub async fn update(&mut self, batch: &mut Batch) -> Result<()> {
         ensure!(!self.aborted, OperateAbortedIndexSnafu);
 
         if batch.is_empty() {
@@ -174,16 +177,36 @@ impl InvertedIndexer {
         self.do_cleanup().await
     }
 
-    async fn do_update(&mut self, batch: &Batch) -> Result<()> {
+    async fn do_update(&mut self, batch: &mut Batch) -> Result<()> {
         let mut guard = self.stats.record_update();
 
         let n = batch.num_rows();
         guard.inc_row_count(n);
 
-        for ((col_id, col_id_str), field, value) in self.codec.decode(batch.primary_key())? {
+        // TODO(weny, zhenchi): lazy decode
+        if batch.pk_values().is_none() {
+            let values = self.codec.decode(batch.primary_key())?;
+            batch.set_pk_values(values);
+        }
+
+        // Safety: the primary key is decoded
+        let values = batch.pk_values().unwrap();
+        for (idx, (col_id, field)) in self.codec.fields().iter().enumerate() {
             if !self.indexed_column_ids.contains(col_id) {
                 continue;
             }
+
+            let value = match &values {
+                CompositeValues::Dense(vec) => {
+                    let value = &vec[idx].1;
+                    if value.is_null() {
+                        None
+                    } else {
+                        Some(value)
+                    }
+                }
+                CompositeValues::Sparse(sparse_values) => sparse_values.get(col_id),
+            };
 
             if let Some(value) = value.as_ref() {
                 self.value_buf.clear();
@@ -193,6 +216,9 @@ impl InvertedIndexer {
                     &mut self.value_buf,
                 )?;
             }
+
+            // Safety: the column id is guaranteed to be in the map
+            let col_id_str = self.codec.column_ids().get(col_id).unwrap();
 
             // non-null value -> Some(encoded_bytes), null value -> None
             let value = value.is_some().then_some(self.value_buf.as_slice());
@@ -381,8 +407,8 @@ mod tests {
         u64_field: impl IntoIterator<Item = u64>,
     ) -> Batch {
         let fields = vec![
-            SortField::new(ConcreteDataType::string_datatype()),
-            SortField::new(ConcreteDataType::int32_datatype()),
+            (0, SortField::new(ConcreteDataType::string_datatype())),
+            (1, SortField::new(ConcreteDataType::int32_datatype())),
         ];
         let codec = DensePrimaryKeyCodec::with_fields(fields);
         let row: [ValueRef; 2] = [str_tag.as_ref().into(), i32_tag.into().into()];
@@ -435,8 +461,8 @@ mod tests {
         );
 
         for (str_tag, i32_tag, u64_field) in &rows {
-            let batch = new_batch(str_tag, *i32_tag, u64_field.iter().copied());
-            creator.update(&batch).await.unwrap();
+            let mut batch = new_batch(str_tag, *i32_tag, u64_field.iter().copied());
+            creator.update(&mut batch).await.unwrap();
         }
 
         let puffin_manager = factory.build(object_store.clone());

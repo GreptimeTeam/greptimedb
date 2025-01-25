@@ -303,7 +303,7 @@ impl KvBackend for CachedKvBackend {
             .lock()
             .unwrap()
             .as_ref()
-            .map_or(false, |v| !self.validate_version(*v))
+            .is_some_and(|v| !self.validate_version(*v))
         {
             self.cache.invalidate(key).await;
         }

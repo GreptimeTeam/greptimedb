@@ -781,7 +781,7 @@ impl JsonLike for Value {
         if left.len() != right.len() {
             false
         } else {
-            left.iter().zip(right).map(|(a, b)| a.eq(&b)).all(|a| a)
+            left.iter().zip(right).all(|(a, b)| a.eq(&b))
         }
     }
 

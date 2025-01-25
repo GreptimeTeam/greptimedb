@@ -18,7 +18,7 @@ use crate::read::Batch;
 use crate::sst::index::Indexer;
 
 impl Indexer {
-    pub(crate) async fn do_update(&mut self, batch: &Batch) {
+    pub(crate) async fn do_update(&mut self, batch: &mut Batch) {
         if batch.is_empty() {
             return;
         }
@@ -35,7 +35,7 @@ impl Indexer {
     }
 
     /// Returns false if the update failed.
-    async fn do_update_inverted_index(&mut self, batch: &Batch) -> bool {
+    async fn do_update_inverted_index(&mut self, batch: &mut Batch) -> bool {
         let Some(creator) = self.inverted_indexer.as_mut() else {
             return true;
         };
@@ -60,7 +60,7 @@ impl Indexer {
     }
 
     /// Returns false if the update failed.
-    async fn do_update_fulltext_index(&mut self, batch: &Batch) -> bool {
+    async fn do_update_fulltext_index(&mut self, batch: &mut Batch) -> bool {
         let Some(creator) = self.fulltext_indexer.as_mut() else {
             return true;
         };
@@ -85,7 +85,7 @@ impl Indexer {
     }
 
     /// Returns false if the update failed.
-    async fn do_update_bloom_filter(&mut self, batch: &Batch) -> bool {
+    async fn do_update_bloom_filter(&mut self, batch: &mut Batch) -> bool {
         let Some(creator) = self.bloom_filter_indexer.as_mut() else {
             return true;
         };

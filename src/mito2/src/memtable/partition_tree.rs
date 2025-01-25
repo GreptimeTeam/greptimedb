@@ -19,8 +19,6 @@ mod dedup;
 mod dict;
 mod merger;
 mod partition;
-// TODO(weny): remove this
-#[allow(unused)]
 mod primary_key_filter;
 mod shard;
 mod shard_builder;
@@ -31,9 +29,8 @@ use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
-pub(crate) use primary_key_filter::DensePrimaryKeyFilter;
+pub(crate) use primary_key_filter::{DensePrimaryKeyFilter, SparsePrimaryKeyFilter};
 use serde::{Deserialize, Serialize};
-use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
@@ -48,7 +45,7 @@ use crate::memtable::{
     MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
 };
 use crate::region::options::MergeMode;
-use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec};
+use crate::row_converter::{build_primary_key_codec, PrimaryKeyCodec};
 
 /// Use `1/DICTIONARY_SIZE_FACTOR` of OS memory as dictionary size.
 pub(crate) const DICTIONARY_SIZE_FACTOR: u64 = 8;
@@ -330,22 +327,14 @@ impl PartitionTreeMemtableBuilder {
 
 impl MemtableBuilder for PartitionTreeMemtableBuilder {
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
-        match metadata.primary_key_encoding {
-            PrimaryKeyEncoding::Dense => {
-                let codec = Arc::new(DensePrimaryKeyCodec::new(metadata));
-                Arc::new(PartitionTreeMemtable::new(
-                    id,
-                    codec,
-                    metadata.clone(),
-                    self.write_buffer_manager.clone(),
-                    &self.config,
-                ))
-            }
-            PrimaryKeyEncoding::Sparse => {
-                //TODO(weny): Implement sparse primary key encoding.
-                todo!()
-            }
-        }
+        let codec = build_primary_key_codec(metadata);
+        Arc::new(PartitionTreeMemtable::new(
+            id,
+            codec,
+            metadata.clone(),
+            self.write_buffer_manager.clone(),
+            &self.config,
+        ))
     }
 }
 
@@ -382,7 +371,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
+    use crate::row_converter::DensePrimaryKeyCodec;
     use crate::test_util::memtable_util::{
         self, collect_iter_timestamps, region_metadata_to_row_schema,
     };
@@ -794,7 +783,7 @@ mod tests {
 
         let mut reader = new_memtable.iter(None, None, None).unwrap();
         let batch = reader.next().unwrap().unwrap();
-        let pk = codec.decode(batch.primary_key()).unwrap();
+        let pk = codec.decode(batch.primary_key()).unwrap().into_dense();
         if let Value::String(s) = &pk[2] {
             assert_eq!("10min", s.as_utf8());
         } else {

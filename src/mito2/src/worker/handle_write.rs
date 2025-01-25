@@ -20,6 +20,7 @@ use std::sync::Arc;
 use api::v1::OpType;
 use common_telemetry::debug;
 use snafu::ensure;
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::RegionId;
@@ -231,19 +232,24 @@ impl<S> RegionWorkerLoop<S> {
                 continue;
             }
 
-            // Checks whether request schema is compatible with region schema.
-            if let Err(e) =
-                maybe_fill_missing_columns(&mut sender_req.request, &region_ctx.version().metadata)
-            {
-                sender_req.sender.send(Err(e));
+            // If the primary key is dense, we need to fill missing columns.
+            if sender_req.request.primary_key_encoding() == PrimaryKeyEncoding::Dense {
+                // Checks whether request schema is compatible with region schema.
+                if let Err(e) = maybe_fill_missing_columns(
+                    &mut sender_req.request,
+                    &region_ctx.version().metadata,
+                ) {
+                    sender_req.sender.send(Err(e));
 
-                continue;
+                    continue;
+                }
             }
 
             // Collect requests by region.
             region_ctx.push_mutation(
                 sender_req.request.op_type as i32,
                 Some(sender_req.request.rows),
+                sender_req.request.hint,
                 sender_req.sender,
             );
         }

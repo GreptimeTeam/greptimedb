@@ -281,8 +281,29 @@ pub fn validate_create_expr(create: &CreateTableExpr) -> Result<()> {
         }
         .fail();
     }
+    // verify do not contain interval type column issue #3235
+    for column in &create.column_defs {
+        if is_interval_type(&column.data_type()) {
+            return InvalidSqlSnafu {
+                err_msg: format!(
+                    "column name `{}` is interval type, which is not supported",
+                    column.name
+                ),
+            }
+            .fail();
+        }
+    }
 
     Ok(())
+}
+
+fn is_interval_type(data_type: &ColumnDataType) -> bool {
+    matches!(
+        data_type,
+        ColumnDataType::IntervalYearMonth
+            | ColumnDataType::IntervalDayTime
+            | ColumnDataType::IntervalMonthDayNano
+    )
 }
 
 fn find_primary_keys(
@@ -504,6 +525,12 @@ pub(crate) fn to_alter_table_expr(
                     )
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?;
+                    if is_interval_type(&column_def.data_type()) {
+                        return NotSupportedSnafu {
+                            feat: "Add column with interval type",
+                        }
+                        .fail();
+                    }
                     Ok(AddColumn {
                         column_def: Some(column_def),
                         location: add_column.location.as_ref().map(From::from),
@@ -521,6 +548,12 @@ pub(crate) fn to_alter_table_expr(
             let (target_type, target_type_extension) = ColumnDataTypeWrapper::try_from(target_type)
                 .map(|w| w.to_parts())
                 .context(ColumnDataTypeSnafu)?;
+            if is_interval_type(&target_type) {
+                return NotSupportedSnafu {
+                    feat: "Modify column type to interval type",
+                }
+                .fail();
+            }
             AlterTableKind::ModifyColumnTypes(ModifyColumnTypes {
                 modify_column_types: vec![ModifyColumnType {
                     column_name: column_name.value,

@@ -36,12 +36,14 @@ use datatypes::schema::SchemaRef;
 use datatypes::value::transform_value_ref_to_json_value;
 use event::{LogState, LogValidatorRef};
 use futures::FutureExt;
+use http::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ensure, ResultExt};
 use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
 use tower::ServiceBuilder;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::decompression::RequestDecompressionLayer;
 use tower_http::trace::TraceLayer;
 
@@ -737,6 +739,18 @@ impl HttpServer {
                     // disable on failure tracing. because printing out isn't very helpful,
                     // and we have impl IntoResponse for Error. It will print out more detailed error messages
                     .layer(TraceLayer::new_for_http().on_failure(()))
+                    .layer(
+                        CorsLayer::new()
+                            .allow_methods([
+                                Method::GET,
+                                Method::POST,
+                                Method::PUT,
+                                Method::DELETE,
+                                Method::HEAD,
+                            ])
+                            .allow_origin(Any)
+                            .allow_headers(Any),
+                    )
                     .option_layer(timeout_layer)
                     .option_layer(body_limit_layer)
                     // auth layer

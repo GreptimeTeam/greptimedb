@@ -48,7 +48,7 @@ use crate::error::{
     ConvertVectorSnafu, InvalidBatchSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
 };
 use crate::read::{Batch, BatchBuilder, BatchColumn};
-use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, SortField};
+use crate::row_converter::{build_primary_key_codec_with_fields, SortField};
 use crate::sst::file::{FileMeta, FileTimeRange};
 use crate::sst::to_sst_arrow_schema;
 
@@ -391,6 +391,7 @@ impl ReadFormat {
         column: &ColumnMetadata,
         is_min: bool,
     ) -> Option<ArrayRef> {
+        let primary_key_encoding = self.metadata.primary_key_encoding;
         let is_first_tag = self
             .metadata
             .primary_key
@@ -402,9 +403,15 @@ impl ReadFormat {
             return None;
         }
 
-        let converter = DensePrimaryKeyCodec::with_fields(vec![SortField::new(
-            column.column_schema.data_type.clone(),
-        )]);
+        let converter = build_primary_key_codec_with_fields(
+            primary_key_encoding,
+            [(
+                column.column_id,
+                SortField::new(column.column_schema.data_type.clone()),
+            )]
+            .into_iter(),
+        );
+
         let values = row_groups.iter().map(|meta| {
             let stats = meta
                 .borrow()

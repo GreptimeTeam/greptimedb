@@ -33,7 +33,7 @@ use crate::read::compat::CompatBatch;
 use crate::read::last_row::RowGroupLastRowCachedReader;
 use crate::read::prune::PruneReader;
 use crate::read::Batch;
-use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
+use crate::row_converter::{CompositeValues, PrimaryKeyCodec};
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext};
@@ -156,7 +156,7 @@ impl FileRangeContext {
         reader_builder: RowGroupReaderBuilder,
         filters: Vec<SimpleFilterContext>,
         read_format: ReadFormat,
-        codec: DensePrimaryKeyCodec,
+        codec: Arc<dyn PrimaryKeyCodec>,
     ) -> Self {
         Self {
             reader_builder,
@@ -237,7 +237,7 @@ pub(crate) struct RangeBase {
     /// Helper to read the SST.
     pub(crate) read_format: ReadFormat,
     /// Decoder for primary keys
-    pub(crate) codec: DensePrimaryKeyCodec,
+    pub(crate) codec: Arc<dyn PrimaryKeyCodec>,
     /// Optional helper to compat batches.
     pub(crate) compat_batch: Option<CompatBatch>,
 }
@@ -264,15 +264,25 @@ impl RangeBase {
                         input.set_pk_values(self.codec.decode(input.primary_key())?);
                         input.pk_values().unwrap()
                     };
-                    // Safety: this is a primary key
-                    let pk_index = self
-                        .read_format
-                        .metadata()
-                        .primary_key_index(filter.column_id())
-                        .unwrap();
-                    let pk_value = pk_values[pk_index]
-                        .try_to_scalar_value(filter.data_type())
-                        .context(FieldTypeMismatchSnafu)?;
+                    let pk_value = match pk_values {
+                        CompositeValues::Dense(v) => {
+                            // Safety: this is a primary key
+                            let pk_index = self
+                                .read_format
+                                .metadata()
+                                .primary_key_index(filter.column_id())
+                                .unwrap();
+                            v[pk_index]
+                                .1
+                                .try_to_scalar_value(filter.data_type())
+                                .context(FieldTypeMismatchSnafu)?
+                        }
+                        CompositeValues::Sparse(v) => {
+                            let v = v.get_or_null(filter.column_id());
+                            v.try_to_scalar_value(filter.data_type())
+                                .context(FieldTypeMismatchSnafu)?
+                        }
+                    };
                     if filter
                         .filter()
                         .evaluate_scalar(&pk_value)
