@@ -22,7 +22,6 @@ use common_telemetry::debug;
 use snafu::ensure;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::LogStore;
-use store_api::metadata::RegionMetadata;
 use store_api::storage::RegionId;
 
 use crate::error::{InvalidRequestSnafu, RegionLeaderStateSnafu, RejectWriteSnafu, Result};
@@ -232,13 +231,21 @@ impl<S> RegionWorkerLoop<S> {
                 continue;
             }
 
-            // If the primary key is dense, we need to fill missing columns.
-            if sender_req.request.primary_key_encoding() == PrimaryKeyEncoding::Dense {
-                // Checks whether request schema is compatible with region schema.
-                if let Err(e) = maybe_fill_missing_columns(
-                    &mut sender_req.request,
-                    &region_ctx.version().metadata,
-                ) {
+            // Double check the request schema
+            let need_fill_missing_columns =
+                if let Some(ref region_metadata) = sender_req.request.region_metadata {
+                    region_ctx.version().metadata.schema_version != region_metadata.schema_version
+                } else {
+                    true
+                };
+            // Only fill missing columns if primary key is dense encoded.
+            if need_fill_missing_columns
+                && sender_req.request.primary_key_encoding() == PrimaryKeyEncoding::Dense
+            {
+                if let Err(e) = sender_req
+                    .request
+                    .maybe_fill_missing_columns(&region_ctx.version().metadata)
+                {
                     sender_req.sender.send(Err(e));
 
                     continue;
@@ -277,22 +284,6 @@ fn reject_write_requests(write_requests: &mut Vec<SenderWriteRequest>) {
             .fail(),
         );
     }
-}
-
-/// Checks the schema and fill missing columns.
-fn maybe_fill_missing_columns(request: &mut WriteRequest, metadata: &RegionMetadata) -> Result<()> {
-    if let Err(e) = request.check_schema(metadata) {
-        if e.is_fill_default() {
-            // TODO(yingwen): Add metrics for this case.
-            // We need to fill default value. The write request may be a request
-            // sent before changing the schema.
-            request.fill_missing_columns(metadata)?;
-        } else {
-            return Err(e);
-        }
-    }
-
-    Ok(())
 }
 
 /// Rejects delete request under append mode.
