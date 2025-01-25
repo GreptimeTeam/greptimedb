@@ -16,7 +16,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use api::v1::{RowInsertRequest, Rows};
-use pipeline::error::PipelineTransformSnafu;
 use pipeline::{
     DispatchedTo, GreptimePipelineParams, GreptimeTransformer, Pipeline, PipelineDefinition,
     PipelineExecOutput, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
@@ -24,7 +23,7 @@ use pipeline::{
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
-use crate::error::{CatalogSnafu, PipelineSnafu, Result};
+use crate::error::{CatalogSnafu, PipelineTransformSnafu, Result};
 use crate::metrics::{
     METRIC_FAILURE_VALUE, METRIC_HTTP_LOGS_TRANSFORM_ELAPSED, METRIC_SUCCESS_VALUE,
 };
@@ -76,7 +75,6 @@ pub(crate) async fn run_pipeline(
                 }]
             })
             .context(PipelineTransformSnafu)
-            .context(PipelineSnafu)
     } else {
         let pipeline = get_pipeline(pipeline_definition, state, query_ctx).await?;
 
@@ -94,8 +92,7 @@ pub(crate) async fn run_pipeline(
                         .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
                         .observe(transform_timer.elapsed().as_secs_f64());
                 })
-                .context(PipelineTransformSnafu)
-                .context(PipelineSnafu)?;
+                .context(PipelineTransformSnafu)?;
 
             match r {
                 PipelineExecOutput::Transformed(row) => {

@@ -23,7 +23,7 @@ use pipeline::{GreptimePipelineParams, SelectInfo};
 use crate::http::header::constants::{
     GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME, GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,
     GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME, GREPTIME_LOG_TABLE_NAME_HEADER_NAME,
-    GREPTIME_TRACE_TABLE_NAME_HEADER_NAME,
+    GREPTIME_PIPELINE_PARAMS_HEADER, GREPTIME_TRACE_TABLE_NAME_HEADER_NAME,
 };
 
 /// Axum extractor for optional target log table name from HTTP header
@@ -91,7 +91,7 @@ where
 pub struct PipelineInfo {
     pub pipeline_name: Option<String>,
     pub pipeline_version: Option<String>,
-    pub pipeline_params: Option<GreptimePipelineParams>,
+    pub pipeline_params: GreptimePipelineParams,
 }
 
 impl<S> FromRequestParts<S> for PipelineInfo
@@ -112,7 +112,7 @@ where
         Ok(PipelineInfo {
             pipeline_name,
             pipeline_version,
-            pipeline_params: pipeline_parameters.map(|v| GreptimePipelineParams::from_params(v)),
+            pipeline_params: GreptimePipelineParams::from_params(pipeline_parameters.as_deref()),
         })
     }
 }

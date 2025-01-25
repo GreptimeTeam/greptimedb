@@ -126,7 +126,7 @@ pub async fn logs(
         PipelineWay::OtlpLogDirect(Box::new(select_info))
     };
 
-    let pipeline_params = pipeline_info.pipeline_params.unwrap_or_default();
+    let pipeline_params = pipeline_info.pipeline_params;
 
     // here we use nightly feature `trait_upcasting` to convert handler to
     // pipeline_handler

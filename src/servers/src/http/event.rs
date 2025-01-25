@@ -32,10 +32,7 @@ use headers::ContentType;
 use lazy_static::lazy_static;
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
-use pipeline::{
-    GreptimePipelineParams, GreptimeTransformer, PipelineDefinition, PipelineVersion,
-    GREPTIME_PIPELINE_PARAMS_HEADER,
-};
+use pipeline::{GreptimePipelineParams, GreptimeTransformer, PipelineDefinition, PipelineVersion};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Map, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -45,6 +42,7 @@ use crate::error::{
     status_code_to_http_status, Error, InvalidParameterSnafu, ParseJsonSnafu, PipelineSnafu,
     Result, UnsupportedContentTypeSnafu,
 };
+use crate::http::header::constants::GREPTIME_PIPELINE_PARAMS_HEADER;
 use crate::http::header::CONTENT_TYPE_PROTOBUF_STR;
 use crate::http::result::greptime_manage_resp::GreptimedbManageResponse;
 use crate::http::result::greptime_result_v1::GreptimedbV1Response;
