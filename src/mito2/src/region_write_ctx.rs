@@ -223,6 +223,7 @@ impl RegionWriteCtx {
         } else {
             let write_tasks = mutations.into_iter().map(|(i, kvs)| {
                 let mutable = mutable.clone();
+                // use tokio runtime to schedule tasks.
                 common_runtime::spawn_blocking_global(move || (i, mutable.write(&kvs)))
             });
             for result in futures::future::join_all(write_tasks).await {
