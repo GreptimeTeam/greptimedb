@@ -209,9 +209,7 @@ impl RegionWriteCtx {
             .into_iter()
             .enumerate()
             .filter_map(|(i, mutation)| {
-                let Some(kvs) = KeyValues::new(&self.version.metadata, mutation) else {
-                    return None;
-                };
+                let kvs = KeyValues::new(&self.version.metadata, mutation)?;
                 Some((i, kvs))
             })
             .collect::<Vec<_>>();
