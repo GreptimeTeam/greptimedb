@@ -36,7 +36,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// Takes and handles all write requests.
     pub(crate) async fn handle_write_requests(
         &mut self,
-        mut write_requests: Vec<SenderWriteRequest>,
+        write_requests: &mut Vec<SenderWriteRequest>,
         allow_stall: bool,
     ) {
         if write_requests.is_empty() {
@@ -56,7 +56,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         if self.write_buffer_manager.should_stall() && allow_stall {
             self.stalled_count.add(write_requests.len() as i64);
-            self.stalled_requests.append(&mut write_requests);
+            self.stalled_requests.append(write_requests);
             self.listener.on_write_stall();
             return;
         }
@@ -125,8 +125,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let stalled = std::mem::take(&mut self.stalled_requests);
         self.stalled_count.sub(stalled.requests.len() as i64);
         // We already stalled these requests, don't stall them again.
-        for (_, (_, requests)) in stalled.requests {
-            self.handle_write_requests(requests, false).await;
+        for (_, (_, mut requests)) in stalled.requests {
+            self.handle_write_requests(&mut requests, false).await;
         }
     }
 
@@ -134,25 +134,25 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) fn reject_stalled_requests(&mut self) {
         let stalled = std::mem::take(&mut self.stalled_requests);
         self.stalled_count.sub(stalled.requests.len() as i64);
-        for (_, (_, requests)) in stalled.requests {
-            reject_write_requests(requests);
+        for (_, (_, mut requests)) in stalled.requests {
+            reject_write_requests(&mut requests);
         }
     }
 
     /// Rejects a specific region's stalled requests.
     pub(crate) fn reject_region_stalled_requests(&mut self, region_id: &RegionId) {
         debug!("Rejects stalled requests for region {}", region_id);
-        let requests = self.stalled_requests.remove(region_id);
+        let mut requests = self.stalled_requests.remove(region_id);
         self.stalled_count.sub(requests.len() as i64);
-        reject_write_requests(requests);
+        reject_write_requests(&mut requests);
     }
 
     /// Handles a specific region's stalled requests.
     pub(crate) async fn handle_region_stalled_requests(&mut self, region_id: &RegionId) {
         debug!("Handles stalled requests for region {}", region_id);
-        let requests = self.stalled_requests.remove(region_id);
+        let mut requests = self.stalled_requests.remove(region_id);
         self.stalled_count.sub(requests.len() as i64);
-        self.handle_write_requests(requests, true).await;
+        self.handle_write_requests(&mut requests, true).await;
     }
 }
 
@@ -160,11 +160,11 @@ impl<S> RegionWorkerLoop<S> {
     /// Validates and groups requests by region.
     fn prepare_region_write_ctx(
         &mut self,
-        write_requests: Vec<SenderWriteRequest>,
+        write_requests: &mut Vec<SenderWriteRequest>,
     ) -> HashMap<RegionId, RegionWriteCtx> {
         // Initialize region write context map.
         let mut region_ctxs = HashMap::new();
-        for mut sender_req in write_requests {
+        for mut sender_req in write_requests.drain(..) {
             let region_id = sender_req.request.region_id;
 
             // If region is waiting for alteration, add requests to pending writes.
@@ -266,10 +266,10 @@ impl<S> RegionWorkerLoop<S> {
 }
 
 /// Send rejected error to all `write_requests`.
-fn reject_write_requests(write_requests: Vec<SenderWriteRequest>) {
+fn reject_write_requests(write_requests: &mut Vec<SenderWriteRequest>) {
     WRITE_REJECT_TOTAL.inc_by(write_requests.len() as u64);
 
-    for req in write_requests {
+    for req in write_requests.drain(..) {
         req.sender.send(
             RejectWriteSnafu {
                 region_id: req.request.region_id,
