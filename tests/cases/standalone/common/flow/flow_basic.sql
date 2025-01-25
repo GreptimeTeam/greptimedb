@@ -172,41 +172,6 @@ DROP TABLE distinct_basic;
 
 DROP TABLE out_distinct_basic;
 
--- test interprete interval
-CREATE TABLE numbers_input_basic (
-    number INT,
-    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY(number),
-    TIME INDEX(ts)
-);
-
-create table out_num_cnt_basic (
-    a INTERVAL,
-    b INTERVAL,
-    c INTERVAL,
-    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP TIME INDEX
-);
-
-CREATE FLOW filter_numbers_basic SINK TO out_num_cnt_basic AS
-SELECT
-    INTERVAL '1 day 1 second',
-    INTERVAL '1 month 1 day 1 second',
-    INTERVAL '1 year 1 month'
-FROM
-    numbers_input_basic
-where
-    number > 10;
-
-SHOW CREATE FLOW filter_numbers_basic;
-
-SHOW CREATE TABLE out_num_cnt_basic;
-
-drop flow filter_numbers_basic;
-
-drop table out_num_cnt_basic;
-
-drop table numbers_input_basic;
-
 CREATE TABLE bytes_log (
     byte INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

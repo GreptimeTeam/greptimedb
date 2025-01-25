@@ -17,6 +17,12 @@ SELECT * FROM test_alt_table WHERE i = 1;
 -- SQLNESS ARG restart=true
 ALTER TABLE test_alt_table ADD COLUMN m INTEGER;
 
+-- Should fail issue #5422
+ALTER TABLE test_alt_table ADD COLUMN n interval;
+
+-- Should fail issue #5422
+ALTER TABLE test_alt_table MODIFY COLUMN m interval;
+
 DESC TABLE test_alt_table;
 
 DROP TABLE test_alt_table;
