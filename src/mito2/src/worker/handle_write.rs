@@ -105,10 +105,27 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let _timer = WRITE_STAGE_ELAPSED
                 .with_label_values(&["write_memtable"])
                 .start_timer();
-            for mut region_ctx in region_ctxs.into_values() {
-                region_ctx.write_memtable();
+            if region_ctxs.len() == 1 {
+                let mut region_ctx = region_ctxs.into_values().next().unwrap();
+                region_ctx.write_memtable().await;
                 put_rows += region_ctx.put_num;
                 delete_rows += region_ctx.delete_num;
+            } else {
+                let region_write_task = region_ctxs
+                    .into_values()
+                    .map(|mut region_ctx| {
+                        common_runtime::spawn_global(async move {
+                            region_ctx.write_memtable().await;
+                            (region_ctx.put_num, region_ctx.delete_num)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+
+                for result in futures::future::join_all(region_write_task).await {
+                    let (put, delete) = result.unwrap();
+                    put_rows += put;
+                    delete_rows += delete;
+                }
             }
         }
         WRITE_ROWS_TOTAL

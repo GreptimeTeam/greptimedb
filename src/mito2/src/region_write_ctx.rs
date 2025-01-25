@@ -197,23 +197,39 @@ impl RegionWriteCtx {
     }
 
     /// Consumes mutations and writes them into mutable memtable.
-    pub(crate) fn write_memtable(&mut self) {
+    pub(crate) async fn write_memtable(&mut self) {
         debug_assert_eq!(self.notifiers.len(), self.wal_entry.mutations.len());
 
         if self.failed {
             return;
         }
 
-        let mutable = &self.version.memtables.mutable;
-        // Takes mutations from the wal entry.
-        let mutations = mem::take(&mut self.wal_entry.mutations);
-        for (mutation, notify) in mutations.into_iter().zip(&mut self.notifiers) {
-            // Write mutation to the memtable.
-            let Some(kvs) = KeyValues::new(&self.version.metadata, mutation) else {
-                continue;
-            };
-            if let Err(e) = mutable.write(&kvs) {
-                notify.err = Some(Arc::new(e));
+        let mutable = self.version.memtables.mutable.clone();
+        let mutations = mem::take(&mut self.wal_entry.mutations)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, mutation)| {
+                let Some(kvs) = KeyValues::new(&self.version.metadata, mutation) else {
+                    return None;
+                };
+                Some((i, kvs))
+            })
+            .collect::<Vec<_>>();
+
+        if mutations.len() == 1 {
+            if let Err(err) = mutable.write(&mutations[0].1) {
+                self.notifiers[mutations[0].0].err = Some(Arc::new(err));
+            }
+        } else {
+            let write_tasks = mutations.into_iter().map(|(i, kvs)| {
+                let mutable = mutable.clone();
+                common_runtime::spawn_blocking_global(move || (i, mutable.write(&kvs)))
+            });
+            for result in futures::future::join_all(write_tasks).await {
+                let (i, result) = result.unwrap();
+                if let Err(err) = result {
+                    self.notifiers[i].err = Some(Arc::new(err));
+                }
             }
         }
 
