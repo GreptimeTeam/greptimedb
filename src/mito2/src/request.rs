@@ -256,11 +256,13 @@ impl WriteRequest {
     pub(crate) fn fill_missing_columns(&mut self, metadata: &RegionMetadata) -> Result<()> {
         debug_assert_eq!(self.region_id, metadata.region_id);
 
+        let mut columns_to_fill = vec![];
         for column in &metadata.column_metadatas {
             if !self.name_to_index.contains_key(&column.column_schema.name) {
-                self.fill_column(column)?;
+                columns_to_fill.push(column);
             }
         }
+        self.fill_columns(columns_to_fill)?;
 
         Ok(())
     }
@@ -281,37 +283,40 @@ impl WriteRequest {
         Ok(())
     }
 
-    /// Fills default value for specific `column`.
-    fn fill_column(&mut self, column: &ColumnMetadata) -> Result<()> {
-        // Need to add a default value for this column.
-        let proto_value = self.column_default_value(column)?;
-
-        if proto_value.value_data.is_none() {
-            return Ok(());
+    /// Fills default value for specific `columns`.
+    fn fill_columns(&mut self, columns: Vec<&ColumnMetadata>) -> Result<()> {
+        let mut default_values = Vec::with_capacity(columns.len());
+        let mut columns_to_fill = Vec::with_capacity(columns.len());
+        for column in columns {
+            let default_value = self.column_default_value(column)?;
+            if default_value.value_data.is_some() {
+                default_values.push(default_value);
+                columns_to_fill.push(column);
+            }
         }
 
-        // Insert default value to each row.
         for row in &mut self.rows.rows {
-            row.values.push(proto_value.clone());
+            row.values.extend(default_values.clone());
         }
 
-        // Insert column schema.
-        let (datatype, datatype_ext) =
-            ColumnDataTypeWrapper::try_from(column.column_schema.data_type.clone())
-                .with_context(|_| ConvertColumnDataTypeSnafu {
-                    reason: format!(
-                        "no protobuf type for column {} ({:?})",
-                        column.column_schema.name, column.column_schema.data_type
-                    ),
-                })?
-                .to_parts();
-        self.rows.schema.push(ColumnSchema {
-            column_name: column.column_schema.name.clone(),
-            datatype: datatype as i32,
-            semantic_type: column.semantic_type as i32,
-            datatype_extension: datatype_ext,
-            options: options_from_column_schema(&column.column_schema),
-        });
+        for column in columns_to_fill {
+            let (datatype, datatype_ext) =
+                ColumnDataTypeWrapper::try_from(column.column_schema.data_type.clone())
+                    .with_context(|_| ConvertColumnDataTypeSnafu {
+                        reason: format!(
+                            "no protobuf type for column {} ({:?})",
+                            column.column_schema.name, column.column_schema.data_type
+                        ),
+                    })?
+                    .to_parts();
+            self.rows.schema.push(ColumnSchema {
+                column_name: column.column_schema.name.clone(),
+                datatype: datatype as i32,
+                semantic_type: column.semantic_type as i32,
+                datatype_extension: datatype_ext,
+                options: options_from_column_schema(&column.column_schema),
+            });
+        }
 
         Ok(())
     }
