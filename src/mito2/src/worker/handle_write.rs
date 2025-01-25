@@ -18,7 +18,7 @@ use std::collections::{hash_map, HashMap};
 use std::sync::Arc;
 
 use api::v1::OpType;
-use common_telemetry::debug;
+use common_telemetry::{debug, error};
 use snafu::ensure;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::LogStore;
@@ -106,6 +106,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .with_label_values(&["write_memtable"])
                 .start_timer();
             if region_ctxs.len() == 1 {
+                // fast path for single region.
                 let mut region_ctx = region_ctxs.into_values().next().unwrap();
                 region_ctx.write_memtable().await;
                 put_rows += region_ctx.put_num;
@@ -114,6 +115,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 let region_write_task = region_ctxs
                     .into_values()
                     .map(|mut region_ctx| {
+                        // use tokio runtime to schedule tasks.
                         common_runtime::spawn_global(async move {
                             region_ctx.write_memtable().await;
                             (region_ctx.put_num, region_ctx.delete_num)
@@ -122,9 +124,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     .collect::<Vec<_>>();
 
                 for result in futures::future::join_all(region_write_task).await {
-                    let (put, delete) = result.unwrap();
-                    put_rows += put;
-                    delete_rows += delete;
+                    match result {
+                        Ok((put, delete)) => {
+                            put_rows += put;
+                            delete_rows += delete;
+                        }
+                        Err(e) => {
+                            error!(e; "unexpected error when joining region write tasks");
+                        }
+                    }
                 }
             }
         }
