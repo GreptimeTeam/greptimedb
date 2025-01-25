@@ -983,7 +983,7 @@ impl PromPlanner {
     fn build_time_index_filter(&self, offset_duration: i64) -> Result<Option<DfExpr>> {
         let start = self.ctx.start;
         let end = self.ctx.end;
-        if end <= start {
+        if end < start {
             return InvalidTimeRangeSnafu { start, end }.fail();
         }
         let lookback_delta = self.ctx.lookback_delta;
