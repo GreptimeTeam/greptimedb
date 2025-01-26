@@ -572,14 +572,22 @@ pub fn identity_pipeline(
     table: Option<Arc<table::Table>>,
     params: &GreptimePipelineParams,
 ) -> Result<Rows> {
-    // TODO: flatten
+    let input = if params.flatten_json_object() {
+        array
+            .into_iter()
+            .map(|item| flatten_object(item, DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING))
+            .collect::<Result<Vec<BTreeMap<String, Value>>>>()?
+    } else {
+        array
+    };
+
     match table {
         Some(table) => {
             let table_info = table.table_info();
             let tag_column_names = table_info.meta.row_key_column_names();
-            identity_pipeline_inner(array, Some(tag_column_names), params)
+            identity_pipeline_inner(input, Some(tag_column_names), params)
         }
-        None => identity_pipeline_inner(array, None::<std::iter::Empty<&String>>, params),
+        None => identity_pipeline_inner(input, None::<std::iter::Empty<&String>>, params),
     }
 }
 
@@ -587,24 +595,24 @@ pub fn identity_pipeline(
 ///
 /// The `max_nested_levels` parameter is used to limit the nested levels of the JSON object.
 /// The error will be returned if the nested levels is greater than the `max_nested_levels`.
-pub fn flatten_json_object(
-    object: Map<String, JsonValue>,
+pub fn flatten_object(
+    object: BTreeMap<String, Value>,
     max_nested_levels: usize,
-) -> Result<Map<String, JsonValue>> {
-    let mut flattened = Map::new();
+) -> Result<BTreeMap<String, Value>> {
+    let mut flattened = BTreeMap::new();
 
     if !object.is_empty() {
         // it will use recursion to flatten the object.
-        do_flatten_json_object(&mut flattened, None, object, 1, max_nested_levels)?;
+        do_flatten_object(&mut flattened, None, object, 1, max_nested_levels)?;
     }
 
     Ok(flattened)
 }
 
-fn do_flatten_json_object(
-    dest: &mut Map<String, JsonValue>,
+fn do_flatten_object(
+    dest: &mut BTreeMap<String, Value>,
     base: Option<&str>,
-    object: Map<String, JsonValue>,
+    object: BTreeMap<String, Value>,
     current_level: usize,
     max_nested_levels: usize,
 ) -> Result<()> {
@@ -617,11 +625,11 @@ fn do_flatten_json_object(
         let new_key = base.map_or_else(|| key.clone(), |base_key| format!("{base_key}.{key}"));
 
         match value {
-            JsonValue::Object(object) => {
-                do_flatten_json_object(
+            Value::Map(object) => {
+                do_flatten_object(
                     dest,
                     Some(&new_key),
-                    object,
+                    object.values,
                     current_level + 1,
                     max_nested_levels,
                 )?;
@@ -640,9 +648,7 @@ fn do_flatten_json_object(
 mod tests {
     use api::v1::SemanticType;
 
-    use crate::etl::transform::transformer::greptime::{
-        flatten_json_object, identity_pipeline_inner, GreptimePipelineParams,
-    };
+    use super::*;
     use crate::etl::{json_array_to_intermediate_state, json_to_intermediate_state};
     use crate::{identity_pipeline, Pipeline};
 
@@ -864,14 +870,11 @@ mod tests {
         ];
 
         for (input, max_depth, expected) in test_cases {
-            let flattened_object =
-                flatten_json_object(input.as_object().unwrap().clone(), max_depth);
-            match flattened_object {
-                Ok(flattened_object) => {
-                    assert_eq!(&flattened_object, expected.unwrap().as_object().unwrap())
-                }
-                Err(_) => assert_eq!(None, expected),
-            }
+            let input = json_to_intermediate_state(input).unwrap();
+            let expected = expected.map(|e| json_to_intermediate_state(e).unwrap());
+
+            let flattened_object = flatten_object(input, max_depth).ok();
+            assert_eq!(flattened_object, expected);
         }
     }
 
