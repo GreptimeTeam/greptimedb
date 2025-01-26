@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::v1::region::{
     region_request, DropRequest as PbDropRegionRequest, RegionRequest, RegionRequestHeader,
 };
@@ -124,9 +126,15 @@ impl DropTableExecutor {
         &self,
         ctx: &DdlContext,
         table_route_value: &TableRouteValue,
+        region_wal_options: &HashMap<u32, String>,
     ) -> Result<()> {
         ctx.table_metadata_manager
-            .delete_table_metadata_tombstone(self.table_id, &self.table, table_route_value)
+            .delete_table_metadata_tombstone(
+                self.table_id,
+                &self.table,
+                table_route_value,
+                region_wal_options,
+            )
             .await
     }
 
@@ -135,9 +143,15 @@ impl DropTableExecutor {
         &self,
         ctx: &DdlContext,
         table_route_value: &TableRouteValue,
+        region_wal_options: &HashMap<u32, String>,
     ) -> Result<()> {
         ctx.table_metadata_manager
-            .destroy_table_metadata(self.table_id, &self.table, table_route_value)
+            .destroy_table_metadata(
+                self.table_id,
+                &self.table,
+                table_route_value,
+                region_wal_options,
+            )
             .await?;
 
         let detecting_regions = if table_route_value.is_physical() {

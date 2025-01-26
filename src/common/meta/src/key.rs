@@ -136,6 +136,7 @@ use table::metadata::{RawTableInfo, TableId};
 use table::table_name::TableName;
 use table_info::{TableInfoKey, TableInfoManager, TableInfoValue};
 use table_name::{TableNameKey, TableNameManager, TableNameValue};
+use topic_region::TopicRegionManager;
 use view_info::{ViewInfoKey, ViewInfoManager, ViewInfoValue};
 
 use self::catalog_name::{CatalogManager, CatalogNameKey, CatalogNameValue};
@@ -306,6 +307,7 @@ pub struct TableMetadataManager {
     schema_manager: SchemaManager,
     table_route_manager: TableRouteManager,
     tombstone_manager: TombstoneManager,
+    topic_region_manager: TopicRegionManager,
     kv_backend: KvBackendRef,
 }
 
@@ -456,6 +458,7 @@ impl TableMetadataManager {
             schema_manager: SchemaManager::new(kv_backend.clone()),
             table_route_manager: TableRouteManager::new(kv_backend.clone()),
             tombstone_manager: TombstoneManager::new(kv_backend.clone()),
+            topic_region_manager: TopicRegionManager::new(kv_backend.clone()),
             kv_backend,
         }
     }
@@ -648,10 +651,15 @@ impl TableMetadataManager {
             .table_route_storage()
             .build_create_txn(table_id, &table_route_value)?;
 
+        let create_topic_region_txns = self
+            .topic_region_manager
+            .build_create_txn(table_id, &region_wal_options);
+
         let mut txn = Txn::merge_all(vec![
             create_table_name_txn,
             create_table_info_txn,
             create_table_route_txn,
+            create_topic_region_txns,
         ]);
 
         if let TableRouteValue::Physical(x) = &table_route_value {
@@ -835,9 +843,22 @@ impl TableMetadataManager {
         table_id: TableId,
         table_name: &TableName,
         table_route_value: &TableRouteValue,
+        region_wal_options: &HashMap<RegionNumber, String>,
     ) -> Result<()> {
-        let keys = self.table_metadata_keys(table_id, table_name, table_route_value)?;
-        self.tombstone_manager.delete(keys).await
+        let table_metadata_keys =
+            self.table_metadata_keys(table_id, table_name, table_route_value)?;
+        let tombstone_txn = self
+            .tombstone_manager
+            .build_delete_txn(&table_metadata_keys)?;
+
+        let topic_region_txn = self
+            .topic_region_manager
+            .build_delete_txn(table_id, region_wal_options)?;
+        let txn = tombstone_txn.merge(topic_region_txn);
+
+        // Always success.
+        let _ = self.kv_backend.txn(txn).await?;
+        Ok(())
     }
 
     /// Restores metadata for table.
@@ -859,12 +880,19 @@ impl TableMetadataManager {
         table_id: TableId,
         table_name: &TableName,
         table_route_value: &TableRouteValue,
+        region_wal_options: &HashMap<RegionNumber, String>,
     ) -> Result<()> {
         let keys = self.table_metadata_keys(table_id, table_name, table_route_value)?;
-        let _ = self
-            .kv_backend
-            .batch_delete(BatchDeleteRequest::new().with_keys(keys))
-            .await?;
+        let operations = keys.into_iter().map(TxnOp::Delete).collect::<Vec<_>>();
+        let txn = Txn::new().and_then(operations);
+
+        let topic_region_txn = self
+            .topic_region_manager
+            .build_delete_txn(table_id, region_wal_options)?;
+        let txn = txn.merge(topic_region_txn);
+
+        // Always success.
+        let _ = self.kv_backend.txn(txn).await?;
         Ok(())
     }
 
@@ -1309,8 +1337,9 @@ mod tests {
     use bytes::Bytes;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_time::util::current_time_millis;
+    use common_wal::options::{KafkaWalOptions, WalOptions};
     use futures::TryStreamExt;
-    use store_api::storage::RegionId;
+    use store_api::storage::{RegionId, RegionNumber};
     use table::metadata::{RawTableInfo, TableInfo};
     use table::table_name::TableName;
 
@@ -1323,10 +1352,15 @@ mod tests {
     use crate::key::table_info::TableInfoValue;
     use crate::key::table_name::TableNameKey;
     use crate::key::table_route::TableRouteValue;
-    use crate::key::{DeserializedValueWithBytes, TableMetadataManager, ViewInfoValue};
+    use crate::key::{
+        DeserializedValueWithBytes, TableMetadataManager, ViewInfoValue, TOPIC_REGION_PREFIX,
+    };
     use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::kv_backend::KvBackend;
     use crate::peer::Peer;
     use crate::rpc::router::{region_distribution, LeaderState, Region, RegionRoute};
+    use crate::rpc::store::RangeRequest;
+    use crate::wal_options_allocator::{allocate_region_wal_options, WalOptionsAllocator};
 
     #[test]
     fn test_deserialized_value_with_bytes() {
@@ -1398,14 +1432,62 @@ mod tests {
         table_metadata_manager: &TableMetadataManager,
         table_info: RawTableInfo,
         region_routes: Vec<RegionRoute>,
+        region_wal_options: HashMap<RegionNumber, String>,
     ) -> Result<()> {
         table_metadata_manager
             .create_table_metadata(
                 table_info,
                 TableRouteValue::physical(region_routes),
-                HashMap::default(),
+                region_wal_options,
             )
             .await
+    }
+
+    fn create_mock_region_wal_options() -> HashMap<RegionNumber, String> {
+        let topics = (0..16)
+            .map(|i| format!("greptimedb_topic{}", i))
+            .collect::<Vec<_>>();
+        let options_batch = topics
+            .iter()
+            .map(|topic| {
+                WalOptions::Kafka(KafkaWalOptions {
+                    topic: topic.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let wal_options = options_batch
+            .into_iter()
+            .map(|wal_options| serde_json::to_string(&wal_options).unwrap())
+            .collect::<Vec<_>>();
+
+        (0..16).zip(wal_options).collect()
+    }
+
+    #[tokio::test]
+    async fn test_raft_engine_topic_region_map() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let table_metadata_manager = TableMetadataManager::new(mem_kv.clone());
+        let region_route = new_test_region_route();
+        let region_routes = &vec![region_route.clone()];
+        let table_info: RawTableInfo =
+            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
+        let wal_allocator = WalOptionsAllocator::RaftEngine;
+        let regions = (0..16).collect();
+        let region_wal_options = allocate_region_wal_options(regions, &wal_allocator).unwrap();
+        create_physical_table_metadata(
+            &table_metadata_manager,
+            table_info.clone(),
+            region_routes.clone(),
+            region_wal_options.clone(),
+        )
+        .await
+        .unwrap();
+
+        let topic_region_key = TOPIC_REGION_PREFIX.to_string();
+        let range_req = RangeRequest::new().with_prefix(topic_region_key);
+        let resp = mem_kv.range(range_req).await.unwrap();
+        // Should be empty because the topic region map is empty for raft engine.
+        assert!(resp.kvs.is_empty());
     }
 
     #[tokio::test]
@@ -1416,11 +1498,14 @@ mod tests {
         let region_routes = &vec![region_route.clone()];
         let table_info: RawTableInfo =
             new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
+        let region_wal_options = create_mock_region_wal_options();
+
         // creates metadata.
         create_physical_table_metadata(
             &table_metadata_manager,
             table_info.clone(),
             region_routes.clone(),
+            region_wal_options.clone(),
         )
         .await
         .unwrap();
@@ -1430,6 +1515,7 @@ mod tests {
             &table_metadata_manager,
             table_info.clone(),
             region_routes.clone(),
+            region_wal_options.clone(),
         )
         .await
         .is_ok());
@@ -1440,7 +1526,8 @@ mod tests {
         assert!(create_physical_table_metadata(
             &table_metadata_manager,
             table_info.clone(),
-            modified_region_routes
+            modified_region_routes,
+            region_wal_options.clone(),
         )
         .await
         .is_err());
@@ -1462,6 +1549,19 @@ mod tests {
                 .unwrap(),
             region_routes
         );
+
+        for i in 0..16 {
+            let region_number = i as u32;
+            let region_id = RegionId::new(table_info.ident.table_id, region_number);
+            let topic = format!("greptimedb_topic{}", i);
+            let regions = table_metadata_manager
+                .topic_region_manager
+                .regions(&topic)
+                .await
+                .unwrap();
+            assert_eq!(regions.len(), 1);
+            assert_eq!(regions[0], region_id);
+        }
     }
 
     #[tokio::test]
@@ -1563,6 +1663,7 @@ mod tests {
             &table_metadata_manager,
             table_info.clone(),
             region_routes.clone(),
+            create_mock_region_wal_options(),
         )
         .await
         .unwrap();
@@ -1617,6 +1718,14 @@ mod tests {
             .await
             .unwrap();
         assert!(table_route.is_none());
+        // Logical delete does not remove the topic region mapping.
+        let regions = table_metadata_manager
+            .topic_region_manager
+            .regions("greptimedb_topic1")
+            .await
+            .unwrap();
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0], RegionId::new(table_id, 1));
     }
 
     #[tokio::test]
@@ -1633,6 +1742,7 @@ mod tests {
             &table_metadata_manager,
             table_info.clone(),
             region_routes.clone(),
+            HashMap::new(),
         )
         .await
         .unwrap();
@@ -1705,6 +1815,7 @@ mod tests {
             &table_metadata_manager,
             table_info.clone(),
             region_routes.clone(),
+            HashMap::new(),
         )
         .await
         .unwrap();
@@ -1790,6 +1901,7 @@ mod tests {
             &table_metadata_manager,
             table_info.clone(),
             region_routes.clone(),
+            HashMap::new(),
         )
         .await
         .unwrap();
@@ -1870,6 +1982,7 @@ mod tests {
             &table_metadata_manager,
             table_info.clone(),
             region_routes.clone(),
+            HashMap::new(),
         )
         .await
         .unwrap();
@@ -1980,7 +2093,7 @@ mod tests {
         let table_id = 1025;
         let table_name = "foo";
         let task = test_create_table_task(table_name, table_id);
-        let options = [(0, "test".to_string())].into();
+        let options = create_mock_region_wal_options();
         table_metadata_manager
             .create_table_metadata(
                 task.table_info,
@@ -2007,7 +2120,7 @@ mod tests {
                         leader_down_since: None,
                     },
                 ]),
-                options,
+                options.clone(),
             )
             .await
             .unwrap();
@@ -2020,7 +2133,7 @@ mod tests {
             .unwrap()
             .unwrap();
         table_metadata_manager
-            .destroy_table_metadata(table_id, &table_name, &table_route_value)
+            .destroy_table_metadata(table_id, &table_name, &table_route_value, &options)
             .await
             .unwrap();
         assert!(mem_kv.is_empty());
@@ -2033,7 +2146,7 @@ mod tests {
         let table_id = 1025;
         let table_name = "foo";
         let task = test_create_table_task(table_name, table_id);
-        let options = [(0, "test".to_string())].into();
+        let options = create_mock_region_wal_options();
         table_metadata_manager
             .create_table_metadata(
                 task.table_info,

@@ -26,16 +26,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::fmt::{self, Display};
 
+use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, RegionNumber};
+use table::metadata::TableId;
 
 use crate::error::{Error, InvalidMetadataSnafu, Result};
 use crate::key::{MetadataKey, TOPIC_REGION_PATTERN, TOPIC_REGION_PREFIX};
+use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::store::{BatchPutRequest, PutRequest, RangeRequest};
+use crate::rpc::store::{BatchDeleteRequest, BatchPutRequest, PutRequest, RangeRequest};
 use crate::rpc::KeyValue;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,7 +57,7 @@ impl<'a> TopicRegionKey<'a> {
     }
 
     pub fn range_topic_key(topic: &str) -> String {
-        format!("{}/{}", TOPIC_REGION_PREFIX, topic)
+        format!("{}/{}/", TOPIC_REGION_PREFIX, topic)
     }
 }
 
@@ -80,7 +84,7 @@ impl Display for TopicRegionKey<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}/{}",
+            "{}{}",
             Self::range_topic_key(self.topic),
             self.region_id.as_u64()
         )
@@ -151,6 +155,23 @@ impl TopicRegionManager {
         Ok(())
     }
 
+    pub fn build_create_txn(
+        &self,
+        table_id: TableId,
+        region_wal_options: &HashMap<RegionNumber, String>,
+    ) -> Txn {
+        let topic_region_map = self.topic_region_map(table_id, region_wal_options);
+        let topic_region_keys = topic_region_map
+            .iter()
+            .map(|(topic, region_id)| TopicRegionKey::new(*topic, region_id))
+            .collect::<Vec<_>>();
+        let operations = topic_region_keys
+            .into_iter()
+            .map(|key| TxnOp::Put(key.to_bytes(), vec![]))
+            .collect::<Vec<_>>();
+        Txn::new().and_then(operations)
+    }
+
     /// Returns the list of region ids using specified topic.
     pub async fn regions(&self, topic: &str) -> Result<Vec<RegionId>> {
         let prefix = TopicRegionKey::range_topic_key(topic);
@@ -168,6 +189,58 @@ impl TopicRegionManager {
         let raw_key = key.to_bytes();
         self.kv_backend.delete(&raw_key, false).await?;
         Ok(())
+    }
+
+    pub(crate) fn build_delete_txn(
+        &self,
+        table_id: TableId,
+        region_wal_options: &HashMap<RegionNumber, String>,
+    ) -> Result<Txn> {
+        let topic_region_map = self.topic_region_map(table_id, region_wal_options);
+        let topic_region_keys = topic_region_map
+            .iter()
+            .map(|(topic, region_id)| TopicRegionKey::new(*topic, region_id))
+            .collect::<Vec<_>>();
+        let operations = topic_region_keys
+            .into_iter()
+            .map(|key| TxnOp::Delete(key.to_bytes()))
+            .collect::<Vec<_>>();
+        Ok(Txn::new().and_then(operations))
+    }
+
+    pub async fn batch_delete(&self, keys: Vec<TopicRegionKey<'_>>) -> Result<()> {
+        let raw_keys = keys.iter().map(|key| key.to_bytes()).collect::<Vec<_>>();
+        let req = BatchDeleteRequest {
+            keys: raw_keys,
+            prev_kv: false,
+        };
+        self.kv_backend.batch_delete(req).await?;
+        Ok(())
+    }
+
+    fn topic_region_map(
+        &self,
+        table_id: TableId,
+        region_wal_options: &HashMap<RegionNumber, String>,
+    ) -> Vec<(RegionId, String)> {
+        let region_ids = region_wal_options
+            .keys()
+            .map(|region_number| RegionId::new(table_id, *region_number))
+            .collect::<Vec<_>>();
+        let keys = region_ids
+            .into_iter()
+            .zip(region_wal_options.values())
+            .filter_map(|(region_id, topic_json)| {
+                // topic json is a serialized json string of `RegionWalOptions`.
+                // Safety: should always success
+                let topic = serde_json::from_str::<WalOptions>(topic_json).unwrap();
+                match topic {
+                    WalOptions::Kafka(kafka) => Some((region_id, kafka.topic)),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>();
+        keys
     }
 }
 
