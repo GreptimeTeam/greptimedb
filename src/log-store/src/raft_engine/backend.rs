@@ -17,7 +17,8 @@
 use std::any::Any;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::path::Path;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use common_error::ext::BoxedError;
 use common_meta::error as meta_error;
@@ -30,16 +31,19 @@ use common_meta::rpc::store::{
 };
 use common_meta::rpc::KeyValue;
 use common_meta::util::get_next_prefix_key;
+use common_runtime::RepeatedTask;
 use raft_engine::{Config, Engine, LogBatch};
 use snafu::{IntoError, ResultExt};
 
-use crate::error::{self, IoSnafu, RaftEngineSnafu};
+use crate::error::{self, Error, IoSnafu, RaftEngineSnafu, StartGcTaskSnafu};
+use crate::raft_engine::log_store::PurgeExpiredFilesFunction;
 
 pub(crate) const SYSTEM_NAMESPACE: u64 = 0;
 
 /// RaftEngine based [KvBackend] implementation.
 pub struct RaftEngineBackend {
-    engine: RwLock<Engine>,
+    engine: RwLock<Arc<Engine>>,
+    _gc_task: RepeatedTask<Error>,
 }
 
 fn ensure_dir(dir: &str) -> error::Result<()> {
@@ -71,9 +75,19 @@ impl RaftEngineBackend {
             ensure_dir(spill_dir)?;
         }
 
-        let engine = Engine::open(config).context(RaftEngineSnafu)?;
+        let engine = Arc::new(Engine::open(config).context(RaftEngineSnafu)?);
+        let gc_task = RepeatedTask::new(
+            Duration::from_secs(60),
+            Box::new(PurgeExpiredFilesFunction {
+                engine: engine.clone(),
+            }),
+        );
+        gc_task
+            .start(common_runtime::global_runtime())
+            .context(StartGcTaskSnafu)?;
         Ok(Self {
             engine: RwLock::new(engine),
+            _gc_task: gc_task,
         })
     }
 }
@@ -411,8 +425,8 @@ mod tests {
             purge_threshold: ReadableSize::mb(16),
             ..Default::default()
         };
-        let engine = RwLock::new(Engine::open(config).unwrap());
-        RaftEngineBackend { engine }
+
+        RaftEngineBackend::try_open_with_cfg(config).unwrap()
     }
 
     #[tokio::test]

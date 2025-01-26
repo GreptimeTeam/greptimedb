@@ -40,7 +40,7 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
-use common_telemetry::{debug, error, tracing};
+use common_telemetry::{debug, error, info, tracing};
 use datafusion_expr::LogicalPlan;
 use log_store::raft_engine::RaftEngineBackend;
 use operator::delete::DeleterRef;
@@ -134,19 +134,22 @@ impl Instance {
         kv_backend_config: KvBackendConfig,
         procedure_config: ProcedureConfig,
     ) -> Result<(KvBackendRef, ProcedureManagerRef)> {
-        let kv_backend = Arc::new(
-            RaftEngineBackend::try_open_with_cfg(Config {
-                dir,
-                purge_threshold: ReadableSize(kv_backend_config.purge_threshold.0),
-                recovery_mode: RecoveryMode::TolerateTailCorruption,
-                batch_compression_threshold: ReadableSize::kb(8),
-                target_file_size: ReadableSize(kv_backend_config.file_size.0),
-                ..Default::default()
-            })
-            .map_err(BoxedError::new)
-            .context(error::OpenRaftEngineBackendSnafu)?,
+        info!(
+            "Creating metadata kvbackend with config: {:?}",
+            kv_backend_config
         );
+        let kv_backend = RaftEngineBackend::try_open_with_cfg(Config {
+            dir,
+            purge_threshold: ReadableSize(kv_backend_config.purge_threshold.0),
+            recovery_mode: RecoveryMode::TolerateTailCorruption,
+            batch_compression_threshold: ReadableSize::kb(8),
+            target_file_size: ReadableSize(kv_backend_config.file_size.0),
+            ..Default::default()
+        })
+        .map_err(BoxedError::new)
+        .context(error::OpenRaftEngineBackendSnafu)?;
 
+        let kv_backend = Arc::new(kv_backend);
         let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
 
         let manager_config = ManagerConfig {

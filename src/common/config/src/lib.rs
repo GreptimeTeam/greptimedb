@@ -46,10 +46,10 @@ pub struct KvBackendConfig {
 impl Default for KvBackendConfig {
     fn default() -> Self {
         Self {
-            // log file size 256MB
-            file_size: ReadableSize::mb(256),
-            // purge threshold 4GB
-            purge_threshold: ReadableSize::gb(4),
+            // The log file size 128MB
+            file_size: ReadableSize::mb(128),
+            // The log purge threshold 512MB
+            purge_threshold: ReadableSize::mb(512),
         }
     }
 }
