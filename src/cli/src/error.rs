@@ -86,6 +86,22 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to parse proxy options: {}", error))]
+    ParseProxyOpts {
+        #[snafu(source)]
+        error: reqwest::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build reqwest client: {}", error))]
+    BuildClient {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: reqwest::Error,
+    },
+
     #[snafu(display("Invalid REPL command: {reason}"))]
     InvalidReplCommand { reason: String },
 
@@ -278,7 +294,8 @@ impl ErrorExt for Error {
             | Error::InitTimezone { .. }
             | Error::ConnectEtcd { .. }
             | Error::CreateDir { .. }
-            | Error::EmptyResult { .. } => StatusCode::InvalidArguments,
+            | Error::EmptyResult { .. }
+            | Error::ParseProxyOpts { .. } => StatusCode::InvalidArguments,
 
             Error::StartProcedureManager { source, .. }
             | Error::StopProcedureManager { source, .. } => source.status_code(),
@@ -298,7 +315,8 @@ impl ErrorExt for Error {
             Error::SerdeJson { .. }
             | Error::FileIo { .. }
             | Error::SpawnThread { .. }
-            | Error::InitTlsProvider { .. } => StatusCode::Unexpected,
+            | Error::InitTlsProvider { .. }
+            | Error::BuildClient { .. } => StatusCode::Unexpected,
 
             Error::Other { source, .. } => source.status_code(),
 

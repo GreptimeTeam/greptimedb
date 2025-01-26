@@ -25,7 +25,7 @@ use snafu::{OptionExt, ResultExt};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
-use crate::database::DatabaseClient;
+use crate::database::{parse_proxy_opts, DatabaseClient};
 use crate::error::{Error, FileIoSnafu, Result, SchemaNotFoundSnafu};
 use crate::{database, Tool};
 
@@ -76,18 +76,30 @@ pub struct ImportCommand {
     /// The default behavior will disable server-side default timeout(i.e. `0s`).
     #[clap(long, value_parser = humantime::parse_duration)]
     timeout: Option<Duration>,
+
+    /// The proxy server address to connect, if set, will override the system proxy.
+    ///
+    /// The default behavior will use the system proxy if neither `proxy` nor `no_proxy` is set.
+    #[clap(long)]
+    proxy: Option<String>,
+
+    /// Disable proxy server, if set, will not use any proxy.
+    #[clap(long, default_value = "false")]
+    no_proxy: bool,
 }
 
 impl ImportCommand {
     pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
         let (catalog, schema) =
             database::split_database(&self.database).map_err(BoxedError::new)?;
+        let proxy = parse_proxy_opts(self.proxy.clone(), self.no_proxy)?;
         let database_client = DatabaseClient::new(
             self.addr.clone(),
             catalog.clone(),
             self.auth_basic.clone(),
             // Treats `None` as `0s` to disable server-side default timeout.
             self.timeout.unwrap_or_default(),
+            proxy,
         );
 
         Ok(Box::new(Import {
