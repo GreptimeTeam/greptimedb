@@ -240,7 +240,7 @@ fn test_load_standalone_example_config() {
                 ..Default::default()
             },
             http: HttpOptions {
-                cors_allowed_origins: vec!["https://example.com".to_owned()],
+                cors_allowed_origins: vec!["https://example.com".to_string()],
                 ..Default::default()
             },
             ..Default::default()

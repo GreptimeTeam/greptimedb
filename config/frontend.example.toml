@@ -33,7 +33,7 @@ timeout = "30s"
 body_limit = "64MB"
 ## HTTP CORS support, it's turned on by default
 ## This allows browser to access http APIs without CORS restrictions
-disable_cors = false
+enable_cors = true
 ## Customize allowed origins for HTTP CORS.
 ## @toml2docs:none-default
 cors_allowed_origins = ["https://example.com"]

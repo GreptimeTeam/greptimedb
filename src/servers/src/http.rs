@@ -144,7 +144,7 @@ pub struct HttpOptions {
 
     pub cors_allowed_origins: Vec<String>,
 
-    pub disable_cors: bool,
+    pub enable_cors: bool,
 }
 
 impl Default for HttpOptions {
@@ -156,7 +156,7 @@ impl Default for HttpOptions {
             body_limit: DEFAULT_BODY_LIMIT,
             is_strict_mode: false,
             cors_allowed_origins: Vec::new(),
-            disable_cors: false,
+            enable_cors: true,
         }
     }
 }
@@ -738,7 +738,7 @@ impl HttpServer {
             info!("HTTP server body limit is disabled");
             None
         };
-        let cors_layer = if !self.options.disable_cors {
+        let cors_layer = if self.options.enable_cors {
             Some(
                 CorsLayer::new()
                     .allow_methods([
@@ -1305,7 +1305,7 @@ mod test {
         let (tx, _rx) = mpsc::channel(100);
 
         let options = HttpOptions {
-            disable_cors: true,
+            enable_cors: false,
             ..Default::default()
         };
 
