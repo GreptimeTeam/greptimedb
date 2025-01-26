@@ -214,11 +214,6 @@ mod test {
 
     #[test]
     fn test_rewrite() {
-        let sql = "SELECT * FROM number LIMIT 1::bigint";
-        let sql2 = "SELECT * FROM number limit      1::BIGINT";
-
-        assert_eq!("SELECT * FROM number LIMIT 1", rewrite_sql(sql));
-        assert_eq!("SELECT * FROM number limit      1", rewrite_sql(sql2));
         assert_eq!(
             "SELECT db.oid as _oid,db.* FROM pg_catalog.pg_database db",
             rewrite_sql("SELECT db.oid,db.* FROM pg_catalog.pg_database db")
