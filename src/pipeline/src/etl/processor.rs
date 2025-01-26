@@ -13,7 +13,7 @@
 // limitations under the License.
 
 pub mod cmcd;
-// pub mod csv;
+pub mod csv;
 pub mod date;
 pub mod decolorize;
 pub mod digest;
@@ -30,7 +30,7 @@ pub mod urlencoding;
 use std::collections::BTreeMap;
 
 use cmcd::CmcdProcessor;
-// use csv::CsvProcessor;
+use csv::CsvProcessor;
 use date::DateProcessor;
 use decolorize::DecolorizeProcessor;
 use digest::DigestProcessor;
@@ -90,7 +90,7 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
 #[enum_dispatch]
 pub enum ProcessorKind {
     Cmcd(CmcdProcessor),
-    // Csv(CsvProcessor),
+    Csv(CsvProcessor),
     // Dissect(DissectProcessor),
     Gsub(GsubProcessor),
     Join(JoinProcessor),
@@ -157,7 +157,7 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorKind> {
 
     let processor = match str_key {
         cmcd::PROCESSOR_CMCD => ProcessorKind::Cmcd(CmcdProcessor::try_from(value)?),
-        // csv::PROCESSOR_CSV => ProcessorKind::Csv(CsvProcessor::try_from(value)?),
+        csv::PROCESSOR_CSV => ProcessorKind::Csv(CsvProcessor::try_from(value)?),
         // dissect::PROCESSOR_DISSECT => ProcessorKind::Dissect(DissectProcessor::try_from(value)?),
         epoch::PROCESSOR_EPOCH => ProcessorKind::Epoch(EpochProcessor::try_from(value)?),
         date::PROCESSOR_DATE => ProcessorKind::Date(DateProcessor::try_from(value)?),

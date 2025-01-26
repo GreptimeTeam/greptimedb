@@ -14,7 +14,8 @@
 
 // Reference: https://www.elastic.co/guide/en/elasticsearch/reference/current/csv-processor.html
 
-use ahash::HashSet;
+use std::collections::BTreeMap;
+
 use csv::{ReaderBuilder, Trim};
 use itertools::EitherOrBoth::{Both, Left, Right};
 use itertools::Itertools;
@@ -24,11 +25,10 @@ use crate::etl::error::{
     CsvNoRecordSnafu, CsvQuoteNameSnafu, CsvReadSnafu, CsvSeparatorNameSnafu, Error,
     KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, Result,
 };
-use crate::etl::field::{Fields, InputField, OneInputMultiOutputField};
-use crate::etl::find_key_index;
+use crate::etl::field::Fields;
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, ProcessorBuilder,
-    ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
+    IGNORE_MISSING_NAME,
 };
 use crate::etl::value::Value;
 
@@ -40,11 +40,12 @@ const TRIM_NAME: &str = "trim";
 const EMPTY_VALUE_NAME: &str = "empty_value";
 const TARGET_FIELDS: &str = "target_fields";
 
+/// only support string value
 #[derive(Debug, Default)]
-pub struct CsvProcessorBuilder {
+pub struct CsvProcessor {
     reader: ReaderBuilder,
-
     fields: Fields,
+
     ignore_missing: bool,
 
     // Value used to fill empty fields, empty fields will be skipped if this is not provided.
@@ -57,80 +58,22 @@ pub struct CsvProcessorBuilder {
     // tag
 }
 
-impl CsvProcessorBuilder {
-    fn build(self, intermediate_keys: &[String]) -> Result<CsvProcessor> {
-        let mut real_fields = vec![];
-
-        for field in self.fields {
-            let input_index = find_key_index(intermediate_keys, field.input_field(), "csv")?;
-
-            let input_field_info = InputField::new(field.input_field(), input_index);
-            let real_field = OneInputMultiOutputField::new(input_field_info, None);
-            real_fields.push(real_field);
-        }
-
-        let output_index_info = self
-            .target_fields
-            .iter()
-            .map(|f| find_key_index(intermediate_keys, f, "csv"))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(CsvProcessor {
-            reader: self.reader,
-            fields: real_fields,
-            ignore_missing: self.ignore_missing,
-            empty_value: self.empty_value,
-            output_index_info,
-        })
-    }
-}
-
-impl ProcessorBuilder for CsvProcessorBuilder {
-    fn output_keys(&self) -> HashSet<&str> {
-        self.target_fields.iter().map(|s| s.as_str()).collect()
-    }
-
-    fn input_keys(&self) -> HashSet<&str> {
-        self.fields.iter().map(|f| f.input_field()).collect()
-    }
-
-    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind> {
-        self.build(intermediate_keys).map(ProcessorKind::Csv)
-    }
-}
-
-/// only support string value
-#[derive(Debug)]
-pub struct CsvProcessor {
-    reader: ReaderBuilder,
-
-    fields: Vec<OneInputMultiOutputField>,
-
-    ignore_missing: bool,
-
-    // Value used to fill empty fields, empty fields will be skipped if this is not provided.
-    empty_value: Option<String>,
-    output_index_info: Vec<usize>,
-    // description
-    // if
-    // ignore_failure
-    // on_failure
-    // tag
-}
-
 impl CsvProcessor {
     // process the csv format string to a map with target_fields as keys
-    fn process(&self, val: &str) -> Result<Vec<(usize, Value)>> {
+    fn process(&self, val: &str) -> Result<BTreeMap<String, Value>> {
         let mut reader = self.reader.from_reader(val.as_bytes());
 
         if let Some(result) = reader.records().next() {
             let record: csv::StringRecord = result.context(CsvReadSnafu)?;
 
-            let values: Vec<(usize, Value)> = self
-                .output_index_info
+            let values = self
+                .target_fields
                 .iter()
                 .zip_longest(record.iter())
                 .filter_map(|zipped| match zipped {
-                    Both(target_field, val) => Some((*target_field, Value::String(val.into()))),
+                    Both(target_field, val) => {
+                        Some((target_field.clone(), Value::String(val.into())))
+                    }
                     // if target fields are more than extracted fields, fill the rest with empty value
                     Left(target_field) => {
                         let value = self
@@ -138,7 +81,7 @@ impl CsvProcessor {
                             .as_ref()
                             .map(|s| Value::String(s.clone()))
                             .unwrap_or(Value::Null);
-                        Some((*target_field, value))
+                        Some((target_field.clone(), value))
                     }
                     // if extracted fields are more than target fields, ignore the rest
                     Right(_) => None,
@@ -152,7 +95,7 @@ impl CsvProcessor {
     }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for CsvProcessorBuilder {
+impl TryFrom<&yaml_rust::yaml::Hash> for CsvProcessor {
     type Error = Error;
 
     fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self> {
@@ -224,8 +167,8 @@ impl TryFrom<&yaml_rust::yaml::Hash> for CsvProcessorBuilder {
                 _ => {}
             }
         }
-        let builder = {
-            CsvProcessorBuilder {
+        let proc = {
+            CsvProcessor {
                 reader,
                 fields,
                 ignore_missing,
@@ -234,7 +177,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for CsvProcessorBuilder {
             }
         };
 
-        Ok(builder)
+        Ok(proc)
     }
 }
 
@@ -247,21 +190,20 @@ impl Processor for CsvProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<()> {
+    fn exec_mut(&self, val: &mut BTreeMap<String, Value>) -> Result<()> {
         for field in self.fields.iter() {
-            let index = field.input_index();
-            match val.get(index) {
+            let name = field.input_field();
+
+            match val.get(name) {
                 Some(Value::String(v)) => {
-                    let resule_list = self.process(v)?;
-                    for (k, v) in resule_list {
-                        val[k] = v;
-                    }
+                    let results = self.process(v)?;
+                    val.extend(results);
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
                         return ProcessorMissingFieldSnafu {
                             processor: self.kind().to_string(),
-                            field: field.input_name().to_string(),
+                            field: name.to_string(),
                         }
                         .fail();
                     }
@@ -282,37 +224,28 @@ impl Processor for CsvProcessor {
 #[cfg(test)]
 mod tests {
 
-    use ahash::HashMap;
-
-    use super::Value;
-    use crate::etl::processor::csv::CsvProcessorBuilder;
+    use super::*;
+    use crate::etl::field::Field;
 
     #[test]
     fn test_equal_length() {
         let mut reader = csv::ReaderBuilder::new();
         reader.has_headers(false);
-        let builder = CsvProcessorBuilder {
+        let processor = CsvProcessor {
             reader,
+            fields: Fields::new(vec![Field::new("data", None)]),
             target_fields: vec!["a".into(), "b".into()],
             ..Default::default()
         };
 
-        let intermediate_keys = vec!["data".into(), "a".into(), "b".into()];
-
-        let processor = builder.build(&intermediate_keys).unwrap();
-        let result = processor
-            .process("1,2")
-            .unwrap()
-            .into_iter()
-            .map(|(k, v)| (intermediate_keys[k].clone(), v))
-            .collect::<HashMap<_, _>>();
+        let result = processor.process("1,2").unwrap();
 
         let values = [
             ("a".into(), Value::String("1".into())),
             ("b".into(), Value::String("2".into())),
         ]
         .into_iter()
-        .collect::<HashMap<_, _>>();
+        .collect();
 
         assert_eq!(result, values);
     }
@@ -324,21 +257,14 @@ mod tests {
         {
             let mut reader = csv::ReaderBuilder::new();
             reader.has_headers(false);
-            let builder = CsvProcessorBuilder {
+            let processor = CsvProcessor {
                 reader,
+                fields: Fields::new(vec![Field::new("data", None)]),
                 target_fields: vec!["a".into(), "b".into(), "c".into()],
                 ..Default::default()
             };
 
-            let intermediate_keys = vec!["data".into(), "a".into(), "b".into(), "c".into()];
-
-            let processor = builder.build(&intermediate_keys).unwrap();
-            let result = processor
-                .process("1,2")
-                .unwrap()
-                .into_iter()
-                .map(|(k, v)| (intermediate_keys[k].clone(), v))
-                .collect::<HashMap<_, _>>();
+            let result = processor.process("1,2").unwrap();
 
             let values = [
                 ("a".into(), Value::String("1".into())),
@@ -346,7 +272,7 @@ mod tests {
                 ("c".into(), Value::Null),
             ]
             .into_iter()
-            .collect::<HashMap<_, _>>();
+            .collect();
 
             assert_eq!(result, values);
         }
@@ -355,22 +281,15 @@ mod tests {
         {
             let mut reader = csv::ReaderBuilder::new();
             reader.has_headers(false);
-            let builder = CsvProcessorBuilder {
+            let processor = CsvProcessor {
                 reader,
+                fields: Fields::new(vec![Field::new("data", None)]),
                 target_fields: vec!["a".into(), "b".into(), "c".into()],
                 empty_value: Some("default".into()),
                 ..Default::default()
             };
 
-            let intermediate_keys = vec!["data".into(), "a".into(), "b".into(), "c".into()];
-
-            let processor = builder.build(&intermediate_keys).unwrap();
-            let result = processor
-                .process("1,2")
-                .unwrap()
-                .into_iter()
-                .map(|(k, v)| (intermediate_keys[k].clone(), v))
-                .collect::<HashMap<_, _>>();
+            let result = processor.process("1,2").unwrap();
 
             let values = [
                 ("a".into(), Value::String("1".into())),
@@ -389,22 +308,14 @@ mod tests {
     fn test_target_fields_has_less_length() {
         let mut reader = csv::ReaderBuilder::new();
         reader.has_headers(false);
-        let builder = CsvProcessorBuilder {
+        let processor = CsvProcessor {
             reader,
             target_fields: vec!["a".into(), "b".into()],
             empty_value: Some("default".into()),
             ..Default::default()
         };
 
-        let intermediate_keys = vec!["data".into(), "a".into(), "b".into()];
-
-        let processor = builder.build(&intermediate_keys).unwrap();
-        let result = processor
-            .process("1,2")
-            .unwrap()
-            .into_iter()
-            .map(|(k, v)| (intermediate_keys[k].clone(), v))
-            .collect::<HashMap<_, _>>();
+        let result = processor.process("1,2").unwrap();
 
         let values = [
             ("a".into(), Value::String("1".into())),
