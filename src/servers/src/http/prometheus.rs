@@ -45,7 +45,7 @@ use serde_json::Value;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::{Location, OptionExt, ResultExt};
 use store_api::metric_engine_consts::{
-    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
 
 pub use super::result::prometheus_resp::PrometheusJsonResponse;
@@ -941,16 +941,30 @@ pub async fn label_values_query(
         .start_timer();
 
     if label_name == METRIC_NAME_LABEL {
-        let mut table_names = match handler
-            .catalog_manager()
-            .table_names(&catalog, &schema, Some(&query_ctx))
-            .await
-        {
-            Ok(table_names) => table_names,
-            Err(e) => {
-                return PrometheusJsonResponse::error(e.status_code(), e.output_msg());
+        let catalog_manager = handler.catalog_manager();
+        let mut tables_stream = catalog_manager.tables(&catalog, &schema, Some(&query_ctx));
+        let mut table_names = Vec::new();
+        while let Some(table) = tables_stream.next().await {
+            // filter out physical tables
+            match table {
+                Ok(table) => {
+                    if table
+                        .table_info()
+                        .meta
+                        .options
+                        .extra_options
+                        .contains_key(PHYSICAL_TABLE_METADATA_KEY)
+                    {
+                        continue;
+                    }
+
+                    table_names.push(table.table_info().name.clone());
+                }
+                Err(e) => {
+                    return PrometheusJsonResponse::error(e.status_code(), e.output_msg());
+                }
             }
-        };
+        }
         table_names.sort_unstable();
         return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(table_names));
     } else if label_name == FIELD_NAME_LABEL {
