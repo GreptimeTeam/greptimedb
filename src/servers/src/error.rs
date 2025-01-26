@@ -27,6 +27,7 @@ use common_macro::stack_trace_debug;
 use common_telemetry::{error, warn};
 use datatypes::prelude::ConcreteDataType;
 use headers::ContentType;
+use http::header::InvalidHeaderValue;
 use query::parser::PromQuery;
 use serde_json::json;
 use snafu::{Location, Snafu};
@@ -341,6 +342,14 @@ pub enum Error {
     InvalidUtf8Value {
         #[snafu(source)]
         error: FromUtf8Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid http header value"))]
+    InvalidHeaderValue {
+        #[snafu(source)]
+        error: InvalidHeaderValue,
         #[snafu(implicit)]
         location: Location,
     },
@@ -678,7 +687,7 @@ impl ErrorExt for Error {
             #[cfg(feature = "mem-prof")]
             DumpProfileData { source, .. } => source.status_code(),
 
-            InvalidUtf8Value { .. } => StatusCode::InvalidArguments,
+            InvalidUtf8Value { .. } | InvalidHeaderValue { .. } => StatusCode::InvalidArguments,
 
             ParsePromQL { source, .. } => source.status_code(),
             Other { source, .. } => source.status_code(),
