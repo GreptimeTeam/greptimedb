@@ -693,24 +693,16 @@ impl Series {
 
 /// `ValueBuilder` holds all the vector builders for field columns.
 struct ValueBuilder {
-    // timestamp: Box<dyn MutableVector>,
     timestamp: Vec<i64>,
     timestamp_type: ConcreteDataType,
     sequence: Vec<u64>,
     op_type: Vec<u8>,
-    // sequence: UInt64VectorBuilder,
-    // op_type: UInt8VectorBuilder,
     fields: Vec<Option<Box<dyn MutableVector>>>,
     field_types: Vec<ConcreteDataType>,
 }
 
 impl ValueBuilder {
     fn new(region_metadata: &RegionMetadataRef, capacity: usize) -> Self {
-        // let timestamp = region_metadata
-        //     .time_index_column()
-        //     .column_schema
-        //     .data_type
-        //     .create_mutable_vector(capacity);
         let timestamp_type = region_metadata
             .time_index_column()
             .column_schema
@@ -741,8 +733,6 @@ impl ValueBuilder {
         debug_assert_eq!(fields.len(), self.fields.len());
         self.timestamp
             .push(ts.as_timestamp().unwrap().unwrap().value());
-        // self.sequence.push_value_ref(ValueRef::UInt64(sequence));
-        // self.op_type.push_value_ref(ValueRef::UInt8(op_type));
         self.sequence.push(sequence);
         self.op_type.push(op_type);
         let num_rows = self.timestamp.len();
@@ -861,7 +851,6 @@ impl From<ValueBuilder> for Values {
             .collect::<Vec<_>>();
         let sequence = Arc::new(UInt64Vector::from_vec(value.sequence));
         let op_type = Arc::new(UInt8Vector::from_vec(value.op_type));
-        // let timestamp = value.timestamp.to_vector();
         let timestamp: VectorRef = match value.timestamp_type {
             ConcreteDataType::Timestamp(TimestampType::Second(_)) => {
                 Arc::new(TimestampSecondVector::from_vec(value.timestamp))
