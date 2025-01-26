@@ -416,7 +416,9 @@ impl EngineInner {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<AffectedRows> {
-        let (request, receiver) = WorkerRequest::try_from_region_request(region_id, request)?;
+        let region_metadata = self.get_metadata(region_id).ok();
+        let (request, receiver) =
+            WorkerRequest::try_from_region_request(region_id, request, region_metadata)?;
         self.workers.submit_to_worker(region_id, request).await?;
 
         receiver.await.context(RecvSnafu)?

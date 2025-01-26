@@ -688,11 +688,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.last_periodical_check_millis += init_check_delay.as_millis() as i64;
 
         // Buffer to retrieve requests from receiver.
-        let mut buffer = RequestBuffer::with_capacity(self.config.worker_request_batch_size);
+        let mut write_req_buffer: Vec<SenderWriteRequest> =
+            Vec::with_capacity(self.config.worker_request_batch_size);
+        let mut ddl_req_buffer: Vec<SenderDdlRequest> =
+            Vec::with_capacity(self.config.worker_request_batch_size);
+        let mut general_req_buffer: Vec<WorkerRequest> =
+            RequestBuffer::with_capacity(self.config.worker_request_batch_size);
 
         while self.running.load(Ordering::Relaxed) {
             // Clear the buffer before handling next batch of requests.
-            buffer.clear();
+            write_req_buffer.clear();
+            ddl_req_buffer.clear();
+            general_req_buffer.clear();
 
             let max_wait_time = self.time_provider.wait_duration(CHECK_REGION_INTERVAL);
             let sleep = tokio::time::sleep(max_wait_time);
@@ -701,7 +708,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             tokio::select! {
                 request_opt = self.receiver.recv() => {
                     match request_opt {
-                        Some(request) => buffer.push(request),
+                        Some(request) => match request {
+                            WorkerRequest::Write(sender_req) => write_req_buffer.push(sender_req),
+                            WorkerRequest::Ddl(sender_req) => ddl_req_buffer.push(sender_req),
+                            _ => general_req_buffer.push(request),
+                        },
                         // The channel is disconnected.
                         None => break,
                     }
@@ -736,18 +747,29 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
 
             // Try to recv more requests from the channel.
-            for _ in 1..buffer.capacity() {
+            for _ in 1..self.config.worker_request_batch_size {
                 // We have received one request so we start from 1.
                 match self.receiver.try_recv() {
-                    Ok(req) => buffer.push(req),
+                    Ok(req) => match req {
+                        WorkerRequest::Write(sender_req) => write_req_buffer.push(sender_req),
+                        WorkerRequest::Ddl(sender_req) => ddl_req_buffer.push(sender_req),
+                        _ => general_req_buffer.push(req),
+                    },
                     // We still need to handle remaining requests.
                     Err(_) => break,
                 }
             }
 
-            self.listener.on_recv_requests(buffer.len());
+            self.listener.on_recv_requests(
+                write_req_buffer.len() + ddl_req_buffer.len() + general_req_buffer.len(),
+            );
 
-            self.handle_requests(&mut buffer).await;
+            self.handle_requests(
+                &mut write_req_buffer,
+                &mut ddl_req_buffer,
+                &mut general_req_buffer,
+            )
+            .await;
 
             self.handle_periodical_tasks();
         }
@@ -760,16 +782,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// Dispatches and processes requests.
     ///
     /// `buffer` should be empty.
-    async fn handle_requests(&mut self, buffer: &mut RequestBuffer) {
-        let mut write_requests = Vec::with_capacity(buffer.len());
-        let mut ddl_requests = Vec::with_capacity(buffer.len());
-        for worker_req in buffer.drain(..) {
+    async fn handle_requests(
+        &mut self,
+        write_requests: &mut Vec<SenderWriteRequest>,
+        ddl_requests: &mut Vec<SenderDdlRequest>,
+        general_requests: &mut Vec<WorkerRequest>,
+    ) {
+        for worker_req in general_requests.drain(..) {
             match worker_req {
-                WorkerRequest::Write(sender_req) => {
-                    write_requests.push(sender_req);
-                }
-                WorkerRequest::Ddl(sender_req) => {
-                    ddl_requests.push(sender_req);
+                WorkerRequest::Write(_) | WorkerRequest::Ddl(_) => {
+                    // These requests are categorized into write_requests and ddl_requests.
+                    continue;
                 }
                 WorkerRequest::Background { region_id, notify } => {
                     // For background notify, we handle it directly.
@@ -803,12 +826,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 
     /// Takes and handles all ddl requests.
-    async fn handle_ddl_requests(&mut self, ddl_requests: Vec<SenderDdlRequest>) {
+    async fn handle_ddl_requests(&mut self, ddl_requests: &mut Vec<SenderDdlRequest>) {
         if ddl_requests.is_empty() {
             return;
         }
 
-        for ddl in ddl_requests {
+        for ddl in ddl_requests.drain(..) {
             let res = match ddl.request {
                 DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
                 DdlRequest::Drop(_) => self.handle_drop_request(ddl.region_id).await,
