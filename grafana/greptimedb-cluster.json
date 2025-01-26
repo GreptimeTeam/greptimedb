@@ -1761,12 +1761,25 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum (rate(greptime_servers_http_promql_elapsed_counte{pod=~\"$frontend\"}[$__rate_interval]))",
+          "expr": "sum (rate(greptime_servers_http_promql_elapsed_count{pod=~\"$frontend\"}[$__rate_interval]))",
           "hide": false,
           "instant": false,
-          "legendFormat": "promql",
+          "legendFormat": "promql-native",
           "range": true,
           "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum (rate(greptime_servers_http_prometheus_promql_elapsed_count{pod=~\"$frontend\"}[$__rate_interval]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "promql-compatible-api",
+          "range": true,
+          "refId": "D"
         }
       ],
       "title": "Queries",

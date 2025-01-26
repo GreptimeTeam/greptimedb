@@ -320,8 +320,7 @@ impl VectorDiff {
 
     fn try_new(vector: VectorRef, diff: Option<VectorRef>) -> Result<Self, EvalError> {
         ensure!(
-            diff.as_ref()
-                .map_or(true, |diff| diff.len() == vector.len()),
+            diff.as_ref().is_none_or(|diff| diff.len() == vector.len()),
             InvalidArgumentSnafu {
                 reason: "Length of vector and diff should be the same"
             }

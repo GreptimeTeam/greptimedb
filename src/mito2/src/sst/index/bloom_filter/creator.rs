@@ -127,7 +127,7 @@ impl BloomFilterIndexer {
     /// Garbage will be cleaned up if failed to update.
     ///
     /// TODO(zhongzc): duplicate with `mito2::sst::index::inverted_index::creator::InvertedIndexCreator`
-    pub async fn update(&mut self, batch: &Batch) -> Result<()> {
+    pub async fn update(&mut self, batch: &mut Batch) -> Result<()> {
         ensure!(!self.aborted, OperateAbortedIndexSnafu);
 
         if self.creators.is_empty() {
@@ -189,14 +189,20 @@ impl BloomFilterIndexer {
         self.do_cleanup().await
     }
 
-    async fn do_update(&mut self, batch: &Batch) -> Result<()> {
+    async fn do_update(&mut self, batch: &mut Batch) -> Result<()> {
         let mut guard = self.stats.record_update();
 
         let n = batch.num_rows();
         guard.inc_row_count(n);
 
         // TODO(weny, zhenchi): lazy decode
-        let values = self.codec.decode(batch.primary_key())?;
+        if batch.pk_values().is_none() {
+            let values = self.codec.decode(batch.primary_key())?;
+            batch.set_pk_values(values);
+        }
+
+        // Safety: the primary key is decoded
+        let values = batch.pk_values().unwrap();
         // Tags
         for (idx, (col_id, field)) in self.codec.fields().iter().enumerate() {
             let Some(creator) = self.creators.get_mut(col_id) else {
@@ -475,11 +481,11 @@ pub(crate) mod tests {
         .unwrap();
 
         // push 20 rows
-        let batch = new_batch("tag1", 0..10);
-        indexer.update(&batch).await.unwrap();
+        let mut batch = new_batch("tag1", 0..10);
+        indexer.update(&mut batch).await.unwrap();
 
-        let batch = new_batch("tag2", 10..20);
-        indexer.update(&batch).await.unwrap();
+        let mut batch = new_batch("tag2", 10..20);
+        indexer.update(&mut batch).await.unwrap();
 
         let (_d, factory) = PuffinManagerFactory::new_for_test_async(prefix).await;
         let puffin_manager = factory.build(object_store);

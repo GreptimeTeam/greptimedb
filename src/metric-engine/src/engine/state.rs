@@ -17,6 +17,7 @@
 use std::collections::{HashMap, HashSet};
 
 use snafu::OptionExt;
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::ColumnMetadata;
 use store_api::storage::{ColumnId, RegionId};
 
@@ -28,17 +29,20 @@ use crate::utils::to_data_region_id;
 pub struct PhysicalRegionState {
     logical_regions: HashSet<RegionId>,
     physical_columns: HashMap<String, ColumnId>,
+    primary_key_encoding: PrimaryKeyEncoding,
     options: PhysicalRegionOptions,
 }
 
 impl PhysicalRegionState {
     pub fn new(
         physical_columns: HashMap<String, ColumnId>,
+        primary_key_encoding: PrimaryKeyEncoding,
         options: PhysicalRegionOptions,
     ) -> Self {
         Self {
             logical_regions: HashSet::new(),
             physical_columns,
+            primary_key_encoding,
             options,
         }
     }
@@ -83,12 +87,13 @@ impl MetricEngineState {
         &mut self,
         physical_region_id: RegionId,
         physical_columns: HashMap<String, ColumnId>,
+        primary_key_encoding: PrimaryKeyEncoding,
         options: PhysicalRegionOptions,
     ) {
         let physical_region_id = to_data_region_id(physical_region_id);
         self.physical_regions.insert(
             physical_region_id,
-            PhysicalRegionState::new(physical_columns, options),
+            PhysicalRegionState::new(physical_columns, primary_key_encoding, options),
         );
     }
 
@@ -146,6 +151,15 @@ impl MetricEngineState {
 
     pub fn exist_physical_region(&self, physical_region_id: RegionId) -> bool {
         self.physical_regions.contains_key(&physical_region_id)
+    }
+
+    pub fn get_primary_key_encoding(
+        &self,
+        physical_region_id: RegionId,
+    ) -> Option<PrimaryKeyEncoding> {
+        self.physical_regions
+            .get(&physical_region_id)
+            .map(|state| state.primary_key_encoding)
     }
 
     pub fn logical_regions(&self) -> &HashMap<RegionId, RegionId> {

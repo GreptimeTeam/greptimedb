@@ -41,6 +41,11 @@ lazy_static! {
         "table operator mirror rows"
     )
     .unwrap();
+    pub static ref DIST_MIRROR_PENDING_ROW_COUNT: IntGauge = register_int_gauge!(
+        "greptime_table_operator_mirror_pending_rows",
+        "table operator mirror pending rows"
+    )
+    .unwrap();
     pub static ref DIST_DELETE_ROW_COUNT: IntCounter = register_int_counter!(
         "greptime_table_operator_delete_rows",
         "table operator delete rows"

@@ -14,7 +14,6 @@
 
 #![feature(assert_matches)]
 #![feature(btree_extract_if)]
-#![feature(async_closure)]
 #![feature(let_chains)]
 #![feature(extract_if)]
 #![feature(hash_extract_if)]

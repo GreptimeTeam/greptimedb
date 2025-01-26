@@ -16,14 +16,9 @@ use std::collections::BTreeSet;
 use std::env;
 
 use build_data::{format_timestamp, get_source_time};
-use shadow_rs::{CARGO_METADATA, CARGO_TREE};
+use shadow_rs::{BuildPattern, ShadowBuilder, CARGO_METADATA, CARGO_TREE};
 
 fn main() -> shadow_rs::SdResult<()> {
-    println!(
-        "cargo:rerun-if-changed={}/.git/refs/heads",
-        env!("CARGO_RUSTC_CURRENT_DIR")
-    );
-
     println!(
         "cargo:rustc-env=SOURCE_TIMESTAMP={}",
         if let Ok(t) = get_source_time() {
@@ -39,10 +34,14 @@ fn main() -> shadow_rs::SdResult<()> {
     // made as a submodule in another repo.
     let src_path = env::var("CARGO_WORKSPACE_DIR").or_else(|_| env::var("CARGO_MANIFEST_DIR"))?;
     let out_path = env::var("OUT_DIR")?;
-    let _ = shadow_rs::Shadow::build_with(
-        src_path,
-        out_path,
-        BTreeSet::from([CARGO_METADATA, CARGO_TREE]),
-    )?;
+
+    let _ = ShadowBuilder::builder()
+        .build_pattern(BuildPattern::Lazy)
+        .src_path(src_path)
+        .out_path(out_path)
+        .deny_const(BTreeSet::from([CARGO_METADATA, CARGO_TREE]))
+        .build()
+        .unwrap();
+
     Ok(())
 }
