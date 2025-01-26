@@ -20,7 +20,7 @@ use greptime_proto::v1::value::ValueData::{
     U32Value, U64Value, U8Value,
 };
 use greptime_proto::v1::Value as GreptimeValue;
-use pipeline::{parse, Content, GreptimeTransformer, Pipeline};
+use pipeline::{json_to_intermediate_state, parse, Content, GreptimeTransformer, Pipeline};
 
 #[test]
 fn test_complex_data() {
@@ -420,10 +420,7 @@ transform:
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline<GreptimeTransformer> =
         parse(&yaml_content).expect("failed to parse pipeline");
-    let mut stats = pipeline.init_intermediate_state();
-    pipeline
-        .prepare(input_value, &mut stats)
-        .expect("failed to prepare pipeline");
+    let mut stats = json_to_intermediate_state(input_value).unwrap();
 
     let row = pipeline
         .exec_mut(&mut stats)
@@ -492,8 +489,7 @@ transform:
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
 
-    let mut status = pipeline.init_intermediate_state();
-    pipeline.prepare(input_value, &mut status).unwrap();
+    let mut status = json_to_intermediate_state(input_value).unwrap();
     let row = pipeline
         .exec_mut(&mut status)
         .unwrap()
@@ -601,9 +597,7 @@ transform:
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
 
-    let mut status = pipeline.init_intermediate_state();
-
-    pipeline.prepare(input_value, &mut status).unwrap();
+    let mut status = json_to_intermediate_state(input_value).unwrap();
     let row = pipeline
         .exec_mut(&mut status)
         .unwrap()
@@ -668,8 +662,7 @@ transform:
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
 
-    let mut status = pipeline.init_intermediate_state();
-    pipeline.prepare(input_value, &mut status).unwrap();
+    let mut status = json_to_intermediate_state(input_value).unwrap();
     let row = pipeline
         .exec_mut(&mut status)
         .unwrap()
@@ -708,8 +701,7 @@ transform:
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
 
-    let mut status = pipeline.init_intermediate_state();
-    pipeline.prepare(input_value, &mut status).unwrap();
+    let mut status = json_to_intermediate_state(input_value).unwrap();
 
     let row = pipeline
         .exec_mut(&mut status)
@@ -768,8 +760,7 @@ transform:
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
 
-    let mut status = pipeline.init_intermediate_state();
-    pipeline.prepare(input_value, &mut status).unwrap();
+    let mut status = json_to_intermediate_state(input_value).unwrap();
     let row = pipeline
         .exec_mut(&mut status)
         .unwrap()
@@ -841,8 +832,7 @@ transform:
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
 
-    let mut status = pipeline.init_intermediate_state();
-    pipeline.prepare(input_value1, &mut status).unwrap();
+    let mut status = json_to_intermediate_state(input_value1).unwrap();
     let dispatched_to = pipeline
         .exec_mut(&mut status)
         .unwrap()
@@ -851,8 +841,7 @@ transform:
     assert_eq!(dispatched_to.table_part, "http");
     assert_eq!(dispatched_to.pipeline.unwrap(), "access_log_pipeline");
 
-    let mut status = pipeline.init_intermediate_state();
-    pipeline.prepare(input_value2, &mut status).unwrap();
+    let mut status = json_to_intermediate_state(input_value2).unwrap();
     let row = pipeline
         .exec_mut(&mut status)
         .unwrap()
