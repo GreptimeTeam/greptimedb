@@ -45,14 +45,13 @@ pub fn parse_proxy_opts(
     if no_proxy {
         return Ok(None);
     }
-    if let Some(proxy) = proxy {
-        let proxy = reqwest::Proxy::all(proxy)
-            .context(ParseProxyOptsSnafu)
-            .map_err(BoxedError::new)?;
-        return Ok(Some(proxy));
-    } else {
-        return Ok(None);
-    }
+    proxy
+        .map(|proxy| {
+            reqwest::Proxy::all(proxy)
+                .context(ParseProxyOptsSnafu)
+                .map_err(BoxedError::new)
+        })
+        .transpose()
 }
 
 impl DatabaseClient {
