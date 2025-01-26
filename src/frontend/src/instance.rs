@@ -55,7 +55,6 @@ use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::DescribeResult;
 use query::stats::StatementStatistics;
 use query::QueryEngineRef;
-use raft_engine::{Config, ReadableSize, RecoveryMode};
 use servers::error as server_error;
 use servers::error::{AuthSnafu, ExecuteQuerySnafu, ParsePromQLSnafu};
 use servers::export_metrics::ExportMetricsTask;
@@ -138,16 +137,9 @@ impl Instance {
             "Creating metadata kvbackend with config: {:?}",
             kv_backend_config
         );
-        let kv_backend = RaftEngineBackend::try_open_with_cfg(Config {
-            dir,
-            purge_threshold: ReadableSize(kv_backend_config.purge_threshold.0),
-            recovery_mode: RecoveryMode::TolerateTailCorruption,
-            batch_compression_threshold: ReadableSize::kb(8),
-            target_file_size: ReadableSize(kv_backend_config.file_size.0),
-            ..Default::default()
-        })
-        .map_err(BoxedError::new)
-        .context(error::OpenRaftEngineBackendSnafu)?;
+        let kv_backend = RaftEngineBackend::try_open_with_cfg(dir, &kv_backend_config)
+            .map_err(BoxedError::new)
+            .context(error::OpenRaftEngineBackendSnafu)?;
 
         let kv_backend = Arc::new(kv_backend);
         let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));

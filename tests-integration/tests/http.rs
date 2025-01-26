@@ -940,8 +940,9 @@ prefill_log_files = false
 {storage}
 
 [metadata_store]
-file_size = "256MiB"
-purge_threshold = "4GiB"
+file_size = "64MiB"
+purge_threshold = "256MiB"
+purge_interval = "1m"
 
 [procedure]
 max_retry_times = 3

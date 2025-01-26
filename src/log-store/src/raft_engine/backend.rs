@@ -18,8 +18,8 @@ use std::any::Any;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
+use common_config::KvBackendConfig;
 use common_error::ext::BoxedError;
 use common_meta::error as meta_error;
 use common_meta::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnResponse};
@@ -32,7 +32,7 @@ use common_meta::rpc::store::{
 use common_meta::rpc::KeyValue;
 use common_meta::util::get_next_prefix_key;
 use common_runtime::RepeatedTask;
-use raft_engine::{Config, Engine, LogBatch};
+use raft_engine::{Config, Engine, LogBatch, ReadableSize, RecoveryMode};
 use snafu::{IntoError, ResultExt};
 
 use crate::error::{self, Error, IoSnafu, RaftEngineSnafu, StartGcTaskSnafu};
@@ -69,15 +69,24 @@ fn ensure_dir(dir: &str) -> error::Result<()> {
 }
 
 impl RaftEngineBackend {
-    pub fn try_open_with_cfg(config: Config) -> error::Result<Self> {
-        ensure_dir(&config.dir)?;
-        if let Some(spill_dir) = &config.spill_dir {
+    pub fn try_open_with_cfg(dir: String, config: &KvBackendConfig) -> error::Result<Self> {
+        let cfg = Config {
+            dir: dir.to_string(),
+            purge_threshold: ReadableSize(config.purge_threshold.0),
+            recovery_mode: RecoveryMode::TolerateTailCorruption,
+            batch_compression_threshold: ReadableSize::kb(8),
+            target_file_size: ReadableSize(config.file_size.0),
+            ..Default::default()
+        };
+
+        ensure_dir(&dir)?;
+        if let Some(spill_dir) = &cfg.spill_dir {
             ensure_dir(spill_dir)?;
         }
 
-        let engine = Arc::new(Engine::open(config).context(RaftEngineSnafu)?);
+        let engine = Arc::new(Engine::open(cfg).context(RaftEngineSnafu)?);
         let gc_task = RepeatedTask::new(
-            Duration::from_secs(60),
+            config.purge_interval,
             Box::new(PurgeExpiredFilesFunction {
                 engine: engine.clone(),
             }),
@@ -412,21 +421,11 @@ mod tests {
     };
     use common_meta::rpc::store::{CompareAndPutRequest, CompareAndPutResponse};
     use common_test_util::temp_dir::create_temp_dir;
-    use raft_engine::{Config, ReadableSize, RecoveryMode};
 
     use super::*;
 
     fn build_kv_backend(dir: String) -> RaftEngineBackend {
-        let config = Config {
-            dir,
-            spill_dir: None,
-            recovery_mode: RecoveryMode::AbsoluteConsistency,
-            target_file_size: ReadableSize::mb(4),
-            purge_threshold: ReadableSize::mb(16),
-            ..Default::default()
-        };
-
-        RaftEngineBackend::try_open_with_cfg(config).unwrap()
+        RaftEngineBackend::try_open_with_cfg(dir, &KvBackendConfig::default()).unwrap()
     }
 
     #[tokio::test]
