@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use snafu::{OptionExt, ResultExt};
 use urlencoding::decode;
 
+use super::IntermediateStatus;
 use crate::etl::error::{
     CmcdMissingKeySnafu, CmcdMissingValueSnafu, Error, FailedToParseFloatKeySnafu,
     FailedToParseIntKeySnafu, KeyMustBeStringSnafu, ProcessorExpectStringSnafu,
@@ -32,8 +33,6 @@ use crate::etl::processor::{
     IGNORE_MISSING_NAME,
 };
 use crate::etl::value::Value;
-
-use super::IntermediateStatus;
 
 pub(crate) const PROCESSOR_CMCD: &str = "cmcd";
 
