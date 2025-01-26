@@ -225,6 +225,7 @@ impl RegionWriteCtx {
                 common_runtime::spawn_blocking_global(move || (i, mutable.write(&kvs)))
             });
             for result in futures::future::join_all(write_tasks).await {
+                // first unwrap the result from `spawn` above
                 let (i, result) = result.unwrap();
                 if let Err(err) = result {
                     self.notifiers[i].err = Some(Arc::new(err));
