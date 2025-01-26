@@ -203,7 +203,7 @@ impl Configurable for MetasrvOptions {
 }
 
 impl MetasrvOptions {
-    /// Detect server address if `auto_server_addr` is true.
+    /// Detect server address.
     #[cfg(not(target_os = "android"))]
     pub fn detect_server_addr(&mut self) {
         if self.server_addr.is_empty() {

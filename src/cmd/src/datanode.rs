@@ -357,8 +357,8 @@ mod tests {
             rpc_addr = "127.0.0.1:4001"
             rpc_hostname = "192.168.0.1"
             [grpc]
-            addr = "127.0.0.1:3001"
-            hostname = "127.0.0.1"
+            bind_addr = "127.0.0.1:3001"
+            server_addr = "127.0.0.1"
             runtime_size = 8
         "#;
         write!(file, "{}", toml_str).unwrap();
