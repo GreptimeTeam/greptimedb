@@ -133,10 +133,14 @@ impl SubCommand {
 
 #[derive(Debug, Default, Parser)]
 struct StartCommand {
-    #[clap(long)]
-    bind_addr: Option<String>,
-    #[clap(long)]
-    server_addr: Option<String>,
+    /// The address to bind the gRPC server.
+    #[clap(long, alias = "bind-addr")]
+    rpc_bind_addr: Option<String>,
+    /// The communication server address for the frontend and datanode to connect to metasrv.
+    /// If left empty or unset, the server will automatically use the IP address of the first network interface
+    /// on the host, with the same port number as the one specified in `bind_addr`.
+    #[clap(long, alias = "server-addr")]
+    rpc_server_addr: Option<String>,
     #[clap(long, value_delimiter = ',', num_args = 1..)]
     store_addrs: Option<Vec<String>>,
     #[clap(short, long)]
@@ -201,11 +205,11 @@ impl StartCommand {
             tokio_console_addr: global_options.tokio_console_addr.clone(),
         };
 
-        if let Some(addr) = &self.bind_addr {
+        if let Some(addr) = &self.rpc_bind_addr {
             opts.bind_addr.clone_from(addr);
         }
 
-        if let Some(addr) = &self.server_addr {
+        if let Some(addr) = &self.rpc_server_addr {
             opts.server_addr.clone_from(addr);
         }
 
@@ -269,11 +273,13 @@ impl StartCommand {
         log_versions(version(), short_version(), APP_NAME);
 
         info!("Metasrv start command: {:#?}", self);
-        info!("Metasrv options: {:#?}", opts);
 
         let plugin_opts = opts.plugins;
         let mut opts = opts.component;
         opts.detect_server_addr();
+
+        info!("Metasrv options: {:#?}", opts);
+
         let mut plugins = Plugins::new();
         plugins::setup_metasrv_plugins(&mut plugins, &plugin_opts, &opts)
             .await
@@ -306,8 +312,8 @@ mod tests {
     #[test]
     fn test_read_from_cmd() {
         let cmd = StartCommand {
-            bind_addr: Some("127.0.0.1:3002".to_string()),
-            server_addr: Some("127.0.0.1:3002".to_string()),
+            rpc_bind_addr: Some("127.0.0.1:3002".to_string()),
+            rpc_server_addr: Some("127.0.0.1:3002".to_string()),
             store_addrs: Some(vec!["127.0.0.1:2380".to_string()]),
             selector: Some("LoadBased".to_string()),
             ..Default::default()
@@ -381,8 +387,8 @@ mod tests {
     #[test]
     fn test_load_log_options_from_cli() {
         let cmd = StartCommand {
-            bind_addr: Some("127.0.0.1:3002".to_string()),
-            server_addr: Some("127.0.0.1:3002".to_string()),
+            rpc_bind_addr: Some("127.0.0.1:3002".to_string()),
+            rpc_server_addr: Some("127.0.0.1:3002".to_string()),
             store_addrs: Some(vec!["127.0.0.1:2380".to_string()]),
             selector: Some("LoadBased".to_string()),
             ..Default::default()

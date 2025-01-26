@@ -329,8 +329,8 @@ impl App for Instance {
 pub struct StartCommand {
     #[clap(long)]
     http_addr: Option<String>,
-    #[clap(long)]
-    rpc_addr: Option<String>,
+    #[clap(long, alias = "rpc-addr")]
+    rpc_bind_addr: Option<String>,
     #[clap(long)]
     mysql_addr: Option<String>,
     #[clap(long)]
@@ -407,7 +407,7 @@ impl StartCommand {
             opts.storage.data_home.clone_from(data_home);
         }
 
-        if let Some(addr) = &self.rpc_addr {
+        if let Some(addr) = &self.rpc_bind_addr {
             // frontend grpc addr conflict with datanode default grpc addr
             let datanode_grpc_addr = DatanodeOptions::default().grpc.bind_addr;
             if addr.eq(&datanode_grpc_addr) {

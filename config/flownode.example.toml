@@ -17,7 +17,7 @@ node_id = 14
 bind_addr = "127.0.0.1:6800"
 ## The address advertised to the metasrv,
 ## and used for connections from outside the host
-server_addr = "127.0.0.1"
+server_addr = "127.0.0.1:6800"
 ## The number of server worker threads.
 runtime_size = 2
 ## The maximum receive message size for gRPC server.

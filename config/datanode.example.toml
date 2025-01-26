@@ -19,14 +19,6 @@ init_regions_parallelism = 16
 ## The maximum current queries allowed to be executed. Zero means unlimited.
 max_concurrent_queries = 0
 
-## Deprecated, use `grpc.addr` instead.
-## @toml2docs:none-default
-rpc_addr = "127.0.0.1:3001"
-
-## Deprecated, use `grpc.hostname` instead.
-## @toml2docs:none-default
-rpc_hostname = "127.0.0.1"
-
 ## Deprecated, use `grpc.runtime_size` instead.
 ## @toml2docs:none-default
 rpc_runtime_size = 8
@@ -60,7 +52,7 @@ bind_addr = "127.0.0.1:3001"
 ## The address advertised to the metasrv, and used for connections from outside the host.
 ## If left empty or unset, the server will automatically use the IP address of the first network interface
 ## on the host, with the same port number as the one specified in `bind_addr`.
-server_addr = ""
+server_addr = "127.0.0.1:3001"
 ## The number of server worker threads.
 runtime_size = 8
 ## The maximum receive message size for gRPC server.
