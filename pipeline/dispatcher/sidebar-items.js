@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["FIELD","PIPELINE","RULES","TABLE_PARTIAL","VALUE"],"struct":["Dispatcher","Rule"]};

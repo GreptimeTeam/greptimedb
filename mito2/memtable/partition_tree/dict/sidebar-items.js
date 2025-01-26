@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_KEYS_PER_BLOCK"],"fn":["compute_pk_weights"],"struct":["DictBlock","DictBuilderReader","KeyBuffer","KeyDict","KeyDictBuilder"],"type":["KeyDictRef","PkIndexMap"]};

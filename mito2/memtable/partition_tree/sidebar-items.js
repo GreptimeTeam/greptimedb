@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_FREEZE_THRESHOLD","DEFAULT_MAX_KEYS_PER_SHARD","DICTIONARY_SIZE_FACTOR"],"mod":["data","dedup","dict","merger","partition","primary_key_filter","shard","shard_builder","tree"],"struct":["PartitionTreeConfig","PartitionTreeIterBuilder","PartitionTreeMemtable","PartitionTreeMemtableBuilder","PkId"],"type":["PkIndex","ShardId"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["TYPE_BLOOM_FILTER_INDEX","TYPE_FULLTEXT_INDEX","TYPE_INVERTED_INDEX"],"mod":["bloom_filter","codec","fulltext_index","indexer","intermediate","inverted_index","puffin_manager","statistics","store"],"struct":["IndexBaseOutput","IndexOutput","Indexer","IndexerBuilder"],"type":["BloomFilterOutput","FulltextIndexOutput","InvertedIndexOutput"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_prometheus_metrics_layer"],"static":["PROMETHEUS_LAYER"]};
