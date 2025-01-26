@@ -17,6 +17,7 @@ use std::time::Duration;
 use base64::engine::general_purpose;
 use base64::Engine;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_error::ext::BoxedError;
 use humantime::format_duration;
 use serde_json::Value;
 use servers::http::header::constants::GREPTIME_DB_HEADER_TIMEOUT;
@@ -24,7 +25,9 @@ use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use servers::http::GreptimeQueryOutput;
 use snafu::ResultExt;
 
-use crate::error::{HttpQuerySqlSnafu, Result, SerdeJsonSnafu};
+use crate::error::{
+    BuildClientSnafu, HttpQuerySqlSnafu, ParseProxyOptsSnafu, Result, SerdeJsonSnafu,
+};
 
 #[derive(Debug, Clone)]
 pub struct DatabaseClient {
@@ -32,6 +35,24 @@ pub struct DatabaseClient {
     catalog: String,
     auth_header: Option<String>,
     timeout: Duration,
+    proxy: Option<reqwest::Proxy>,
+}
+
+pub fn parse_proxy_opts(
+    proxy: Option<String>,
+    no_proxy: bool,
+) -> std::result::Result<Option<reqwest::Proxy>, BoxedError> {
+    if no_proxy {
+        return Ok(None);
+    }
+    if let Some(proxy) = proxy {
+        let proxy = reqwest::Proxy::all(proxy)
+            .context(ParseProxyOptsSnafu)
+            .map_err(BoxedError::new)?;
+        return Ok(Some(proxy));
+    } else {
+        return Ok(None);
+    }
 }
 
 impl DatabaseClient {
@@ -40,6 +61,7 @@ impl DatabaseClient {
         catalog: String,
         auth_basic: Option<String>,
         timeout: Duration,
+        proxy: Option<reqwest::Proxy>,
     ) -> Self {
         let auth_header = if let Some(basic) = auth_basic {
             let encoded = general_purpose::STANDARD.encode(basic);
@@ -48,11 +70,18 @@ impl DatabaseClient {
             None
         };
 
+        if let Some(ref proxy) = proxy {
+            common_telemetry::info!("Using proxy: {:?}", proxy);
+        } else {
+            common_telemetry::info!("Using system proxy(if any)");
+        }
+
         Self {
             addr,
             catalog,
             auth_header,
             timeout,
+            proxy,
         }
     }
 
@@ -67,7 +96,13 @@ impl DatabaseClient {
             ("db", format!("{}-{}", self.catalog, schema)),
             ("sql", sql.to_string()),
         ];
-        let mut request = reqwest::Client::new()
+        let client = self
+            .proxy
+            .clone()
+            .map(|proxy| reqwest::Client::builder().proxy(proxy).build())
+            .unwrap_or_else(|| Ok(reqwest::Client::new()))
+            .context(BuildClientSnafu)?;
+        let mut request = client
             .post(&url)
             .form(&params)
             .header("Content-Type", "application/x-www-form-urlencoded");
