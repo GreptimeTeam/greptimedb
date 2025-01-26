@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// pub mod cmcd;
+pub mod cmcd;
 // pub mod csv;
 pub mod date;
 pub mod decolorize;
@@ -29,7 +29,7 @@ pub mod urlencoding;
 
 use std::collections::BTreeMap;
 
-// use cmcd::CmcdProcessor;
+use cmcd::CmcdProcessor;
 // use csv::CsvProcessor;
 use date::DateProcessor;
 use decolorize::DecolorizeProcessor;
@@ -89,7 +89,7 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
 #[derive(Debug)]
 #[enum_dispatch]
 pub enum ProcessorKind {
-    // Cmcd(CmcdProcessor),
+    Cmcd(CmcdProcessor),
     // Csv(CsvProcessor),
     // Dissect(DissectProcessor),
     Gsub(GsubProcessor),
@@ -156,7 +156,7 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorKind> {
     let str_key = key.as_str().context(ProcessorKeyMustBeStringSnafu)?;
 
     let processor = match str_key {
-        // cmcd::PROCESSOR_CMCD => ProcessorKind::Cmcd(CmcdProcessor::try_from(value)?),
+        cmcd::PROCESSOR_CMCD => ProcessorKind::Cmcd(CmcdProcessor::try_from(value)?),
         // csv::PROCESSOR_CSV => ProcessorKind::Csv(CsvProcessor::try_from(value)?),
         // dissect::PROCESSOR_DISSECT => ProcessorKind::Dissect(DissectProcessor::try_from(value)?),
         epoch::PROCESSOR_EPOCH => ProcessorKind::Epoch(EpochProcessor::try_from(value)?),
