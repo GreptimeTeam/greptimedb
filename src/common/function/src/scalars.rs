@@ -20,6 +20,7 @@ pub mod geo;
 pub mod json;
 pub mod matches;
 pub mod math;
+pub mod sleep;
 pub mod vector;
 
 #[cfg(test)]

@@ -25,6 +25,7 @@ use crate::scalars::expression::ExpressionFunction;
 use crate::scalars::json::JsonFunction;
 use crate::scalars::matches::MatchesFunction;
 use crate::scalars::math::MathFunction;
+use crate::scalars::sleep::SleepFunction;
 use crate::scalars::timestamp::TimestampFunction;
 use crate::scalars::vector::VectorFunction;
 use crate::system::SystemFunction;
@@ -121,6 +122,9 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
 
     // Vector related functions
     VectorFunction::register(&function_registry);
+
+    // Sleep function
+    SleepFunction::register(&function_registry);
 
     // Geo functions
     #[cfg(feature = "geo")]
