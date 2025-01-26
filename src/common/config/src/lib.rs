@@ -16,6 +16,8 @@ pub mod config;
 pub mod error;
 pub mod utils;
 
+use std::time::Duration;
+
 use common_base::readable_size::ReadableSize;
 pub use config::*;
 use serde::{Deserialize, Serialize};
@@ -34,22 +36,27 @@ pub enum Mode {
     Distributed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct KvBackendConfig {
-    // Kv file size in bytes
+    /// The size of the metadata store backend log file.
     pub file_size: ReadableSize,
-    // Kv purge threshold in bytes
+    /// The threshold of the metadata store size to trigger a purge.
     pub purge_threshold: ReadableSize,
+    /// The interval of the metadata store to trigger a purge.
+    #[serde(with = "humantime_serde")]
+    pub purge_interval: Duration,
 }
 
 impl Default for KvBackendConfig {
     fn default() -> Self {
         Self {
-            // log file size 256MB
-            file_size: ReadableSize::mb(256),
-            // purge threshold 4GB
-            purge_threshold: ReadableSize::gb(4),
+            // The log file size 64MB
+            file_size: ReadableSize::mb(64),
+            // The log purge threshold 256MB
+            purge_threshold: ReadableSize::mb(256),
+            // The log purge interval 1m
+            purge_interval: Duration::from_secs(60),
         }
     }
 }

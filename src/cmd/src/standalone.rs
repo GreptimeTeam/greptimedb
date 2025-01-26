@@ -486,8 +486,8 @@ impl StartCommand {
         let metadata_dir = metadata_store_dir(data_home);
         let (kv_backend, procedure_manager) = FeInstance::try_build_standalone_components(
             metadata_dir,
-            opts.metadata_store.clone(),
-            opts.procedure.clone(),
+            opts.metadata_store,
+            opts.procedure,
         )
         .await
         .context(StartFrontendSnafu)?;
