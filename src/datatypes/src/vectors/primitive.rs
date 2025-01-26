@@ -80,10 +80,12 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
         }
     }
 
-    pub fn from_vec(array: Vec<T::Native>) -> Self {
-        Self {
-            array: PrimitiveArray::from_iter_values(array),
-        }
+    pub fn from_vec(vector: Vec<T::Native>) -> Self {
+        let mutable_buffer = arrow::buffer::MutableBuffer::from(vector);
+        let mut primitive_builder =
+            PrimitiveBuilder::<T::ArrowPrimitive>::new_from_buffer(mutable_buffer, None);
+        let array = primitive_builder.finish();
+        Self { array }
     }
 
     pub fn from_iter_values<I: IntoIterator<Item = T::Native>>(iter: I) -> Self {
