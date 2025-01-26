@@ -202,7 +202,6 @@ pub trait MutableVector: Send + Sync {
     /// # Panics
     /// Panics if error if data types mismatch.
     fn push_value_ref(&mut self, value: ValueRef) {
-        #[cfg(debug_assertions)]
         self.try_push_value_ref(value).unwrap_or_else(|_| {
             panic!(
                 "expecting pushing value of datatype {:?}, actual {:?}",
@@ -210,8 +209,6 @@ pub trait MutableVector: Send + Sync {
                 value
             );
         });
-        #[cfg(not(debug_assertions))]
-        let _ = self.try_push_value_ref(value);
     }
 
     /// Push null to this mutable vector.
