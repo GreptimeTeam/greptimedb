@@ -738,6 +738,8 @@ impl ValueBuilder {
     /// Pushes a new row to `ValueBuilder`.
     /// We don't need primary keys since they've already be encoded.
     /// Returns the size of field values.
+    ///
+    /// In this method, we don't check the data type of the value, because it is already checked in the caller.
     fn push<'a>(
         &mut self,
         ts: ValueRef,
@@ -752,21 +754,21 @@ impl ValueBuilder {
             field_vec.into_iter()
         };
 
-        self.timestamp.push_value_ref(ts);
-        self.sequence.push_value_ref(ValueRef::UInt64(sequence));
-        self.op_type.push_value_ref(ValueRef::UInt8(op_type));
+        let _ = self.timestamp.try_push_value_ref(ts);
+        let _ = self.sequence.try_push_value_ref(ValueRef::UInt64(sequence));
+        let _ = self.op_type.try_push_value_ref(ValueRef::UInt8(op_type));
         let num_rows = self.timestamp.len();
         let mut size = 0;
         for (idx, field_value) in fields.enumerate() {
             size += field_value.data_size();
             if !field_value.is_null() || self.fields[idx].is_some() {
                 if let Some(field) = self.fields[idx].as_mut() {
-                    field.push_value_ref(field_value);
+                    let _ = field.try_push_value_ref(field_value);
                 } else {
                     let mut mutable_vector =
                         self.field_types[idx].create_mutable_vector(num_rows.max(BUILDER_CAPACITY));
                     mutable_vector.push_nulls(num_rows - 1);
-                    mutable_vector.push_value_ref(field_value);
+                    let _ = mutable_vector.try_push_value_ref(field_value);
                     self.fields[idx] = Some(mutable_vector);
                 }
             }
