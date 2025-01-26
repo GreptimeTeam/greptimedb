@@ -182,17 +182,17 @@ impl StartCommand {
         };
 
         if let Some(addr) = &self.rpc_addr {
-            opts.grpc.addr.clone_from(addr);
+            opts.grpc.bind_addr.clone_from(addr);
         } else if let Some(addr) = &opts.rpc_addr {
             warn!("Use the deprecated attribute `DatanodeOptions.rpc_addr`, please use `grpc.addr` instead.");
-            opts.grpc.addr.clone_from(addr);
+            opts.grpc.bind_addr.clone_from(addr);
         }
 
         if let Some(hostname) = &self.rpc_hostname {
-            opts.grpc.hostname.clone_from(hostname);
+            opts.grpc.server_addr.clone_from(hostname);
         } else if let Some(hostname) = &opts.rpc_hostname {
             warn!("Use the deprecated attribute `DatanodeOptions.rpc_hostname`, please use `grpc.hostname` instead.");
-            opts.grpc.hostname.clone_from(hostname);
+            opts.grpc.server_addr.clone_from(hostname);
         }
 
         if let Some(runtime_size) = opts.rpc_runtime_size {
@@ -277,7 +277,7 @@ impl StartCommand {
 
         let plugin_opts = opts.plugins;
         let mut opts = opts.component;
-        opts.grpc.detect_hostname();
+        opts.grpc.detect_server_addr();
         let mut plugins = Plugins::new();
         plugins::setup_datanode_plugins(&mut plugins, &plugin_opts, &opts)
             .await
@@ -369,8 +369,8 @@ mod tests {
         };
 
         let options = cmd.load_options(&Default::default()).unwrap().component;
-        assert_eq!("127.0.0.1:4001".to_string(), options.grpc.addr);
-        assert_eq!("192.168.0.1".to_string(), options.grpc.hostname);
+        assert_eq!("127.0.0.1:4001".to_string(), options.grpc.bind_addr);
+        assert_eq!("192.168.0.1".to_string(), options.grpc.server_addr);
     }
 
     #[test]
@@ -431,7 +431,7 @@ mod tests {
 
         let options = cmd.load_options(&Default::default()).unwrap().component;
 
-        assert_eq!("127.0.0.1:3001".to_string(), options.grpc.addr);
+        assert_eq!("127.0.0.1:3001".to_string(), options.grpc.bind_addr);
         assert_eq!(Some(42), options.node_id);
 
         let DatanodeWalConfig::RaftEngine(raft_engine_config) = options.wal else {
@@ -645,7 +645,7 @@ mod tests {
                     opts.http.addr,
                     DatanodeOptions::default().component.http.addr
                 );
-                assert_eq!(opts.grpc.hostname, "10.103.174.219");
+                assert_eq!(opts.grpc.server_addr, "10.103.174.219");
             },
         );
     }

@@ -185,11 +185,11 @@ impl StartCommand {
         };
 
         if let Some(addr) = &self.rpc_addr {
-            opts.grpc.addr.clone_from(addr);
+            opts.grpc.bind_addr.clone_from(addr);
         }
 
         if let Some(hostname) = &self.rpc_hostname {
-            opts.grpc.hostname.clone_from(hostname);
+            opts.grpc.server_addr.clone_from(hostname);
         }
 
         if let Some(node_id) = self.node_id {
@@ -237,7 +237,7 @@ impl StartCommand {
         info!("Flownode options: {:#?}", opts);
 
         let mut opts = opts.component;
-        opts.grpc.detect_hostname();
+        opts.grpc.detect_server_addr();
 
         // TODO(discord9): make it not optionale after cluster id is required
         let cluster_id = opts.cluster_id.unwrap_or(0);

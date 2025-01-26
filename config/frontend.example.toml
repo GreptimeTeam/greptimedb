@@ -41,10 +41,10 @@ cors_allowed_origins = ["https://example.com"]
 ## The gRPC server options.
 [grpc]
 ## The address to bind the gRPC server.
-addr = "127.0.0.1:4001"
-## The hostname advertised to the metasrv,
+bind_addr = "127.0.0.1:4001"
+## The address advertised to the metasrv,
 ## and used for connections from outside the host
-hostname = "127.0.0.1:4001"
+server_addr = "127.0.0.1:4001"
 ## The number of server worker threads.
 runtime_size = 8
 

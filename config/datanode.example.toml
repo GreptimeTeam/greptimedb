@@ -56,10 +56,10 @@ body_limit = "64MB"
 ## The gRPC server options.
 [grpc]
 ## The address to bind the gRPC server.
-addr = "127.0.0.1:3001"
-## The hostname advertised to the metasrv,
+bind_addr = "127.0.0.1:3001"
+## The address advertised to the metasrv,
 ## and used for connections from outside the host
-hostname = "127.0.0.1:3001"
+server_addr = "127.0.0.1:3001"
 ## The number of server worker threads.
 runtime_size = 8
 ## The maximum receive message size for gRPC server.

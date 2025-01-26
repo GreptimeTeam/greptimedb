@@ -91,8 +91,8 @@ fn test_load_datanode_example_config() {
                 ..Default::default()
             },
             grpc: GrpcOptions::default()
-                .with_addr("127.0.0.1:3001")
-                .with_hostname("127.0.0.1:3001"),
+                .with_bind_addr("127.0.0.1:3001")
+                .with_server_addr("127.0.0.1:3001"),
             rpc_addr: Some("127.0.0.1:3001".to_string()),
             rpc_hostname: Some("127.0.0.1".to_string()),
             rpc_runtime_size: Some(8),
@@ -144,7 +144,7 @@ fn test_load_frontend_example_config() {
                 remote_write: Some(Default::default()),
                 ..Default::default()
             },
-            grpc: GrpcOptions::default().with_hostname("127.0.0.1:4001"),
+            grpc: GrpcOptions::default().with_server_addr("127.0.0.1:4001"),
             http: HttpOptions {
                 cors_allowed_origins: vec!["https://example.com".to_string()],
                 ..Default::default()

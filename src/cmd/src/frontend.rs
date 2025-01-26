@@ -219,7 +219,7 @@ impl StartCommand {
         }
 
         if let Some(addr) = &self.rpc_addr {
-            opts.grpc.addr.clone_from(addr);
+            opts.grpc.bind_addr.clone_from(addr);
             opts.grpc.tls = tls_opts.clone();
         }
 
@@ -269,7 +269,7 @@ impl StartCommand {
 
         let plugin_opts = opts.plugins;
         let mut opts = opts.component;
-        opts.grpc.detect_hostname();
+        opts.grpc.detect_server_addr();
         let mut plugins = Plugins::new();
         plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &opts)
             .await
@@ -413,7 +413,7 @@ mod tests {
 
         let default_opts = FrontendOptions::default().component;
 
-        assert_eq!(opts.grpc.addr, default_opts.grpc.addr);
+        assert_eq!(opts.grpc.bind_addr, default_opts.grpc.bind_addr);
         assert!(opts.mysql.enable);
         assert_eq!(opts.mysql.runtime_size, default_opts.mysql.runtime_size);
         assert!(opts.postgres.enable);
@@ -604,7 +604,7 @@ mod tests {
                 assert_eq!(fe_opts.http.addr, "127.0.0.1:14000");
 
                 // Should be default value.
-                assert_eq!(fe_opts.grpc.addr, GrpcOptions::default().addr);
+                assert_eq!(fe_opts.grpc.bind_addr, GrpcOptions::default().bind_addr);
             },
         );
     }

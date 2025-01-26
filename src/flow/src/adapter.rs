@@ -121,7 +121,7 @@ impl Default for FlownodeOptions {
             cluster_id: None,
             node_id: None,
             flow: FlowConfig::default(),
-            grpc: GrpcOptions::default().with_addr("127.0.0.1:3004"),
+            grpc: GrpcOptions::default().with_bind_addr("127.0.0.1:3004"),
             http: HttpOptions::default(),
             meta_client: None,
             logging: LoggingOptions::default(),

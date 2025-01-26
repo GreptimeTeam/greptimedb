@@ -409,7 +409,7 @@ impl StartCommand {
 
         if let Some(addr) = &self.rpc_addr {
             // frontend grpc addr conflict with datanode default grpc addr
-            let datanode_grpc_addr = DatanodeOptions::default().grpc.addr;
+            let datanode_grpc_addr = DatanodeOptions::default().grpc.bind_addr;
             if addr.eq(&datanode_grpc_addr) {
                 return IllegalConfigSnafu {
                     msg: format!(
@@ -417,7 +417,7 @@ impl StartCommand {
                     ),
                 }.fail();
             }
-            opts.grpc.addr.clone_from(addr)
+            opts.grpc.bind_addr.clone_from(addr)
         }
 
         if let Some(addr) = &self.mysql_addr {
@@ -464,7 +464,7 @@ impl StartCommand {
         let mut plugins = Plugins::new();
         let plugin_opts = opts.plugins;
         let mut opts = opts.component;
-        opts.grpc.detect_hostname();
+        opts.grpc.detect_server_addr();
         let fe_opts = opts.frontend_options();
         let dn_opts = opts.datanode_options();
 
@@ -907,7 +907,7 @@ mod tests {
         assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http.addr);
         assert_eq!(Duration::from_secs(33), fe_opts.http.timeout);
         assert_eq!(ReadableSize::mb(128), fe_opts.http.body_limit);
-        assert_eq!("127.0.0.1:4001".to_string(), fe_opts.grpc.addr);
+        assert_eq!("127.0.0.1:4001".to_string(), fe_opts.grpc.bind_addr);
         assert!(fe_opts.mysql.enable);
         assert_eq!("127.0.0.1:4002", fe_opts.mysql.addr);
         assert_eq!(2, fe_opts.mysql.runtime_size);
@@ -1037,7 +1037,7 @@ mod tests {
                 assert_eq!(ReadableSize::mb(64), fe_opts.http.body_limit);
 
                 // Should be default value.
-                assert_eq!(fe_opts.grpc.addr, GrpcOptions::default().addr);
+                assert_eq!(fe_opts.grpc.bind_addr, GrpcOptions::default().bind_addr);
             },
         );
     }
