@@ -137,7 +137,7 @@ struct StartCommand {
     bind_addr: Option<String>,
     #[clap(long)]
     server_addr: Option<String>,
-    #[clap(long, aliases = ["store-addr"], value_delimiter = ',', num_args = 1..)]
+    #[clap(long, value_delimiter = ',', num_args = 1..)]
     store_addrs: Option<Vec<String>>,
     #[clap(short, long)]
     config_file: Option<String>,
