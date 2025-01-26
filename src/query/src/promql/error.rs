@@ -129,7 +129,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "End time must greater than start time start: {:?}, end: {:?}",
+        "The end time must be greater than start time, start: {:?}, end: {:?}",
         start,
         end
     ))]
