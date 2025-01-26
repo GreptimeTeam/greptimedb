@@ -115,11 +115,7 @@ pub(crate) fn process<'a>(query: &str, query_ctx: QueryContextRef) -> Option<Vec
     }
 }
 
-static LIMIT_CAST_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)(LIMIT\\s+\\d+)::bigint").unwrap());
 pub(crate) fn rewrite_sql(query: &str) -> Cow<'_, str> {
-    //TODO(sunng87): remove this when we upgraded datafusion to 43 or newer
-    let query = LIMIT_CAST_PATTERN.replace_all(query, "$1");
     // DBeaver tricky replacement for datafusion not support sql
     // TODO: add more here
     query
