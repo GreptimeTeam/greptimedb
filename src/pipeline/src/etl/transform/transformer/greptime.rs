@@ -25,7 +25,7 @@ use api::v1::{ColumnDataType, ColumnDataTypeExtension, JsonTypeExtension, Semant
 use coerce::{coerce_columns, coerce_value};
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
-use serde_json::{Map, Number, Value as JsonValue};
+use serde_json::Number;
 
 use crate::etl::error::{
     IdentifyPipelineColumnTypeMismatchSnafu, ReachedMaxNestedLevelsSnafu, Result,
@@ -33,9 +33,10 @@ use crate::etl::error::{
     TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu,
     UnsupportedNumberTypeSnafu,
 };
+use crate::etl::field::{Field, Fields};
 use crate::etl::processor::IntermediateStatus;
 use crate::etl::transform::index::Index;
-use crate::etl::transform::{Transformer, Transforms};
+use crate::etl::transform::{Transform, Transformer, Transforms};
 use crate::etl::value::{Timestamp, Value};
 
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
@@ -83,37 +84,21 @@ impl GreptimePipelineParams {
 impl GreptimeTransformer {
     /// Add a default timestamp column to the transforms
     fn add_greptime_timestamp_column(transforms: &mut Transforms) {
-        // let ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
-        // let type_ = Value::Timestamp(Timestamp::Nanosecond(ns));
-        // let default = Some(type_.clone());
+        let ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let type_ = Value::Timestamp(Timestamp::Nanosecond(ns));
+        let default = Some(type_.clone());
 
-        // let transform = Transform {
-        //     real_fields: vec![OneInputOneOutputField::new(
-        //         InputFieldInfo {
-        //             name: DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(),
-        //             index: usize::MAX,
-        //         },
-        //         (
-        //             DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(),
-        //             transforms
-        //                 .transforms
-        //                 .iter()
-        //                 .map(|x| x.real_fields.len())
-        //                 .sum(),
-        //         ),
-        //     )],
-        //     type_,
-        //     default,
-        //     index: Some(Index::Time),
-        //     on_failure: Some(crate::etl::transform::OnFailure::Default),
-        // };
-        // let required_keys = transforms.required_keys_mut();
-        // required_keys.push(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string());
-
-        // let output_keys = transforms.output_keys_mut();
-        // output_keys.push(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string());
-        // transforms.push(transform);
-        todo!()
+        let transform = Transform {
+            fields: Fields::one(Field::new(
+                DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(),
+                None,
+            )),
+            type_,
+            default,
+            index: Some(Index::Time),
+            on_failure: Some(crate::etl::transform::OnFailure::Default),
+        };
+        transforms.push(transform);
     }
 
     /// Generate the schema for the GreptimeTransformer
@@ -650,7 +635,7 @@ mod tests {
 
     use super::*;
     use crate::etl::{json_array_to_intermediate_state, json_to_intermediate_state};
-    use crate::{identity_pipeline, Pipeline};
+    use crate::identity_pipeline;
 
     #[test]
     fn test_identify_pipeline() {
