@@ -90,9 +90,7 @@ fn test_load_datanode_example_config() {
                 remote_write: Some(Default::default()),
                 ..Default::default()
             },
-            grpc: GrpcOptions::default()
-                .with_bind_addr("127.0.0.1:3001")
-                .with_server_addr("127.0.0.1:3001"),
+            grpc: GrpcOptions::default().with_bind_addr("127.0.0.1:3001"),
             rpc_addr: Some("127.0.0.1:3001".to_string()),
             rpc_hostname: Some("127.0.0.1".to_string()),
             rpc_runtime_size: Some(8),
@@ -144,7 +142,7 @@ fn test_load_frontend_example_config() {
                 remote_write: Some(Default::default()),
                 ..Default::default()
             },
-            grpc: GrpcOptions::default().with_server_addr("127.0.0.1:4001"),
+            grpc: GrpcOptions::default(),
             http: HttpOptions {
                 cors_allowed_origins: vec!["https://example.com".to_string()],
                 ..Default::default()
@@ -166,7 +164,6 @@ fn test_load_metasrv_example_config() {
         component: MetasrvOptions {
             selector: SelectorType::default(),
             data_home: "/tmp/metasrv/".to_string(),
-            server_addr: "127.0.0.1:3002".to_string(),
             logging: LoggingOptions {
                 dir: "/tmp/greptimedb/logs".to_string(),
                 level: Some("info".to_string()),
