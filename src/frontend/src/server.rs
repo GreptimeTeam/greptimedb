@@ -193,7 +193,7 @@ where
 
         {
             // Always init GRPC server
-            let grpc_addr = parse_addr(&opts.grpc.addr)?;
+            let grpc_addr = parse_addr(&opts.grpc.bind_addr)?;
             let grpc_server = self.build_grpc_server(&opts)?;
             handlers.insert((Box::new(grpc_server), grpc_addr)).await;
         }

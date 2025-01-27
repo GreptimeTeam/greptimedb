@@ -21,7 +21,7 @@ type = 'File'
 data_home = '{data_home}'
 
 [grpc]
-addr = '127.0.0.1:29401'
+bind_addr = '127.0.0.1:29401'
 runtime_size = 8
 
 [mysql]

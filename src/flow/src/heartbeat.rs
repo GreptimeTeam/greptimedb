@@ -83,7 +83,7 @@ impl HeartbeatTask {
     ) -> Self {
         Self {
             node_id: opts.node_id.unwrap_or(0),
-            peer_addr: addrs::resolve_addr(&opts.grpc.addr, Some(&opts.grpc.hostname)),
+            peer_addr: addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),
             meta_client,
             report_interval: heartbeat_opts.interval,
             retry_interval: heartbeat_opts.retry_interval,

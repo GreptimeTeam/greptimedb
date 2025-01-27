@@ -56,7 +56,7 @@ impl HeartbeatTask {
         resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     ) -> Self {
         HeartbeatTask {
-            peer_addr: addrs::resolve_addr(&opts.grpc.addr, Some(&opts.grpc.hostname)),
+            peer_addr: addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),
             meta_client,
             report_interval: heartbeat_opts.interval.as_millis() as u64,
             retry_interval: heartbeat_opts.retry_interval.as_millis() as u64,

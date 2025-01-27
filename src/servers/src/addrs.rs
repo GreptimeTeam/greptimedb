@@ -14,19 +14,19 @@
 
 use common_telemetry::warn;
 
-/// Resolves hostname:port address for meta registration.
-/// If `hostname_addr` is present, prefer to use it, `bind_addr` otherwise.
-pub fn resolve_addr(bind_addr: &str, hostname_addr: Option<&str>) -> String {
-    match hostname_addr {
-        Some(hostname_addr) => {
+/// Resolves server address for meta registration.
+/// If `server_addr` is present, prefer to use it, `bind_addr` otherwise.
+pub fn resolve_addr(bind_addr: &str, server_addr: Option<&str>) -> String {
+    match server_addr {
+        Some(server_addr) => {
             // it has port configured
-            if hostname_addr.contains(':') {
-                hostname_addr.to_string()
+            if server_addr.contains(':') {
+                server_addr.to_string()
             } else {
                 // otherwise, resolve port from bind_addr
                 // should be safe to unwrap here because bind_addr is already validated
                 let port = bind_addr.split(':').nth(1).unwrap();
-                format!("{hostname_addr}:{port}")
+                format!("{server_addr}:{port}")
             }
         }
         None => {

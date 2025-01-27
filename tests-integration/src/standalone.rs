@@ -293,7 +293,7 @@ impl GreptimeDbStandaloneBuilder {
             procedure: procedure_config,
             metadata_store: kv_backend_config,
             wal: self.metasrv_wal_config.clone().into(),
-            grpc: GrpcOptions::default().with_hostname("127.0.0.1:4001"),
+            grpc: GrpcOptions::default().with_server_addr("127.0.0.1:4001"),
             ..StandaloneOptions::default()
         };
 

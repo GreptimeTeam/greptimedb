@@ -334,7 +334,7 @@ impl FlownodeBuilder {
 
         let heartbeat_task = self.heartbeat_task;
 
-        let addr = self.opts.grpc.addr;
+        let addr = self.opts.grpc.bind_addr;
         let instance = FlownodeInstance {
             server,
             addr: addr.parse().context(ParseAddrSnafu { addr })?,
