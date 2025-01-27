@@ -128,9 +128,7 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for Transforms {
 
         all_required_keys.sort();
 
-        Ok(Transforms {
-            transforms: transforms,
-        })
+        Ok(Transforms { transforms })
     }
 }
 

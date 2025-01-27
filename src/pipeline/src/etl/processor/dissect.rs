@@ -537,10 +537,10 @@ pub struct DissectProcessor {
 }
 
 impl DissectProcessor {
-    fn process_name_value<'a, 'b>(
+    fn process_name_value<'a>(
         name: &'a Name,
         value: String,
-        appends: &'b mut HashMap<&'a String, Vec<(String, u32)>>,
+        appends: &mut HashMap<&'a String, Vec<(String, u32)>>,
         map: &mut Vec<(&'a String, Value)>,
     ) {
         match name.start_modifier {

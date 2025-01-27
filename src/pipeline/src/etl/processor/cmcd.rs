@@ -257,7 +257,7 @@ impl Processor for CmcdProcessor {
 
             match val.get(name) {
                 Some(Value::String(s)) => {
-                    let results = self.parse(name, s)?;
+                    let results = self.parse(field.target_or_input_field(), s)?;
                     val.extend(results);
                 }
                 Some(Value::Null) | None => {

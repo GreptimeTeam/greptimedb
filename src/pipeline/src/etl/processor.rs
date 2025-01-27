@@ -91,7 +91,7 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
 pub enum ProcessorKind {
     Cmcd(CmcdProcessor),
     Csv(CsvProcessor),
-    // Dissect(DissectProcessor),
+    Dissect(DissectProcessor),
     Gsub(GsubProcessor),
     Join(JoinProcessor),
     Letter(LetterProcessor),

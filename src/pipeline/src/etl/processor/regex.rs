@@ -193,6 +193,7 @@ impl Processor for RegexProcessor {
     fn exec_mut(&self, val: &mut IntermediateStatus) -> Result<()> {
         for field in self.fields.iter() {
             let index = field.input_field();
+            let prefix = field.target_or_input_field();
             let mut result_list = None;
             match val.get(index) {
                 Some(Value::String(s)) => {
@@ -239,8 +240,8 @@ impl Processor for RegexProcessor {
             match result_list {
                 None => {}
                 Some(result_list) => {
-                    for (output_index, result) in result_list {
-                        val.insert(generate_key(index, output_index), result);
+                    for (output_key, result) in result_list {
+                        val.insert(generate_key(prefix, output_key), result);
                     }
                 }
             }
