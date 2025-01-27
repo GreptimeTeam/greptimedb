@@ -283,15 +283,15 @@ mod tests {
         let input_value: serde_json::Value = serde_json::from_str(input_value_str).unwrap();
 
         let pipeline_yaml = r#"description: 'Pipeline for Apache Tomcat'
-    processors:
-      - csv:
-          field: my_field
-          target_fields: field1, field2
-    transform:
-      - field: field1
-        type: uint32
-      - field: field2
-        type: uint32
+processors:
+    - csv:
+        field: my_field
+        target_fields: field1, field2
+transform:
+    - field: field1
+      type: uint32
+    - field: field2
+      type: uint32
     "#;
         let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_yaml)).unwrap();
         let mut payload = json_to_intermediate_state(input_value).unwrap();
@@ -315,34 +315,34 @@ mod tests {
     fn test_dissect_pipeline() {
         let message = r#"129.37.245.88 - meln1ks [01/Aug/2024:14:22:47 +0800] "PATCH /observability/metrics/production HTTP/1.0" 501 33085"#.to_string();
         let pipeline_str = r#"processors:
-      - dissect:
-          fields:
-            - message
-          patterns:
-            - "%{ip} %{?ignored} %{username} [%{ts}] \"%{method} %{path} %{proto}\" %{status} %{bytes}"
-      - timestamp:
-          fields:
-            - ts
-          formats:
-            - "%d/%b/%Y:%H:%M:%S %z"
+    - dissect:
+        fields:
+          - message
+        patterns:
+          - "%{ip} %{?ignored} %{username} [%{ts}] \"%{method} %{path} %{proto}\" %{status} %{bytes}"
+    - timestamp:
+        fields:
+          - ts
+        formats:
+          - "%d/%b/%Y:%H:%M:%S %z"
 
-    transform:
-      - fields:
-          - ip
-          - username
-          - method
-          - path
-          - proto
-        type: string
-      - fields:
-          - status
-        type: uint16
-      - fields:
-          - bytes
-        type: uint32
-      - field: ts
-        type: timestamp, ns
-        index: time"#;
+transform:
+    - fields:
+        - ip
+        - username
+        - method
+        - path
+        - proto
+      type: string
+    - fields:
+        - status
+      type: uint16
+    - fields:
+        - bytes
+      type: uint32
+    - field: ts
+      type: timestamp, ns
+      index: time"#;
         let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_str)).unwrap();
         let mut payload = BTreeMap::new();
         payload.insert("message".to_string(), Value::String(message));
@@ -449,18 +449,17 @@ mod tests {
             "#;
         let input_value: serde_json::Value = serde_json::from_str(input_value_str).unwrap();
 
-        let pipeline_yaml = r#"
-    ---
-    description: Pipeline for Apache Tomcat
+        let pipeline_yaml = r#"---
+description: Pipeline for Apache Tomcat
 
-    processors:
-      - timestamp:
-          field: test_time
+processors:
+    - timestamp:
+        field: test_time
 
-    transform:
-      - field: test_time
-        type: timestamp, ns
-        index: time
+transform:
+    - field: test_time
+      type: timestamp, ns
+      index: time
     "#;
 
         let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_yaml)).unwrap();

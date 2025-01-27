@@ -18,6 +18,7 @@ use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use itertools::Itertools;
 use snafu::OptionExt;
 
+use super::IntermediateStatus;
 use crate::etl::error::{
     DissectAppendOrderAlreadySetSnafu, DissectConsecutiveNamesSnafu, DissectEmptyPatternSnafu,
     DissectEndModifierAlreadySetSnafu, DissectInvalidPatternSnafu, DissectModifierAlreadySetSnafu,
@@ -25,12 +26,10 @@ use crate::etl::error::{
     DissectOrderOnlyAppendSnafu, DissectSplitExceedsInputSnafu, DissectSplitNotMatchInputSnafu,
     Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, Result,
 };
-use crate::etl::field::{Fields, InputField, OneInputMultiOutputField};
-use crate::etl::find_key_index;
+use crate::etl::field::Fields;
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_parse_string, yaml_parse_strings, yaml_string,
-    Processor, ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
-    PATTERNS_NAME, PATTERN_NAME,
+    Processor, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, PATTERNS_NAME, PATTERN_NAME,
 };
 use crate::etl::value::Value;
 
@@ -69,14 +68,7 @@ impl std::fmt::Display for EndModifier {
     }
 }
 
-#[derive(Debug, PartialEq, Default)]
-struct NameInfo {
-    name: String,
-    start_modifier: Option<StartModifier>,
-    end_modifier: Option<EndModifier>,
-}
-
-impl NameInfo {
+impl Name {
     fn is_name_empty(&self) -> bool {
         self.name.is_empty()
     }
@@ -140,26 +132,9 @@ impl NameInfo {
     }
 }
 
-impl std::fmt::Display for NameInfo {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.name)
-    }
-}
-
-impl From<&str> for NameInfo {
-    fn from(value: &str) -> Self {
-        NameInfo {
-            name: value.to_string(),
-            start_modifier: None,
-            end_modifier: None,
-        }
-    }
-}
-
 #[derive(Debug, PartialEq, Default)]
 struct Name {
     name: String,
-    index: usize,
     start_modifier: Option<StartModifier>,
     end_modifier: Option<EndModifier>,
 }
@@ -170,57 +145,12 @@ impl std::fmt::Display for Name {
     }
 }
 
-impl From<NameInfo> for Name {
-    fn from(value: NameInfo) -> Self {
+impl From<&str> for Name {
+    fn from(value: &str) -> Self {
         Name {
-            name: value.name,
-            index: 0,
-            start_modifier: value.start_modifier,
-            end_modifier: value.end_modifier,
-        }
-    }
-}
-
-impl Name {
-    fn is_name_empty(&self) -> bool {
-        self.name.is_empty()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.name.is_empty() && self.start_modifier.is_none() && self.end_modifier.is_none()
-    }
-
-    fn is_end_modifier_set(&self) -> bool {
-        self.end_modifier.is_some()
-    }
-}
-
-#[derive(Debug, PartialEq)]
-enum PartInfo {
-    Split(String),
-    Name(NameInfo),
-}
-
-impl PartInfo {
-    fn is_empty(&self) -> bool {
-        match self {
-            PartInfo::Split(v) => v.is_empty(),
-            PartInfo::Name(v) => v.is_empty(),
-        }
-    }
-
-    fn empty_split() -> Self {
-        PartInfo::Split(String::new())
-    }
-
-    fn empty_name() -> Self {
-        PartInfo::Name(NameInfo::default())
-    }
-
-    fn push(&mut self, ch: char) {
-        match self {
-            PartInfo::Split(v) => v.push(ch),
-            PartInfo::Name(v) => v.name.push(ch),
+            name: value.to_string(),
+            start_modifier: None,
+            end_modifier: None,
         }
     }
 }
@@ -246,13 +176,11 @@ impl Part {
     fn empty_name() -> Self {
         Part::Name(Name::default())
     }
-}
 
-impl From<PartInfo> for Part {
-    fn from(value: PartInfo) -> Self {
-        match value {
-            PartInfo::Split(v) => Part::Split(v),
-            PartInfo::Name(v) => Part::Name(v.into()),
+    fn push(&mut self, ch: char) {
+        match self {
+            Part::Split(v) => v.push(ch),
+            Part::Name(v) => v.name.push(ch),
         }
     }
 }
@@ -271,42 +199,12 @@ impl Deref for Pattern {
     }
 }
 
-impl From<PatternInfo> for Pattern {
-    fn from(value: PatternInfo) -> Self {
-        let parts = value.parts.into_iter().map(|x| x.into()).collect();
-        Pattern {
-            origin: value.origin,
-            parts,
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct PatternInfo {
-    origin: String,
-    parts: Vec<PartInfo>,
-}
-
-impl std::ops::Deref for PatternInfo {
-    type Target = Vec<PartInfo>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.parts
-    }
-}
-
-impl std::ops::DerefMut for PatternInfo {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.parts
-    }
-}
-
-impl std::str::FromStr for PatternInfo {
+impl std::str::FromStr for Pattern {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
         let mut parts = vec![];
-        let mut cursor = PartInfo::empty_split();
+        let mut cursor = Part::empty_split();
 
         let origin = s.to_string();
         let chars: Vec<char> = origin.chars().collect();
@@ -316,27 +214,27 @@ impl std::str::FromStr for PatternInfo {
             let ch = chars[pos];
             match (ch, &mut cursor) {
                 // if cursor is Split part, and found %{, then ready to start a Name part
-                ('%', PartInfo::Split(_)) if matches!(chars.get(pos + 1), Some('{')) => {
+                ('%', Part::Split(_)) if matches!(chars.get(pos + 1), Some('{')) => {
                     if !cursor.is_empty() {
                         parts.push(cursor);
                     }
 
-                    cursor = PartInfo::empty_name();
+                    cursor = Part::empty_name();
                     pos += 1; // skip '{'
                 }
                 // if cursor is Split part, and not found % or {, then continue the Split part
-                (_, PartInfo::Split(_)) => {
+                (_, Part::Split(_)) => {
                     cursor.push(ch);
                 }
                 // if cursor is Name part, and found }, then end the Name part, start the next Split part
-                ('}', PartInfo::Name(_)) => {
+                ('}', Part::Name(_)) => {
                     parts.push(cursor);
-                    cursor = PartInfo::empty_split();
+                    cursor = Part::empty_split();
                 }
-                ('+', PartInfo::Name(name)) if !name.is_start_modifier_set() => {
+                ('+', Part::Name(name)) if !name.is_start_modifier_set() => {
                     name.try_start_modifier(StartModifier::Append(None))?;
                 }
-                ('/', PartInfo::Name(name)) if name.is_append_modifier_set() => {
+                ('/', Part::Name(name)) if name.is_append_modifier_set() => {
                     let mut order = 0;
                     let mut j = pos + 1;
                     while j < chars.len() {
@@ -360,16 +258,16 @@ impl std::str::FromStr for PatternInfo {
                     name.try_append_order(order)?;
                     pos = j - 1; // this will change the position to the last digit of the order
                 }
-                ('?', PartInfo::Name(name)) if !name.is_start_modifier_set() => {
+                ('?', Part::Name(name)) if !name.is_start_modifier_set() => {
                     name.try_start_modifier(StartModifier::NamedSkip)?;
                 }
-                ('*', PartInfo::Name(name)) if !name.is_start_modifier_set() => {
+                ('*', Part::Name(name)) if !name.is_start_modifier_set() => {
                     name.try_start_modifier(StartModifier::MapKey)?;
                 }
-                ('&', PartInfo::Name(name)) if !name.is_start_modifier_set() => {
+                ('&', Part::Name(name)) if !name.is_start_modifier_set() => {
                     name.try_start_modifier(StartModifier::MapVal)?;
                 }
-                ('-', PartInfo::Name(name)) if !name.is_end_modifier_set() => {
+                ('-', Part::Name(name)) if !name.is_end_modifier_set() => {
                     if let Some('>') = chars.get(pos + 1) {
                     } else {
                         return DissectInvalidPatternSnafu {
@@ -391,7 +289,7 @@ impl std::str::FromStr for PatternInfo {
                     name.try_end_modifier()?;
                     pos += 1; // only skip '>', the next loop will skip '}'
                 }
-                (_, PartInfo::Name(name)) if !is_valid_char(ch) => {
+                (_, Part::Name(name)) if !is_valid_char(ch) => {
                     let tail: String = if name.is_name_empty() {
                         format!("Invalid '{ch}'")
                     } else {
@@ -399,7 +297,7 @@ impl std::str::FromStr for PatternInfo {
                     };
                     return DissectInvalidPatternSnafu { s, detail: tail }.fail();
                 }
-                (_, PartInfo::Name(_)) => {
+                (_, Part::Name(_)) => {
                     cursor.push(ch);
                 }
             }
@@ -408,8 +306,8 @@ impl std::str::FromStr for PatternInfo {
         }
 
         match cursor {
-            PartInfo::Split(ref split) if !split.is_empty() => parts.push(cursor),
-            PartInfo::Name(name) if !name.is_empty() => {
+            Part::Split(ref split) if !split.is_empty() => parts.push(cursor),
+            Part::Name(name) if !name.is_empty() => {
                 return DissectInvalidPatternSnafu {
                     s,
                     detail: format!("'{name}' is not closed"),
@@ -425,7 +323,7 @@ impl std::str::FromStr for PatternInfo {
     }
 }
 
-impl PatternInfo {
+impl Pattern {
     fn check(&self) -> Result<()> {
         if self.len() == 0 {
             return DissectEmptyPatternSnafu.fail();
@@ -438,21 +336,21 @@ impl PatternInfo {
             let this_part = &self[i];
             let next_part = self.get(i + 1);
             match (this_part, next_part) {
-                (PartInfo::Split(split), _) if split.is_empty() => {
+                (Part::Split(split), _) if split.is_empty() => {
                     return DissectInvalidPatternSnafu {
                         s: &self.origin,
                         detail: "Empty split is not allowed",
                     }
                     .fail();
                 }
-                (PartInfo::Name(name1), Some(PartInfo::Name(name2))) => {
+                (Part::Name(name1), Some(Part::Name(name2))) => {
                     return DissectInvalidPatternSnafu {
                         s: &self.origin,
                         detail: format!("consecutive names are not allowed: '{name1}' '{name2}'",),
                     }
                     .fail();
                 }
-                (PartInfo::Name(name), _) if name.is_name_empty() => {
+                (Part::Name(name), _) if name.is_name_empty() => {
                     if let Some(ref m) = name.start_modifier {
                         return DissectInvalidPatternSnafu {
                             s: &self.origin,
@@ -461,7 +359,7 @@ impl PatternInfo {
                         .fail();
                     }
                 }
-                (PartInfo::Name(name), _) => match name.start_modifier {
+                (Part::Name(name), _) => match name.start_modifier {
                     Some(StartModifier::MapKey) => {
                         if map_keys.contains(&name.name) {
                             return DissectInvalidPatternSnafu {
@@ -509,128 +407,128 @@ impl PatternInfo {
     }
 }
 
-impl std::fmt::Display for PatternInfo {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.origin)
-    }
-}
+// impl std::fmt::Display for PatternInfo {
+//     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+//         write!(f, "{}", self.origin)
+//     }
+// }
 
-#[derive(Debug, Default)]
-pub struct DissectProcessorBuilder {
-    fields: Fields,
-    patterns: Vec<PatternInfo>,
-    ignore_missing: bool,
-    append_separator: Option<String>,
-    output_keys: HashSet<String>,
-}
+// #[derive(Debug, Default)]
+// pub struct DissectProcessorBuilder {
+//     fields: Fields,
+//     patterns: Vec<PatternInfo>,
+//     ignore_missing: bool,
+//     append_separator: Option<String>,
+//     output_keys: HashSet<String>,
+// }
 
-impl DissectProcessorBuilder {
-    fn build_output_keys(patterns: &[PatternInfo]) -> HashSet<String> {
-        patterns
-            .iter()
-            .flat_map(|pattern| pattern.iter())
-            .filter_map(|p| match p {
-                PartInfo::Name(name) => {
-                    if !name.is_empty()
-                        && (name.start_modifier.is_none()
-                            || name
-                                .start_modifier
-                                .as_ref()
-                                .is_some_and(|x| matches!(x, StartModifier::Append(_))))
-                    {
-                        Some(name.to_string())
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .collect()
-    }
+// impl DissectProcessorBuilder {
+//     fn build_output_keys(patterns: &[PatternInfo]) -> HashSet<String> {
+//         patterns
+//             .iter()
+//             .flat_map(|pattern| pattern.iter())
+//             .filter_map(|p| match p {
+//                 PartInfo::Name(name) => {
+//                     if !name.is_empty()
+//                         && (name.start_modifier.is_none()
+//                             || name
+//                                 .start_modifier
+//                                 .as_ref()
+//                                 .is_some_and(|x| matches!(x, StartModifier::Append(_))))
+//                     {
+//                         Some(name.to_string())
+//                     } else {
+//                         None
+//                     }
+//                 }
+//                 _ => None,
+//             })
+//             .collect()
+//     }
 
-    fn part_info_to_part(part_info: PartInfo, intermediate_keys: &[String]) -> Result<Part> {
-        match part_info {
-            PartInfo::Split(s) => Ok(Part::Split(s)),
-            PartInfo::Name(n) => match n.start_modifier {
-                None | Some(StartModifier::Append(_)) => {
-                    let index = find_key_index(intermediate_keys, &n.name, "dissect")?;
-                    Ok(Part::Name(Name {
-                        name: n.name,
-                        index,
-                        start_modifier: n.start_modifier,
-                        end_modifier: n.end_modifier,
-                    }))
-                }
-                _ => Ok(Part::Name(Name {
-                    name: n.name,
-                    index: usize::MAX,
-                    start_modifier: n.start_modifier,
-                    end_modifier: n.end_modifier,
-                })),
-            },
-        }
-    }
+//     fn part_info_to_part(part_info: PartInfo, intermediate_keys: &[String]) -> Result<Part> {
+//         match part_info {
+//             PartInfo::Split(s) => Ok(Part::Split(s)),
+//             PartInfo::Name(n) => match n.start_modifier {
+//                 None | Some(StartModifier::Append(_)) => {
+//                     let index = find_key_index(intermediate_keys, &n.name, "dissect")?;
+//                     Ok(Part::Name(Name {
+//                         name: n.name,
+//                         index,
+//                         start_modifier: n.start_modifier,
+//                         end_modifier: n.end_modifier,
+//                     }))
+//                 }
+//                 _ => Ok(Part::Name(Name {
+//                     name: n.name,
+//                     index: usize::MAX,
+//                     start_modifier: n.start_modifier,
+//                     end_modifier: n.end_modifier,
+//                 })),
+//             },
+//         }
+//     }
 
-    fn pattern_info_to_pattern(
-        pattern_info: PatternInfo,
-        intermediate_keys: &[String],
-    ) -> Result<Pattern> {
-        let original = pattern_info.origin;
-        let pattern = pattern_info
-            .parts
-            .into_iter()
-            .map(|part_info| Self::part_info_to_part(part_info, intermediate_keys))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Pattern {
-            origin: original,
-            parts: pattern,
-        })
-    }
+//     fn pattern_info_to_pattern(
+//         pattern_info: PatternInfo,
+//         intermediate_keys: &[String],
+//     ) -> Result<Pattern> {
+//         let original = pattern_info.origin;
+//         let pattern = pattern_info
+//             .parts
+//             .into_iter()
+//             .map(|part_info| Self::part_info_to_part(part_info, intermediate_keys))
+//             .collect::<Result<Vec<_>>>()?;
+//         Ok(Pattern {
+//             origin: original,
+//             parts: pattern,
+//         })
+//     }
 
-    fn build_patterns_from_pattern_infos(
-        patterns: Vec<PatternInfo>,
-        intermediate_keys: &[String],
-    ) -> Result<Vec<Pattern>> {
-        patterns
-            .into_iter()
-            .map(|pattern_info| Self::pattern_info_to_pattern(pattern_info, intermediate_keys))
-            .collect()
-    }
-}
+//     fn build_patterns_from_pattern_infos(
+//         patterns: Vec<PatternInfo>,
+//         intermediate_keys: &[String],
+//     ) -> Result<Vec<Pattern>> {
+//         patterns
+//             .into_iter()
+//             .map(|pattern_info| Self::pattern_info_to_pattern(pattern_info, intermediate_keys))
+//             .collect()
+//     }
+// }
 
-impl ProcessorBuilder for DissectProcessorBuilder {
-    fn output_keys(&self) -> HashSet<&str> {
-        self.output_keys.iter().map(|s| s.as_str()).collect()
-    }
+// impl ProcessorBuilder for DissectProcessorBuilder {
+//     fn output_keys(&self) -> HashSet<&str> {
+//         self.output_keys.iter().map(|s| s.as_str()).collect()
+//     }
 
-    fn input_keys(&self) -> HashSet<&str> {
-        self.fields.iter().map(|f| f.input_field()).collect()
-    }
+//     fn input_keys(&self) -> HashSet<&str> {
+//         self.fields.iter().map(|f| f.input_field()).collect()
+//     }
 
-    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind> {
-        let mut real_fields = vec![];
-        for field in self.fields.into_iter() {
-            let input_index = find_key_index(intermediate_keys, field.input_field(), "dissect")?;
+//     fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind> {
+//         let mut real_fields = vec![];
+//         for field in self.fields.into_iter() {
+//             let input_index = find_key_index(intermediate_keys, field.input_field(), "dissect")?;
 
-            let input_field_info = InputField::new(field.input_field(), input_index);
+//             let input_field_info = InputField::new(field.input_field(), input_index);
 
-            let real_field = OneInputMultiOutputField::new(input_field_info, field.target_field);
-            real_fields.push(real_field);
-        }
-        let patterns = Self::build_patterns_from_pattern_infos(self.patterns, intermediate_keys)?;
-        let processor = DissectProcessor {
-            fields: real_fields,
-            patterns,
-            ignore_missing: self.ignore_missing,
-            append_separator: self.append_separator,
-        };
-        Ok(ProcessorKind::Dissect(processor))
-    }
-}
+//             let real_field = OneInputMultiOutputField::new(input_field_info, field.target_field);
+//             real_fields.push(real_field);
+//         }
+//         let patterns = Self::build_patterns_from_pattern_infos(self.patterns, intermediate_keys)?;
+//         let processor = DissectProcessor {
+//             fields: real_fields,
+//             patterns,
+//             ignore_missing: self.ignore_missing,
+//             append_separator: self.append_separator,
+//         };
+//         Ok(ProcessorKind::Dissect(processor))
+//     }
+// }
 
 #[derive(Debug, Default)]
 pub struct DissectProcessor {
-    fields: Vec<OneInputMultiOutputField>,
+    fields: Fields,
     patterns: Vec<Pattern>,
     ignore_missing: bool,
 
@@ -639,33 +537,37 @@ pub struct DissectProcessor {
 }
 
 impl DissectProcessor {
-    fn process_pattern(&self, chs: &[char], pattern: &Pattern) -> Result<Vec<(usize, Value)>> {
+    fn process_name_value<'a, 'b>(
+        name: &'a Name,
+        value: String,
+        appends: &'b mut HashMap<&'a String, Vec<(String, u32)>>,
+        map: &mut Vec<(&'a String, Value)>,
+    ) {
+        match name.start_modifier {
+            Some(StartModifier::NamedSkip) => {
+                // do nothing, ignore this match
+            }
+            Some(StartModifier::Append(order)) => {
+                appends
+                    .entry(&name.name)
+                    .or_default()
+                    .push((value, order.unwrap_or_default()));
+            }
+            Some(_) => {
+                // do nothing, ignore MapKey and MapVal
+                // because transform can know the key name
+            }
+            None => {
+                map.push((&name.name, Value::String(value)));
+            }
+        }
+    }
+
+    fn process_pattern(&self, chs: &[char], pattern: &Pattern) -> Result<Vec<(String, Value)>> {
         let mut map = Vec::new();
         let mut pos = 0;
 
-        let mut appends: HashMap<usize, Vec<(String, u32)>> = HashMap::new();
-
-        let mut process_name_value = |name: &Name, value: String| {
-            let name_index = name.index;
-            match name.start_modifier {
-                Some(StartModifier::NamedSkip) => {
-                    // do nothing, ignore this match
-                }
-                Some(StartModifier::Append(order)) => {
-                    appends
-                        .entry(name_index)
-                        .or_default()
-                        .push((value, order.unwrap_or_default()));
-                }
-                Some(_) => {
-                    // do nothing, ignore MapKey and MapVal
-                    // because transform can know the key name
-                }
-                None => {
-                    map.push((name_index, Value::String(value)));
-                }
-            }
-        };
+        let mut appends: HashMap<&String, Vec<(String, u32)>> = HashMap::new();
 
         for i in 0..pattern.len() {
             let this_part = &pattern[i];
@@ -701,7 +603,7 @@ impl DissectProcessor {
                 // if Name part is the last part, then the rest of the input is the value
                 (Part::Name(name), None) => {
                     let value = chs[pos..].iter().collect::<String>();
-                    process_name_value(name, value);
+                    Self::process_name_value(name, value, &mut appends, &mut map);
                 }
 
                 // if Name part, and next part is Split, then find the matched value of the name
@@ -717,7 +619,7 @@ impl DissectProcessor {
 
                     if !name.is_name_empty() {
                         let value = chs[pos..end].iter().collect::<String>();
-                        process_name_value(name, value);
+                        Self::process_name_value(name, value, &mut appends, &mut map);
                     }
 
                     if name.is_end_modifier_set() {
@@ -745,10 +647,10 @@ impl DissectProcessor {
             }
         }
 
-        Ok(map)
+        Ok(map.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
     }
 
-    fn process(&self, val: &str) -> Result<Vec<(usize, Value)>> {
+    fn process(&self, val: &str) -> Result<Vec<(String, Value)>> {
         let chs = val.chars().collect::<Vec<char>>();
 
         for pattern in &self.patterns {
@@ -760,7 +662,7 @@ impl DissectProcessor {
     }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for DissectProcessorBuilder {
+impl TryFrom<&yaml_rust::yaml::Hash> for DissectProcessor {
     type Error = Error;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self> {
@@ -782,7 +684,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DissectProcessorBuilder {
                     fields = yaml_new_fields(v, FIELDS_NAME)?;
                 }
                 PATTERN_NAME => {
-                    let pattern: PatternInfo = yaml_parse_string(v, PATTERN_NAME)?;
+                    let pattern: Pattern = yaml_parse_string(v, PATTERN_NAME)?;
                     patterns = vec![pattern];
                 }
                 PATTERNS_NAME => {
@@ -797,13 +699,12 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DissectProcessorBuilder {
                 _ => {}
             }
         }
-        let output_keys = Self::build_output_keys(&patterns);
-        let builder = DissectProcessorBuilder {
+        // let output_keys = Self::build_output_keys(&patterns);
+        let builder = DissectProcessor {
             fields,
             patterns,
             ignore_missing,
             append_separator,
-            output_keys,
         };
 
         Ok(builder)
@@ -819,21 +720,21 @@ impl Processor for DissectProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<()> {
+    fn exec_mut(&self, val: &mut IntermediateStatus) -> Result<()> {
         for field in self.fields.iter() {
-            let index = field.input_index();
+            let index = field.input_field();
             match val.get(index) {
                 Some(Value::String(val_str)) => {
                     let r = self.process(val_str)?;
                     for (k, v) in r {
-                        val[k] = v;
+                        val.insert(k, v);
                     }
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
                         return ProcessorMissingFieldSnafu {
                             processor: self.kind(),
-                            field: field.input_name(),
+                            field: field.input_field(),
                         }
                         .fail();
                     }
@@ -859,26 +760,19 @@ fn is_valid_char(ch: char) -> bool {
 mod tests {
     use ahash::HashMap;
 
-    use super::{DissectProcessor, EndModifier, NameInfo, PartInfo, PatternInfo, StartModifier};
-    use crate::etl::processor::dissect::DissectProcessorBuilder;
+    use super::{DissectProcessor, EndModifier, Name, Part, StartModifier};
+    use crate::etl::processor::dissect::Pattern;
     use crate::etl::value::Value;
 
     fn assert(pattern_str: &str, input: &str, expected: HashMap<String, Value>) {
         let chs = input.chars().collect::<Vec<char>>();
-        let pattern_infos: Vec<PatternInfo> = vec![pattern_str.parse().unwrap()];
-        let output_keys: Vec<String> = DissectProcessorBuilder::build_output_keys(&pattern_infos)
-            .into_iter()
-            .collect();
-        let pattern =
-            DissectProcessorBuilder::build_patterns_from_pattern_infos(pattern_infos, &output_keys)
-                .unwrap();
+        let patterns: Vec<Pattern> = vec![pattern_str.parse().unwrap()];
 
         let processor = DissectProcessor::default();
         let result: HashMap<String, Value> = processor
-            .process_pattern(&chs, &pattern[0])
+            .process_pattern(&chs, &patterns[0])
             .unwrap()
             .into_iter()
-            .map(|(k, v)| (output_keys[k].to_string(), v))
             .collect();
 
         assert_eq!(result, expected, "pattern: {}", pattern_str);
@@ -889,28 +783,28 @@ mod tests {
         let cases = [(
             "%{clientip} %{ident} %{auth} [%{timestamp}] \"%{verb} %{request} HTTP/%{httpversion}\" %{status} %{size}",
             vec![
-                PartInfo::Name("clientip".into()),
-                PartInfo::Split(" ".into()),
-                PartInfo::Name("ident".into()),
-                PartInfo::Split(" ".into()),
-                PartInfo::Name("auth".into()),
-                PartInfo::Split(" [".into()),
-                PartInfo::Name("timestamp".into()),
-                PartInfo::Split("] \"".into()),
-                PartInfo::Name("verb".into()),
-                PartInfo::Split(" ".into()),
-                PartInfo::Name("request".into()),
-                PartInfo::Split(" HTTP/".into()),
-                PartInfo::Name("httpversion".into()),
-                PartInfo::Split("\" ".into()),
-                PartInfo::Name("status".into()),
-                PartInfo::Split(" ".into()),
-                PartInfo::Name("size".into()),
+                Part::Name("clientip".into()),
+                Part::Split(" ".into()),
+                Part::Name("ident".into()),
+                Part::Split(" ".into()),
+                Part::Name("auth".into()),
+                Part::Split(" [".into()),
+                Part::Name("timestamp".into()),
+                Part::Split("] \"".into()),
+                Part::Name("verb".into()),
+                Part::Split(" ".into()),
+                Part::Name("request".into()),
+                Part::Split(" HTTP/".into()),
+                Part::Name("httpversion".into()),
+                Part::Split("\" ".into()),
+                Part::Name("status".into()),
+                Part::Split(" ".into()),
+                Part::Name("size".into()),
             ],
         )];
 
         for (pattern, expected) in cases.into_iter() {
-            let p: PatternInfo = pattern.parse().unwrap();
+            let p: Pattern = pattern.parse().unwrap();
             assert_eq!(p.parts, expected);
         }
     }
@@ -921,13 +815,13 @@ mod tests {
             (
                 "%{} %{}",
                 vec![
-                    PartInfo::Name(NameInfo {
+                    Part::Name(Name {
                         name: "".into(),
                         start_modifier: None,
                         end_modifier: None,
                     }),
-                    PartInfo::Split(" ".into()),
-                    PartInfo::Name(NameInfo {
+                    Part::Split(" ".into()),
+                    Part::Name(Name {
                         name: "".into(),
                         start_modifier: None,
                         end_modifier: None,
@@ -937,61 +831,61 @@ mod tests {
             (
                 "%{ts->} %{level}",
                 vec![
-                    PartInfo::Name(NameInfo {
+                    Part::Name(Name {
                         name: "ts".into(),
                         start_modifier: None,
                         end_modifier: Some(EndModifier),
                     }),
-                    PartInfo::Split(" ".into()),
-                    PartInfo::Name("level".into()),
+                    Part::Split(" ".into()),
+                    Part::Name("level".into()),
                 ],
             ),
             (
                 "[%{ts}]%{->}[%{level}]",
                 vec![
-                    PartInfo::Split("[".into()),
-                    PartInfo::Name(NameInfo {
+                    Part::Split("[".into()),
+                    Part::Name(Name {
                         name: "ts".into(),
                         start_modifier: None,
                         end_modifier: None,
                     }),
-                    PartInfo::Split("]".into()),
-                    PartInfo::Name(NameInfo {
+                    Part::Split("]".into()),
+                    Part::Name(Name {
                         name: "".into(),
                         start_modifier: None,
                         end_modifier: Some(EndModifier),
                     }),
-                    PartInfo::Split("[".into()),
-                    PartInfo::Name(NameInfo {
+                    Part::Split("[".into()),
+                    Part::Name(Name {
                         name: "level".into(),
                         start_modifier: None,
                         end_modifier: None,
                     }),
-                    PartInfo::Split("]".into()),
+                    Part::Split("]".into()),
                 ],
             ),
             (
                 "%{+name} %{+name} %{+name} %{+name}",
                 vec![
-                    PartInfo::Name(NameInfo {
+                    Part::Name(Name {
                         name: "name".into(),
                         start_modifier: Some(StartModifier::Append(None)),
                         end_modifier: None,
                     }),
-                    PartInfo::Split(" ".into()),
-                    PartInfo::Name(NameInfo {
+                    Part::Split(" ".into()),
+                    Part::Name(Name {
                         name: "name".into(),
                         start_modifier: Some(StartModifier::Append(None)),
                         end_modifier: None,
                     }),
-                    PartInfo::Split(" ".into()),
-                    PartInfo::Name(NameInfo {
+                    Part::Split(" ".into()),
+                    Part::Name(Name {
                         name: "name".into(),
                         start_modifier: Some(StartModifier::Append(None)),
                         end_modifier: None,
                     }),
-                    PartInfo::Split(" ".into()),
-                    PartInfo::Name(NameInfo {
+                    Part::Split(" ".into()),
+                    Part::Name(Name {
                         name: "name".into(),
                         start_modifier: Some(StartModifier::Append(None)),
                         end_modifier: None,
@@ -1001,25 +895,25 @@ mod tests {
             (
                 "%{+name/2} %{+name/4} %{+name/3} %{+name/1}",
                 vec![
-                    PartInfo::Name(NameInfo {
+                    Part::Name(Name {
                         name: "name".into(),
                         start_modifier: Some(StartModifier::Append(Some(2))),
                         end_modifier: None,
                     }),
-                    PartInfo::Split(" ".into()),
-                    PartInfo::Name(NameInfo {
+                    Part::Split(" ".into()),
+                    Part::Name(Name {
                         name: "name".into(),
                         start_modifier: Some(StartModifier::Append(Some(4))),
                         end_modifier: None,
                     }),
-                    PartInfo::Split(" ".into()),
-                    PartInfo::Name(NameInfo {
+                    Part::Split(" ".into()),
+                    Part::Name(Name {
                         name: "name".into(),
                         start_modifier: Some(StartModifier::Append(Some(3))),
                         end_modifier: None,
                     }),
-                    PartInfo::Split(" ".into()),
-                    PartInfo::Name(NameInfo {
+                    Part::Split(" ".into()),
+                    Part::Name(Name {
                         name: "name".into(),
                         start_modifier: Some(StartModifier::Append(Some(1))),
                         end_modifier: None,
@@ -1029,67 +923,67 @@ mod tests {
             (
                 "%{clientip} %{?ident} %{?auth} [%{timestamp}]",
                 vec![
-                    PartInfo::Name(NameInfo {
+                    Part::Name(Name {
                         name: "clientip".into(),
                         start_modifier: None,
                         end_modifier: None,
                     }),
-                    PartInfo::Split(" ".into()),
-                    PartInfo::Name(NameInfo {
+                    Part::Split(" ".into()),
+                    Part::Name(Name {
                         name: "ident".into(),
                         start_modifier: Some(StartModifier::NamedSkip),
                         end_modifier: None,
                     }),
-                    PartInfo::Split(" ".into()),
-                    PartInfo::Name(NameInfo {
+                    Part::Split(" ".into()),
+                    Part::Name(Name {
                         name: "auth".into(),
                         start_modifier: Some(StartModifier::NamedSkip),
                         end_modifier: None,
                     }),
-                    PartInfo::Split(" [".into()),
-                    PartInfo::Name(NameInfo {
+                    Part::Split(" [".into()),
+                    Part::Name(Name {
                         name: "timestamp".into(),
                         start_modifier: None,
                         end_modifier: None,
                     }),
-                    PartInfo::Split("]".into()),
+                    Part::Split("]".into()),
                 ],
             ),
             (
                 "[%{ts}] [%{level}] %{*p1}:%{&p1} %{*p2}:%{&p2}",
                 vec![
-                    PartInfo::Split("[".into()),
-                    PartInfo::Name(NameInfo {
+                    Part::Split("[".into()),
+                    Part::Name(Name {
                         name: "ts".into(),
                         start_modifier: None,
                         end_modifier: None,
                     }),
-                    PartInfo::Split("] [".into()),
-                    PartInfo::Name(NameInfo {
+                    Part::Split("] [".into()),
+                    Part::Name(Name {
                         name: "level".into(),
                         start_modifier: None,
                         end_modifier: None,
                     }),
-                    PartInfo::Split("] ".into()),
-                    PartInfo::Name(NameInfo {
+                    Part::Split("] ".into()),
+                    Part::Name(Name {
                         name: "p1".into(),
                         start_modifier: Some(StartModifier::MapKey),
                         end_modifier: None,
                     }),
-                    PartInfo::Split(":".into()),
-                    PartInfo::Name(NameInfo {
+                    Part::Split(":".into()),
+                    Part::Name(Name {
                         name: "p1".into(),
                         start_modifier: Some(StartModifier::MapVal),
                         end_modifier: None,
                     }),
-                    PartInfo::Split(" ".into()),
-                    PartInfo::Name(NameInfo {
+                    Part::Split(" ".into()),
+                    Part::Name(Name {
                         name: "p2".into(),
                         start_modifier: Some(StartModifier::MapKey),
                         end_modifier: None,
                     }),
-                    PartInfo::Split(":".into()),
-                    PartInfo::Name(NameInfo {
+                    Part::Split(":".into()),
+                    Part::Name(Name {
                         name: "p2".into(),
                         start_modifier: Some(StartModifier::MapVal),
                         end_modifier: None,
@@ -1099,13 +993,13 @@ mod tests {
             (
                 "%{&p1}:%{*p1}",
                 vec![
-                    PartInfo::Name(NameInfo {
+                    Part::Name(Name {
                         name: "p1".into(),
                         start_modifier: Some(StartModifier::MapVal),
                         end_modifier: None,
                     }),
-                    PartInfo::Split(":".into()),
-                    PartInfo::Name(NameInfo {
+                    Part::Split(":".into()),
+                    Part::Name(Name {
                         name: "p1".into(),
                         start_modifier: Some(StartModifier::MapKey),
                         end_modifier: None,
@@ -1115,7 +1009,7 @@ mod tests {
         ];
 
         for (pattern, expected) in cases.into_iter() {
-            let p: PatternInfo = pattern.parse().unwrap();
+            let p: Pattern = pattern.parse().unwrap();
             assert_eq!(p.parts, expected);
         }
     }
@@ -1195,7 +1089,7 @@ mod tests {
         ];
 
         for (pattern, expected) in cases.into_iter() {
-            let err = pattern.parse::<PatternInfo>().unwrap_err();
+            let err = pattern.parse::<Pattern>().unwrap_err();
             assert_eq!(err.to_string(), expected);
         }
     }
