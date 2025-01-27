@@ -17,13 +17,13 @@ pub mod csv;
 pub mod date;
 pub mod decolorize;
 pub mod digest;
-// pub mod dissect;
+pub mod dissect;
 pub mod epoch;
 pub mod gsub;
 pub mod join;
 pub mod json_path;
 pub mod letter;
-// pub mod regex;
+pub mod regex;
 pub mod timestamp;
 pub mod urlencoding;
 
@@ -34,14 +34,14 @@ use csv::CsvProcessor;
 use date::DateProcessor;
 use decolorize::DecolorizeProcessor;
 use digest::DigestProcessor;
-// use dissect::DissectProcessor;
+use dissect::DissectProcessor;
 use enum_dispatch::enum_dispatch;
 use epoch::EpochProcessor;
 use gsub::GsubProcessor;
 use join::JoinProcessor;
 use json_path::JsonPathProcessor;
 use letter::LetterProcessor;
-// use regex::RegexProcessor;
+use regex::RegexProcessor;
 use snafu::{OptionExt, ResultExt};
 use timestamp::TimestampProcessor;
 use urlencoding::UrlEncodingProcessor;
@@ -91,11 +91,11 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
 pub enum ProcessorKind {
     Cmcd(CmcdProcessor),
     Csv(CsvProcessor),
-    // Dissect(DissectProcessor),
+    Dissect(DissectProcessor),
     Gsub(GsubProcessor),
     Join(JoinProcessor),
     Letter(LetterProcessor),
-    // Regex(RegexProcessor),
+    Regex(RegexProcessor),
     Timestamp(TimestampProcessor),
     UrlEncoding(UrlEncodingProcessor),
     Epoch(EpochProcessor),
@@ -158,13 +158,13 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorKind> {
     let processor = match str_key {
         cmcd::PROCESSOR_CMCD => ProcessorKind::Cmcd(CmcdProcessor::try_from(value)?),
         csv::PROCESSOR_CSV => ProcessorKind::Csv(CsvProcessor::try_from(value)?),
-        // dissect::PROCESSOR_DISSECT => ProcessorKind::Dissect(DissectProcessor::try_from(value)?),
+        dissect::PROCESSOR_DISSECT => ProcessorKind::Dissect(DissectProcessor::try_from(value)?),
         epoch::PROCESSOR_EPOCH => ProcessorKind::Epoch(EpochProcessor::try_from(value)?),
         date::PROCESSOR_DATE => ProcessorKind::Date(DateProcessor::try_from(value)?),
         gsub::PROCESSOR_GSUB => ProcessorKind::Gsub(GsubProcessor::try_from(value)?),
         join::PROCESSOR_JOIN => ProcessorKind::Join(JoinProcessor::try_from(value)?),
         letter::PROCESSOR_LETTER => ProcessorKind::Letter(LetterProcessor::try_from(value)?),
-        // regex::PROCESSOR_REGEX => ProcessorKind::Regex(RegexProcessor::try_from(value)?),
+        regex::PROCESSOR_REGEX => ProcessorKind::Regex(RegexProcessor::try_from(value)?),
         timestamp::PROCESSOR_TIMESTAMP => {
             ProcessorKind::Timestamp(TimestampProcessor::try_from(value)?)
         }

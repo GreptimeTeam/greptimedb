@@ -1663,7 +1663,7 @@ pub async fn test_plain_text_ingestion(store_type: StorageType) {
 processors:
   - dissect:
       fields:
-        - line
+        - message
       patterns:
         - "%{+ts} %{+ts} %{content}"
   - date:

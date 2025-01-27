@@ -573,7 +573,7 @@ fn extract_pipeline_value_by_content_type(
         ct if ct == *TEXT_CONTENT_TYPE || ct == *TEXT_UTF8_CONTENT_TYPE => payload
             .lines()
             .filter(|line| !line.is_empty())
-            .map(|line| Value::String(line.to_string()))
+            .map(|line| json!({"message": line}))
             .collect(),
         _ => UnsupportedContentTypeSnafu { content_type }.fail()?,
     })
