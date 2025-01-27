@@ -18,7 +18,11 @@
           libgit2
           libz
         ];
-
+        lib = nixpkgs.lib;
+        rustToolchain = fenix.packages.${system}.fromToolchainName {
+          name = (lib.importTOML ./rust-toolchain.toml).toolchain.channel;
+          sha256 = "sha256-f/CVA1EC61EWbh0SjaRNhLL0Ypx2ObupbzigZp8NmL4=";
+        };
       in
       {
         devShells.default = pkgs.mkShell {
@@ -30,10 +34,15 @@
             protobuf
             gnumake
             mold
-            (fenix.packages.${system}.fromToolchainFile {
-              dir = ./.;
-              sha256 = "sha256-f/CVA1EC61EWbh0SjaRNhLL0Ypx2ObupbzigZp8NmL4=";
-            })
+            (rustToolchain.withComponents [
+              "cargo"
+              "clippy"
+              "rust-src"
+              "rustc"
+              "rustfmt"
+              "rust-analyzer"
+              "llvm-tools"
+            ])
             cargo-nextest
             cargo-llvm-cov
             taplo
