@@ -18,6 +18,8 @@ const PATTERNS_NAME: &str = "patterns";
 
 pub(crate) const PROCESSOR_REGEX: &str = "regex";
 
+use std::collections::BTreeMap;
+
 use lazy_static::lazy_static;
 use regex::Regex;
 use snafu::{OptionExt, ResultExt};
@@ -167,13 +169,15 @@ impl RegexProcessor {
         Ok(())
     }
 
-    fn process<'a>(&self, val: &str, gr: &'a GroupRegex) -> Result<Vec<(&'a String, Value)>> {
-        let mut result = Vec::new();
-        if let Some(captures) = gr.regex.captures(val) {
-            for group in gr.groups.iter() {
-                if let Some(capture) = captures.name(group) {
-                    let value = capture.as_str().to_string();
-                    result.push((group, Value::String(value)));
+    fn process(&self, prefix: &str, val: &str) -> Result<BTreeMap<String, Value>> {
+        let mut result = BTreeMap::new();
+        for gr in self.patterns.iter() {
+            if let Some(captures) = gr.regex.captures(val) {
+                for group in gr.groups.iter() {
+                    if let Some(capture) = captures.name(group) {
+                        let value = capture.as_str().to_string();
+                        result.insert(generate_key(prefix, group), Value::String(value));
+                    }
                 }
             }
         }
@@ -194,30 +198,10 @@ impl Processor for RegexProcessor {
         for field in self.fields.iter() {
             let index = field.input_field();
             let prefix = field.target_or_input_field();
-            let mut result_list = None;
             match val.get(index) {
                 Some(Value::String(s)) => {
-                    // we get rust borrow checker error here
-                    // for (gr_index, gr) in self.patterns.iter().enumerate() {
-                    //     let result_list = self.process(s.as_str(), gr, (field_index, gr_index))?;
-                    //     for (output_index, result) in result_list {
-                    //cannot borrow `*val` as mutable because it is also borrowed as immutable mutable borrow occurs here
-                    //         val[output_index] = result;
-                    //     }
-                    // }
-                    for gr in self.patterns.iter() {
-                        let result = self.process(s.as_str(), gr)?;
-                        if !result.is_empty() {
-                            match result_list.as_mut() {
-                                None => {
-                                    result_list = Some(result);
-                                }
-                                Some(result_list) => {
-                                    result_list.extend(result);
-                                }
-                            }
-                        }
-                    }
+                    let result = self.process(prefix, s)?;
+                    val.extend(result);
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
@@ -234,15 +218,6 @@ impl Processor for RegexProcessor {
                         v: v.clone(),
                     }
                     .fail();
-                }
-            }
-            // safety here
-            match result_list {
-                None => {}
-                Some(result_list) => {
-                    for (output_key, result) in result_list {
-                        val.insert(generate_key(prefix, output_key), result);
-                    }
                 }
             }
         }
@@ -275,17 +250,12 @@ ignore_missing: false"#;
 
         // single field (with prefix), multiple patterns
 
-        let result = processor
-            .process("123", &processor.patterns[0])
-            .unwrap()
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect();
+        let result = processor.process("a", "123").unwrap();
 
         let map = Map { values: result };
 
         let v = Map {
-            values: vec![("ar".to_string(), Value::String("1".to_string()))]
+            values: vec![("a_ar".to_string(), Value::String("1".to_string()))]
                 .into_iter()
                 .collect(),
         };
@@ -302,7 +272,7 @@ ignore_missing: false"#;
         let cw = "[c=w,n=US_CA_SANJOSE,o=55155]";
         let breadcrumbs_str = [cc, cg, co, cp, cw].iter().join(",");
 
-        let values = [
+        let temporary_map: BTreeMap<String, Value> = [
             ("breadcrumbs_parent", Value::String(cc.to_string())),
             ("breadcrumbs_edge", Value::String(cg.to_string())),
             ("breadcrumbs_origin", Value::String(co.to_string())),
@@ -312,7 +282,6 @@ ignore_missing: false"#;
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
         .collect();
-        let temporary_map = Map { values };
 
         {
             // single field (with prefix), multiple patterns
@@ -332,23 +301,10 @@ ignore_missing: false"#;
                 .unwrap();
             let processor_yaml_hash = processor_yaml.as_hash().unwrap();
             let processor = RegexProcessor::try_from(processor_yaml_hash).unwrap();
-            let mut result = BTreeMap::new();
-            for pattern in processor.patterns.iter() {
-                let r = processor
-                    .process(&breadcrumbs_str, pattern)
-                    .unwrap()
-                    .into_iter()
-                    .map(|(k, v)| (k.to_string(), v))
-                    .collect::<BTreeMap<_, _>>();
-                result.extend(r);
-            }
-            let map = Map {
-                values: result
-                    .into_iter()
-                    .map(|(k, v)| (format!("breadcrumbs_{}", k), v))
-                    .collect(),
-            };
-            assert_eq!(temporary_map, map);
+
+            let result = processor.process("breadcrumbs", &breadcrumbs_str).unwrap();
+
+            assert_eq!(temporary_map, result);
         }
 
         {
@@ -379,20 +335,15 @@ ignore_missing: false"#;
 
             let mut result = HashMap::new();
             for field in processor.fields.iter() {
-                for pattern in processor.patterns.iter() {
-                    let s = temporary_map
-                        .get(field.input_field())
-                        .unwrap()
-                        .to_str_value();
-                    let prefix = field.target_or_input_field();
-                    let r = processor
-                        .process(&s, pattern)
-                        .unwrap()
-                        .into_iter()
-                        .map(|(k, v)| (format!("{}_{}", prefix, k), v))
-                        .collect::<HashMap<_, _>>();
-                    result.extend(r);
-                }
+                let s = temporary_map
+                    .get(field.input_field())
+                    .unwrap()
+                    .to_str_value();
+                let prefix = field.target_or_input_field();
+
+                let r = processor.process(prefix, &s).unwrap();
+
+                result.extend(r);
             }
 
             let new_values = vec![
