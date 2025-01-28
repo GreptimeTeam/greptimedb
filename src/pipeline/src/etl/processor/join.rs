@@ -32,28 +32,19 @@ pub(crate) const PROCESSOR_JOIN: &str = "join";
 #[derive(Debug, Default)]
 pub struct JoinProcessor {
     fields: Fields,
-    separator: Option<String>,
+    separator: String,
     ignore_missing: bool,
 }
 
 impl JoinProcessor {
     fn process(&self, arr: &Array) -> Result<Value> {
-        let sep = self.separator.as_ref().unwrap();
         let val = arr
             .iter()
             .map(|v| v.to_str_value())
             .collect::<Vec<String>>()
-            .join(sep);
+            .join(&self.separator);
 
         Ok(Value::String(val))
-    }
-
-    fn check(self) -> Result<Self> {
-        if self.separator.is_none() {
-            return JoinSeparatorRequiredSnafu.fail();
-        }
-
-        Ok(self)
     }
 }
 
@@ -87,12 +78,11 @@ impl TryFrom<&yaml_rust::yaml::Hash> for JoinProcessor {
             }
         }
 
-        let builder = JoinProcessor {
+        Ok(JoinProcessor {
             fields,
-            separator,
+            separator: separator.context(JoinSeparatorRequiredSnafu)?,
             ignore_missing,
-        };
-        builder.check()
+        })
     }
 }
 
@@ -146,7 +136,7 @@ mod tests {
     #[test]
     fn test_join_processor() {
         let processor = JoinProcessor {
-            separator: Some("-".to_string()),
+            separator: "-".to_string(),
             ..Default::default()
         };
 

@@ -32,35 +32,17 @@ pub(crate) const PROCESSOR_GSUB: &str = "gsub";
 const REPLACEMENT_NAME: &str = "replacement";
 
 /// A processor to replace all matches of a pattern in string by a replacement, only support string value, and array string value
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct GsubProcessor {
     fields: Fields,
-    pattern: Option<Regex>,
-    replacement: Option<String>,
+    pattern: Regex,
+    replacement: String,
     ignore_missing: bool,
 }
 
 impl GsubProcessor {
-    fn check(self) -> Result<Self> {
-        if self.pattern.is_none() {
-            return GsubPatternRequiredSnafu.fail();
-        }
-
-        if self.replacement.is_none() {
-            return GsubReplacementRequiredSnafu.fail();
-        }
-
-        Ok(self)
-    }
-
     fn process_string(&self, val: &str) -> Result<Value> {
-        let replacement = self.replacement.as_ref().unwrap();
-        let new_val = self
-            .pattern
-            .as_ref()
-            .unwrap()
-            .replace_all(val, replacement)
-            .to_string();
+        let new_val = self.pattern.replace_all(val, &self.replacement).to_string();
         let val = Value::String(new_val);
 
         Ok(val)
@@ -118,14 +100,12 @@ impl TryFrom<&yaml_rust::yaml::Hash> for GsubProcessor {
             }
         }
 
-        let builder = GsubProcessor {
+        Ok(GsubProcessor {
             fields,
-            pattern,
-            replacement,
+            pattern: pattern.context(GsubPatternRequiredSnafu)?,
+            replacement: replacement.context(GsubReplacementRequiredSnafu)?,
             ignore_missing,
-        };
-
-        builder.check()
+        })
     }
 }
 
@@ -164,15 +144,17 @@ impl crate::etl::processor::Processor for GsubProcessor {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::etl::processor::gsub::GsubProcessor;
     use crate::etl::value::Value;
 
     #[test]
     fn test_string_value() {
         let processor = GsubProcessor {
-            pattern: Some(regex::Regex::new(r"\d+").unwrap()),
-            replacement: Some("xxx".to_string()),
-            ..Default::default()
+            fields: Fields::default(),
+            pattern: regex::Regex::new(r"\d+").unwrap(),
+            replacement: "xxx".to_string(),
+            ignore_missing: false,
         };
 
         let val = Value::String("123".to_string());

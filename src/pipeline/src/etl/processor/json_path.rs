@@ -67,22 +67,18 @@ impl TryFrom<&yaml_rust::yaml::Hash> for JsonPathProcessor {
                 _ => {}
             }
         }
-        if let Some(json_path) = json_path {
-            let processor = JsonPathProcessor {
-                fields,
-                json_path,
-                ignore_missing,
-                result_idex,
-            };
 
-            Ok(processor)
-        } else {
-            ProcessorMissingFieldSnafu {
+        let processor = JsonPathProcessor {
+            fields,
+            json_path: json_path.context(ProcessorMissingFieldSnafu {
                 processor: PROCESSOR_JSON_PATH,
                 field: JSON_PATH_NAME,
-            }
-            .fail()
-        }
+            })?,
+            ignore_missing,
+            result_index: result_idex,
+        };
+
+        Ok(processor)
     }
 }
 
@@ -91,7 +87,7 @@ pub struct JsonPathProcessor {
     fields: Fields,
     json_path: JsonPath<Value>,
     ignore_missing: bool,
-    result_idex: Option<usize>,
+    result_index: Option<usize>,
 }
 
 impl Default for JsonPathProcessor {
@@ -100,7 +96,7 @@ impl Default for JsonPathProcessor {
             fields: Fields::default(),
             json_path: JsonPath::try_from("$").unwrap(),
             ignore_missing: false,
-            result_idex: None,
+            result_index: None,
         }
     }
 }
@@ -110,7 +106,7 @@ impl JsonPathProcessor {
         let processed = self.json_path.find(val);
         match processed {
             Value::Array(arr) => {
-                if let Some(index) = self.result_idex {
+                if let Some(index) = self.result_index {
                     Ok(arr.get(index).cloned().unwrap_or(Value::Null))
                 } else {
                     Ok(Value::Array(arr))
@@ -166,7 +162,7 @@ mod test {
         let json_path = JsonPath::try_from("$.hello").unwrap();
         let processor = JsonPathProcessor {
             json_path,
-            result_idex: Some(0),
+            result_index: Some(0),
             ..Default::default()
         };
 
