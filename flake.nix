@@ -47,6 +47,7 @@
             cargo-llvm-cov
             taplo
             curl
+            gnuplot ## for cargo bench
           ];
 
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath buildInputs;
