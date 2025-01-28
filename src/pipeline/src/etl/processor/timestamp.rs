@@ -14,22 +14,22 @@
 
 use std::sync::Arc;
 
-use ahash::HashSet;
 use chrono::{DateTime, NaiveDateTime};
 use chrono_tz::Tz;
 use lazy_static::lazy_static;
 use snafu::{OptionExt, ResultExt};
 
+use super::IntermediateStatus;
 use crate::etl::error::{
     DateFailedToGetLocalTimezoneSnafu, DateFailedToGetTimestampSnafu, DateInvalidFormatSnafu,
     DateParseSnafu, DateParseTimezoneSnafu, EpochInvalidResolutionSnafu, Error,
     KeyMustBeStringSnafu, ProcessorFailedToParseStringSnafu, ProcessorMissingFieldSnafu,
     ProcessorUnsupportedValueSnafu, Result,
 };
-use crate::etl::field::{Fields, OneInputOneOutputField};
+use crate::etl::field::Fields;
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, Processor,
-    ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, Processor, FIELDS_NAME,
+    FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::time::{
     MICROSECOND_RESOLUTION, MICRO_RESOLUTION, MILLISECOND_RESOLUTION, MILLI_RESOLUTION,
@@ -114,56 +114,10 @@ impl std::ops::Deref for Formats {
     }
 }
 
-#[derive(Debug)]
-pub struct TimestampProcessorBuilder {
-    fields: Fields,
-    formats: Formats,
-    resolution: Resolution,
-    ignore_missing: bool,
-}
-
-impl ProcessorBuilder for TimestampProcessorBuilder {
-    fn output_keys(&self) -> HashSet<&str> {
-        self.fields
-            .iter()
-            .map(|f| f.target_or_input_field())
-            .collect()
-    }
-
-    fn input_keys(&self) -> HashSet<&str> {
-        self.fields.iter().map(|f| f.input_field()).collect()
-    }
-
-    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind> {
-        self.build(intermediate_keys).map(ProcessorKind::Timestamp)
-    }
-}
-
-impl TimestampProcessorBuilder {
-    pub fn build(self, intermediate_keys: &[String]) -> Result<TimestampProcessor> {
-        let mut real_fields = vec![];
-        for field in self.fields.into_iter() {
-            let input = OneInputOneOutputField::build(
-                "timestamp",
-                intermediate_keys,
-                field.input_field(),
-                field.target_or_input_field(),
-            )?;
-            real_fields.push(input);
-        }
-        Ok(TimestampProcessor {
-            fields: real_fields,
-            formats: self.formats,
-            resolution: self.resolution,
-            ignore_missing: self.ignore_missing,
-        })
-    }
-}
-
 /// support string, integer, float, time, epoch
 #[derive(Debug, Default)]
 pub struct TimestampProcessor {
-    fields: Vec<OneInputOneOutputField>,
+    fields: Fields,
     formats: Formats,
     resolution: Resolution,
     ignore_missing: bool,
@@ -289,7 +243,7 @@ fn parse_formats(yaml: &yaml_rust::yaml::Yaml) -> Result<Vec<(Arc<String>, Tz)>>
     }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for TimestampProcessorBuilder {
+impl TryFrom<&yaml_rust::yaml::Hash> for TimestampProcessor {
     type Error = Error;
 
     fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self> {
@@ -324,7 +278,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for TimestampProcessorBuilder {
             }
         }
 
-        let processor_builder = TimestampProcessorBuilder {
+        let processor_builder = TimestampProcessor {
             fields,
             formats,
             resolution,
@@ -344,23 +298,23 @@ impl Processor for TimestampProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<()> {
+    fn exec_mut(&self, val: &mut IntermediateStatus) -> Result<()> {
         for field in self.fields.iter() {
-            let index = field.input().index;
+            let index = field.input_field();
             match val.get(index) {
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
                         return ProcessorMissingFieldSnafu {
                             processor: self.kind(),
-                            field: field.input_name(),
+                            field: field.input_field(),
                         }
                         .fail();
                     }
                 }
                 Some(v) => {
                     let result = self.parse(v)?;
-                    let (_, index) = field.output();
-                    val[*index] = Value::Timestamp(result);
+                    let output_key = field.target_or_input_field();
+                    val.insert(output_key.to_string(), Value::Timestamp(result));
                 }
             }
         }
@@ -372,17 +326,8 @@ impl Processor for TimestampProcessor {
 mod tests {
     use yaml_rust::YamlLoader;
 
-    use super::{TimestampProcessor, TimestampProcessorBuilder};
+    use super::TimestampProcessor;
     use crate::etl::value::{Timestamp, Value};
-
-    fn builder_to_native_processor(builder: TimestampProcessorBuilder) -> TimestampProcessor {
-        TimestampProcessor {
-            fields: vec![],
-            formats: builder.formats,
-            resolution: builder.resolution,
-            ignore_missing: builder.ignore_missing,
-        }
-    }
 
     #[test]
     fn test_parse_epoch() {
@@ -397,9 +342,7 @@ formats:
 "#;
         let yaml = &YamlLoader::load_from_str(processor_yaml_str).unwrap()[0];
         let timestamp_yaml = yaml.as_hash().unwrap();
-        let processor = builder_to_native_processor(
-            TimestampProcessorBuilder::try_from(timestamp_yaml).unwrap(),
-        );
+        let processor = TimestampProcessor::try_from(timestamp_yaml).unwrap();
 
         let values = [
             (
@@ -451,9 +394,7 @@ formats:
 "#;
         let yaml = &YamlLoader::load_from_str(processor_yaml_str).unwrap()[0];
         let timestamp_yaml = yaml.as_hash().unwrap();
-        let processor = builder_to_native_processor(
-            TimestampProcessorBuilder::try_from(timestamp_yaml).unwrap(),
-        );
+        let processor = TimestampProcessor::try_from(timestamp_yaml).unwrap();
 
         let values: Vec<&str> = vec![
             "2014-5-17T12:34:56",

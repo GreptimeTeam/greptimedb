@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+
+use common_telemetry::debug;
 use snafu::OptionExt;
 use yaml_rust::Yaml;
 
-use crate::etl::error::{Error, Result};
-use crate::etl_error::{
-    FieldRequiredForDispatcherSnafu, TablePartRequiredForDispatcherRuleSnafu,
+use crate::etl::error::{
+    Error, FieldRequiredForDispatcherSnafu, Result, TablePartRequiredForDispatcherRuleSnafu,
     ValueRequiredForDispatcherRuleSnafu,
 };
 use crate::Value;
@@ -84,6 +86,7 @@ impl TryFrom<&Yaml> for Dispatcher {
                         .as_str()
                         .map(|s| s.to_string())
                         .context(TablePartRequiredForDispatcherRuleSnafu)?;
+
                     let pipeline = rule[PIPELINE].as_str().map(|s| s.to_string());
 
                     if rule[VALUE].is_badvalue() {
@@ -103,5 +106,23 @@ impl TryFrom<&Yaml> for Dispatcher {
         };
 
         Ok(Dispatcher { field, rules })
+    }
+}
+
+impl Dispatcher {
+    /// execute dispatcher and returns matched rule if any
+    pub(crate) fn exec(&self, data: &BTreeMap<String, Value>) -> Option<&Rule> {
+        if let Some(value) = data.get(&self.field) {
+            for rule in &self.rules {
+                if rule.value == *value {
+                    return Some(rule);
+                }
+            }
+
+            None
+        } else {
+            debug!("field {} not found in keys {:?}", &self.field, data.keys());
+            None
+        }
     }
 }

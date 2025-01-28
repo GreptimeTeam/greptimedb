@@ -18,21 +18,22 @@ const PATTERNS_NAME: &str = "patterns";
 
 pub(crate) const PROCESSOR_REGEX: &str = "regex";
 
-use ahash::{HashSet, HashSetExt};
+use std::collections::BTreeMap;
+
 use lazy_static::lazy_static;
 use regex::Regex;
 use snafu::{OptionExt, ResultExt};
 
+use super::IntermediateStatus;
 use crate::etl::error::{
     Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu,
     RegexNamedGroupNotFoundSnafu, RegexNoValidFieldSnafu, RegexNoValidPatternSnafu, RegexSnafu,
     Result,
 };
-use crate::etl::field::{Fields, InputFieldInfo, OneInputMultiOutputField};
-use crate::etl::find_key_index;
+use crate::etl::field::Fields;
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, Processor,
-    ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, PATTERN_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, Processor, FIELDS_NAME,
+    FIELD_NAME, IGNORE_MISSING_NAME, PATTERN_NAME,
 };
 use crate::etl::value::Value;
 
@@ -83,113 +84,7 @@ impl std::str::FromStr for GroupRegex {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct RegexProcessorBuilder {
-    fields: Fields,
-    patterns: Vec<GroupRegex>,
-    ignore_missing: bool,
-    output_keys: HashSet<String>,
-}
-
-impl ProcessorBuilder for RegexProcessorBuilder {
-    fn output_keys(&self) -> HashSet<&str> {
-        self.output_keys.iter().map(|k| k.as_str()).collect()
-    }
-
-    fn input_keys(&self) -> HashSet<&str> {
-        self.fields.iter().map(|f| f.input_field()).collect()
-    }
-
-    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind> {
-        self.build(intermediate_keys).map(ProcessorKind::Regex)
-    }
-}
-
-impl RegexProcessorBuilder {
-    fn check(self) -> Result<Self> {
-        if self.fields.is_empty() {
-            return RegexNoValidFieldSnafu {
-                processor: PROCESSOR_REGEX,
-            }
-            .fail();
-        }
-
-        if self.patterns.is_empty() {
-            return RegexNoValidPatternSnafu {
-                processor: PROCESSOR_REGEX,
-            }
-            .fail();
-        }
-
-        Ok(self)
-    }
-
-    fn build_group_output_info(
-        group_regex: &GroupRegex,
-        om_field: &OneInputMultiOutputField,
-        intermediate_keys: &[String],
-    ) -> Result<Vec<OutPutInfo>> {
-        group_regex
-            .groups
-            .iter()
-            .map(|g| {
-                let key = generate_key(om_field.target_prefix(), g);
-                let index = find_key_index(intermediate_keys, &key, "regex");
-                index.map(|index| OutPutInfo {
-                    final_key: key,
-                    group_name: g.to_string(),
-                    index,
-                })
-            })
-            .collect::<Result<Vec<_>>>()
-    }
-
-    fn build_group_output_infos(
-        patterns: &[GroupRegex],
-        om_field: &OneInputMultiOutputField,
-        intermediate_keys: &[String],
-    ) -> Result<Vec<Vec<OutPutInfo>>> {
-        patterns
-            .iter()
-            .map(|group_regex| {
-                Self::build_group_output_info(group_regex, om_field, intermediate_keys)
-            })
-            .collect::<Result<Vec<_>>>()
-    }
-
-    fn build_output_info(
-        real_fields: &[OneInputMultiOutputField],
-        patterns: &[GroupRegex],
-        intermediate_keys: &[String],
-    ) -> Result<RegexProcessorOutputInfo> {
-        let inner = real_fields
-            .iter()
-            .map(|om_field| Self::build_group_output_infos(patterns, om_field, intermediate_keys))
-            .collect::<Result<Vec<_>>>();
-        inner.map(|inner| RegexProcessorOutputInfo { inner })
-    }
-
-    fn build(self, intermediate_keys: &[String]) -> Result<RegexProcessor> {
-        let mut real_fields = vec![];
-        for field in self.fields.into_iter() {
-            let input_index = find_key_index(intermediate_keys, field.input_field(), "regex")?;
-            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
-
-            let input = OneInputMultiOutputField::new(input_field_info, field.target_field);
-            real_fields.push(input);
-        }
-        let output_info = Self::build_output_info(&real_fields, &self.patterns, intermediate_keys)?;
-        Ok(RegexProcessor {
-            // fields: Fields::one(Field::new("test".to_string())),
-            fields: real_fields,
-            patterns: self.patterns,
-            output_info,
-            ignore_missing: self.ignore_missing,
-        })
-    }
-}
-
-impl TryFrom<&yaml_rust::yaml::Hash> for RegexProcessorBuilder {
+impl TryFrom<&yaml_rust::yaml::Hash> for RegexProcessor {
     type Error = Error;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self> {
@@ -226,61 +121,44 @@ impl TryFrom<&yaml_rust::yaml::Hash> for RegexProcessorBuilder {
             }
         }
 
-        let pattern_output_keys = patterns
-            .iter()
-            .flat_map(|pattern| pattern.groups.iter())
-            .collect::<Vec<_>>();
-        let mut output_keys = HashSet::new();
-        for field in fields.iter() {
-            for x in pattern_output_keys.iter() {
-                output_keys.insert(generate_key(field.target_or_input_field(), x));
-            }
-        }
-
-        let processor_builder = RegexProcessorBuilder {
+        let processor_builder = RegexProcessor {
             fields,
             patterns,
             ignore_missing,
-            output_keys,
         };
 
         processor_builder.check()
     }
 }
 
-#[derive(Debug, Default)]
-struct OutPutInfo {
-    final_key: String,
-    group_name: String,
-    index: usize,
-}
-
-#[derive(Debug, Default)]
-struct RegexProcessorOutputInfo {
-    pub inner: Vec<Vec<Vec<OutPutInfo>>>,
-}
-
-impl RegexProcessorOutputInfo {
-    fn get_output_index(
-        &self,
-        field_index: usize,
-        pattern_index: usize,
-        group_index: usize,
-    ) -> usize {
-        self.inner[field_index][pattern_index][group_index].index
-    }
-}
 /// only support string value
 /// if no value found from a pattern, the target_field will be ignored
 #[derive(Debug, Default)]
 pub struct RegexProcessor {
-    fields: Vec<OneInputMultiOutputField>,
-    output_info: RegexProcessorOutputInfo,
+    fields: Fields,
     patterns: Vec<GroupRegex>,
     ignore_missing: bool,
 }
 
 impl RegexProcessor {
+    fn check(self) -> Result<Self> {
+        if self.fields.is_empty() {
+            return RegexNoValidFieldSnafu {
+                processor: PROCESSOR_REGEX,
+            }
+            .fail();
+        }
+
+        if self.patterns.is_empty() {
+            return RegexNoValidPatternSnafu {
+                processor: PROCESSOR_REGEX,
+            }
+            .fail();
+        }
+
+        Ok(self)
+    }
+
     fn try_with_patterns(&mut self, patterns: Vec<String>) -> Result<()> {
         let mut rs = vec![];
         for pattern in patterns {
@@ -291,21 +169,15 @@ impl RegexProcessor {
         Ok(())
     }
 
-    fn process(
-        &self,
-        val: &str,
-        gr: &GroupRegex,
-        index: (usize, usize),
-    ) -> Result<Vec<(usize, Value)>> {
-        let mut result = Vec::new();
-        if let Some(captures) = gr.regex.captures(val) {
-            for (group_index, group) in gr.groups.iter().enumerate() {
-                if let Some(capture) = captures.name(group) {
-                    let value = capture.as_str().to_string();
-                    let index = self
-                        .output_info
-                        .get_output_index(index.0, index.1, group_index);
-                    result.push((index, Value::String(value)));
+    fn process(&self, prefix: &str, val: &str) -> Result<BTreeMap<String, Value>> {
+        let mut result = BTreeMap::new();
+        for gr in self.patterns.iter() {
+            if let Some(captures) = gr.regex.captures(val) {
+                for group in gr.groups.iter() {
+                    if let Some(capture) = captures.name(group) {
+                        let value = capture.as_str().to_string();
+                        result.insert(generate_key(prefix, group), Value::String(value));
+                    }
                 }
             }
         }
@@ -322,39 +194,20 @@ impl Processor for RegexProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<()> {
-        for (field_index, field) in self.fields.iter().enumerate() {
-            let index = field.input_index();
-            let mut result_list = None;
+    fn exec_mut(&self, val: &mut IntermediateStatus) -> Result<()> {
+        for field in self.fields.iter() {
+            let index = field.input_field();
+            let prefix = field.target_or_input_field();
             match val.get(index) {
                 Some(Value::String(s)) => {
-                    // we get rust borrow checker error here
-                    // for (gr_index, gr) in self.patterns.iter().enumerate() {
-                    //     let result_list = self.process(s.as_str(), gr, (field_index, gr_index))?;
-                    //     for (output_index, result) in result_list {
-                    //cannot borrow `*val` as mutable because it is also borrowed as immutable mutable borrow occurs here
-                    //         val[output_index] = result;
-                    //     }
-                    // }
-                    for (gr_index, gr) in self.patterns.iter().enumerate() {
-                        let result = self.process(s.as_str(), gr, (field_index, gr_index))?;
-                        if !result.is_empty() {
-                            match result_list.as_mut() {
-                                None => {
-                                    result_list = Some(result);
-                                }
-                                Some(result_list) => {
-                                    result_list.extend(result);
-                                }
-                            }
-                        }
-                    }
+                    let result = self.process(prefix, s)?;
+                    val.extend(result);
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
                         return ProcessorMissingFieldSnafu {
                             processor: self.kind(),
-                            field: field.input_name(),
+                            field: field.input_field(),
                         }
                         .fail();
                     }
@@ -365,15 +218,6 @@ impl Processor for RegexProcessor {
                         v: v.clone(),
                     }
                     .fail();
-                }
-            }
-            // safety here
-            match result_list {
-                None => {}
-                Some(result_list) => {
-                    for (output_index, result) in result_list {
-                        val[output_index] = result;
-                    }
                 }
             }
         }
@@ -388,7 +232,7 @@ mod tests {
     use ahash::{HashMap, HashMapExt};
     use itertools::Itertools;
 
-    use crate::etl::processor::regex::RegexProcessorBuilder;
+    use crate::etl::processor::regex::RegexProcessor;
     use crate::etl::value::{Map, Value};
 
     #[test]
@@ -402,18 +246,11 @@ ignore_missing: false"#;
             .pop()
             .unwrap();
         let processor_yaml_hash = processor_yaml.as_hash().unwrap();
-        let builder = RegexProcessorBuilder::try_from(processor_yaml_hash).unwrap();
-        let intermediate_keys = ["a".to_string(), "a_ar".to_string()];
-        let processor = builder.build(&intermediate_keys).unwrap();
+        let processor = RegexProcessor::try_from(processor_yaml_hash).unwrap();
 
         // single field (with prefix), multiple patterns
 
-        let result = processor
-            .process("123", &processor.patterns[0], (0, 0))
-            .unwrap()
-            .into_iter()
-            .map(|(k, v)| (intermediate_keys[k].clone(), v))
-            .collect();
+        let result = processor.process("a", "123").unwrap();
 
         let map = Map { values: result };
 
@@ -435,7 +272,7 @@ ignore_missing: false"#;
         let cw = "[c=w,n=US_CA_SANJOSE,o=55155]";
         let breadcrumbs_str = [cc, cg, co, cp, cw].iter().join(",");
 
-        let values = [
+        let temporary_map: BTreeMap<String, Value> = [
             ("breadcrumbs_parent", Value::String(cc.to_string())),
             ("breadcrumbs_edge", Value::String(cg.to_string())),
             ("breadcrumbs_origin", Value::String(co.to_string())),
@@ -445,7 +282,6 @@ ignore_missing: false"#;
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
         .collect();
-        let temporary_map = Map { values };
 
         {
             // single field (with prefix), multiple patterns
@@ -464,31 +300,11 @@ ignore_missing: false"#;
                 .pop()
                 .unwrap();
             let processor_yaml_hash = processor_yaml.as_hash().unwrap();
-            let builder = RegexProcessorBuilder::try_from(processor_yaml_hash).unwrap();
-            let intermediate_keys = [
-                "breadcrumbs",
-                "breadcrumbs_parent",
-                "breadcrumbs_edge",
-                "breadcrumbs_origin",
-                "breadcrumbs_peer",
-                "breadcrumbs_wrapper",
-            ]
-            .iter()
-            .map(|k| k.to_string())
-            .collect_vec();
-            let processor = builder.build(&intermediate_keys).unwrap();
-            let mut result = BTreeMap::new();
-            for (index, pattern) in processor.patterns.iter().enumerate() {
-                let r = processor
-                    .process(&breadcrumbs_str, pattern, (0, index))
-                    .unwrap()
-                    .into_iter()
-                    .map(|(k, v)| (intermediate_keys[k].clone(), v))
-                    .collect::<BTreeMap<_, _>>();
-                result.extend(r);
-            }
-            let map = Map { values: result };
-            assert_eq!(temporary_map, map);
+            let processor = RegexProcessor::try_from(processor_yaml_hash).unwrap();
+
+            let result = processor.process("breadcrumbs", &breadcrumbs_str).unwrap();
+
+            assert_eq!(temporary_map, result);
         }
 
         {
@@ -515,70 +331,19 @@ ignore_missing: false"#;
                 .pop()
                 .unwrap();
             let processor_yaml_hash = processor_yaml.as_hash().unwrap();
-            let builder = RegexProcessorBuilder::try_from(processor_yaml_hash).unwrap();
-
-            let intermediate_keys = [
-                "breadcrumbs_parent",
-                "breadcrumbs_edge",
-                "breadcrumbs_origin",
-                "breadcrumbs_peer",
-                "breadcrumbs_wrapper",
-                "edge_ip",
-                "edge_request_id",
-                "edge_request_end_time",
-                "edge_turn_around_time",
-                "edge_dns_lookup_time",
-                "edge_geo",
-                "edge_asn",
-                "origin_ip",
-                "origin_request_id",
-                "origin_request_end_time",
-                "origin_turn_around_time",
-                "origin_dns_lookup_time",
-                "origin_geo",
-                "origin_asn",
-                "peer_ip",
-                "peer_request_id",
-                "peer_request_end_time",
-                "peer_turn_around_time",
-                "peer_dns_lookup_time",
-                "peer_geo",
-                "peer_asn",
-                "parent_ip",
-                "parent_request_id",
-                "parent_request_end_time",
-                "parent_turn_around_time",
-                "parent_dns_lookup_time",
-                "parent_geo",
-                "parent_asn",
-                "wrapper_ip",
-                "wrapper_request_id",
-                "wrapper_request_end_time",
-                "wrapper_turn_around_time",
-                "wrapper_dns_lookup_time",
-                "wrapper_geo",
-                "wrapper_asn",
-            ]
-            .iter()
-            .map(|k| k.to_string())
-            .collect_vec();
-            let processor = builder.build(&intermediate_keys).unwrap();
+            let processor = RegexProcessor::try_from(processor_yaml_hash).unwrap();
 
             let mut result = HashMap::new();
-            for (field_index, field) in processor.fields.iter().enumerate() {
-                for (pattern_index, pattern) in processor.patterns.iter().enumerate() {
-                    let s = temporary_map
-                        .get(field.input_name())
-                        .unwrap()
-                        .to_str_value();
-                    let r = processor
-                        .process(&s, pattern, (field_index, pattern_index))
-                        .unwrap()
-                        .into_iter()
-                        .map(|(k, v)| (intermediate_keys[k].clone(), v))
-                        .collect::<HashMap<_, _>>();
-                    result.extend(r);
-                }
+            for field in processor.fields.iter() {
+                let s = temporary_map
+                    .get(field.input_field())
+                    .unwrap()
+                    .to_str_value();
+                let prefix = field.target_or_input_field();
+
+                let r = processor.process(prefix, &s).unwrap();
+
+                result.extend(r);
             }
 
             let new_values = vec![

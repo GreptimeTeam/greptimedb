@@ -15,11 +15,9 @@
 pub mod index;
 pub mod transformer;
 
-use snafu::OptionExt;
+use std::collections::BTreeMap;
 
 use crate::etl::error::{Error, Result};
-use crate::etl::find_key_index;
-use crate::etl::processor::yaml_string;
 use crate::etl::transform::index::Index;
 use crate::etl::value::Value;
 
@@ -30,14 +28,15 @@ const TRANSFORM_INDEX: &str = "index";
 const TRANSFORM_DEFAULT: &str = "default";
 const TRANSFORM_ON_FAILURE: &str = "on_failure";
 
+use snafu::OptionExt;
 pub use transformer::greptime::GreptimeTransformer;
 
 use super::error::{
     KeyMustBeStringSnafu, TransformElementMustBeMapSnafu, TransformOnFailureInvalidValueSnafu,
     TransformTypeMustBeSetSnafu,
 };
-use super::field::{Fields, InputFieldInfo, OneInputOneOutputField};
-use super::processor::{yaml_new_field, yaml_new_fields};
+use super::field::Fields;
+use super::processor::{yaml_new_field, yaml_new_fields, yaml_string};
 
 pub trait Transformer: std::fmt::Debug + Sized + Send + Sync + 'static {
     type Output;
@@ -47,7 +46,7 @@ pub trait Transformer: std::fmt::Debug + Sized + Send + Sync + 'static {
     fn schemas(&self) -> &Vec<greptime_proto::v1::ColumnSchema>;
     fn transforms(&self) -> &Transforms;
     fn transforms_mut(&mut self) -> &mut Transforms;
-    fn transform_mut(&self, val: &mut Vec<Value>) -> Result<Self::VecOutput>;
+    fn transform_mut(&self, val: &mut BTreeMap<String, Value>) -> Result<Self::VecOutput>;
 }
 
 /// On Failure behavior when transform fails
@@ -74,36 +73,11 @@ impl std::str::FromStr for OnFailure {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct TransformBuilders {
-    pub(crate) builders: Vec<TransformBuilder>,
-    pub(crate) output_keys: Vec<String>,
-    pub(crate) required_keys: Vec<String>,
-}
-
-#[derive(Debug, Default, Clone)]
 pub struct Transforms {
     pub(crate) transforms: Vec<Transform>,
-    pub(crate) output_keys: Vec<String>,
-    pub(crate) required_keys: Vec<String>,
 }
 
 impl Transforms {
-    pub fn output_keys(&self) -> &Vec<String> {
-        &self.output_keys
-    }
-
-    pub fn output_keys_mut(&mut self) -> &mut Vec<String> {
-        &mut self.output_keys
-    }
-
-    pub fn required_keys_mut(&mut self) -> &mut Vec<String> {
-        &mut self.required_keys
-    }
-
-    pub fn required_keys(&self) -> &Vec<String> {
-        &self.required_keys
-    }
-
     pub fn transforms(&self) -> &Vec<Transform> {
         &self.transforms
     }
@@ -123,7 +97,7 @@ impl std::ops::DerefMut for Transforms {
     }
 }
 
-impl TryFrom<&Vec<yaml_rust::Yaml>> for TransformBuilders {
+impl TryFrom<&Vec<yaml_rust::Yaml>> for Transforms {
     type Error = Error;
 
     fn try_from(docs: &Vec<yaml_rust::Yaml>) -> Result<Self> {
@@ -131,7 +105,7 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for TransformBuilders {
         let mut all_output_keys: Vec<String> = Vec::with_capacity(100);
         let mut all_required_keys = Vec::with_capacity(100);
         for doc in docs {
-            let transform_builder: TransformBuilder = doc
+            let transform_builder: Transform = doc
                 .as_hash()
                 .context(TransformElementMustBeMapSnafu)?
                 .try_into()?;
@@ -154,51 +128,14 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for TransformBuilders {
 
         all_required_keys.sort();
 
-        Ok(TransformBuilders {
-            builders: transforms,
-            output_keys: all_output_keys,
-            required_keys: all_required_keys,
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct TransformBuilder {
-    fields: Fields,
-    type_: Value,
-    default: Option<Value>,
-    index: Option<Index>,
-    on_failure: Option<OnFailure>,
-}
-
-impl TransformBuilder {
-    pub fn build(self, intermediate_keys: &[String], output_keys: &[String]) -> Result<Transform> {
-        let mut real_fields = vec![];
-        for field in self.fields {
-            let input_index = find_key_index(intermediate_keys, field.input_field(), "transform")?;
-            let input_field_info = InputFieldInfo::new(field.input_field(), input_index);
-            let output_index =
-                find_key_index(output_keys, field.target_or_input_field(), "transform")?;
-            let input = OneInputOneOutputField::new(
-                input_field_info,
-                (field.target_or_input_field().to_string(), output_index),
-            );
-            real_fields.push(input);
-        }
-        Ok(Transform {
-            real_fields,
-            type_: self.type_,
-            default: self.default,
-            index: self.index,
-            on_failure: self.on_failure,
-        })
+        Ok(Transforms { transforms })
     }
 }
 
 /// only field is required
 #[derive(Debug, Clone)]
 pub struct Transform {
-    pub real_fields: Vec<OneInputOneOutputField>,
+    pub fields: Fields,
 
     pub type_: Value,
 
@@ -212,7 +149,7 @@ pub struct Transform {
 impl Default for Transform {
     fn default() -> Self {
         Transform {
-            real_fields: Vec::new(),
+            fields: Fields::default(),
             type_: Value::Null,
             default: None,
             index: None,
@@ -231,7 +168,7 @@ impl Transform {
     }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for TransformBuilder {
+impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
     type Error = Error;
 
     fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self> {
@@ -294,7 +231,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for TransformBuilder {
                 }
             }
         }
-        let builder = TransformBuilder {
+        let builder = Transform {
             fields,
             type_,
             default: final_default,

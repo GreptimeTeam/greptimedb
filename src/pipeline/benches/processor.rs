@@ -13,21 +13,22 @@
 // limitations under the License.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use pipeline::{parse, Content, GreptimeTransformer, Pipeline, Result};
+use pipeline::{json_to_intermediate_state, parse, Content, GreptimeTransformer, Pipeline, Result};
 use serde_json::{Deserializer, Value};
 
 fn processor_mut(
     pipeline: &Pipeline<GreptimeTransformer>,
     input_values: Vec<Value>,
 ) -> Result<Vec<greptime_proto::v1::Row>> {
-    let mut payload = pipeline.init_intermediate_state();
     let mut result = Vec::with_capacity(input_values.len());
 
     for v in input_values {
-        pipeline.prepare(v, &mut payload)?;
-        let r = pipeline.exec_mut(&mut payload)?;
+        let mut payload = json_to_intermediate_state(v).unwrap();
+        let r = pipeline
+            .exec_mut(&mut payload)?
+            .into_transformed()
+            .expect("expect transformed result ");
         result.push(r);
-        pipeline.reset_intermediate_state(&mut payload);
     }
 
     Ok(result)

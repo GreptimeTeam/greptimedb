@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, Rows, SemanticType};
-use pipeline::{parse, Content, GreptimeTransformer, Pipeline};
+use pipeline::{json_to_intermediate_state, parse, Content, GreptimeTransformer, Pipeline};
 
 /// test util function to parse and execute pipeline
 pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
@@ -22,7 +22,6 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline<GreptimeTransformer> =
         parse(&yaml_content).expect("failed to parse pipeline");
-    let mut result = pipeline.init_intermediate_state();
 
     let schema = pipeline.schemas().clone();
 
@@ -31,19 +30,22 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
     match input_value {
         serde_json::Value::Array(array) => {
             for value in array {
-                pipeline.prepare(value, &mut result).unwrap();
+                let mut intermediate_status = json_to_intermediate_state(value).unwrap();
                 let row = pipeline
-                    .exec_mut(&mut result)
-                    .expect("failed to exec pipeline");
+                    .exec_mut(&mut intermediate_status)
+                    .expect("failed to exec pipeline")
+                    .into_transformed()
+                    .expect("expect transformed result ");
                 rows.push(row);
-                pipeline.reset_intermediate_state(&mut result);
             }
         }
         serde_json::Value::Object(_) => {
-            pipeline.prepare(input_value, &mut result).unwrap();
+            let mut intermediate_status = json_to_intermediate_state(input_value).unwrap();
             let row = pipeline
-                .exec_mut(&mut result)
-                .expect("failed to exec pipeline");
+                .exec_mut(&mut intermediate_status)
+                .expect("failed to exec pipeline")
+                .into_transformed()
+                .expect("expect transformed result ");
             rows.push(row);
         }
         _ => {

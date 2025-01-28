@@ -18,18 +18,17 @@
 //! from Grafana Loki and [`strip_ansi_escape_codes`](https://vector.dev/docs/reference/vrl/functions/#strip_ansi_escape_codes)
 //! from Vector VRL.
 
-use ahash::HashSet;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use snafu::OptionExt;
 
+use super::IntermediateStatus;
 use crate::etl::error::{
     Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, Result,
 };
-use crate::etl::field::{Fields, OneInputOneOutputField};
+use crate::etl::field::Fields;
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, ProcessorBuilder, ProcessorKind, FIELDS_NAME,
-    FIELD_NAME, IGNORE_MISSING_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fields, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::Value;
 
@@ -37,52 +36,10 @@ pub(crate) const PROCESSOR_DECOLORIZE: &str = "decolorize";
 
 static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\x1b\[[0-9;]*m").unwrap());
 
-#[derive(Debug, Default)]
-pub struct DecolorizeProcessorBuilder {
-    fields: Fields,
-    ignore_missing: bool,
-}
-
-impl ProcessorBuilder for DecolorizeProcessorBuilder {
-    fn output_keys(&self) -> HashSet<&str> {
-        self.fields
-            .iter()
-            .map(|f| f.target_or_input_field())
-            .collect()
-    }
-
-    fn input_keys(&self) -> HashSet<&str> {
-        self.fields.iter().map(|f| f.input_field()).collect()
-    }
-
-    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind> {
-        self.build(intermediate_keys).map(ProcessorKind::Decolorize)
-    }
-}
-
-impl DecolorizeProcessorBuilder {
-    fn build(self, intermediate_keys: &[String]) -> Result<DecolorizeProcessor> {
-        let mut real_fields = vec![];
-        for field in self.fields.into_iter() {
-            let input = OneInputOneOutputField::build(
-                "decolorize",
-                intermediate_keys,
-                field.input_field(),
-                field.target_or_input_field(),
-            )?;
-            real_fields.push(input);
-        }
-        Ok(DecolorizeProcessor {
-            fields: real_fields,
-            ignore_missing: self.ignore_missing,
-        })
-    }
-}
-
 /// Remove ANSI color control codes from the input text.
 #[derive(Debug, Default)]
 pub struct DecolorizeProcessor {
-    fields: Vec<OneInputOneOutputField>,
+    fields: Fields,
     ignore_missing: bool,
 }
 
@@ -103,7 +60,7 @@ impl DecolorizeProcessor {
     }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for DecolorizeProcessorBuilder {
+impl TryFrom<&yaml_rust::yaml::Hash> for DecolorizeProcessor {
     type Error = Error;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self> {
@@ -129,7 +86,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DecolorizeProcessorBuilder {
             }
         }
 
-        Ok(DecolorizeProcessorBuilder {
+        Ok(DecolorizeProcessor {
             fields,
             ignore_missing,
         })
@@ -145,23 +102,23 @@ impl crate::etl::processor::Processor for DecolorizeProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<()> {
+    fn exec_mut(&self, val: &mut IntermediateStatus) -> Result<()> {
         for field in self.fields.iter() {
-            let index = field.input_index();
+            let index = field.input_field();
             match val.get(index) {
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
                         return ProcessorMissingFieldSnafu {
                             processor: self.kind(),
-                            field: field.input_name(),
+                            field: field.input_field(),
                         }
                         .fail();
                     }
                 }
                 Some(v) => {
                     let result = self.process(v)?;
-                    let output_index = field.output_index();
-                    val[output_index] = result;
+                    let output_index = field.target_or_input_field();
+                    val.insert(output_index.to_string(), result);
                 }
             }
         }
@@ -176,7 +133,7 @@ mod tests {
     #[test]
     fn test_decolorize_processor() {
         let processor = DecolorizeProcessor {
-            fields: vec![],
+            fields: Fields::default(),
             ignore_missing: false,
         };
 

@@ -17,6 +17,7 @@
 #![feature(exclusive_wrapper)]
 #![feature(let_chains)]
 #![feature(if_let_guard)]
+#![feature(trait_upcasting)]
 
 use datafusion_expr::LogicalPlan;
 use datatypes::schema::Schema;
@@ -37,6 +38,7 @@ pub mod metrics_handler;
 pub mod mysql;
 pub mod opentsdb;
 pub mod otlp;
+mod pipeline;
 pub mod postgres;
 mod prom_row_builder;
 pub mod prom_store;

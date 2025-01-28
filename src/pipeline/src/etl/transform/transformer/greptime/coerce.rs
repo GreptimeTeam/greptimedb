@@ -71,12 +71,11 @@ impl TryFrom<Value> for ValueData {
     }
 }
 
-// TODO(yuanbohan): add fulltext support in datatype_extension
 pub(crate) fn coerce_columns(transform: &Transform) -> Result<Vec<ColumnSchema>> {
     let mut columns = Vec::new();
 
-    for field in transform.real_fields.iter() {
-        let column_name = field.output_name().to_string();
+    for field in transform.fields.iter() {
+        let column_name = field.target_or_input_field().to_string();
 
         let (datatype, datatype_extension) = coerce_type(transform)?;
 
@@ -477,12 +476,14 @@ fn coerce_json_value(v: &Value, transform: &Transform) -> Result<Option<ValueDat
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+    use crate::etl::field::Fields;
 
     #[test]
     fn test_coerce_string_without_on_failure() {
         let transform = Transform {
-            real_fields: vec![],
+            fields: Fields::default(),
             type_: Value::Int32(0),
             default: None,
             index: None,
@@ -507,7 +508,7 @@ mod tests {
     #[test]
     fn test_coerce_string_with_on_failure_ignore() {
         let transform = Transform {
-            real_fields: vec![],
+            fields: Fields::default(),
             type_: Value::Int32(0),
             default: None,
             index: None,
@@ -522,7 +523,7 @@ mod tests {
     #[test]
     fn test_coerce_string_with_on_failure_default() {
         let mut transform = Transform {
-            real_fields: vec![],
+            fields: Fields::default(),
             type_: Value::Int32(0),
             default: None,
             index: None,

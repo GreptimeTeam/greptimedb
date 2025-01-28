@@ -14,21 +14,21 @@
 
 use std::sync::Arc;
 
-use ahash::HashSet;
 use chrono::{DateTime, NaiveDateTime};
 use chrono_tz::Tz;
 use lazy_static::lazy_static;
 use snafu::{OptionExt, ResultExt};
 
+use super::IntermediateStatus;
 use crate::etl::error::{
     DateFailedToGetLocalTimezoneSnafu, DateFailedToGetTimestampSnafu, DateParseSnafu,
     DateParseTimezoneSnafu, Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu,
     ProcessorFailedToParseStringSnafu, ProcessorMissingFieldSnafu, Result,
 };
-use crate::etl::field::{Fields, OneInputOneOutputField};
+use crate::etl::field::Fields;
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, Processor,
-    ProcessorBuilder, ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, Processor, FIELDS_NAME,
+    FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::{Timestamp, Value};
 
@@ -88,55 +88,7 @@ impl std::ops::Deref for Formats {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct DateProcessorBuilder {
-    fields: Fields,
-    formats: Formats,
-    timezone: Option<Arc<String>>,
-    locale: Option<Arc<String>>,
-    ignore_missing: bool,
-}
-
-impl ProcessorBuilder for DateProcessorBuilder {
-    fn output_keys(&self) -> HashSet<&str> {
-        self.fields
-            .iter()
-            .map(|f| f.target_or_input_field())
-            .collect()
-    }
-
-    fn input_keys(&self) -> HashSet<&str> {
-        self.fields.iter().map(|f| f.input_field()).collect()
-    }
-
-    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind> {
-        self.build(intermediate_keys).map(ProcessorKind::Date)
-    }
-}
-
-impl DateProcessorBuilder {
-    pub fn build(self, intermediate_keys: &[String]) -> Result<DateProcessor> {
-        let mut real_fields = vec![];
-        for field in self.fields.into_iter() {
-            let input = OneInputOneOutputField::build(
-                "date",
-                intermediate_keys,
-                field.input_field(),
-                field.target_or_input_field(),
-            )?;
-            real_fields.push(input);
-        }
-        Ok(DateProcessor {
-            fields: real_fields,
-            formats: self.formats,
-            timezone: self.timezone,
-            locale: self.locale,
-            ignore_missing: self.ignore_missing,
-        })
-    }
-}
-
-impl TryFrom<&yaml_rust::yaml::Hash> for DateProcessorBuilder {
+impl TryFrom<&yaml_rust::yaml::Hash> for DateProcessor {
     type Error = Error;
 
     fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self> {
@@ -181,7 +133,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DateProcessorBuilder {
             }
         }
 
-        let builder = DateProcessorBuilder {
+        let builder = DateProcessor {
             fields,
             formats,
             timezone,
@@ -197,7 +149,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DateProcessorBuilder {
 /// Reserved for compatibility only
 #[derive(Debug, Default)]
 pub struct DateProcessor {
-    fields: Vec<OneInputOneOutputField>,
+    fields: Fields,
     formats: Formats,
     timezone: Option<Arc<String>>,
     locale: Option<Arc<String>>, // to support locale
@@ -242,20 +194,20 @@ impl Processor for DateProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<()> {
+    fn exec_mut(&self, val: &mut IntermediateStatus) -> Result<()> {
         for field in self.fields.iter() {
-            let index = field.input_index();
+            let index = field.input_field();
             match val.get(index) {
                 Some(Value::String(s)) => {
                     let timestamp = self.parse(s)?;
-                    let output_index = field.output_index();
-                    val[output_index] = Value::Timestamp(timestamp);
+                    let output_key = field.target_or_input_field();
+                    val.insert(output_key.to_string(), Value::Timestamp(timestamp));
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
                         return ProcessorMissingFieldSnafu {
                             processor: self.kind().to_string(),
-                            field: field.input_name().to_string(),
+                            field: field.input_field().to_string(),
                         }
                         .fail();
                     }
