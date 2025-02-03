@@ -1186,6 +1186,7 @@ mod tests {
                 rows,
             }),
             write_hint: None,
+            bulk: Vec::new(),
         };
         KeyValues::new(schema.as_ref(), mutation).unwrap()
     }

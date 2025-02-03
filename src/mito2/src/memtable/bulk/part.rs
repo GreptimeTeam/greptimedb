@@ -55,7 +55,7 @@ use crate::sst::to_sst_arrow_schema;
 
 #[derive(Debug)]
 pub struct BulkPart {
-    data: Bytes,
+    pub(crate) data: Bytes,
     metadata: BulkPartMeta,
 }
 

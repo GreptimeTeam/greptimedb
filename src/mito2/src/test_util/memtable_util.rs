@@ -290,6 +290,7 @@ pub(crate) fn build_key_values_with_ts_seq_values(
             rows,
         }),
         write_hint: None,
+        bulk: Vec::new(),
     };
     KeyValues::new(metadata.as_ref(), mutation).unwrap()
 }

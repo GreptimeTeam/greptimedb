@@ -246,10 +246,12 @@ impl<S> RegionWorkerLoop<S> {
             }
 
             // Collect requests by region.
+            // TODO(yingwen): Encode into bulk.
             region_ctx.push_mutation(
                 sender_req.request.op_type as i32,
                 Some(sender_req.request.rows),
                 sender_req.request.hint,
+                Vec::new(),
                 sender_req.sender,
             );
         }

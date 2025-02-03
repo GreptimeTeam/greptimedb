@@ -544,10 +544,12 @@ where
                 .as_ref()
                 .map(|rows| rows.rows.len())
                 .unwrap_or(0);
+            // TODO(yingwen): We need to support schema change as bulk may have different schema.
             region_write_ctx.push_mutation(
                 mutation.op_type,
                 mutation.rows,
                 mutation.write_hint,
+                mutation.bulk,
                 OptionOutputTx::none(),
             );
         }

@@ -731,6 +731,7 @@ mod tests {
                 rows,
             }),
             write_hint: None,
+            bulk: Vec::new(),
         };
         KeyValues::new(metadata.as_ref(), mutation).unwrap()
     }
