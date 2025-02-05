@@ -31,11 +31,11 @@ use std::fmt::{self, Display};
 
 use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
-use crate::error::{Error, InvalidMetadataSnafu, Result};
+use crate::error::{Error, InvalidMetadataSnafu, ParseWalOptionsSnafu, Result};
 use crate::key::{MetadataKey, TOPIC_REGION_PATTERN, TOPIC_REGION_PREFIX};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
@@ -159,8 +159,8 @@ impl TopicRegionManager {
         &self,
         table_id: TableId,
         region_wal_options: &HashMap<RegionNumber, String>,
-    ) -> Txn {
-        let topic_region_map = self.topic_region_map(table_id, region_wal_options);
+    ) -> Result<Txn> {
+        let topic_region_map = self.topic_region_map(table_id, region_wal_options)?;
         let topic_region_keys = topic_region_map
             .iter()
             .map(|(topic, region_id)| TopicRegionKey::new(*topic, region_id))
@@ -169,7 +169,7 @@ impl TopicRegionManager {
             .into_iter()
             .map(|key| TxnOp::Put(key.to_bytes(), vec![]))
             .collect::<Vec<_>>();
-        Txn::new().and_then(operations)
+        Ok(Txn::new().and_then(operations))
     }
 
     /// Returns the list of region ids using specified topic.
@@ -196,7 +196,7 @@ impl TopicRegionManager {
         table_id: TableId,
         region_wal_options: &HashMap<RegionNumber, String>,
     ) -> Result<Txn> {
-        let topic_region_map = self.topic_region_map(table_id, region_wal_options);
+        let topic_region_map = self.topic_region_map(table_id, region_wal_options)?;
         let topic_region_keys = topic_region_map
             .iter()
             .map(|(topic, region_id)| TopicRegionKey::new(*topic, region_id))
@@ -222,7 +222,7 @@ impl TopicRegionManager {
         &self,
         table_id: TableId,
         region_wal_options: &HashMap<RegionNumber, String>,
-    ) -> Vec<(RegionId, String)> {
+    ) -> Result<Vec<(RegionId, String)>> {
         let region_ids = region_wal_options
             .keys()
             .map(|region_number| RegionId::new(table_id, *region_number))
@@ -232,15 +232,19 @@ impl TopicRegionManager {
             .zip(region_wal_options.values())
             .filter_map(|(region_id, topic_json)| {
                 // topic json is a serialized json string of `RegionWalOptions`.
-                // Safety: should always success
-                let topic = serde_json::from_str::<WalOptions>(topic_json).unwrap();
+                // TODO: Use WalOptions instead of String to avoid deserialization everywhere.
+                let topic =
+                    serde_json::from_str::<WalOptions>(topic_json).context(ParseWalOptionsSnafu {
+                        wal_options: topic_json,
+                    });
                 match topic {
-                    WalOptions::Kafka(kafka) => Some((region_id, kafka.topic)),
-                    _ => None,
+                    Ok(WalOptions::Kafka(kafka)) => Some(Ok((region_id, kafka.topic))),
+                    Ok(WalOptions::RaftEngine) => None,
+                    Err(e) => Some(Err(e)),
                 }
             })
-            .collect::<Vec<_>>();
-        keys
+            .collect::<Result<Vec<_>>>()?;
+        Ok(keys)
     }
 }
 

@@ -710,6 +710,15 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to parse wal options: {}", wal_options))]
+    ParseWalOptions {
+        wal_options: String,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: serde_json::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -762,7 +771,8 @@ impl ErrorExt for Error {
             | UnexpectedLogicalRouteTable { .. }
             | ProcedureOutput { .. }
             | FromUtf8 { .. }
-            | MetadataCorruption { .. } => StatusCode::Unexpected,
+            | MetadataCorruption { .. }
+            | ParseWalOptions { .. } => StatusCode::Unexpected,
 
             SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } => StatusCode::Internal,
 

@@ -651,15 +651,15 @@ impl TableMetadataManager {
             .table_route_storage()
             .build_create_txn(table_id, &table_route_value)?;
 
-        let create_topic_region_txns = self
+        let create_topic_region_txn = self
             .topic_region_manager
-            .build_create_txn(table_id, &region_wal_options);
+            .build_create_txn(table_id, &region_wal_options)?;
 
         let mut txn = Txn::merge_all(vec![
             create_table_name_txn,
             create_table_info_txn,
             create_table_route_txn,
-            create_topic_region_txns,
+            create_topic_region_txn,
         ]);
 
         if let TableRouteValue::Physical(x) = &table_route_value {
@@ -1444,23 +1444,21 @@ mod tests {
     }
 
     fn create_mock_region_wal_options() -> HashMap<RegionNumber, String> {
-        let topics = (0..16)
+        let topics = (0..2)
             .map(|i| format!("greptimedb_topic{}", i))
             .collect::<Vec<_>>();
         let options_batch = topics
-            .iter()
-            .map(|topic| {
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: topic.clone(),
-                })
-            })
+            .into_iter()
+            .map(|topic| WalOptions::Kafka(KafkaWalOptions { topic: topic }))
             .collect::<Vec<_>>();
         let wal_options = options_batch
             .into_iter()
             .map(|wal_options| serde_json::to_string(&wal_options).unwrap())
             .collect::<Vec<_>>();
 
-        (0..16).zip(wal_options).collect()
+        (0..16)
+            .map(|i| (i as u32, wal_options[i % wal_options.len()].clone()))
+            .collect()
     }
 
     #[tokio::test]
