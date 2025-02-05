@@ -127,7 +127,8 @@ etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "683e9d10ae7f3dfb8aaabd89082fc600c17e3795" }
+# branch: poc-write-path
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "1915576b113a494f5352fd61f211d899b7f87aab" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
