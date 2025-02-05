@@ -347,7 +347,6 @@ impl RegionFlushTask {
             }
 
             let max_sequence = mem.stats().max_sequence();
-            let file_id = FileId::random();
             let iter = mem.iter(None, None, None)?;
             let source = Source::Iter(iter);
 
