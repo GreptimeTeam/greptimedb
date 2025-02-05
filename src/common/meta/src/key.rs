@@ -860,13 +860,7 @@ impl TableMetadataManager {
     ) -> Result<()> {
         let table_metadata_keys =
             self.table_metadata_keys(table_id, table_name, table_route_value, region_wal_options)?;
-        let txn = self
-            .tombstone_manager
-            .build_delete_txn(&table_metadata_keys)?;
-
-        // Always success.
-        let _ = self.kv_backend.txn(txn).await?;
-        Ok(())
+        self.tombstone_manager.delete(table_metadata_keys).await
     }
 
     /// Restores metadata for table.
@@ -894,11 +888,10 @@ impl TableMetadataManager {
     ) -> Result<()> {
         let keys =
             self.table_metadata_keys(table_id, table_name, table_route_value, region_wal_options)?;
-        let operations = keys.into_iter().map(TxnOp::Delete).collect::<Vec<_>>();
-        let txn = Txn::new().and_then(operations);
-
-        // Always success.
-        let _ = self.kv_backend.txn(txn).await?;
+        let _ = self
+            .kv_backend
+            .batch_delete(BatchDeleteRequest::new().with_keys(keys))
+            .await?;
         Ok(())
     }
 
