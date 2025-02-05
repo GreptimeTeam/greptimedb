@@ -104,13 +104,13 @@ pub fn new_source(batches: &[Batch]) -> Source {
     Source::Reader(Box::new(reader))
 }
 
-/// Creates a new [FileHandle] for a SST.
-pub fn sst_file_handle(start_ms: i64, end_ms: i64) -> FileHandle {
+/// Creates a SST file handle with provided file id
+pub fn sst_file_handle_with_file_id(file_id: FileId, start_ms: i64, end_ms: i64) -> FileHandle {
     let file_purger = new_noop_file_purger();
     FileHandle::new(
         FileMeta {
             region_id: REGION_ID,
-            file_id: FileId::random(),
+            file_id,
             time_range: (
                 Timestamp::new_millisecond(start_ms),
                 Timestamp::new_millisecond(end_ms),
@@ -125,6 +125,11 @@ pub fn sst_file_handle(start_ms: i64, end_ms: i64) -> FileHandle {
         },
         file_purger,
     )
+}
+
+/// Creates a new [FileHandle] for a SST.
+pub fn sst_file_handle(start_ms: i64, end_ms: i64) -> FileHandle {
+    sst_file_handle_with_file_id(FileId::random(), start_ms, end_ms)
 }
 
 pub fn new_batch_by_range(tags: &[&str], start: usize, end: usize) -> Batch {

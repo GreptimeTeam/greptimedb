@@ -105,7 +105,6 @@ pub struct Indexer {
     file_id: FileId,
     file_path: String,
     region_id: RegionId,
-
     puffin_manager: Option<SstPuffinManager>,
     inverted_indexer: Option<InvertedIndexer>,
     last_mem_inverted_index: usize,
@@ -168,11 +167,15 @@ impl Indexer {
     }
 }
 
-pub(crate) struct IndexerBuilder<'a> {
+#[async_trait::async_trait]
+pub trait IndexerBuilder {
+    /// Builds indexer of given file id to [index_file_path].
+    async fn build(&self, file_id: FileId, index_file_path: String) -> Indexer;
+}
+
+pub(crate) struct IndexerBuilderImpl {
     pub(crate) op_type: OperationType,
-    pub(crate) file_id: FileId,
-    pub(crate) file_path: String,
-    pub(crate) metadata: &'a RegionMetadataRef,
+    pub(crate) metadata: RegionMetadataRef,
     pub(crate) row_group_size: usize,
     pub(crate) puffin_manager: SstPuffinManager,
     pub(crate) intermediate_manager: IntermediateManager,
@@ -182,20 +185,20 @@ pub(crate) struct IndexerBuilder<'a> {
     pub(crate) bloom_filter_index_config: BloomFilterConfig,
 }
 
-impl IndexerBuilder<'_> {
+#[async_trait::async_trait]
+impl IndexerBuilder for IndexerBuilderImpl {
     /// Sanity check for arguments and create a new [Indexer] if arguments are valid.
-    pub(crate) async fn build(self) -> Indexer {
+    async fn build(&self, file_id: FileId, index_file_path: String) -> Indexer {
         let mut indexer = Indexer {
-            file_id: self.file_id,
-            file_path: self.file_path.clone(),
+            file_id,
+            file_path: index_file_path,
             region_id: self.metadata.region_id,
-
             ..Default::default()
         };
 
-        indexer.inverted_indexer = self.build_inverted_indexer();
-        indexer.fulltext_indexer = self.build_fulltext_indexer().await;
-        indexer.bloom_filter_indexer = self.build_bloom_filter_indexer();
+        indexer.inverted_indexer = self.build_inverted_indexer(file_id);
+        indexer.fulltext_indexer = self.build_fulltext_indexer(file_id).await;
+        indexer.bloom_filter_indexer = self.build_bloom_filter_indexer(file_id);
         if indexer.inverted_indexer.is_none()
             && indexer.fulltext_indexer.is_none()
             && indexer.bloom_filter_indexer.is_none()
@@ -204,11 +207,13 @@ impl IndexerBuilder<'_> {
             return Indexer::default();
         }
 
-        indexer.puffin_manager = Some(self.puffin_manager);
+        indexer.puffin_manager = Some(self.puffin_manager.clone());
         indexer
     }
+}
 
-    fn build_inverted_indexer(&self) -> Option<InvertedIndexer> {
+impl IndexerBuilderImpl {
+    fn build_inverted_indexer(&self, file_id: FileId) -> Option<InvertedIndexer> {
         let create = match self.op_type {
             OperationType::Flush => self.inverted_index_config.create_on_flush.auto(),
             OperationType::Compact => self.inverted_index_config.create_on_compaction.auto(),
@@ -217,7 +222,7 @@ impl IndexerBuilder<'_> {
         if !create {
             debug!(
                 "Skip creating inverted index due to config, region_id: {}, file_id: {}",
-                self.metadata.region_id, self.file_id,
+                self.metadata.region_id, file_id,
             );
             return None;
         }
@@ -228,7 +233,7 @@ impl IndexerBuilder<'_> {
         if indexed_column_ids.is_empty() {
             debug!(
                 "No columns to be indexed, skip creating inverted index, region_id: {}, file_id: {}",
-                self.metadata.region_id, self.file_id,
+                self.metadata.region_id, file_id,
             );
             return None;
         }
@@ -238,7 +243,7 @@ impl IndexerBuilder<'_> {
         else {
             warn!(
                 "Segment row count is 0, skip creating index, region_id: {}, file_id: {}",
-                self.metadata.region_id, self.file_id,
+                self.metadata.region_id, file_id,
             );
             return None;
         };
@@ -246,7 +251,7 @@ impl IndexerBuilder<'_> {
         let Some(row_group_size) = NonZeroUsize::new(self.row_group_size) else {
             warn!(
                 "Row group size is 0, skip creating index, region_id: {}, file_id: {}",
-                self.metadata.region_id, self.file_id,
+                self.metadata.region_id, file_id,
             );
             return None;
         };
@@ -257,8 +262,8 @@ impl IndexerBuilder<'_> {
         }
 
         let indexer = InvertedIndexer::new(
-            self.file_id,
-            self.metadata,
+            file_id,
+            &self.metadata,
             self.intermediate_manager.clone(),
             self.inverted_index_config.mem_threshold_on_create(),
             segment_row_count,
@@ -268,7 +273,7 @@ impl IndexerBuilder<'_> {
         Some(indexer)
     }
 
-    async fn build_fulltext_indexer(&self) -> Option<FulltextIndexer> {
+    async fn build_fulltext_indexer(&self, file_id: FileId) -> Option<FulltextIndexer> {
         let create = match self.op_type {
             OperationType::Flush => self.fulltext_index_config.create_on_flush.auto(),
             OperationType::Compact => self.fulltext_index_config.create_on_compaction.auto(),
@@ -277,7 +282,7 @@ impl IndexerBuilder<'_> {
         if !create {
             debug!(
                 "Skip creating full-text index due to config, region_id: {}, file_id: {}",
-                self.metadata.region_id, self.file_id,
+                self.metadata.region_id, file_id,
             );
             return None;
         }
@@ -285,9 +290,9 @@ impl IndexerBuilder<'_> {
         let mem_limit = self.fulltext_index_config.mem_threshold_on_create();
         let creator = FulltextIndexer::new(
             &self.metadata.region_id,
-            &self.file_id,
+            &file_id,
             &self.intermediate_manager,
-            self.metadata,
+            &self.metadata,
             self.fulltext_index_config.compress,
             mem_limit,
         )
@@ -298,7 +303,7 @@ impl IndexerBuilder<'_> {
                 if creator.is_none() {
                     debug!(
                         "Skip creating full-text index due to no columns require indexing, region_id: {}, file_id: {}",
-                        self.metadata.region_id, self.file_id,
+                        self.metadata.region_id, file_id,
                     );
                 }
                 return creator;
@@ -309,19 +314,19 @@ impl IndexerBuilder<'_> {
         if cfg!(any(test, feature = "test")) {
             panic!(
                 "Failed to create full-text indexer, region_id: {}, file_id: {}, err: {:?}",
-                self.metadata.region_id, self.file_id, err
+                self.metadata.region_id, file_id, err
             );
         } else {
             warn!(
                 err; "Failed to create full-text indexer, region_id: {}, file_id: {}",
-                self.metadata.region_id, self.file_id,
+                self.metadata.region_id, file_id,
             );
         }
 
         None
     }
 
-    fn build_bloom_filter_indexer(&self) -> Option<BloomFilterIndexer> {
+    fn build_bloom_filter_indexer(&self, file_id: FileId) -> Option<BloomFilterIndexer> {
         let create = match self.op_type {
             OperationType::Flush => self.bloom_filter_index_config.create_on_flush.auto(),
             OperationType::Compact => self.bloom_filter_index_config.create_on_compaction.auto(),
@@ -330,15 +335,15 @@ impl IndexerBuilder<'_> {
         if !create {
             debug!(
                 "Skip creating bloom filter due to config, region_id: {}, file_id: {}",
-                self.metadata.region_id, self.file_id,
+                self.metadata.region_id, file_id,
             );
             return None;
         }
 
         let mem_limit = self.bloom_filter_index_config.mem_threshold_on_create();
         let indexer = BloomFilterIndexer::new(
-            self.file_id,
-            self.metadata,
+            file_id,
+            &self.metadata,
             self.intermediate_manager.clone(),
             mem_limit,
         );
@@ -348,7 +353,7 @@ impl IndexerBuilder<'_> {
                 if indexer.is_none() {
                     debug!(
                         "Skip creating bloom filter due to no columns require indexing, region_id: {}, file_id: {}",
-                        self.metadata.region_id, self.file_id,
+                        self.metadata.region_id, file_id,
                     );
                 }
                 return indexer;
@@ -359,12 +364,12 @@ impl IndexerBuilder<'_> {
         if cfg!(any(test, feature = "test")) {
             panic!(
                 "Failed to create bloom filter, region_id: {}, file_id: {}, err: {:?}",
-                self.metadata.region_id, self.file_id, err
+                self.metadata.region_id, file_id, err
             );
         } else {
             warn!(
                 err; "Failed to create bloom filter, region_id: {}, file_id: {}",
-                self.metadata.region_id, self.file_id,
+                self.metadata.region_id, file_id,
             );
         }
 
@@ -490,11 +495,9 @@ mod tests {
             with_fulltext: true,
             with_skipping_bloom: true,
         });
-        let indexer = IndexerBuilder {
+        let indexer = IndexerBuilderImpl {
             op_type: OperationType::Flush,
-            file_id: FileId::random(),
-            file_path: "test".to_string(),
-            metadata: &metadata,
+            metadata,
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store()),
             intermediate_manager: intm_manager,
@@ -503,7 +506,7 @@ mod tests {
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build()
+        .build(FileId::random(), "test".to_string())
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -522,11 +525,9 @@ mod tests {
             with_fulltext: true,
             with_skipping_bloom: true,
         });
-        let indexer = IndexerBuilder {
+        let indexer = IndexerBuilderImpl {
             op_type: OperationType::Flush,
-            file_id: FileId::random(),
-            file_path: "test".to_string(),
-            metadata: &metadata,
+            metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store()),
             intermediate_manager: intm_manager.clone(),
@@ -538,18 +539,16 @@ mod tests {
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build()
+        .build(FileId::random(), "test".to_string())
         .await;
 
         assert!(indexer.inverted_indexer.is_none());
         assert!(indexer.fulltext_indexer.is_some());
         assert!(indexer.bloom_filter_indexer.is_some());
 
-        let indexer = IndexerBuilder {
+        let indexer = IndexerBuilderImpl {
             op_type: OperationType::Compact,
-            file_id: FileId::random(),
-            file_path: "test".to_string(),
-            metadata: &metadata,
+            metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store()),
             intermediate_manager: intm_manager.clone(),
@@ -561,18 +560,16 @@ mod tests {
             },
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build()
+        .build(FileId::random(), "test".to_string())
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
         assert!(indexer.fulltext_indexer.is_none());
         assert!(indexer.bloom_filter_indexer.is_some());
 
-        let indexer = IndexerBuilder {
+        let indexer = IndexerBuilderImpl {
             op_type: OperationType::Compact,
-            file_id: FileId::random(),
-            file_path: "test".to_string(),
-            metadata: &metadata,
+            metadata,
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store()),
             intermediate_manager: intm_manager,
@@ -584,7 +581,7 @@ mod tests {
                 ..Default::default()
             },
         }
-        .build()
+        .build(FileId::random(), "test".to_string())
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -603,11 +600,9 @@ mod tests {
             with_fulltext: true,
             with_skipping_bloom: true,
         });
-        let indexer = IndexerBuilder {
+        let indexer = IndexerBuilderImpl {
             op_type: OperationType::Flush,
-            file_id: FileId::random(),
-            file_path: "test".to_string(),
-            metadata: &metadata,
+            metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store()),
             intermediate_manager: intm_manager.clone(),
@@ -616,7 +611,7 @@ mod tests {
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build()
+        .build(FileId::random(), "test".to_string())
         .await;
 
         assert!(indexer.inverted_indexer.is_none());
@@ -628,11 +623,9 @@ mod tests {
             with_fulltext: false,
             with_skipping_bloom: true,
         });
-        let indexer = IndexerBuilder {
+        let indexer = IndexerBuilderImpl {
             op_type: OperationType::Flush,
-            file_id: FileId::random(),
-            file_path: "test".to_string(),
-            metadata: &metadata,
+            metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store()),
             intermediate_manager: intm_manager.clone(),
@@ -641,7 +634,7 @@ mod tests {
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build()
+        .build(FileId::random(), "test".to_string())
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -653,11 +646,9 @@ mod tests {
             with_fulltext: true,
             with_skipping_bloom: false,
         });
-        let indexer = IndexerBuilder {
+        let indexer = IndexerBuilderImpl {
             op_type: OperationType::Flush,
-            file_id: FileId::random(),
-            file_path: "test".to_string(),
-            metadata: &metadata,
+            metadata: metadata.clone(),
             row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store()),
             intermediate_manager: intm_manager,
@@ -666,7 +657,7 @@ mod tests {
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build()
+        .build(FileId::random(), "test".to_string())
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -685,11 +676,9 @@ mod tests {
             with_fulltext: true,
             with_skipping_bloom: true,
         });
-        let indexer = IndexerBuilder {
+        let indexer = IndexerBuilderImpl {
             op_type: OperationType::Flush,
-            file_id: FileId::random(),
-            file_path: "test".to_string(),
-            metadata: &metadata,
+            metadata,
             row_group_size: 0,
             puffin_manager: factory.build(mock_object_store()),
             intermediate_manager: intm_manager,
@@ -698,7 +687,7 @@ mod tests {
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build()
+        .build(FileId::random(), "test".to_string())
         .await;
 
         assert!(indexer.inverted_indexer.is_none());
