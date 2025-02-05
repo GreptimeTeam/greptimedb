@@ -52,7 +52,7 @@ pub struct JaegerAPIError {
 }
 
 /// Operation is an operation in a service.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Operation {
     pub name: String,
@@ -61,7 +61,7 @@ pub struct Operation {
 }
 
 /// Trace is a collection of spans.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Trace {
     #[serde(rename = "traceID")]
@@ -72,7 +72,7 @@ pub struct Trace {
 }
 
 /// Span is a single operation within a trace.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Span {
     #[serde(rename = "traceID")]
@@ -106,7 +106,7 @@ pub struct Span {
 }
 
 /// Reference is a reference from one span to another.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Reference {
     #[serde(rename = "traceID")]
@@ -117,7 +117,7 @@ pub struct Reference {
 }
 
 /// Process is the process emitting a set of spans.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Process {
     pub service_name: String,
@@ -125,7 +125,7 @@ pub struct Process {
 }
 
 /// Log is a log emitted in a span.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Log {
     pub timestamp: i64,
@@ -133,7 +133,7 @@ pub struct Log {
 }
 
 /// KeyValue is a key-value pair with typed value.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyValue {
     pub key: String,
@@ -142,7 +142,7 @@ pub struct KeyValue {
     pub value: Value,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 #[serde(rename_all = "camelCase")]
 pub enum Value {
@@ -154,7 +154,7 @@ pub enum Value {
 }
 
 /// ValueType is the type of a value stored in KeyValue struct.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum ValueType {
     String,
@@ -356,7 +356,7 @@ pub async fn handle_get_traces(
                     (
                         StatusCode::OK,
                         axum::Json(JaegerAPIResponse {
-                            data: trace,
+                            data: Some(trace),
                             ..Default::default()
                         }),
                     )
@@ -417,7 +417,7 @@ pub async fn handle_get_trace_by_id(
             (
                 StatusCode::OK,
                 axum::Json(JaegerAPIResponse {
-                    data: trace,
+                    data: Some(trace),
                     ..Default::default()
                 }),
             )
@@ -574,9 +574,9 @@ async fn get_records(
     }
 }
 
-// Construct a Trace from records.
+// Construct Jaeger traces from records.
 // The records has column order: `trace_id`, `timestamp`, `duration_nano`, `service_name`, `span_name`, `span_id`, `span_attributes`.
-fn traces_from_records(records: HttpRecordsOutput) -> Option<Vec<Trace>> {
+fn traces_from_records(records: HttpRecordsOutput) -> Vec<Trace> {
     // maintain the mapping: trace_id -> (process_id -> service_name).
     let mut trace_id_to_processes: HashMap<String, HashMap<String, String>> = HashMap::new();
     // maintain the mapping: trace_id -> spans.
@@ -688,9 +688,10 @@ fn traces_from_records(records: HttpRecordsOutput) -> Option<Vec<Trace>> {
         traces.push(trace);
     }
 
-    Some(traces)
+    traces
 }
 
+// Construct Jaeger operations from records.
 fn operations_from_records(records: HttpRecordsOutput, contain_span_kind: bool) -> Vec<Operation> {
     let mut operations = Vec::with_capacity(records.total_rows);
     for row in records.rows.into_iter() {
@@ -788,5 +789,230 @@ fn normalize_span_kind(span_kind: &str) -> String {
     } else {
         // If no prefix exists, add the `SPAN_KIND_` prefix and convert the value to uppercase
         format!("{}{}", SPAN_KIND_PREFIX, span_kind.to_uppercase())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{json, Number, Value as JsonValue};
+
+    use super::*;
+    use crate::http::{ColumnSchema, HttpRecordsOutput, OutputSchema};
+
+    #[test]
+    fn test_normalize_span_kind() {
+        assert_eq!(normalize_span_kind("SPAN_KIND_CLIENT"), "client");
+        assert_eq!(normalize_span_kind("CLIENT"), "SPAN_KIND_CLIENT");
+    }
+
+    #[test]
+    fn test_operations_from_records() {
+        let tests = vec![
+            (
+                HttpRecordsOutput {
+                    schema: OutputSchema {
+                        column_schemas: vec![
+                            ColumnSchema {
+                                name: "span_name".to_string(),
+                                data_type: "String".to_string(),
+                            },
+                            ColumnSchema {
+                                name: "span_kind".to_string(),
+                                data_type: "String".to_string(),
+                            },
+                        ],
+                    },
+                    rows: vec![
+                        vec![
+                            JsonValue::String("access-mysql".to_string()),
+                            JsonValue::String("SPAN_KIND_SERVER".to_string()),
+                        ],
+                        vec![
+                            JsonValue::String("access-redis".to_string()),
+                            JsonValue::String("SPAN_KIND_CLIENT".to_string()),
+                        ],
+                    ],
+                    total_rows: 2,
+                    metrics: HashMap::new(),
+                },
+                false,
+                vec![
+                    Operation {
+                        name: "access-mysql".to_string(),
+                        span_kind: None,
+                    },
+                    Operation {
+                        name: "access-redis".to_string(),
+                        span_kind: None,
+                    },
+                ],
+            ),
+            (
+                HttpRecordsOutput {
+                    schema: OutputSchema {
+                        column_schemas: vec![
+                            ColumnSchema {
+                                name: "span_name".to_string(),
+                                data_type: "String".to_string(),
+                            },
+                            ColumnSchema {
+                                name: "span_kind".to_string(),
+                                data_type: "String".to_string(),
+                            },
+                        ],
+                    },
+                    rows: vec![
+                        vec![
+                            JsonValue::String("access-mysql".to_string()),
+                            JsonValue::String("SPAN_KIND_SERVER".to_string()),
+                        ],
+                        vec![
+                            JsonValue::String("access-redis".to_string()),
+                            JsonValue::String("SPAN_KIND_CLIENT".to_string()),
+                        ],
+                    ],
+                    total_rows: 2,
+                    metrics: HashMap::new(),
+                },
+                true,
+                vec![
+                    Operation {
+                        name: "access-mysql".to_string(),
+                        span_kind: Some("server".to_string()),
+                    },
+                    Operation {
+                        name: "access-redis".to_string(),
+                        span_kind: Some("client".to_string()),
+                    },
+                ],
+            ),
+        ];
+
+        for (records, contain_span_kind, expected) in tests {
+            let operations = operations_from_records(records, contain_span_kind);
+            assert_eq!(operations, expected);
+        }
+    }
+
+    #[test]
+    fn test_traces_from_records() {
+        let tests = vec![(
+            HttpRecordsOutput {
+                schema: OutputSchema {
+                    column_schemas: vec![
+                        ColumnSchema {
+                            name: "trace_id".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "timestamp".to_string(),
+                            data_type: "TimestampNanosecond".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "duration_nano".to_string(),
+                            data_type: "UInt64".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "service_name".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "span_name".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "span_id".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "span_attributes".to_string(),
+                            data_type: "Json".to_string(),
+                        },
+                    ],
+                },
+                rows: vec![
+                    vec![
+                        JsonValue::String("5611dce1bc9ebed65352d99a027b08ea".to_string()),
+                        JsonValue::Number(Number::from_u128(1738726754492422000).unwrap()),
+                        JsonValue::Number(Number::from_u128(100000000).unwrap()),
+                        JsonValue::String("test-service-0".to_string()),
+                        JsonValue::String("access-mysql".to_string()),
+                        JsonValue::String("008421dbbd33a3e9".to_string()),
+                        JsonValue::Object(
+                            json!({
+                                "operation.type": "access-mysql",
+                            })
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                        ),
+                    ],
+                    vec![
+                        JsonValue::String("5611dce1bc9ebed65352d99a027b08ea".to_string()),
+                        JsonValue::Number(Number::from_u128(1738726754642422000).unwrap()),
+                        JsonValue::Number(Number::from_u128(100000000).unwrap()),
+                        JsonValue::String("test-service-0".to_string()),
+                        JsonValue::String("access-redis".to_string()),
+                        JsonValue::String("ffa03416a7b9ea48".to_string()),
+                        JsonValue::Object(
+                            json!({
+                                "operation.type": "access-redis",
+                            })
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                        ),
+                    ],
+                ],
+                total_rows: 2,
+                metrics: HashMap::new(),
+            },
+            vec![Trace {
+                trace_id: "5611dce1bc9ebed65352d99a027b08ea".to_string(),
+                spans: vec![
+                    Span {
+                        trace_id: "5611dce1bc9ebed65352d99a027b08ea".to_string(),
+                        span_id: "008421dbbd33a3e9".to_string(),
+                        operation_name: "access-mysql".to_string(),
+                        start_time: 1738726754492422,
+                        duration: 100000,
+                        tags: vec![KeyValue {
+                            key: "operation.type".to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String("access-mysql".to_string()),
+                        }],
+                        process_id: "p1".to_string(),
+                        ..Default::default()
+                    },
+                    Span {
+                        trace_id: "5611dce1bc9ebed65352d99a027b08ea".to_string(),
+                        span_id: "ffa03416a7b9ea48".to_string(),
+                        operation_name: "access-redis".to_string(),
+                        start_time: 1738726754642422,
+                        duration: 100000,
+                        tags: vec![KeyValue {
+                            key: "operation.type".to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String("access-redis".to_string()),
+                        }],
+                        process_id: "p1".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                processes: Some(HashMap::from([(
+                    "p1".to_string(),
+                    Process {
+                        service_name: "test-service-0".to_string(),
+                        tags: vec![],
+                    },
+                )])),
+                ..Default::default()
+            }],
+        )];
+
+        for (records, expected) in tests {
+            let traces = traces_from_records(records);
+            assert_eq!(traces, expected);
+        }
     }
 }
