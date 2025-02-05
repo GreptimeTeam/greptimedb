@@ -141,7 +141,7 @@ struct StartCommand {
     /// on the host, with the same port number as the one specified in `bind_addr`.
     #[clap(long, alias = "server-addr")]
     rpc_server_addr: Option<String>,
-    #[clap(long, value_delimiter = ',', num_args = 1..)]
+    #[clap(long, alias = "store-addr", value_delimiter = ',', num_args = 1..)]
     store_addrs: Option<Vec<String>>,
     #[clap(short, long)]
     config_file: Option<String>,
