@@ -32,7 +32,7 @@ use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 /// JaegerAPIResponse is the response of Jaeger HTTP API.
 /// The original version is `structuredResponse` which is defined in https://github.com/jaegertracing/jaeger/blob/main/cmd/query/app/http_handler.go.
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize, PartialEq)]
 pub struct JaegerAPIResponse<T> {
     pub data: Option<T>,
     pub total: i32,
@@ -42,7 +42,7 @@ pub struct JaegerAPIResponse<T> {
 }
 
 /// JaegerAPIError is the error of Jaeger HTTP API.
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct JaegerAPIError {
     pub code: i32,
