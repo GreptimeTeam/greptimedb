@@ -36,7 +36,7 @@ SELECT ts, host, foo FROM (SELECT ts, host, min(val) RANGE '5s' AS foo FROM host
 SELECT ts, b, min(c) RANGE '5s' FROM (SELECT ts, host AS b, val AS c FROM host WHERE host = 'host1') ALIGN '5s' BY (b) ORDER BY b, ts;
 
 +---------------------+-------+-----------------+
-| ts                  | b     | MIN(c) RANGE 5s |
+| ts                  | b     | min(c) RANGE 5s |
 +---------------------+-------+-----------------+
 | 1970-01-01T00:00:00 | host1 | 0               |
 | 1970-01-01T00:00:05 | host1 |                 |
@@ -55,9 +55,9 @@ EXPLAIN SELECT ts, host, min(val) RANGE '5s' FROM host ALIGN '5s';
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| logical_plan_| RangeSelect: range_exprs=[MIN(host.val) RANGE 5s], align=5000ms, align_to=0ms, align_by=[host.host], time_index=ts |
+| logical_plan_| RangeSelect: range_exprs=[min(host.val) RANGE 5s], align=5000ms, align_to=0ms, align_by=[host.host], time_index=ts |
 |_|_MergeScan [is_placeholder=false]_|
-| physical_plan | RangeSelectExec: range_expr=[MIN(host.val) RANGE 5s], align=5000ms, align_to=0ms, align_by=[host@1], time_index=ts |
+| physical_plan | RangeSelectExec: range_expr=[min(host.val) RANGE 5s], align=5000ms, align_to=0ms, align_by=[host@1], time_index=ts |
 |_|_CoalescePartitionsExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
@@ -73,7 +73,7 @@ EXPLAIN ANALYZE SELECT ts, host, min(val) RANGE '5s' FROM host ALIGN '5s';
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_RangeSelectExec: range_expr=[MIN(host.val) RANGE 5s], align=5000ms, align_to=0ms, align_by=[host@1], time_index=ts REDACTED
+| 0_| 0_|_RangeSelectExec: range_expr=[min(host.val) RANGE 5s], align=5000ms, align_to=0ms, align_by=[host@1], time_index=ts REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|

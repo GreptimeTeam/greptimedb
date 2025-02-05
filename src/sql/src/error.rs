@@ -72,7 +72,7 @@ pub enum Error {
     },
 
     // Syntax error from sql parser.
-    #[snafu(display(""))]
+    #[snafu(display("Invalid SQL syntax"))]
     Syntax {
         #[snafu(source)]
         error: ParserError,
@@ -81,7 +81,7 @@ pub enum Error {
     },
 
     // Syntax error from tql parser.
-    #[snafu(display(""))]
+    #[snafu(display("Invalid TQL syntax"))]
     TQLSyntax {
         #[snafu(source)]
         error: TQLError,
@@ -129,6 +129,12 @@ pub enum Error {
     #[snafu(display("SQL data type not supported yet: {:?}", t))]
     SqlTypeNotSupported {
         t: crate::ast::DataType,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("ConcreteDataType not supported yet: {:?}", t))]
+    ConcreteTypeNotSupported {
+        t: ConcreteDataType,
         #[snafu(implicit)]
         location: Location,
     },
@@ -355,6 +361,7 @@ impl ErrorExt for Error {
             | InvalidSql { .. }
             | ParseSqlValue { .. }
             | SqlTypeNotSupported { .. }
+            | ConcreteTypeNotSupported { .. }
             | UnexpectedToken { .. }
             | InvalidDefault { .. } => StatusCode::InvalidSyntax,
 

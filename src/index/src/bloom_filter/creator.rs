@@ -21,11 +21,14 @@ use std::sync::Arc;
 
 use finalize_segment::FinalizedBloomFilterStorage;
 use futures::{AsyncWrite, AsyncWriteExt, StreamExt};
+use greptime_proto::v1::index::{BloomFilterLoc, BloomFilterMeta};
+use prost::Message;
 use snafu::ResultExt;
 
-use crate::bloom_filter::error::{IoSnafu, Result, SerdeJsonSnafu};
-use crate::bloom_filter::{BloomFilterMeta, BloomFilterSegmentLocation, Bytes, SEED};
+use crate::bloom_filter::error::{IoSnafu, Result};
+use crate::bloom_filter::SEED;
 use crate::external_provider::ExternalTempFileProvider;
+use crate::Bytes;
 
 /// The false positive rate of the Bloom filter.
 pub const FALSE_POSITIVE_RATE: f64 = 0.01;
@@ -170,12 +173,15 @@ impl BloomFilterCreator {
         }
 
         let mut meta = BloomFilterMeta {
-            rows_per_segment: self.rows_per_segment,
-            row_count: self.accumulated_row_count,
+            rows_per_segment: self.rows_per_segment as _,
+            row_count: self.accumulated_row_count as _,
             ..Default::default()
         };
 
-        let mut segs = self.finalized_bloom_filters.drain().await?;
+        let (indices, mut segs) = self.finalized_bloom_filters.drain().await?;
+        meta.segment_loc_indices = indices.into_iter().map(|i| i as u64).collect();
+        meta.segment_count = meta.segment_loc_indices.len() as _;
+
         while let Some(segment) = segs.next().await {
             let segment = segment?;
             writer
@@ -183,17 +189,16 @@ impl BloomFilterCreator {
                 .await
                 .context(IoSnafu)?;
 
-            let size = segment.bloom_filter_bytes.len();
-            meta.bloom_filter_segments.push(BloomFilterSegmentLocation {
-                offset: meta.bloom_filter_segments_size as _,
-                size: size as _,
-                elem_count: segment.element_count,
+            let size = segment.bloom_filter_bytes.len() as u64;
+            meta.bloom_filter_locs.push(BloomFilterLoc {
+                offset: meta.bloom_filter_size as _,
+                size,
+                element_count: segment.element_count as _,
             });
-            meta.bloom_filter_segments_size += size;
-            meta.seg_count += 1;
+            meta.bloom_filter_size += size;
         }
 
-        let meta_bytes = serde_json::to_vec(&meta).context(SerdeJsonSnafu)?;
+        let meta_bytes = meta.encode_to_vec();
         writer.write_all(&meta_bytes).await.context(IoSnafu)?;
 
         let meta_size = meta_bytes.len() as u32;
@@ -287,34 +292,38 @@ mod tests {
         let meta_size = u32::from_le_bytes((&bytes[meta_size_offset..]).try_into().unwrap());
 
         let meta_bytes = &bytes[total_size - meta_size as usize - 4..total_size - 4];
-        let meta: BloomFilterMeta = serde_json::from_slice(meta_bytes).unwrap();
+        let meta = BloomFilterMeta::decode(meta_bytes).unwrap();
 
         assert_eq!(meta.rows_per_segment, 2);
-        assert_eq!(meta.seg_count, 2);
+        assert_eq!(meta.segment_count, 2);
         assert_eq!(meta.row_count, 3);
         assert_eq!(
-            meta.bloom_filter_segments_size + meta_bytes.len() + 4,
+            meta.bloom_filter_size as usize + meta_bytes.len() + 4,
             total_size
         );
 
         let mut bfs = Vec::new();
-        for segment in meta.bloom_filter_segments {
+        for segment in meta.bloom_filter_locs {
             let bloom_filter_bytes =
                 &bytes[segment.offset as usize..(segment.offset + segment.size) as usize];
             let v = u64_vec_from_bytes(bloom_filter_bytes);
             let bloom_filter = BloomFilter::from_vec(v)
                 .seed(&SEED)
-                .expected_items(segment.elem_count);
+                .expected_items(segment.element_count as usize);
             bfs.push(bloom_filter);
         }
 
-        assert_eq!(bfs.len(), 2);
-        assert!(bfs[0].contains(&b"a"));
-        assert!(bfs[0].contains(&b"b"));
-        assert!(bfs[0].contains(&b"c"));
-        assert!(bfs[0].contains(&b"d"));
-        assert!(bfs[1].contains(&b"e"));
-        assert!(bfs[1].contains(&b"f"));
+        assert_eq!(meta.segment_loc_indices.len(), 2);
+
+        let bf0 = &bfs[meta.segment_loc_indices[0] as usize];
+        assert!(bf0.contains(&b"a"));
+        assert!(bf0.contains(&b"b"));
+        assert!(bf0.contains(&b"c"));
+        assert!(bf0.contains(&b"d"));
+
+        let bf1 = &bfs[meta.segment_loc_indices[1] as usize];
+        assert!(bf1.contains(&b"e"));
+        assert!(bf1.contains(&b"f"));
     }
 
     #[tokio::test]
@@ -356,37 +365,43 @@ mod tests {
         let meta_size = u32::from_le_bytes((&bytes[meta_size_offset..]).try_into().unwrap());
 
         let meta_bytes = &bytes[total_size - meta_size as usize - 4..total_size - 4];
-        let meta: BloomFilterMeta = serde_json::from_slice(meta_bytes).unwrap();
+        let meta = BloomFilterMeta::decode(meta_bytes).unwrap();
 
         assert_eq!(meta.rows_per_segment, 2);
-        assert_eq!(meta.seg_count, 10);
+        assert_eq!(meta.segment_count, 10);
         assert_eq!(meta.row_count, 20);
         assert_eq!(
-            meta.bloom_filter_segments_size + meta_bytes.len() + 4,
+            meta.bloom_filter_size as usize + meta_bytes.len() + 4,
             total_size
         );
 
         let mut bfs = Vec::new();
-        for segment in meta.bloom_filter_segments {
+        for segment in meta.bloom_filter_locs {
             let bloom_filter_bytes =
                 &bytes[segment.offset as usize..(segment.offset + segment.size) as usize];
             let v = u64_vec_from_bytes(bloom_filter_bytes);
             let bloom_filter = BloomFilter::from_vec(v)
                 .seed(&SEED)
-                .expected_items(segment.elem_count);
+                .expected_items(segment.element_count as _);
             bfs.push(bloom_filter);
         }
 
-        assert_eq!(bfs.len(), 10);
-        for bf in bfs.iter().take(3) {
+        // 4 bloom filters to serve 10 segments
+        assert_eq!(bfs.len(), 4);
+        assert_eq!(meta.segment_loc_indices.len(), 10);
+
+        for idx in meta.segment_loc_indices.iter().take(3) {
+            let bf = &bfs[*idx as usize];
             assert!(bf.contains(&b"a"));
             assert!(bf.contains(&b"b"));
         }
-        for bf in bfs.iter().take(5).skip(2) {
+        for idx in meta.segment_loc_indices.iter().take(5).skip(2) {
+            let bf = &bfs[*idx as usize];
             assert!(bf.contains(&b"c"));
             assert!(bf.contains(&b"d"));
         }
-        for bf in bfs.iter().take(10).skip(5) {
+        for idx in meta.segment_loc_indices.iter().take(10).skip(5) {
+            let bf = &bfs[*idx as usize];
             assert!(bf.contains(&b"e"));
             assert!(bf.contains(&b"f"));
         }

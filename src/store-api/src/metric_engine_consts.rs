@@ -82,3 +82,47 @@ pub fn is_metric_engine_internal_column(name: &str) -> bool {
 pub fn is_metric_engine(name: &str) -> bool {
     name == METRIC_ENGINE_NAME
 }
+
+/// Option key for metric engine index type.
+/// Used to identify the primary key index type of the metric engine.
+/// ```sql
+/// CREATE TABLE table_name (
+///     ...
+/// )
+/// ENGINE = metric
+/// WITH (
+///     physical_metric_table = "",
+///     index.type = "inverted",
+///     index.inverted_index.segment_row_count = "256",
+/// );
+/// ```
+pub const METRIC_ENGINE_INDEX_TYPE_OPTION: &str = "index.type";
+
+/// Option key for the granularity of the skipping index in the metric engine.
+/// This key is used to specify the granularity of the primary key index (skipping index) in the metric engine.
+/// ```sql
+/// CREATE TABLE table_name (
+///     ...
+/// )
+/// ENGINE = metric
+/// WITH (
+///     physical_metric_table = "",
+///     index.type = "skipping",
+///     index.granularity = "102400",
+/// );
+/// ```
+pub const METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION: &str = "index.granularity";
+
+/// Default granularity for the skipping index in the metric engine.
+pub const METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION_DEFAULT: u32 = 102400;
+
+/// Returns true if the `key` is a valid option key for the metric engine.
+pub fn is_metric_engine_option_key(key: &str) -> bool {
+    [
+        PHYSICAL_TABLE_METADATA_KEY,
+        LOGICAL_TABLE_METADATA_KEY,
+        METRIC_ENGINE_INDEX_TYPE_OPTION,
+        METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION,
+    ]
+    .contains(&key)
+}

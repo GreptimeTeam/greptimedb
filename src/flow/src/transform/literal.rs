@@ -16,28 +16,66 @@ use std::array::TryFromSliceError;
 
 use bytes::Bytes;
 use common_decimal::Decimal128;
-use common_time::{Date, Timestamp};
+use common_time::timestamp::TimeUnit;
+use common_time::{Date, IntervalMonthDayNano, Timestamp};
 use datafusion_common::ScalarValue;
 use datatypes::data_type::ConcreteDataType as CDT;
 use datatypes::value::Value;
 use num_traits::FromBytes;
-use snafu::ensure;
-use substrait::substrait_proto_df::proto::expression::literal::user_defined::Val;
-use substrait::substrait_proto_df::proto::expression::literal::UserDefined;
+use snafu::OptionExt;
 use substrait::variation_const::{
     DATE_32_TYPE_VARIATION_REF, DATE_64_TYPE_VARIATION_REF, DEFAULT_TYPE_VARIATION_REF,
-    INTERVAL_DAY_TIME_TYPE_REF, INTERVAL_DAY_TIME_TYPE_URL, INTERVAL_MONTH_DAY_NANO_TYPE_REF,
-    INTERVAL_MONTH_DAY_NANO_TYPE_URL, INTERVAL_YEAR_MONTH_TYPE_REF, INTERVAL_YEAR_MONTH_TYPE_URL,
-    TIMESTAMP_MICRO_TYPE_VARIATION_REF, TIMESTAMP_MILLI_TYPE_VARIATION_REF,
-    TIMESTAMP_NANO_TYPE_VARIATION_REF, TIMESTAMP_SECOND_TYPE_VARIATION_REF,
     UNSIGNED_INTEGER_TYPE_VARIATION_REF,
 };
-use substrait_proto::proto::expression::literal::LiteralType;
+use substrait_proto::proto;
+use substrait_proto::proto::expression::literal::{LiteralType, PrecisionTimestamp};
 use substrait_proto::proto::expression::Literal;
 use substrait_proto::proto::r#type::Kind;
 
 use crate::error::{Error, NotImplementedSnafu, PlanSnafu, UnexpectedSnafu};
 use crate::transform::substrait_proto;
+
+#[derive(Debug)]
+enum TimestampPrecision {
+    Second = 0,
+    Millisecond = 3,
+    Microsecond = 6,
+    Nanosecond = 9,
+}
+
+impl TryFrom<i32> for TimestampPrecision {
+    type Error = Error;
+
+    fn try_from(prec: i32) -> Result<Self, Self::Error> {
+        match prec {
+            0 => Ok(Self::Second),
+            3 => Ok(Self::Millisecond),
+            6 => Ok(Self::Microsecond),
+            9 => Ok(Self::Nanosecond),
+            _ => not_impl_err!("Unsupported precision: {prec}"),
+        }
+    }
+}
+
+impl TimestampPrecision {
+    fn to_time_unit(&self) -> TimeUnit {
+        match self {
+            Self::Second => TimeUnit::Second,
+            Self::Millisecond => TimeUnit::Millisecond,
+            Self::Microsecond => TimeUnit::Microsecond,
+            Self::Nanosecond => TimeUnit::Nanosecond,
+        }
+    }
+
+    fn to_cdt(&self) -> CDT {
+        match self {
+            Self::Second => CDT::timestamp_second_datatype(),
+            Self::Millisecond => CDT::timestamp_millisecond_datatype(),
+            Self::Microsecond => CDT::timestamp_microsecond_datatype(),
+            Self::Nanosecond => CDT::timestamp_nanosecond_datatype(),
+        }
+    }
+}
 
 /// TODO(discord9): this is copy from datafusion-substrait since the original function is not public, will be replace once is exported
 pub(crate) fn to_substrait_literal(value: &ScalarValue) -> Result<Literal, Error> {
@@ -68,21 +106,34 @@ pub(crate) fn to_substrait_literal(value: &ScalarValue) -> Result<Literal, Error
         ),
         ScalarValue::Float32(Some(f)) => (LiteralType::Fp32(*f), DEFAULT_TYPE_VARIATION_REF),
         ScalarValue::Float64(Some(f)) => (LiteralType::Fp64(*f), DEFAULT_TYPE_VARIATION_REF),
+        // TODO(discord9): deal with timezone
         ScalarValue::TimestampSecond(Some(t), _) => (
-            LiteralType::Timestamp(*t),
-            TIMESTAMP_SECOND_TYPE_VARIATION_REF,
+            LiteralType::PrecisionTimestamp(PrecisionTimestamp {
+                value: *t,
+                precision: TimestampPrecision::Second as i32,
+            }),
+            DEFAULT_TYPE_VARIATION_REF,
         ),
         ScalarValue::TimestampMillisecond(Some(t), _) => (
-            LiteralType::Timestamp(*t),
-            TIMESTAMP_MILLI_TYPE_VARIATION_REF,
+            LiteralType::PrecisionTimestamp(PrecisionTimestamp {
+                value: *t,
+                precision: TimestampPrecision::Millisecond as i32,
+            }),
+            DEFAULT_TYPE_VARIATION_REF,
         ),
         ScalarValue::TimestampMicrosecond(Some(t), _) => (
-            LiteralType::Timestamp(*t),
-            TIMESTAMP_MICRO_TYPE_VARIATION_REF,
+            LiteralType::PrecisionTimestamp(PrecisionTimestamp {
+                value: *t,
+                precision: TimestampPrecision::Microsecond as i32,
+            }),
+            DEFAULT_TYPE_VARIATION_REF,
         ),
         ScalarValue::TimestampNanosecond(Some(t), _) => (
-            LiteralType::Timestamp(*t),
-            TIMESTAMP_NANO_TYPE_VARIATION_REF,
+            LiteralType::PrecisionTimestamp(PrecisionTimestamp {
+                value: *t,
+                precision: TimestampPrecision::Nanosecond as i32,
+            }),
+            DEFAULT_TYPE_VARIATION_REF,
         ),
         ScalarValue::Date32(Some(d)) => (LiteralType::Date(*d), DATE_32_TYPE_VARIATION_REF),
         _ => (
@@ -124,25 +175,17 @@ pub(crate) fn from_substrait_literal(lit: &Literal) -> Result<(Value, CDT), Erro
         },
         Some(LiteralType::Fp32(f)) => (Value::from(*f), CDT::float32_datatype()),
         Some(LiteralType::Fp64(f)) => (Value::from(*f), CDT::float64_datatype()),
-        Some(LiteralType::Timestamp(t)) => match lit.type_variation_reference {
-            TIMESTAMP_SECOND_TYPE_VARIATION_REF => (
-                Value::from(Timestamp::new_second(*t)),
-                CDT::timestamp_second_datatype(),
-            ),
-            TIMESTAMP_MILLI_TYPE_VARIATION_REF => (
-                Value::from(Timestamp::new_millisecond(*t)),
-                CDT::timestamp_millisecond_datatype(),
-            ),
-            TIMESTAMP_MICRO_TYPE_VARIATION_REF => (
-                Value::from(Timestamp::new_microsecond(*t)),
-                CDT::timestamp_microsecond_datatype(),
-            ),
-            TIMESTAMP_NANO_TYPE_VARIATION_REF => (
-                Value::from(Timestamp::new_nanosecond(*t)),
-                CDT::timestamp_nanosecond_datatype(),
-            ),
-            others => not_impl_err!("Unknown type variation reference {others}",)?,
-        },
+        Some(LiteralType::Timestamp(t)) => (
+            Value::from(Timestamp::new_microsecond(*t)),
+            CDT::timestamp_microsecond_datatype(),
+        ),
+        Some(LiteralType::PrecisionTimestamp(prec_ts)) => {
+            let (prec, val) = (prec_ts.precision, prec_ts.value);
+            let prec = TimestampPrecision::try_from(prec)?;
+            let unit = prec.to_time_unit();
+            let typ = prec.to_cdt();
+            (Value::from(Timestamp::new(val, unit)), typ)
+        }
         Some(LiteralType::Date(d)) => (Value::from(Date::new(*d)), CDT::date_datatype()),
         Some(LiteralType::String(s)) => (Value::from(s.clone()), CDT::string_datatype()),
         Some(LiteralType::Binary(b)) | Some(LiteralType::FixedBinary(b)) => {
@@ -174,28 +217,114 @@ pub(crate) fn from_substrait_literal(lit: &Literal) -> Result<(Value, CDT), Erro
             )
         }
         Some(LiteralType::Null(ntype)) => (Value::Null, from_substrait_type(ntype)?),
-        Some(LiteralType::IntervalDayToSecond(interval)) => {
-            let (days, seconds, microseconds) =
-                (interval.days, interval.seconds, interval.microseconds);
-            let millis = microseconds / 1000 + seconds * 1000;
-            let value_interval = common_time::IntervalDayTime::new(days, millis);
+        Some(LiteralType::IntervalDayToSecond(interval)) => from_interval_day_sec(interval)?,
+        Some(LiteralType::IntervalYearToMonth(interval)) => from_interval_year_month(interval)?,
+        Some(LiteralType::IntervalCompound(interval_compound)) => {
+            let interval_day_time = &interval_compound
+                .interval_day_to_second
+                .map(|i| from_interval_day_sec(&i))
+                .transpose()?;
+            let interval_year_month = &interval_compound
+                .interval_year_to_month
+                .map(|i| from_interval_year_month(&i))
+                .transpose()?;
+            let mut compound = IntervalMonthDayNano::new(0, 0, 0);
+            if let Some(day_sec) = interval_day_time {
+                let Value::IntervalDayTime(day_time) = day_sec.0 else {
+                    UnexpectedSnafu {
+                        reason: format!("Expect IntervalDayTime, found {:?}", day_sec),
+                    }
+                    .fail()?
+                };
+                //  1 day in milliseconds = 24 * 60 * 60 * 1000 = 8.64e7 ms = 8.64e13 ns << 2^63
+                // so overflow is unexpected
+                compound.nanoseconds = compound
+                    .nanoseconds
+                    .checked_add(day_time.milliseconds as i64 * 1_000_000)
+                    .with_context(|| UnexpectedSnafu {
+                        reason: format!(
+                            "Overflow when converting interval: {:?}",
+                            interval_compound
+                        ),
+                    })?;
+                compound.days += day_time.days;
+            }
+
+            if let Some(year_month) = interval_year_month {
+                let Value::IntervalYearMonth(year_month) = year_month.0 else {
+                    UnexpectedSnafu {
+                        reason: format!("Expect IntervalYearMonth, found {:?}", year_month),
+                    }
+                    .fail()?
+                };
+                compound.months += year_month.months;
+            }
+
             (
-                Value::IntervalDayTime(value_interval),
-                CDT::interval_day_time_datatype(),
+                Value::IntervalMonthDayNano(compound),
+                CDT::interval_month_day_nano_datatype(),
             )
-        }
-        Some(LiteralType::IntervalYearToMonth(interval)) => (
-            Value::IntervalYearMonth(common_time::IntervalYearMonth::new(
-                interval.years * 12 + interval.months,
-            )),
-            CDT::interval_year_month_datatype(),
-        ),
-        Some(LiteralType::UserDefined(user_defined)) => {
-            from_substrait_user_defined_type(user_defined)?
         }
         _ => not_impl_err!("unsupported literal_type: {:?}", &lit.literal_type)?,
     };
     Ok(scalar_value)
+}
+
+fn from_interval_day_sec(
+    interval: &proto::expression::literal::IntervalDayToSecond,
+) -> Result<(Value, CDT), Error> {
+    let (days, seconds, subseconds) = (interval.days, interval.seconds, interval.subseconds);
+    let millis = if let Some(prec) = interval.precision_mode {
+        use substrait_proto::proto::expression::literal::interval_day_to_second::PrecisionMode;
+        match prec {
+            PrecisionMode::Precision(e) => {
+                if e >= 3 {
+                    subseconds
+                        / 10_i64
+                            .checked_pow((e - 3) as _)
+                            .with_context(|| UnexpectedSnafu {
+                                reason: format!(
+                                    "Overflow when converting interval: {:?}",
+                                    interval
+                                ),
+                            })?
+                } else {
+                    subseconds
+                        * 10_i64
+                            .checked_pow((3 - e) as _)
+                            .with_context(|| UnexpectedSnafu {
+                                reason: format!(
+                                    "Overflow when converting interval: {:?}",
+                                    interval
+                                ),
+                            })?
+                }
+            }
+            PrecisionMode::Microseconds(_) => subseconds / 1000,
+        }
+    } else if subseconds == 0 {
+        0
+    } else {
+        not_impl_err!("unsupported subseconds without precision_mode: {subseconds}")?
+    };
+
+    let value_interval = common_time::IntervalDayTime::new(days, seconds * 1000 + millis as i32);
+
+    Ok((
+        Value::IntervalDayTime(value_interval),
+        CDT::interval_day_time_datatype(),
+    ))
+}
+
+fn from_interval_year_month(
+    interval: &proto::expression::literal::IntervalYearToMonth,
+) -> Result<(Value, CDT), Error> {
+    let value_interval = common_time::IntervalYearMonth::new(interval.years * 12 + interval.months);
+
+    Ok((
+        Value::IntervalYearMonth(value_interval),
+        CDT::interval_year_month_datatype(),
+    ))
 }
 
 fn from_bytes<T: FromBytes>(i: &Bytes) -> Result<T, Error>
@@ -216,79 +345,6 @@ where
         .build()
     })?);
     Ok(i)
-}
-
-fn from_substrait_user_defined_type(user_defined: &UserDefined) -> Result<(Value, CDT), Error> {
-    if let UserDefined {
-        type_reference,
-        type_parameters: _,
-        val: Some(Val::Value(val)),
-    } = user_defined
-    {
-        // see https://github.com/apache/datafusion/blob/146b679aa19c7749cc73d0c27440419d6498142b/datafusion/substrait/src/logical_plan/producer.rs#L1957
-        // for interval type's transform to substrait
-        let ret = match *type_reference {
-            INTERVAL_YEAR_MONTH_TYPE_REF => {
-                ensure!(
-                    val.type_url == INTERVAL_YEAR_MONTH_TYPE_URL,
-                    UnexpectedSnafu {
-                        reason: format!(
-                            "Expect {}, found {} in type_url",
-                            INTERVAL_YEAR_MONTH_TYPE_URL, val.type_url
-                        )
-                    }
-                );
-                let i: i32 = from_bytes(&val.value)?;
-                let value_interval = common_time::IntervalYearMonth::new(i);
-                (
-                    Value::IntervalYearMonth(value_interval),
-                    CDT::interval_year_month_datatype(),
-                )
-            }
-            INTERVAL_MONTH_DAY_NANO_TYPE_REF => {
-                ensure!(
-                    val.type_url == INTERVAL_MONTH_DAY_NANO_TYPE_URL,
-                    UnexpectedSnafu {
-                        reason: format!(
-                            "Expect {}, found {} in type_url",
-                            INTERVAL_MONTH_DAY_NANO_TYPE_URL, val.type_url
-                        )
-                    }
-                );
-                // TODO(yingwen): Datafusion may change the representation of the interval type.
-                let i: i128 = from_bytes(&val.value)?;
-                let (months, days, nsecs) = ((i >> 96) as i32, (i >> 64) as i32, i as i64);
-                let value_interval = common_time::IntervalMonthDayNano::new(months, days, nsecs);
-                (
-                    Value::IntervalMonthDayNano(value_interval),
-                    CDT::interval_month_day_nano_datatype(),
-                )
-            }
-            INTERVAL_DAY_TIME_TYPE_REF => {
-                ensure!(
-                    val.type_url == INTERVAL_DAY_TIME_TYPE_URL,
-                    UnexpectedSnafu {
-                        reason: format!(
-                            "Expect {}, found {} in type_url",
-                            INTERVAL_DAY_TIME_TYPE_URL, val.type_url
-                        )
-                    }
-                );
-                // TODO(yingwen): Datafusion may change the representation of the interval type.
-                let i: i64 = from_bytes(&val.value)?;
-                let (days, millis) = ((i >> 32) as i32, i as i32);
-                let value_interval = common_time::IntervalDayTime::new(days, millis);
-                (
-                    Value::IntervalDayTime(value_interval),
-                    CDT::interval_day_time_datatype(),
-                )
-            }
-            _ => return not_impl_err!("unsupported user defined type: {:?}", user_defined)?,
-        };
-        Ok(ret)
-    } else {
-        not_impl_err!("Expect val to be Some(...)")
-    }
 }
 
 /// convert a Substrait type into a ConcreteDataType
@@ -318,13 +374,9 @@ pub fn from_substrait_type(null_type: &substrait_proto::proto::Type) -> Result<C
             },
             Kind::Fp32(_) => Ok(CDT::float32_datatype()),
             Kind::Fp64(_) => Ok(CDT::float64_datatype()),
-            Kind::Timestamp(ts) => match ts.type_variation_reference {
-                TIMESTAMP_SECOND_TYPE_VARIATION_REF => Ok(CDT::timestamp_second_datatype()),
-                TIMESTAMP_MILLI_TYPE_VARIATION_REF => Ok(CDT::timestamp_millisecond_datatype()),
-                TIMESTAMP_MICRO_TYPE_VARIATION_REF => Ok(CDT::timestamp_microsecond_datatype()),
-                TIMESTAMP_NANO_TYPE_VARIATION_REF => Ok(CDT::timestamp_nanosecond_datatype()),
-                v => not_impl_err!("Unsupported Substrait type variation {v} of type {kind:?}"),
-            },
+            Kind::PrecisionTimestamp(ts) => {
+                Ok(TimestampPrecision::try_from(ts.precision)?.to_cdt())
+            }
             Kind::Date(date) => match date.type_variation_reference {
                 DATE_32_TYPE_VARIATION_REF | DATE_64_TYPE_VARIATION_REF => Ok(CDT::date_datatype()),
                 v => not_impl_err!("Unsupported Substrait type variation {v} of type {kind:?}"),

@@ -16,26 +16,32 @@ use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
+use arrow::datatypes::IntervalDayTime;
 use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
 use common_query::prelude::GREPTIME_VALUE;
-use datafusion::common::{DFSchemaRef, Result as DfResult};
+use datafusion::common::DFSchemaRef;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::context::SessionState;
-use datafusion::functions_aggregate::sum;
-use datafusion::logical_expr::expr::{
-    AggregateFunction, AggregateFunctionDefinition, Alias, ScalarFunction,
-};
+use datafusion::functions_aggregate::average::avg_udaf;
+use datafusion::functions_aggregate::count::count_udaf;
+use datafusion::functions_aggregate::grouping::grouping_udaf;
+use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
+use datafusion::functions_aggregate::stddev::stddev_pop_udaf;
+use datafusion::functions_aggregate::sum::sum_udaf;
+use datafusion::functions_aggregate::variance::var_pop_udaf;
+use datafusion::logical_expr::expr::{AggregateFunction, Alias, ScalarFunction};
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
 use datafusion::logical_expr::{
-    AggregateFunction as AggregateFunctionEnum, BinaryExpr, Cast, Extension, LogicalPlan,
-    LogicalPlanBuilder, Operator, ScalarUDF as ScalarUdfDef,
+    BinaryExpr, Cast, Extension, LogicalPlan, LogicalPlanBuilder, Operator,
+    ScalarUDF as ScalarUdfDef,
 };
 use datafusion::prelude as df_prelude;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
 use datafusion::sql::TableReference;
 use datafusion_expr::utils::conjunction;
+use datafusion_expr::SortExpr;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
@@ -57,15 +63,19 @@ use promql_parser::parser::{
     VectorMatchCardinality, VectorSelector,
 };
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::promql::error::{
     CatalogSnafu, ColumnNotFoundSnafu, CombineTableColumnMismatchSnafu, DataFusionPlanningSnafu,
-    ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, MultiFieldsNotSupportedSnafu,
-    MultipleMetricMatchersSnafu, MultipleVectorSnafu, NoMetricMatcherSnafu, PromqlPlanNodeSnafu,
-    Result, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu,
-    UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedMatcherOpSnafu,
-    UnsupportedVectorMatchSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, InvalidTimeRangeSnafu,
+    MultiFieldsNotSupportedSnafu, MultipleMetricMatchersSnafu, MultipleVectorSnafu,
+    NoMetricMatcherSnafu, PromqlPlanNodeSnafu, Result, TableNameNotFoundSnafu,
+    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
+    UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, UnsupportedVectorMatchSnafu,
+    ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
 };
 
 /// `time()` function in PromQL.
@@ -409,6 +419,10 @@ impl PromPlanner {
                     }
                 }
                 let mut field_columns = left_field_columns.iter().zip(right_field_columns.iter());
+                let has_special_vector_function = (left_field_columns.len() == 1
+                    && left_field_columns[0] == GREPTIME_VALUE)
+                    || (right_field_columns.len() == 1 && right_field_columns[0] == GREPTIME_VALUE);
+
                 let join_plan = self.join_on_non_field_columns(
                     left_input,
                     right_input,
@@ -417,6 +431,7 @@ impl PromPlanner {
                     // if left plan or right plan tag is empty, means case like `scalar(...) + host` or `host + scalar(...)`
                     // under this case we only join on time index
                     left_context.tag_columns.is_empty() || right_context.tag_columns.is_empty(),
+                    has_special_vector_function,
                 )?;
                 let join_plan_schema = join_plan.schema().clone();
 
@@ -971,6 +986,9 @@ impl PromPlanner {
     fn build_time_index_filter(&self, offset_duration: i64) -> Result<Option<DfExpr>> {
         let start = self.ctx.start;
         let end = self.ctx.end;
+        if end < start {
+            return InvalidTimeRangeSnafu { start, end }.fail();
+        }
         let lookback_delta = self.ctx.lookback_delta;
         let range = self.ctx.range.unwrap_or_default();
         let interval = self.ctx.interval;
@@ -1135,6 +1153,10 @@ impl PromPlanner {
             .table_info()
             .meta
             .row_key_column_names()
+            .filter(|col| {
+                // remove metric engine's internal columns
+                col != &DATA_SCHEMA_TABLE_ID_COLUMN_NAME && col != &DATA_SCHEMA_TSID_COLUMN_NAME
+            })
             .cloned()
             .collect();
         self.ctx.tag_columns = tags;
@@ -1317,8 +1339,9 @@ impl PromPlanner {
                 let month_lit_expr = DfExpr::Literal(ScalarValue::Utf8(Some("month".to_string())));
                 let interval_1month_lit_expr =
                     DfExpr::Literal(ScalarValue::IntervalYearMonth(Some(1)));
-                let interval_1day_lit_expr =
-                    DfExpr::Literal(ScalarValue::IntervalDayTime(Some(1 << 32)));
+                let interval_1day_lit_expr = DfExpr::Literal(ScalarValue::IntervalDayTime(Some(
+                    IntervalDayTime::new(1, 0),
+                )));
                 let the_1month_minus_1day_expr = DfExpr::BinaryExpr(BinaryExpr {
                     left: Box::new(interval_1month_lit_expr),
                     op: Operator::Minus,
@@ -1466,7 +1489,7 @@ impl PromPlanner {
         exprs = exprs
             .into_iter()
             .map(|expr| {
-                let display_name = expr.display_name()?;
+                let display_name = expr.schema_name().to_string();
                 new_field_columns.push(display_name.clone());
                 Ok(expr.alias(display_name))
             })
@@ -1630,7 +1653,7 @@ impl PromPlanner {
         Ok(result)
     }
 
-    fn create_tag_and_time_index_column_sort_exprs(&self) -> Result<Vec<DfExpr>> {
+    fn create_tag_and_time_index_column_sort_exprs(&self) -> Result<Vec<SortExpr>> {
         let mut result = self
             .ctx
             .tag_columns
@@ -1665,18 +1688,14 @@ impl PromPlanner {
         input_plan: &LogicalPlan,
     ) -> Result<Vec<DfExpr>> {
         let aggr = match op.id() {
-            token::T_SUM => AggregateFunctionDefinition::UDF(sum::sum_udaf()),
-            token::T_AVG => AggregateFunctionDefinition::BuiltIn(AggregateFunctionEnum::Avg),
-            token::T_COUNT => AggregateFunctionDefinition::BuiltIn(AggregateFunctionEnum::Count),
-            token::T_MIN => AggregateFunctionDefinition::BuiltIn(AggregateFunctionEnum::Min),
-            token::T_MAX => AggregateFunctionDefinition::BuiltIn(AggregateFunctionEnum::Max),
-            token::T_GROUP => AggregateFunctionDefinition::BuiltIn(AggregateFunctionEnum::Grouping),
-            token::T_STDDEV => {
-                AggregateFunctionDefinition::BuiltIn(AggregateFunctionEnum::StddevPop)
-            }
-            token::T_STDVAR => {
-                AggregateFunctionDefinition::BuiltIn(AggregateFunctionEnum::VariancePop)
-            }
+            token::T_SUM => sum_udaf(),
+            token::T_AVG => avg_udaf(),
+            token::T_COUNT => count_udaf(),
+            token::T_MIN => min_udaf(),
+            token::T_MAX => max_udaf(),
+            token::T_GROUP => grouping_udaf(),
+            token::T_STDDEV => stddev_pop_udaf(),
+            token::T_STDVAR => var_pop_udaf(),
             token::T_TOPK | token::T_BOTTOMK | token::T_COUNT_VALUES | token::T_QUANTILE => {
                 UnsupportedExprSnafu {
                     name: format!("{op:?}"),
@@ -1693,7 +1712,7 @@ impl PromPlanner {
             .iter()
             .map(|col| {
                 DfExpr::AggregateFunction(AggregateFunction {
-                    func_def: aggr.clone(),
+                    func: aggr.clone(),
                     args: vec![DfExpr::Column(Column::from_name(col))],
                     distinct: false,
                     filter: None,
@@ -1708,7 +1727,7 @@ impl PromPlanner {
         let normalized_exprs =
             normalize_cols(exprs.iter().cloned(), input_plan).context(DataFusionPlanningSnafu)?;
         for expr in normalized_exprs {
-            new_field_columns.push(expr.display_name().context(DataFusionPlanningSnafu)?);
+            new_field_columns.push(expr.schema_name().to_string());
         }
         self.ctx.field_columns = new_field_columns;
 
@@ -2003,6 +2022,7 @@ impl PromPlanner {
         left_table_ref: TableReference,
         right_table_ref: TableReference,
         only_join_time_index: bool,
+        has_special_vector_function: bool,
     ) -> Result<LogicalPlan> {
         let mut tag_columns = if only_join_time_index {
             vec![]
@@ -2014,9 +2034,12 @@ impl PromPlanner {
                 .collect::<Vec<_>>()
         };
 
-        // push time index column if it exist
+        // push time index column if it exists
         if let Some(time_index_column) = &self.ctx.time_index_column {
-            tag_columns.push(Column::from_name(time_index_column));
+            // issue #5392 if is special vector function
+            if !has_special_vector_function {
+                tag_columns.push(Column::from_name(time_index_column));
+            }
         }
 
         let right = LogicalPlanBuilder::from(right)
@@ -2394,9 +2417,8 @@ impl PromPlanner {
         // alias the computation exprs to remove qualifier
         self.ctx.field_columns = result_field_columns
             .iter()
-            .map(|expr| expr.display_name())
-            .collect::<DfResult<Vec<_>>>()
-            .context(DataFusionPlanningSnafu)?;
+            .map(|expr| expr.schema_name().to_string())
+            .collect();
         let field_columns_iter = result_field_columns
             .into_iter()
             .zip(self.ctx.field_columns.iter())
@@ -2488,10 +2510,9 @@ mod test {
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::test_util::DummyDecoder;
-    use datafusion::execution::runtime_env::RuntimeEnv;
+    use datafusion::execution::SessionStateBuilder;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
-    use df_prelude::SessionConfig;
     use promql_parser::label::Labels;
     use promql_parser::parser;
     use session::context::QueryContext;
@@ -2501,7 +2522,7 @@ mod test {
     use super::*;
 
     fn build_session_state() -> SessionState {
-        SessionState::new_with_config_rt(SessionConfig::new(), Arc::new(RuntimeEnv::default()))
+        SessionStateBuilder::new().with_default_features().build()
     }
 
     async fn build_test_table_provider(
@@ -2861,28 +2882,28 @@ mod test {
 
     #[tokio::test]
     async fn aggregate_sum() {
-        do_aggregate_expr_plan("sum", "SUM").await;
+        do_aggregate_expr_plan("sum", "sum").await;
     }
 
     #[tokio::test]
     async fn aggregate_avg() {
-        do_aggregate_expr_plan("avg", "AVG").await;
+        do_aggregate_expr_plan("avg", "avg").await;
     }
 
     #[tokio::test]
     #[should_panic] // output type doesn't match
     async fn aggregate_count() {
-        do_aggregate_expr_plan("count", "COUNT").await;
+        do_aggregate_expr_plan("count", "count").await;
     }
 
     #[tokio::test]
     async fn aggregate_min() {
-        do_aggregate_expr_plan("min", "MIN").await;
+        do_aggregate_expr_plan("min", "min").await;
     }
 
     #[tokio::test]
     async fn aggregate_max() {
-        do_aggregate_expr_plan("max", "MAX").await;
+        do_aggregate_expr_plan("max", "max").await;
     }
 
     #[tokio::test]
@@ -2893,12 +2914,12 @@ mod test {
 
     #[tokio::test]
     async fn aggregate_stddev() {
-        do_aggregate_expr_plan("stddev", "STDDEV_POP").await;
+        do_aggregate_expr_plan("stddev", "stddev_pop").await;
     }
 
     #[tokio::test]
     async fn aggregate_stdvar() {
-        do_aggregate_expr_plan("stdvar", "VAR_POP").await;
+        do_aggregate_expr_plan("stdvar", "var_pop").await;
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use axum::body::Body;
 use axum::http::Request;
 use axum::middleware::Next;
 use axum::response::Response;
@@ -19,7 +20,7 @@ use session::context::QueryContext;
 
 use crate::hint_headers;
 
-pub async fn extract_hints<B>(mut request: Request<B>, next: Next<B>) -> Response {
+pub async fn extract_hints(mut request: Request<Body>, next: Next) -> Response {
     let hints = hint_headers::extract_hints(request.headers());
     if let Some(query_ctx) = request.extensions_mut().get_mut::<QueryContext>() {
         for (key, value) in hints {

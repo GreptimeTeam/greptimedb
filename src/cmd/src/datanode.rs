@@ -62,6 +62,11 @@ impl Instance {
     pub fn datanode(&self) -> &Datanode {
         &self.datanode
     }
+
+    /// allow customizing datanode for downstream projects
+    pub fn datanode_mut(&mut self) -> &mut Datanode {
+        &mut self.datanode
+    }
 }
 
 #[async_trait]
@@ -271,7 +276,8 @@ impl StartCommand {
         info!("Datanode options: {:#?}", opts);
 
         let plugin_opts = opts.plugins;
-        let opts = opts.component;
+        let mut opts = opts.component;
+        opts.grpc.detect_hostname();
         let mut plugins = Plugins::new();
         plugins::setup_datanode_plugins(&mut plugins, &plugin_opts, &opts)
             .await

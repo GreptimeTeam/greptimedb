@@ -18,11 +18,9 @@ pub(crate) mod jemalloc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
-use axum::extract::MatchedPath;
-use axum::http::Request;
+use axum::extract::{MatchedPath, Request};
 use axum::middleware::Next;
 use axum::response::IntoResponse;
-use hyper::Body;
 use lazy_static::lazy_static;
 use prometheus::{
     register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge,
@@ -182,6 +180,20 @@ lazy_static! {
             &[METRIC_DB_LABEL, METRIC_RESULT_LABEL]
         )
         .unwrap();
+    pub static ref METRIC_ELASTICSEARCH_LOGS_INGESTION_ELAPSED: HistogramVec =
+        register_histogram_vec!(
+            "greptime_servers_elasticsearch_logs_ingestion_elapsed",
+            "servers elasticsearch logs ingestion elapsed",
+            &[METRIC_DB_LABEL]
+        )
+        .unwrap();
+    pub static ref METRIC_ELASTICSEARCH_LOGS_DOCS_COUNT: IntCounterVec = register_int_counter_vec!(
+        "greptime_servers_elasticsearch_logs_docs_count",
+        "servers elasticsearch logs docs count",
+        &[METRIC_DB_LABEL]
+    )
+    .unwrap();
+
     pub static ref METRIC_HTTP_LOGS_TRANSFORM_ELAPSED: HistogramVec =
         register_histogram_vec!(
             "greptime_servers_http_logs_transform_elapsed",
@@ -281,9 +293,9 @@ pub(crate) struct MetricsMiddleware<S> {
     inner: S,
 }
 
-impl<S> Service<hyper::Request<Body>> for MetricsMiddleware<S>
+impl<S> Service<http::Request<BoxBody>> for MetricsMiddleware<S>
 where
-    S: Service<hyper::Request<Body>, Response = hyper::Response<BoxBody>> + Clone + Send + 'static,
+    S: Service<http::Request<BoxBody>, Response = http::Response<BoxBody>> + Clone + Send + 'static,
     S::Future: Send + 'static,
 {
     type Response = S::Response;
@@ -294,7 +306,7 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, req: hyper::Request<Body>) -> Self::Future {
+    fn call(&mut self, req: http::Request<BoxBody>) -> Self::Future {
         // This is necessary because tonic internally uses `tower::buffer::Buffer`.
         // See https://github.com/tower-rs/tower/issues/547#issuecomment-767629149
         // for details on why this is necessary
@@ -324,7 +336,7 @@ where
 
 /// A middleware to record metrics for HTTP.
 // Based on https://github.com/tokio-rs/axum/blob/axum-v0.6.16/examples/prometheus-metrics/src/main.rs
-pub(crate) async fn http_metrics_layer<B>(req: Request<B>, next: Next<B>) -> impl IntoResponse {
+pub(crate) async fn http_metrics_layer(req: Request, next: Next) -> impl IntoResponse {
     let start = Instant::now();
     let path = if let Some(matched_path) = req.extensions().get::<MatchedPath>() {
         matched_path.as_str().to_owned()

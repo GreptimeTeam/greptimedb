@@ -24,7 +24,7 @@ use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::Result as DataFusionResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::PhysicalSortRequirement;
+use datafusion::physical_expr::{LexRequirement, PhysicalSortRequirement};
 use datafusion::physical_plan::expressions::Column as ColumnExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
@@ -40,7 +40,7 @@ use snafu::ResultExt;
 use crate::error::{DeserializeSnafu, Result};
 use crate::metrics::PROMQL_SERIES_COUNT;
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
 pub struct SeriesDivide {
     tag_columns: Vec<String>,
     input: LogicalPlan,
@@ -146,7 +146,7 @@ impl ExecutionPlan for SeriesDivideExec {
         vec![Distribution::SinglePartition]
     }
 
-    fn required_input_ordering(&self) -> Vec<Option<Vec<PhysicalSortRequirement>>> {
+    fn required_input_ordering(&self) -> Vec<Option<LexRequirement>> {
         let input_schema = self.input.schema();
         let exprs: Vec<PhysicalSortRequirement> = self
             .tag_columns
@@ -158,7 +158,7 @@ impl ExecutionPlan for SeriesDivideExec {
             })
             .collect();
         if !exprs.is_empty() {
-            vec![Some(exprs)]
+            vec![Some(LexRequirement::new(exprs))]
         } else {
             vec![None]
         }
@@ -217,6 +217,10 @@ impl ExecutionPlan for SeriesDivideExec {
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metric.clone_inner())
     }
+
+    fn name(&self) -> &str {
+        "SeriesDivideExec"
+    }
 }
 
 impl DisplayAs for SeriesDivideExec {
@@ -254,7 +258,10 @@ impl Stream for SeriesDivideStream {
         let timer = std::time::Instant::now();
         loop {
             if !self.buffer.is_empty() {
-                let cut_at = self.find_first_diff_row();
+                let cut_at = match self.find_first_diff_row() {
+                    Ok(cut_at) => cut_at,
+                    Err(e) => return Poll::Ready(Some(Err(e))),
+                };
                 if let Some((batch_index, row_index)) = cut_at {
                     // slice out the first time series and return it.
                     let half_batch_of_first_series =
@@ -318,10 +325,10 @@ impl SeriesDivideStream {
 
     /// Return the position to cut buffer.
     /// None implies the current buffer only contains one time series.
-    fn find_first_diff_row(&mut self) -> Option<(usize, usize)> {
+    fn find_first_diff_row(&mut self) -> DataFusionResult<Option<(usize, usize)>> {
         // fast path: no tag columns means all data belongs to the same series.
         if self.tag_indices.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         let mut resumed_batch_index = self.inspect_start;
@@ -337,18 +344,26 @@ impl SeriesDivideStream {
                 for index in &self.tag_indices {
                     let current_array = batch.column(*index);
                     let last_array = last_batch.column(*index);
-                    let current_value = current_array
+                    let current_string_array = current_array
                         .as_any()
                         .downcast_ref::<StringArray>()
-                        .unwrap()
-                        .value(0);
-                    let last_value = last_array
+                        .ok_or_else(|| {
+                            datafusion::error::DataFusionError::Internal(
+                                "Failed to downcast tag column to StringArray".to_string(),
+                            )
+                        })?;
+                    let last_string_array = last_array
                         .as_any()
                         .downcast_ref::<StringArray>()
-                        .unwrap()
-                        .value(last_row);
+                        .ok_or_else(|| {
+                            datafusion::error::DataFusionError::Internal(
+                                "Failed to downcast tag column to StringArray".to_string(),
+                            )
+                        })?;
+                    let current_value = current_string_array.value(0);
+                    let last_value = last_string_array.value(last_row);
                     if current_value != last_value {
-                        return Some((resumed_batch_index, 0));
+                        return Ok(Some((resumed_batch_index, 0)));
                     }
                 }
             }
@@ -356,7 +371,15 @@ impl SeriesDivideStream {
             // check column by column
             for index in &self.tag_indices {
                 let array = batch.column(*index);
-                let string_array = array.as_any().downcast_ref::<StringArray>().unwrap();
+                let string_array =
+                    array
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or_else(|| {
+                            datafusion::error::DataFusionError::Internal(
+                                "Failed to downcast tag column to StringArray".to_string(),
+                            )
+                        })?;
                 // the first row number that not equal to the next row.
                 let mut same_until = 0;
                 while same_until < num_rows - 1 {
@@ -372,12 +395,12 @@ impl SeriesDivideStream {
                 // all rows are the same, inspect next batch
                 resumed_batch_index += 1;
             } else {
-                return Some((resumed_batch_index, result_index));
+                return Ok(Some((resumed_batch_index, result_index)));
             }
         }
 
         self.inspect_start = resumed_batch_index;
-        None
+        Ok(None)
     }
 }
 

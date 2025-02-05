@@ -6,11 +6,8 @@ ARG DOCKER_BUILD_ROOT=.
 ENV LANG en_US.utf8
 WORKDIR /greptimedb
 
-# Add PPA for Python 3.10.
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common && \
-    add-apt-repository ppa:deadsnakes/ppa -y
-
+    DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common
 # Install dependencies.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     libssl-dev \
@@ -20,38 +17,23 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     ca-certificates \
     git \
     build-essential \
-    pkg-config \
-    python3.10 \
-    python3.10-dev
+    pkg-config
 
 ARG TARGETPLATFORM
 RUN echo "target platform: $TARGETPLATFORM"
 
+ARG PROTOBUF_VERSION=29.3
+
 # Install protobuf, because the one in the apt is too old (v3.12).
 RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-    curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-aarch_64.zip && \
-    unzip protoc-29.1-linux-aarch_64.zip -d protoc3; \
+    curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOBUF_VERSION}/protoc-${PROTOBUF_VERSION}-linux-aarch_64.zip && \
+    unzip protoc-${PROTOBUF_VERSION}-linux-aarch_64.zip -d protoc3; \
 elif [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
-    curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip && \
-    unzip protoc-29.1-linux-x86_64.zip -d protoc3; \
+    curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOBUF_VERSION}/protoc-${PROTOBUF_VERSION}-linux-x86_64.zip && \
+    unzip protoc-${PROTOBUF_VERSION}-linux-x86_64.zip -d protoc3; \
 fi
 RUN mv protoc3/bin/* /usr/local/bin/
 RUN mv protoc3/include/* /usr/local/include/
-
-# https://github.com/GreptimeTeam/greptimedb/actions/runs/10935485852/job/30357457188#step:3:7106
-# `aws-lc-sys` require gcc >= 10.3.0 to work, hence alias to use gcc-10
-RUN apt-get remove -y gcc-9 g++-9 cpp-9 && \
-    apt-get install -y gcc-10 g++-10 cpp-10 make cmake && \
-    ln -sf /usr/bin/gcc-10 /usr/bin/gcc && ln -sf /usr/bin/g++-10 /usr/bin/g++ && \
-    ln -sf /usr/bin/gcc-10 /usr/bin/cc && \
-    ln -sf /usr/bin/g++-10 /usr/bin/cpp && ln -sf /usr/bin/g++-10 /usr/bin/c++ && \
-    cc --version && gcc --version && g++ --version && cpp --version && c++ --version
-
-# Remove Python 3.8 and install pip.
-RUN apt-get -y purge python3.8 && \
-    apt-get -y autoremove && \
-    ln -s /usr/bin/python3.10 /usr/bin/python3 && \
-    curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10
 
 # Silence all `safe.directory` warnings, to avoid the "detect dubious repository" error when building with submodules.
 # Disabling the safe directory check here won't pose extra security issues, because in our usage for this dev build
@@ -64,10 +46,6 @@ RUN apt-get -y purge python3.8 && \
 # It's troublesome to do this since the dev build runs in Docker, which is under user "root"; while outside the Docker,
 # it can be a different user that have prepared the submodules.
 RUN git config --global --add safe.directory '*'
-
-# Install Python dependencies.
-COPY $DOCKER_BUILD_ROOT/docker/python/requirements.txt /etc/greptime/requirements.txt
-RUN python3 -m pip install -r /etc/greptime/requirements.txt
 
 # Install Rust.
 SHELL ["/bin/bash", "-c"]

@@ -106,6 +106,10 @@ struct Args {
     /// Whether to setup etcd, by default it is false.
     #[clap(long, default_value = "false")]
     setup_etcd: bool,
+
+    /// Whether to setup pg, by default it is false.
+    #[clap(long, default_value = "false")]
+    setup_pg: bool,
 }
 
 #[tokio::main]
@@ -154,6 +158,7 @@ async fn main() {
     let store = StoreConfig {
         store_addrs: args.store_addrs.clone(),
         setup_etcd: args.setup_etcd,
+        setup_pg: args.setup_pg,
     };
 
     let runner = Runner::new(
@@ -167,7 +172,13 @@ async fn main() {
             store,
         ),
     );
-    runner.run().await.unwrap();
+    match runner.run().await {
+        Ok(_) => println!("\x1b[32mAll sqlness tests passed!\x1b[0m"),
+        Err(e) => {
+            println!("\x1b[31mTest failed: {}\x1b[0m", e);
+            std::process::exit(1);
+        }
+    }
 
     // clean up and exit
     if !args.preserve_state {

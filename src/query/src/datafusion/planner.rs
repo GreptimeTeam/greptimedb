@@ -20,12 +20,19 @@ use arrow_schema::DataType;
 use catalog::table_source::DfTableSourceProvider;
 use common_function::scalars::udf::create_udf;
 use common_query::logical_plan::create_aggregate_function;
-use datafusion::catalog::TableReference;
+use datafusion::common::TableReference;
+use datafusion::datasource::cte_worktable::CteWorkTable;
+use datafusion::datasource::file_format::{format_as_file_type, FileFormatFactory};
+use datafusion::datasource::provider_as_source;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::SessionState;
+use datafusion::execution::SessionStateDefaults;
 use datafusion::sql::planner::ContextProvider;
 use datafusion::variable::VarType;
 use datafusion_common::config::ConfigOptions;
+use datafusion_common::file_options::file_type::FileType;
+use datafusion_common::DataFusionError;
+use datafusion_expr::planner::{ExprPlanner, TypePlanner};
 use datafusion_expr::var_provider::is_system_variables;
 use datafusion_expr::{AggregateUDF, ScalarUDF, TableSource, WindowUDF};
 use datafusion_sql::parser::Statement as DfStatement;
@@ -41,6 +48,14 @@ pub struct DfContextProviderAdapter {
     tables: HashMap<String, Arc<dyn TableSource>>,
     table_provider: DfTableSourceProvider,
     query_ctx: QueryContextRef,
+
+    // Fields from session state defaults:
+    /// Holds registered external FileFormat implementations
+    /// DataFusion doesn't pub this field, so we need to store it here.
+    file_formats: HashMap<String, Arc<dyn FileFormatFactory>>,
+    /// Provides support for customising the SQL planner, e.g. to add support for custom operators like `->>` or `?`
+    /// DataFusion doesn't pub this field, so we need to store it here.
+    expr_planners: Vec<Arc<dyn ExprPlanner>>,
 }
 
 impl DfContextProviderAdapter {
@@ -70,6 +85,10 @@ impl DfContextProviderAdapter {
         );
 
         let tables = resolve_tables(table_names, &mut table_provider).await?;
+        let file_formats = SessionStateDefaults::default_file_formats()
+            .into_iter()
+            .map(|format| (format.get_ext().to_lowercase(), format))
+            .collect();
 
         Ok(Self {
             engine_state,
@@ -77,6 +96,8 @@ impl DfContextProviderAdapter {
             tables,
             table_provider,
             query_ctx,
+            file_formats,
+            expr_planners: SessionStateDefaults::default_expr_planners(),
         })
     }
 }
@@ -154,8 +175,8 @@ impl ContextProvider for DfContextProviderAdapter {
         )
     }
 
-    fn get_window_meta(&self, _name: &str) -> Option<Arc<WindowUDF>> {
-        None
+    fn get_window_meta(&self, name: &str) -> Option<Arc<WindowUDF>> {
+        self.session_state.window_functions().get(name).cloned()
     }
 
     fn get_variable_type(&self, variable_names: &[String]) -> Option<DataType> {
@@ -181,17 +202,64 @@ impl ContextProvider for DfContextProviderAdapter {
     }
 
     fn udf_names(&self) -> Vec<String> {
-        // TODO(LFC): Impl it.
-        vec![]
+        let mut names = self.engine_state.udf_names();
+        names.extend(self.session_state.scalar_functions().keys().cloned());
+        names
     }
 
     fn udaf_names(&self) -> Vec<String> {
-        // TODO(LFC): Impl it.
-        vec![]
+        let mut names = self.engine_state.udaf_names();
+        names.extend(self.session_state.aggregate_functions().keys().cloned());
+        names
     }
 
     fn udwf_names(&self) -> Vec<String> {
-        // TODO(LFC): Impl it.
-        vec![]
+        self.session_state
+            .window_functions()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    fn get_file_type(&self, ext: &str) -> DfResult<Arc<dyn FileType>> {
+        self.file_formats
+            .get(&ext.to_lowercase())
+            .ok_or_else(|| {
+                DataFusionError::Plan(format!("There is no registered file format with ext {ext}"))
+            })
+            .map(|file_type| format_as_file_type(Arc::clone(file_type)))
+    }
+
+    fn get_table_function_source(
+        &self,
+        name: &str,
+        args: Vec<datafusion_expr::Expr>,
+    ) -> DfResult<Arc<dyn TableSource>> {
+        let tbl_func = self
+            .session_state
+            .table_functions()
+            .get(name)
+            .cloned()
+            .ok_or_else(|| DataFusionError::Plan(format!("table function '{name}' not found")))?;
+        let provider = tbl_func.create_table_provider(&args)?;
+
+        Ok(provider_as_source(provider))
+    }
+
+    fn create_cte_work_table(
+        &self,
+        name: &str,
+        schema: arrow_schema::SchemaRef,
+    ) -> DfResult<Arc<dyn TableSource>> {
+        let table = Arc::new(CteWorkTable::new(name, schema));
+        Ok(provider_as_source(table))
+    }
+
+    fn get_expr_planners(&self) -> &[Arc<dyn ExprPlanner>] {
+        &self.expr_planners
+    }
+
+    fn get_type_planner(&self) -> Option<Arc<dyn TypePlanner>> {
+        None
     }
 }

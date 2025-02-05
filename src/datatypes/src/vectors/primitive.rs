@@ -80,10 +80,12 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
         }
     }
 
-    pub fn from_vec(array: Vec<T::Native>) -> Self {
-        Self {
-            array: PrimitiveArray::from_iter_values(array),
-        }
+    pub fn from_vec(vector: Vec<T::Native>) -> Self {
+        let mutable_buffer = arrow::buffer::MutableBuffer::from(vector);
+        let mut primitive_builder =
+            PrimitiveBuilder::<T::ArrowPrimitive>::new_from_buffer(mutable_buffer, None);
+        let array = primitive_builder.finish();
+        Self { array }
     }
 
     pub fn from_iter_values<I: IntoIterator<Item = T::Native>>(iter: I) -> Self {
@@ -406,7 +408,7 @@ mod tests {
         Int32Array, Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray,
         Time64NanosecondArray,
     };
-    use arrow::datatypes::DataType as ArrowDataType;
+    use arrow::datatypes::{DataType as ArrowDataType, IntervalDayTime};
     use arrow_array::{
         DurationMicrosecondArray, DurationMillisecondArray, DurationNanosecondArray,
         DurationSecondArray, IntervalDayTimeArray, IntervalYearMonthArray,
@@ -650,10 +652,18 @@ mod tests {
             vector
         );
 
-        let array: ArrayRef = Arc::new(IntervalDayTimeArray::from(vec![1000, 2000, 3000]));
+        let array: ArrayRef = Arc::new(IntervalDayTimeArray::from(vec![
+            IntervalDayTime::new(1, 1000),
+            IntervalDayTime::new(1, 2000),
+            IntervalDayTime::new(1, 3000),
+        ]));
         let vector = IntervalDayTimeVector::try_from_arrow_array(array).unwrap();
         assert_eq!(
-            IntervalDayTimeVector::from_values(vec![1000, 2000, 3000]),
+            IntervalDayTimeVector::from_values(vec![
+                IntervalDayTime::new(1, 1000),
+                IntervalDayTime::new(1, 2000),
+                IntervalDayTime::new(1, 3000),
+            ]),
             vector
         );
 

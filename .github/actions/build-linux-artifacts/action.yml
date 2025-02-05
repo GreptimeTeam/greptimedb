@@ -48,12 +48,11 @@ runs:
         path: /tmp/greptime-*.log
         retention-days: 3
 
-    - name: Build greptime
-      if: ${{ inputs.dev-mode == 'false' }}
+    - name: Build greptime # Builds standard greptime binary
       uses: ./.github/actions/build-greptime-binary
       with:
         base-image: ubuntu
-        features: servers/dashboard
+        features: servers/dashboard,pg_kvbackend
         cargo-profile: ${{ inputs.cargo-profile }}
         artifacts-dir: greptime-linux-${{ inputs.arch }}-${{ inputs.version }}
         version: ${{ inputs.version }}
@@ -71,7 +70,7 @@ runs:
       if: ${{ inputs.arch == 'amd64' && inputs.dev-mode == 'false' }} # Builds greptime for centos if the host machine is amd64.
       with:
         base-image: centos
-        features: servers/dashboard
+        features: servers/dashboard,pg_kvbackend
         cargo-profile: ${{ inputs.cargo-profile }}
         artifacts-dir: greptime-linux-${{ inputs.arch }}-centos-${{ inputs.version }}
         version: ${{ inputs.version }}

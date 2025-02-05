@@ -305,6 +305,53 @@ pub fn stop_rm_etcd() {
     }
 }
 
+/// Set up a PostgreSQL server in docker.
+pub fn setup_pg(pg_port: u16, pg_version: Option<&str>) {
+    if std::process::Command::new("docker")
+        .args(["-v"])
+        .status()
+        .is_err()
+    {
+        panic!("Docker is not installed");
+    }
+
+    let pg_image = if let Some(pg_version) = pg_version {
+        format!("postgres:{pg_version}")
+    } else {
+        "postgres:latest".to_string()
+    };
+    let pg_password = "admin";
+    let pg_user = "greptimedb";
+
+    let mut arg_list = vec![];
+    arg_list.extend(["run", "-d"]);
+
+    let pg_password_env = format!("POSTGRES_PASSWORD={pg_password}");
+    let pg_user_env = format!("POSTGRES_USER={pg_user}");
+    let pg_port_forward = format!("{pg_port}:5432");
+    arg_list.extend(["-e", &pg_password_env, "-e", &pg_user_env]);
+    arg_list.extend(["-p", &pg_port_forward]);
+
+    arg_list.extend(["--name", "greptimedb_pg", &pg_image]);
+
+    let mut cmd = std::process::Command::new("docker");
+
+    cmd.args(arg_list);
+
+    println!("Starting PostgreSQL with command: {:?}", cmd);
+
+    let status = cmd.status();
+    if status.is_err() {
+        panic!("Failed to start PostgreSQL: {:?}", status);
+    } else if let Ok(status) = status {
+        if status.success() {
+            println!("Started PostgreSQL with port {}", pg_port);
+        } else {
+            panic!("Failed to start PostgreSQL: {:?}", status);
+        }
+    }
+}
+
 /// Get the dir of test cases. This function only works when the runner is run
 /// under the project's dir because it depends on some envs set by cargo.
 pub fn get_case_dir(case_dir: Option<PathBuf>) -> String {

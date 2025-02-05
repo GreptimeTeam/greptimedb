@@ -30,7 +30,7 @@ use crate::error::{
     PuffinAddBlobSnafu, PushBloomFilterValueSnafu, Result,
 };
 use crate::read::Batch;
-use crate::row_converter::SortField;
+use crate::row_converter::{CompositeValues, SortField};
 use crate::sst::file::FileId;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
 use crate::sst::index::codec::{IndexValueCodec, IndexValuesCodec};
@@ -108,7 +108,10 @@ impl BloomFilterIndexer {
             return Ok(None);
         }
 
-        let codec = IndexValuesCodec::from_tag_columns(metadata.primary_key_columns());
+        let codec = IndexValuesCodec::from_tag_columns(
+            metadata.primary_key_encoding,
+            metadata.primary_key_columns(),
+        );
         let indexer = Self {
             creators,
             temp_file_provider,
@@ -124,7 +127,7 @@ impl BloomFilterIndexer {
     /// Garbage will be cleaned up if failed to update.
     ///
     /// TODO(zhongzc): duplicate with `mito2::sst::index::inverted_index::creator::InvertedIndexCreator`
-    pub async fn update(&mut self, batch: &Batch) -> Result<()> {
+    pub async fn update(&mut self, batch: &mut Batch) -> Result<()> {
         ensure!(!self.aborted, OperateAbortedIndexSnafu);
 
         if self.creators.is_empty() {
@@ -186,17 +189,38 @@ impl BloomFilterIndexer {
         self.do_cleanup().await
     }
 
-    async fn do_update(&mut self, batch: &Batch) -> Result<()> {
+    async fn do_update(&mut self, batch: &mut Batch) -> Result<()> {
         let mut guard = self.stats.record_update();
 
         let n = batch.num_rows();
         guard.inc_row_count(n);
 
+        // TODO(weny, zhenchi): lazy decode
+        if batch.pk_values().is_none() {
+            let values = self.codec.decode(batch.primary_key())?;
+            batch.set_pk_values(values);
+        }
+
+        // Safety: the primary key is decoded
+        let values = batch.pk_values().unwrap();
         // Tags
-        for ((col_id, _), field, value) in self.codec.decode(batch.primary_key())? {
+        for (idx, (col_id, field)) in self.codec.fields().iter().enumerate() {
             let Some(creator) = self.creators.get_mut(col_id) else {
                 continue;
             };
+
+            let value = match &values {
+                CompositeValues::Dense(vec) => {
+                    let value = &vec[idx].1;
+                    if value.is_null() {
+                        None
+                    } else {
+                        Some(value)
+                    }
+                }
+                CompositeValues::Sparse(sparse_values) => sparse_values.get(col_id),
+            };
+
             let elems = value
                 .map(|v| {
                     let mut buf = vec![];
@@ -321,7 +345,7 @@ impl BloomFilterIndexer {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::iter;
 
     use api::v1::SemanticType;
@@ -338,14 +362,14 @@ mod tests {
 
     use super::*;
     use crate::read::BatchColumn;
-    use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+    use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
-    fn mock_object_store() -> ObjectStore {
+    pub fn mock_object_store() -> ObjectStore {
         ObjectStore::new(Memory::default()).unwrap().finish()
     }
 
-    async fn new_intm_mgr(path: impl AsRef<str>) -> IntermediateManager {
+    pub async fn new_intm_mgr(path: impl AsRef<str>) -> IntermediateManager {
         IntermediateManager::init_fs(path).await.unwrap()
     }
 
@@ -365,7 +389,7 @@ mod tests {
     ///   - index: bloom filter
     ///   - granularity: 4
     ///   - column_id: 3
-    fn mock_region_metadata() -> RegionMetadataRef {
+    pub fn mock_region_metadata() -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
         builder
             .push_column_metadata(ColumnMetadata {
@@ -410,9 +434,9 @@ mod tests {
         Arc::new(builder.build().unwrap())
     }
 
-    fn new_batch(str_tag: impl AsRef<str>, u64_field: impl IntoIterator<Item = u64>) -> Batch {
-        let fields = vec![SortField::new(ConcreteDataType::string_datatype())];
-        let codec = McmpRowCodec::new(fields);
+    pub fn new_batch(str_tag: impl AsRef<str>, u64_field: impl IntoIterator<Item = u64>) -> Batch {
+        let fields = vec![(0, SortField::new(ConcreteDataType::string_datatype()))];
+        let codec = DensePrimaryKeyCodec::with_fields(fields);
         let row: [ValueRef; 1] = [str_tag.as_ref().into()];
         let primary_key = codec.encode(row.into_iter()).unwrap();
 
@@ -441,8 +465,9 @@ mod tests {
     #[tokio::test]
     async fn test_bloom_filter_indexer() {
         let prefix = "test_bloom_filter_indexer_";
+        let tempdir = common_test_util::temp_dir::create_temp_dir(prefix);
         let object_store = mock_object_store();
-        let intm_mgr = new_intm_mgr(prefix).await;
+        let intm_mgr = new_intm_mgr(tempdir.path().to_string_lossy()).await;
         let region_metadata = mock_region_metadata();
         let memory_usage_threshold = Some(1024);
 
@@ -456,11 +481,11 @@ mod tests {
         .unwrap();
 
         // push 20 rows
-        let batch = new_batch("tag1", 0..10);
-        indexer.update(&batch).await.unwrap();
+        let mut batch = new_batch("tag1", 0..10);
+        indexer.update(&mut batch).await.unwrap();
 
-        let batch = new_batch("tag2", 10..20);
-        indexer.update(&batch).await.unwrap();
+        let mut batch = new_batch("tag2", 10..20);
+        indexer.update(&mut batch).await.unwrap();
 
         let (_d, factory) = PuffinManagerFactory::new_for_test_async(prefix).await;
         let puffin_manager = factory.build(object_store);
@@ -481,22 +506,18 @@ mod tests {
                 .await
                 .unwrap();
             let reader = blob_guard.reader().await.unwrap();
-            let mut bloom_filter = BloomFilterReaderImpl::new(reader);
+            let bloom_filter = BloomFilterReaderImpl::new(reader);
             let metadata = bloom_filter.metadata().await.unwrap();
 
-            assert_eq!(metadata.bloom_filter_segments.len(), 10);
+            assert_eq!(metadata.segment_count, 10);
             for i in 0..5 {
-                let bf = bloom_filter
-                    .bloom_filter(&metadata.bloom_filter_segments[i])
-                    .await
-                    .unwrap();
+                let loc = &metadata.bloom_filter_locs[metadata.segment_loc_indices[i] as usize];
+                let bf = bloom_filter.bloom_filter(loc).await.unwrap();
                 assert!(bf.contains(b"tag1"));
             }
             for i in 5..10 {
-                let bf = bloom_filter
-                    .bloom_filter(&metadata.bloom_filter_segments[i])
-                    .await
-                    .unwrap();
+                let loc = &metadata.bloom_filter_locs[metadata.segment_loc_indices[i] as usize];
+                let bf = bloom_filter.bloom_filter(loc).await.unwrap();
                 assert!(bf.contains(b"tag2"));
             }
         }
@@ -510,15 +531,14 @@ mod tests {
                 .await
                 .unwrap();
             let reader = blob_guard.reader().await.unwrap();
-            let mut bloom_filter = BloomFilterReaderImpl::new(reader);
+            let bloom_filter = BloomFilterReaderImpl::new(reader);
             let metadata = bloom_filter.metadata().await.unwrap();
 
-            assert_eq!(metadata.bloom_filter_segments.len(), 5);
+            assert_eq!(metadata.segment_count, 5);
             for i in 0u64..20 {
-                let bf = bloom_filter
-                    .bloom_filter(&metadata.bloom_filter_segments[i as usize / 4])
-                    .await
-                    .unwrap();
+                let idx = i as usize / 4;
+                let loc = &metadata.bloom_filter_locs[metadata.segment_loc_indices[idx] as usize];
+                let bf = bloom_filter.bloom_filter(loc).await.unwrap();
                 let mut buf = vec![];
                 IndexValueCodec::encode_nonnull_value(ValueRef::UInt64(i), &sort_field, &mut buf)
                     .unwrap();

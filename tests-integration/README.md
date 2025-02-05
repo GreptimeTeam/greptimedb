@@ -47,13 +47,10 @@ To run the integration test, please copy `.env.example` to `.env` in the project
 GT_KAFKA_ENDPOINTS = localhost:9092
 ```
 
-### Setup kafka standalone 
+### Setup kafka standalone
 
 ```
-cd tests-integration/fixtures/kafka 
+cd tests-integration/fixtures
 
-docker compose -f docker-compose-standalone.yml up
+docker compose -f docker-compose-standalone.yml up kafka
 ```
-
-
-

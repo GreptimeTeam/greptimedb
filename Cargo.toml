@@ -55,7 +55,6 @@ members = [
     "src/promql",
     "src/puffin",
     "src/query",
-    "src/script",
     "src/servers",
     "src/session",
     "src/sql",
@@ -79,8 +78,6 @@ clippy.dbg_macro = "warn"
 clippy.implicit_clone = "warn"
 clippy.readonly_write_lock = "allow"
 rust.unknown_lints = "deny"
-# Remove this after https://github.com/PyO3/pyo3/issues/4094
-rust.non_local_definitions = "allow"
 rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 
 [workspace.dependencies]
@@ -91,14 +88,18 @@ rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 # See for more detaiils: https://github.com/rust-lang/cargo/issues/11329
 ahash = { version = "0.8", features = ["compile-time-rng"] }
 aquamarine = "0.3"
-arrow = { version = "51.0.0", features = ["prettyprint"] }
-arrow-array = { version = "51.0.0", default-features = false, features = ["chrono-tz"] }
-arrow-flight = "51.0"
-arrow-ipc = { version = "51.0.0", default-features = false, features = ["lz4", "zstd"] }
-arrow-schema = { version = "51.0", features = ["serde"] }
+arrow = { version = "53.0.0", features = ["prettyprint"] }
+arrow-array = { version = "53.0.0", default-features = false, features = ["chrono-tz"] }
+arrow-flight = "53.0"
+arrow-ipc = { version = "53.0.0", default-features = false, features = ["lz4", "zstd"] }
+arrow-schema = { version = "53.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
-axum = { version = "0.6", features = ["headers"] }
+# Remember to update axum-extra, axum-macros when updating axum
+axum = "0.8"
+axum-extra = "0.10"
+axum-macros = "0.4"
+backon = "1"
 base64 = "0.21"
 bigdecimal = "0.4.2"
 bitflags = "2.4.1"
@@ -109,29 +110,35 @@ clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
 crossbeam-utils = "0.8"
 dashmap = "5.4"
-datafusion = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
-datafusion-common = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
-datafusion-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
-datafusion-functions = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
-datafusion-optimizer = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
-datafusion-physical-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
-datafusion-physical-plan = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
-datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
-datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "7823ef2f63663907edab46af0d51359900f608d6" }
+datafusion = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-common = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-expr = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-functions = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-optimizer = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-physical-expr = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-physical-plan = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-sql = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-substrait = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+deadpool = "0.10"
+deadpool-postgres = "0.12"
 derive_builder = "0.12"
 dotenv = "0.15"
-etcd-client = "0.13"
+etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "a875e976441188028353f7274a46a7e6e065c5d4" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "683e9d10ae7f3dfb8aaabd89082fc600c17e3795" }
 hex = "0.4"
-http = "0.2"
+http = "1"
 humantime = "2.1"
 humantime-serde = "1.1"
+hyper = "1.1"
+hyper-util = "0.1"
 itertools = "0.10"
 jsonb = { git = "https://github.com/databendlabs/jsonb.git", rev = "8c8d2fc294a39f3ff08909d60f718639cfba3875", default-features = false }
 lazy_static = "1.4"
+local-ip-address = "0.6"
+loki-api = { git = "https://github.com/shuiyisong/tracing-loki", branch = "chore/prost_version" }
 meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "a10facb353b41460eeb98578868ebf19c2084fac" }
 mockall = "0.11.4"
 moka = "0.12"
@@ -139,7 +146,7 @@ nalgebra = "0.33"
 notify = "6.1"
 num_cpus = "1.16"
 once_cell = "1.18"
-opentelemetry-proto = { version = "0.5", features = [
+opentelemetry-proto = { version = "0.27", features = [
     "gen-tonic",
     "metrics",
     "trace",
@@ -147,12 +154,12 @@ opentelemetry-proto = { version = "0.5", features = [
     "logs",
 ] }
 parking_lot = "0.12"
-parquet = { version = "51.0.0", default-features = false, features = ["arrow", "async", "object_store"] }
+parquet = { version = "53.0.0", default-features = false, features = ["arrow", "async", "object_store"] }
 paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
 promql-parser = { version = "0.4.3", features = ["ser"] }
-prost = "0.12"
+prost = "0.13"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.8"
 ratelimit = "0.9"
@@ -171,28 +178,30 @@ rstest = "0.21"
 rstest_reuse = "0.7"
 rust_decimal = "1.33"
 rustc-hash = "2.0"
+rustls = { version = "0.23.20", default-features = false } # override by patch, see [patch.crates-io]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_with = "3"
-shadow-rs = "0.35"
+shadow-rs = "0.38"
 similar-asserts = "1.6.0"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
 sysinfo = "0.30"
-# on branch v0.44.x
-sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "54a267ac89c09b11c0c88934690530807185d3e7", features = [
+# on branch v0.52.x
+sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "71dd86058d2af97b9925093d40c4e03360403170", features = [
     "visitor",
     "serde",
-] }
+] } # on branch v0.44.x
 strum = { version = "0.25", features = ["derive"] }
 tempfile = "3"
 tokio = { version = "1.40", features = ["full"] }
 tokio-postgres = "0.7"
+tokio-rustls = { version = "0.26.0", default-features = false } # override by patch, see [patch.crates-io]
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
-tonic = { version = "0.11", features = ["tls", "gzip", "zstd"] }
-tower = "0.4"
+tonic = { version = "0.12", features = ["tls", "gzip", "zstd"] }
+tower = "0.5"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 typetag = "0.2"
@@ -254,7 +263,6 @@ plugins = { path = "src/plugins" }
 promql = { path = "src/promql" }
 puffin = { path = "src/puffin" }
 query = { path = "src/query" }
-script = { path = "src/script" }
 servers = { path = "src/servers" }
 session = { path = "src/session" }
 sql = { path = "src/sql" }
@@ -264,9 +272,9 @@ table = { path = "src/table" }
 
 [patch.crates-io]
 # change all rustls dependencies to use our fork to default to `ring` to make it "just work"
-hyper-rustls = { git = "https://github.com/GreptimeTeam/hyper-rustls" }
-rustls = { git = "https://github.com/GreptimeTeam/rustls" }
-tokio-rustls = { git = "https://github.com/GreptimeTeam/tokio-rustls" }
+hyper-rustls = { git = "https://github.com/GreptimeTeam/hyper-rustls", rev = "a951e03" } # version = "0.27.5" with ring patch
+rustls = { git = "https://github.com/GreptimeTeam/rustls", rev = "34fd0c6" }             # version = "0.23.20" with ring patch
+tokio-rustls = { git = "https://github.com/GreptimeTeam/tokio-rustls", rev = "4604ca6" } # version = "0.26.0" with ring patch
 # This is commented, since we are not using aws-lc-sys, if we need to use it, we need to uncomment this line or use a release after this commit, or it wouldn't compile with gcc < 8.1
 # see https://github.com/aws/aws-lc-rs/pull/526
 # aws-lc-sys = { git ="https://github.com/aws/aws-lc-rs", rev = "556558441e3494af4b156ae95ebc07ebc2fd38aa" }

@@ -16,6 +16,11 @@ WITH(
   append_mode = 'true'
 );
 
+INSERT INTO `test_table` (`bytes`, `http_version`, `ip`, `method`, `path`, `status`, `user`, `timestamp`)
+VALUES (1024, 'HTTP/1.1', '192.168.1.1', 'GET', '/index.html', 200, 'user1', 1667446797450);
+
+SELECT count(*) FROM test_table;
+
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (-+) -

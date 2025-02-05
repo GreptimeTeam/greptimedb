@@ -49,6 +49,7 @@ use frontend::frontend::FrontendOptions;
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
+use hyper_util::rt::TokioIo;
 use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
 use meta_srv::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
@@ -185,6 +186,7 @@ impl GreptimeDbClusterBuilder {
                 max_metadata_value_size: None,
             },
             wal: self.metasrv_wal_config.clone(),
+            server_addr: "127.0.0.1:3002".to_string(),
             ..Default::default()
         };
 
@@ -485,7 +487,7 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
 
                 async move {
                     if let Some(client) = client {
-                        Ok(client)
+                        Ok(TokioIo::new(client))
                     } else {
                         Err(std::io::Error::new(
                             std::io::ErrorKind::Other,

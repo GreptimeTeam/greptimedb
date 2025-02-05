@@ -129,7 +129,10 @@ async fn test_engine_open_readonly() {
     let err = engine
         .handle_request(
             region_id,
-            RegionRequest::Put(RegionPutRequest { rows: rows.clone() }),
+            RegionRequest::Put(RegionPutRequest {
+                rows: rows.clone(),
+                hint: None,
+            }),
         )
         .await
         .unwrap_err();
@@ -464,6 +467,7 @@ async fn test_open_compaction_region() {
         region_id,
         region_dir: region_dir.clone(),
         region_options: RegionOptions::default(),
+        max_parallelism: 1,
     };
 
     let compaction_region = open_compaction_region(

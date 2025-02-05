@@ -289,6 +289,11 @@ impl StatementExecutor {
             .await
             .context(error::ExecuteStatementSnafu)
     }
+    pub async fn show_search_path(&self, query_ctx: QueryContextRef) -> Result<Output> {
+        query::sql::show_search_path(query_ctx)
+            .await
+            .context(error::ExecuteStatementSnafu)
+    }
 }
 
 pub(crate) fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<Option<Partitions>> {

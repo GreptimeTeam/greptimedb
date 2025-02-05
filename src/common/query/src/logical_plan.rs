@@ -92,10 +92,7 @@ pub fn rename_logical_plan_columns(
         };
 
         let (qualifier_rename, field_rename) =
-            match plan.schema().qualified_field_from_column(&old_column) {
-                Ok(qualifier_and_field) => qualifier_and_field,
-                Err(err) => return Err(err),
-            };
+            plan.schema().qualified_field_from_column(&old_column)?;
 
         for (qualifier, field) in plan.schema().iter() {
             if qualifier.eq(&qualifier_rename) && field.as_ref() == field_rename {
@@ -214,8 +211,7 @@ mod tests {
         ];
 
         // call the function
-        let result = (df_udf.fun())(&args).unwrap();
-
+        let result = df_udf.invoke_batch(&args, 4).unwrap();
         match result {
             DfColumnarValue::Array(arr) => {
                 let arr = arr.as_any().downcast_ref::<BooleanArray>().unwrap();
@@ -308,7 +304,7 @@ mod tests {
 Projection: person.id AS a, person.name AS b
   Filter: person.id > Int32(500)
     TableScan: person"#,
-            format!("\n{:?}", new_plan)
+            format!("\n{}", new_plan)
         );
     }
 

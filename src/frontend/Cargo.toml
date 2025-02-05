@@ -5,8 +5,6 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["python"]
-python = ["dep:script"]
 testing = []
 
 [lints]
@@ -39,6 +37,7 @@ common-time.workspace = true
 common-version.workspace = true
 datafusion-expr.workspace = true
 datanode.workspace = true
+datatypes.workspace = true
 humantime-serde.workspace = true
 lazy_static.workspace = true
 log-query.workspace = true
@@ -49,10 +48,10 @@ operator.workspace = true
 partition.workspace = true
 pipeline.workspace = true
 prometheus.workspace = true
+promql-parser.workspace = true
 prost.workspace = true
 query.workspace = true
 raft-engine.workspace = true
-script = { workspace = true, features = ["python"], optional = true }
 serde.workspace = true
 servers.workspace = true
 session.workspace = true

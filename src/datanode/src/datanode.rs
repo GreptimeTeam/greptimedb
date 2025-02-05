@@ -395,6 +395,11 @@ impl DatanodeBuilder {
         plugins: Plugins,
     ) -> Result<Vec<RegionEngineRef>> {
         let mut engines = vec![];
+        let mut metric_engine_config = opts.region_engine.iter().find_map(|c| match c {
+            RegionEngineConfig::Metric(config) => Some(config.clone()),
+            _ => None,
+        });
+
         for engine in &opts.region_engine {
             match engine {
                 RegionEngineConfig::Mito(config) => {
@@ -407,7 +412,10 @@ impl DatanodeBuilder {
                     )
                     .await?;
 
-                    let metric_engine = MetricEngine::new(mito_engine.clone());
+                    let metric_engine = MetricEngine::new(
+                        mito_engine.clone(),
+                        metric_engine_config.take().unwrap_or_default(),
+                    );
                     engines.push(Arc::new(mito_engine) as _);
                     engines.push(Arc::new(metric_engine) as _);
                 }
@@ -417,6 +425,9 @@ impl DatanodeBuilder {
                         object_store_manager.default_object_store().clone(), // TODO: implement custom storage for file engine
                     );
                     engines.push(Arc::new(engine) as _);
+                }
+                RegionEngineConfig::Metric(_) => {
+                    // Already handled in `build_mito_engine`.
                 }
             }
         }
@@ -433,8 +444,8 @@ impl DatanodeBuilder {
     ) -> Result<MitoEngine> {
         if opts.storage.is_object_storage() {
             // Enable the write cache when setting object storage
-            config.enable_experimental_write_cache = true;
-            info!("Configured 'enable_experimental_write_cache=true' for mito engine.");
+            config.enable_write_cache = true;
+            info!("Configured 'enable_write_cache=true' for mito engine.");
         }
 
         let mito_engine = match &opts.wal {

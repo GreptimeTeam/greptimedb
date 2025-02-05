@@ -25,14 +25,17 @@ use snafu::ResultExt;
 use super::intermediate_codec::IntermediateBloomFilterCodecV1;
 use crate::bloom_filter::creator::{FALSE_POSITIVE_RATE, SEED};
 use crate::bloom_filter::error::{IntermediateSnafu, IoSnafu, Result};
-use crate::bloom_filter::Bytes;
 use crate::external_provider::ExternalTempFileProvider;
+use crate::Bytes;
 
 /// The minimum memory usage threshold for flushing in-memory Bloom filters to disk.
 const MIN_MEMORY_USAGE_THRESHOLD: usize = 1024 * 1024; // 1MB
 
 /// Storage for finalized Bloom filters.
 pub struct FinalizedBloomFilterStorage {
+    /// Indices of the segments in the sequence of finalized Bloom filters.
+    segment_indices: Vec<usize>,
+
     /// Bloom filters that are stored in memory.
     in_memory: Vec<FinalizedBloomFilterSegment>,
 
@@ -54,6 +57,9 @@ pub struct FinalizedBloomFilterStorage {
 
     /// The threshold of the global memory usage of the creating Bloom filters.
     global_memory_usage_threshold: Option<usize>,
+
+    /// Records the number of flushed segments.
+    flushed_seg_count: usize,
 }
 
 impl FinalizedBloomFilterStorage {
@@ -65,6 +71,7 @@ impl FinalizedBloomFilterStorage {
     ) -> Self {
         let external_prefix = format!("intm-bloom-filters-{}", uuid::Uuid::new_v4());
         Self {
+            segment_indices: Vec::new(),
             in_memory: Vec::new(),
             intermediate_file_id_counter: 0,
             intermediate_prefix: external_prefix,
@@ -72,6 +79,7 @@ impl FinalizedBloomFilterStorage {
             memory_usage: 0,
             global_memory_usage,
             global_memory_usage_threshold,
+            flushed_seg_count: 0,
         }
     }
 
@@ -97,6 +105,13 @@ impl FinalizedBloomFilterStorage {
 
         let fbf = FinalizedBloomFilterSegment::from(bf, element_count);
 
+        // Reuse the last segment if it is the same as the current one.
+        if self.in_memory.last() == Some(&fbf) {
+            self.segment_indices
+                .push(self.flushed_seg_count + self.in_memory.len() - 1);
+            return Ok(());
+        }
+
         // Update memory usage.
         let memory_diff = fbf.bloom_filter_bytes.len();
         self.memory_usage += memory_diff;
@@ -105,6 +120,8 @@ impl FinalizedBloomFilterStorage {
 
         // Add the finalized Bloom filter to the in-memory storage.
         self.in_memory.push(fbf);
+        self.segment_indices
+            .push(self.flushed_seg_count + self.in_memory.len() - 1);
 
         // Flush to disk if necessary.
 
@@ -129,13 +146,19 @@ impl FinalizedBloomFilterStorage {
         Ok(())
     }
 
-    /// Drains the storage and returns a stream of finalized Bloom filter segments.
+    /// Drains the storage and returns indieces of the segments and a stream of finalized Bloom filters.
     pub async fn drain(
         &mut self,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<FinalizedBloomFilterSegment>> + Send + '_>>> {
+    ) -> Result<(
+        Vec<usize>,
+        Pin<Box<dyn Stream<Item = Result<FinalizedBloomFilterSegment>> + Send + '_>>,
+    )> {
         // FAST PATH: memory only
         if self.intermediate_file_id_counter == 0 {
-            return Ok(Box::pin(stream::iter(self.in_memory.drain(..).map(Ok))));
+            return Ok((
+                std::mem::take(&mut self.segment_indices),
+                Box::pin(stream::iter(self.in_memory.drain(..).map(Ok))),
+            ));
         }
 
         // SLOW PATH: memory + disk
@@ -151,8 +174,9 @@ impl FinalizedBloomFilterStorage {
             .map(|(_, reader)| FramedRead::new(reader, IntermediateBloomFilterCodecV1::default()));
 
         let in_memory_stream = stream::iter(self.in_memory.drain(..)).map(Ok);
-        Ok(Box::pin(
-            stream::iter(streams).flatten().chain(in_memory_stream),
+        Ok((
+            std::mem::take(&mut self.segment_indices),
+            Box::pin(stream::iter(streams).flatten().chain(in_memory_stream)),
         ))
     }
 
@@ -160,6 +184,7 @@ impl FinalizedBloomFilterStorage {
     async fn flush_in_memory_to_disk(&mut self) -> Result<()> {
         let file_id = self.intermediate_file_id_counter;
         self.intermediate_file_id_counter += 1;
+        self.flushed_seg_count += self.in_memory.len();
 
         let file_id = format!("{:08}", file_id);
         let mut writer = self
@@ -266,21 +291,25 @@ mod tests {
 
         let elem_count = 2000;
         let batch = 1000;
+        let dup_batch = 200;
 
-        for i in 0..batch {
+        for i in 0..(batch - dup_batch) {
             let elems = (elem_count * i..elem_count * (i + 1)).map(|x| x.to_string().into_bytes());
             storage.add(elems, elem_count).await.unwrap();
+        }
+        for _ in 0..dup_batch {
+            storage.add(Some(vec![]), 1).await.unwrap();
         }
 
         // Flush happens.
         assert!(storage.intermediate_file_id_counter > 0);
 
         // Drain the storage.
-        let mut stream = storage.drain().await.unwrap();
+        let (indices, mut stream) = storage.drain().await.unwrap();
+        assert_eq!(indices.len(), batch);
 
-        let mut i = 0;
-        while let Some(segment) = stream.next().await {
-            let segment = segment.unwrap();
+        for (i, idx) in indices.iter().enumerate().take(batch - dup_batch) {
+            let segment = stream.next().await.unwrap().unwrap();
             assert_eq!(segment.element_count, elem_count);
 
             let v = u64_vec_from_bytes(&segment.bloom_filter_bytes);
@@ -292,9 +321,44 @@ mod tests {
             for elem in (elem_count * i..elem_count * (i + 1)).map(|x| x.to_string().into_bytes()) {
                 assert!(bf.contains(&elem));
             }
-            i += 1;
+            assert_eq!(indices[i], *idx);
         }
 
-        assert_eq!(i, batch);
+        // Check the correctness of the duplicated segments.
+        let dup_seg = stream.next().await.unwrap().unwrap();
+        assert_eq!(dup_seg.element_count, 1);
+        assert!(stream.next().await.is_none());
+        assert!(indices[(batch - dup_batch)..batch]
+            .iter()
+            .all(|&x| x == batch - dup_batch));
+    }
+
+    #[tokio::test]
+    async fn test_finalized_bloom_filter_storage_all_dup() {
+        let mock_provider = MockExternalTempFileProvider::new();
+        let global_memory_usage = Arc::new(AtomicUsize::new(0));
+        let global_memory_usage_threshold = Some(1024 * 1024); // 1MB
+        let provider = Arc::new(mock_provider);
+        let mut storage = FinalizedBloomFilterStorage::new(
+            provider,
+            global_memory_usage.clone(),
+            global_memory_usage_threshold,
+        );
+
+        let batch = 1000;
+        for _ in 0..batch {
+            storage.add(Some(vec![]), 1).await.unwrap();
+        }
+
+        // Drain the storage.
+        let (indices, mut stream) = storage.drain().await.unwrap();
+
+        let bf = stream.next().await.unwrap().unwrap();
+        assert_eq!(bf.element_count, 1);
+
+        assert!(stream.next().await.is_none());
+
+        assert_eq!(indices.len(), batch);
+        assert!(indices.iter().all(|&x| x == 0));
     }
 }

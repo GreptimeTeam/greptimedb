@@ -35,7 +35,7 @@ use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
-use common_meta::wal_options_allocator::WalOptionsAllocator;
+use common_meta::wal_options_allocator::build_wal_options_allocator;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
@@ -45,6 +45,7 @@ use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use query::stats::StatementStatistics;
+use servers::grpc::GrpcOptions;
 use servers::Mode;
 use snafu::ResultExt;
 
@@ -189,10 +190,11 @@ impl GreptimeDbStandaloneBuilder {
                 .step(10)
                 .build(),
         );
-        let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
-            opts.wal.clone().into(),
-            kv_backend.clone(),
-        ));
+        let kafka_options = opts.wal.clone().into();
+        let wal_options_allocator = build_wal_options_allocator(&kafka_options, kv_backend.clone())
+            .await
+            .unwrap();
+        let wal_options_allocator = Arc::new(wal_options_allocator);
         let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_sequence,
             wal_options_allocator.clone(),
@@ -291,6 +293,7 @@ impl GreptimeDbStandaloneBuilder {
             procedure: procedure_config,
             metadata_store: kv_backend_config,
             wal: self.metasrv_wal_config.clone().into(),
+            grpc: GrpcOptions::default().with_hostname("127.0.0.1:4001"),
             ..StandaloneOptions::default()
         };
 

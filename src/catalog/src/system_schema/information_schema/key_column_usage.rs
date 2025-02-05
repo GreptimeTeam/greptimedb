@@ -58,8 +58,11 @@ pub(crate) const TIME_INDEX_CONSTRAINT_NAME: &str = "TIME INDEX";
 pub(crate) const INVERTED_INDEX_CONSTRAINT_NAME: &str = "INVERTED INDEX";
 /// Fulltext index constraint name
 pub(crate) const FULLTEXT_INDEX_CONSTRAINT_NAME: &str = "FULLTEXT INDEX";
+/// Skipping index constraint name
+pub(crate) const SKIPPING_INDEX_CONSTRAINT_NAME: &str = "SKIPPING INDEX";
 
 /// The virtual table implementation for `information_schema.KEY_COLUMN_USAGE`.
+#[derive(Debug)]
 pub(super) struct InformationSchemaKeyColumnUsage {
     schema: SchemaRef,
     catalog_name: String,
@@ -225,6 +228,12 @@ impl InformationSchemaKeyColumnUsageBuilder {
                 let keys = &table_info.meta.primary_key_indices;
                 let schema = table.schema();
 
+                // For compatibility, use primary key columns as inverted index columns.
+                let pk_as_inverted_index = !schema
+                    .column_schemas()
+                    .iter()
+                    .any(|c| c.has_inverted_index_key());
+
                 for (idx, column) in schema.column_schemas().iter().enumerate() {
                     let mut constraints = vec![];
                     if column.is_time_index() {
@@ -242,13 +251,19 @@ impl InformationSchemaKeyColumnUsageBuilder {
                     // TODO(dimbtp): foreign key constraint not supported yet
                     if keys.contains(&idx) {
                         constraints.push(PRI_CONSTRAINT_NAME);
+
+                        if pk_as_inverted_index {
+                            constraints.push(INVERTED_INDEX_CONSTRAINT_NAME);
+                        }
                     }
                     if column.is_inverted_indexed() {
                         constraints.push(INVERTED_INDEX_CONSTRAINT_NAME);
                     }
-
-                    if column.has_fulltext_index_key() {
+                    if column.is_fulltext_indexed() {
                         constraints.push(FULLTEXT_INDEX_CONSTRAINT_NAME);
+                    }
+                    if column.is_skipping_indexed() {
+                        constraints.push(SKIPPING_INDEX_CONSTRAINT_NAME);
                     }
 
                     if !constraints.is_empty() {

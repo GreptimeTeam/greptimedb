@@ -34,7 +34,7 @@ Affected Rows: 1
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 +----------+-------------------+-----------------------------------+-----------------------------------+
-| COUNT(*) | COUNT(bigtable.a) | MAX(character_length(bigtable.a)) | SUM(character_length(bigtable.a)) |
+| count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
 +----------+-------------------+-----------------------------------+-----------------------------------+
 | 1        | 1                 | 10000                             | 10000                             |
 +----------+-------------------+-----------------------------------+-----------------------------------+
@@ -49,7 +49,7 @@ Affected Rows: 1
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 +----------+-------------------+-----------------------------------+-----------------------------------+
-| COUNT(*) | COUNT(bigtable.a) | MAX(character_length(bigtable.a)) | SUM(character_length(bigtable.a)) |
+| count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
 +----------+-------------------+-----------------------------------+-----------------------------------+
 | 2        | 2                 | 10000                             | 20000                             |
 +----------+-------------------+-----------------------------------+-----------------------------------+
@@ -61,7 +61,7 @@ Affected Rows: 2
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 +----------+-------------------+-----------------------------------+-----------------------------------+
-| COUNT(*) | COUNT(bigtable.a) | MAX(character_length(bigtable.a)) | SUM(character_length(bigtable.a)) |
+| count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
 +----------+-------------------+-----------------------------------+-----------------------------------+
 | 4        | 4                 | 10000                             | 40000                             |
 +----------+-------------------+-----------------------------------+-----------------------------------+
@@ -73,7 +73,7 @@ Affected Rows: 4
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 +----------+-------------------+-----------------------------------+-----------------------------------+
-| COUNT(*) | COUNT(bigtable.a) | MAX(character_length(bigtable.a)) | SUM(character_length(bigtable.a)) |
+| count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
 +----------+-------------------+-----------------------------------+-----------------------------------+
 | 8        | 8                 | 10000                             | 80000                             |
 +----------+-------------------+-----------------------------------+-----------------------------------+
@@ -85,7 +85,7 @@ Affected Rows: 8
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 +----------+-------------------+-----------------------------------+-----------------------------------+
-| COUNT(*) | COUNT(bigtable.a) | MAX(character_length(bigtable.a)) | SUM(character_length(bigtable.a)) |
+| count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
 +----------+-------------------+-----------------------------------+-----------------------------------+
 | 16       | 16                | 10000                             | 160000                            |
 +----------+-------------------+-----------------------------------+-----------------------------------+
@@ -97,7 +97,7 @@ Affected Rows: 16
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 +----------+-------------------+-----------------------------------+-----------------------------------+
-| COUNT(*) | COUNT(bigtable.a) | MAX(character_length(bigtable.a)) | SUM(character_length(bigtable.a)) |
+| count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
 +----------+-------------------+-----------------------------------+-----------------------------------+
 | 32       | 32                | 10000                             | 320000                            |
 +----------+-------------------+-----------------------------------+-----------------------------------+
@@ -109,7 +109,7 @@ Affected Rows: 32
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 +----------+-------------------+-----------------------------------+-----------------------------------+
-| COUNT(*) | COUNT(bigtable.a) | MAX(character_length(bigtable.a)) | SUM(character_length(bigtable.a)) |
+| count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
 +----------+-------------------+-----------------------------------+-----------------------------------+
 | 64       | 64                | 10000                             | 640000                            |
 +----------+-------------------+-----------------------------------+-----------------------------------+
@@ -121,7 +121,7 @@ Affected Rows: 64
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 +----------+-------------------+-----------------------------------+-----------------------------------+
-| COUNT(*) | COUNT(bigtable.a) | MAX(character_length(bigtable.a)) | SUM(character_length(bigtable.a)) |
+| count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
 +----------+-------------------+-----------------------------------+-----------------------------------+
 | 128      | 128               | 10000                             | 1280000                           |
 +----------+-------------------+-----------------------------------+-----------------------------------+
@@ -133,7 +133,7 @@ Affected Rows: 128
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 +----------+-------------------+-----------------------------------+-----------------------------------+
-| COUNT(*) | COUNT(bigtable.a) | MAX(character_length(bigtable.a)) | SUM(character_length(bigtable.a)) |
+| count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
 +----------+-------------------+-----------------------------------+-----------------------------------+
 | 256      | 256               | 10000                             | 2560000                           |
 +----------+-------------------+-----------------------------------+-----------------------------------+
@@ -145,7 +145,7 @@ Affected Rows: 256
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 +----------+-------------------+-----------------------------------+-----------------------------------+
-| COUNT(*) | COUNT(bigtable.a) | MAX(character_length(bigtable.a)) | SUM(character_length(bigtable.a)) |
+| count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
 +----------+-------------------+-----------------------------------+-----------------------------------+
 | 512      | 512               | 10000                             | 5120000                           |
 +----------+-------------------+-----------------------------------+-----------------------------------+
@@ -157,7 +157,7 @@ Affected Rows: 512
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 +----------+-------------------+-----------------------------------+-----------------------------------+
-| COUNT(*) | COUNT(bigtable.a) | MAX(character_length(bigtable.a)) | SUM(character_length(bigtable.a)) |
+| count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
 +----------+-------------------+-----------------------------------+-----------------------------------+
 | 1024     | 1024              | 10000                             | 10240000                          |
 +----------+-------------------+-----------------------------------+-----------------------------------+
@@ -169,7 +169,7 @@ Affected Rows: 1024
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 +----------+-------------------+-----------------------------------+-----------------------------------+
-| COUNT(*) | COUNT(bigtable.a) | MAX(character_length(bigtable.a)) | SUM(character_length(bigtable.a)) |
+| count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
 +----------+-------------------+-----------------------------------+-----------------------------------+
 | 2048     | 2048              | 10000                             | 20480000                          |
 +----------+-------------------+-----------------------------------+-----------------------------------+
@@ -181,7 +181,7 @@ Affected Rows: 2048
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 +----------+-------------------+-----------------------------------+-----------------------------------+
-| COUNT(*) | COUNT(bigtable.a) | MAX(character_length(bigtable.a)) | SUM(character_length(bigtable.a)) |
+| count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
 +----------+-------------------+-----------------------------------+-----------------------------------+
 | 4096     | 4096              | 10000                             | 40960000                          |
 +----------+-------------------+-----------------------------------+-----------------------------------+
@@ -193,7 +193,7 @@ Affected Rows: 4096
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 +----------+-------------------+-----------------------------------+-----------------------------------+
-| COUNT(*) | COUNT(bigtable.a) | MAX(character_length(bigtable.a)) | SUM(character_length(bigtable.a)) |
+| count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
 +----------+-------------------+-----------------------------------+-----------------------------------+
 | 8192     | 8192              | 10000                             | 81920000                          |
 +----------+-------------------+-----------------------------------+-----------------------------------+
@@ -202,7 +202,7 @@ SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 +----------+-------------------+-----------------------------------+-----------------------------------+
-| COUNT(*) | COUNT(bigtable.a) | MAX(character_length(bigtable.a)) | SUM(character_length(bigtable.a)) |
+| count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
 +----------+-------------------+-----------------------------------+-----------------------------------+
 | 8192     | 8192              | 10000                             | 81920000                          |
 +----------+-------------------+-----------------------------------+-----------------------------------+
@@ -214,7 +214,7 @@ Affected Rows: 8192
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 +----------+-------------------+-----------------------------------+-----------------------------------+
-| COUNT(*) | COUNT(bigtable.a) | MAX(character_length(bigtable.a)) | SUM(character_length(bigtable.a)) |
+| count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
 +----------+-------------------+-----------------------------------+-----------------------------------+
 | 16384    | 16384             | 10000                             | 163840000                         |
 +----------+-------------------+-----------------------------------+-----------------------------------+
@@ -226,7 +226,7 @@ Affected Rows: 16384
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 +----------+-------------------+-----------------------------------+-----------------------------------+
-| COUNT(*) | COUNT(bigtable.a) | MAX(character_length(bigtable.a)) | SUM(character_length(bigtable.a)) |
+| count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
 +----------+-------------------+-----------------------------------+-----------------------------------+
 | 32768    | 32768             | 10000                             | 327680000                         |
 +----------+-------------------+-----------------------------------+-----------------------------------+

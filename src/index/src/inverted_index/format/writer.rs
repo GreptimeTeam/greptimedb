@@ -23,7 +23,7 @@ use futures::Stream;
 
 use crate::inverted_index::error::Result;
 pub use crate::inverted_index::format::writer::blob::InvertedIndexBlobWriter;
-use crate::inverted_index::Bytes;
+use crate::Bytes;
 
 pub type ValueStream = Box<dyn Stream<Item = Result<(Bytes, BitVec)>> + Send + Unpin>;
 

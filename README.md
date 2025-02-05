@@ -13,7 +13,7 @@
   <a href="https://greptime.com/product/cloud">GreptimeCloud</a> |
   <a href="https://docs.greptime.com/">User Guide</a> |
   <a href="https://greptimedb.rs/">API Docs</a> |
-  <a href="https://github.com/GreptimeTeam/greptimedb/issues/3412">Roadmap 2024</a>
+  <a href="https://github.com/GreptimeTeam/greptimedb/issues/5446">Roadmap 2025</a>
 </h4>
 
 <a href="https://github.com/GreptimeTeam/greptimedb/releases/latest">
@@ -138,7 +138,8 @@ Check the prerequisite:
 
 * [Rust toolchain](https://www.rust-lang.org/tools/install) (nightly)
 * [Protobuf compiler](https://grpc.io/docs/protoc-installation/) (>= 3.15)
-* Python toolchain (optional): Required only if built with PyO3 backend. More details for compiling with PyO3 can be found in its [documentation](https://pyo3.rs/v0.18.1/building_and_distribution#configuring-the-python-version).
+* C/C++ building essentials, including `gcc`/`g++`/`autoconf` and glibc library (eg. `libc6-dev` on Ubuntu and `glibc-devel` on Fedora)
+* Python toolchain (optional): Required only if using some test scripts.
 
 Build GreptimeDB binary:
 
@@ -228,4 +229,3 @@ Special thanks to all the contributors who have propelled GreptimeDB forward. Fo
 - GreptimeDB's query engine is powered by [Apache Arrow DataFusion™](https://arrow.apache.org/datafusion/).
 - [Apache OpenDAL™](https://opendal.apache.org) gives GreptimeDB a very general and elegant data access abstraction layer.
 - GreptimeDB's meta service is based on [etcd](https://etcd.io/).
-- GreptimeDB uses [RustPython](https://github.com/RustPython/RustPython) for experimental embedded python scripting.

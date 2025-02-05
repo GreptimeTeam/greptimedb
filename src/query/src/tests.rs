@@ -33,6 +33,7 @@ mod time_range_filter_test;
 
 mod function;
 mod pow;
+mod vec_product_test;
 mod vec_sum_test;
 
 async fn exec_selection(engine: QueryEngineRef, sql: &str) -> Vec<RecordBatch> {

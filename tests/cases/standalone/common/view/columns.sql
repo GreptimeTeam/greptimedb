@@ -45,14 +45,6 @@ SELECT * FROM v1;
 
 ALTER TABLE t1 DROP COLUMN n;
 
--- FIXME(dennis): The result looks weird,
--- Looks like substrait referes to columns only by their relative indices, so that’s name-independent.
--- Limit: skip=0, fetch=5
---  Projection: greptime.public.t1.ts, greptime.public.t1.s
---    MergeScan [is_placeholder=false]
--- Limit: skip=0, fetch=5
---  MergeScan [is_placeholder=false]
--- See https://github.com/apache/datafusion/issues/6489
 SELECT * FROM v1;
 
 DROP VIEW v1;

@@ -372,6 +372,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
         add_columns: vec![AddColumn {
             column_def: Some(add_column),
             location: None,
+            add_if_not_exists: false,
         }],
     });
     let expr = AlterTableExpr {

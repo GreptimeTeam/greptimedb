@@ -35,12 +35,12 @@ use async_trait::async_trait;
 use common_time::Timestamp;
 use datafusion_common::arrow::array::UInt8Array;
 use datatypes::arrow;
-use datatypes::arrow::array::{Array, ArrayRef};
+use datatypes::arrow::array::{Array, ArrayRef, UInt64Array};
 use datatypes::arrow::compute::SortOptions;
 use datatypes::arrow::row::{RowConverter, SortField};
 use datatypes::prelude::{ConcreteDataType, DataType, ScalarVector};
 use datatypes::types::TimestampType;
-use datatypes::value::{Value, ValueRef};
+use datatypes::value::ValueRef;
 use datatypes::vectors::{
     BooleanVector, Helper, TimestampMicrosecondVector, TimestampMillisecondVector,
     TimestampNanosecondVector, TimestampSecondVector, UInt32Vector, UInt64Vector, UInt8Vector,
@@ -58,6 +58,7 @@ use crate::error::{
 use crate::memtable::BoxedBatchIterator;
 use crate::metrics::{READ_BATCHES_RETURN, READ_ROWS_RETURN, READ_STAGE_ELAPSED};
 use crate::read::prune::PruneReader;
+use crate::row_converter::CompositeValues;
 
 /// Storage internal representation of a batch of rows for a primary key (time series).
 ///
@@ -68,7 +69,7 @@ pub struct Batch {
     /// Primary key encoded in a comparable form.
     primary_key: Vec<u8>,
     /// Possibly decoded `primary_key` values. Some places would decode it in advance.
-    pk_values: Option<Vec<Value>>,
+    pk_values: Option<CompositeValues>,
     /// Timestamps of rows, should be sorted and not null.
     timestamps: VectorRef,
     /// Sequences of rows
@@ -114,12 +115,12 @@ impl Batch {
     }
 
     /// Returns possibly decoded primary-key values.
-    pub fn pk_values(&self) -> Option<&[Value]> {
-        self.pk_values.as_deref()
+    pub fn pk_values(&self) -> Option<&CompositeValues> {
+        self.pk_values.as_ref()
     }
 
     /// Sets possibly decoded primary-key values.
-    pub fn set_pk_values(&mut self, pk_values: Vec<Value>) {
+    pub fn set_pk_values(&mut self, pk_values: CompositeValues) {
         self.pk_values = Some(pk_values);
     }
 
@@ -330,6 +331,24 @@ impl Batch {
                 .filter(predicate)
                 .context(ComputeVectorSnafu)?;
         }
+
+        Ok(())
+    }
+
+    /// Filters rows by the given `sequence`. Only preserves rows with sequence less than or equal to `sequence`.
+    pub fn filter_by_sequence(&mut self, sequence: Option<SequenceNumber>) -> Result<()> {
+        let seq = match (sequence, self.last_sequence()) {
+            (None, _) | (_, None) => return Ok(()),
+            (Some(sequence), Some(last_sequence)) if sequence >= last_sequence => return Ok(()),
+            (Some(sequence), Some(_)) => sequence,
+        };
+
+        let seqs = self.sequences.as_arrow();
+        let sequence = UInt64Array::new_scalar(seq);
+        let predicate = datafusion_common::arrow::compute::kernels::cmp::lt_eq(seqs, &sequence)
+            .context(ComputeArrowSnafu)?;
+        let predicate = BooleanVector::from(predicate);
+        self.filter(&predicate)?;
 
         Ok(())
     }
@@ -1210,6 +1229,57 @@ mod tests {
         let expect = batch.clone();
         batch.filter_deleted().unwrap();
         assert_eq!(expect, batch);
+    }
+
+    #[test]
+    fn test_filter_by_sequence() {
+        // Filters put only.
+        let mut batch = new_batch(
+            &[1, 2, 3, 4],
+            &[11, 12, 13, 14],
+            &[OpType::Put, OpType::Put, OpType::Put, OpType::Put],
+            &[21, 22, 23, 24],
+        );
+        batch.filter_by_sequence(Some(13)).unwrap();
+        let expect = new_batch(
+            &[1, 2, 3],
+            &[11, 12, 13],
+            &[OpType::Put, OpType::Put, OpType::Put],
+            &[21, 22, 23],
+        );
+        assert_eq!(expect, batch);
+
+        // Filters to empty.
+        let mut batch = new_batch(
+            &[1, 2, 3, 4],
+            &[11, 12, 13, 14],
+            &[OpType::Put, OpType::Delete, OpType::Put, OpType::Put],
+            &[21, 22, 23, 24],
+        );
+
+        batch.filter_by_sequence(Some(10)).unwrap();
+        assert!(batch.is_empty());
+
+        // None filter.
+        let mut batch = new_batch(
+            &[1, 2, 3, 4],
+            &[11, 12, 13, 14],
+            &[OpType::Put, OpType::Delete, OpType::Put, OpType::Put],
+            &[21, 22, 23, 24],
+        );
+        let expect = batch.clone();
+        batch.filter_by_sequence(None).unwrap();
+        assert_eq!(expect, batch);
+
+        // Filter a empty batch
+        let mut batch = new_batch(&[], &[], &[], &[]);
+        batch.filter_by_sequence(Some(10)).unwrap();
+        assert!(batch.is_empty());
+
+        // Filter a empty batch with None
+        let mut batch = new_batch(&[], &[], &[], &[]);
+        batch.filter_by_sequence(None).unwrap();
+        assert!(batch.is_empty());
     }
 
     #[test]

@@ -23,6 +23,7 @@ use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::broadcast;
 use tokio::time::MissedTickBehavior;
+use tokio_postgres::types::ToSql;
 use tokio_postgres::Client;
 
 use crate::election::{
@@ -34,44 +35,139 @@ use crate::error::{
 };
 use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
 
-// TODO(CookiePie): The lock id should be configurable.
-const CAMPAIGN: &str = "SELECT pg_try_advisory_lock(28319)";
-const STEP_DOWN: &str = "SELECT pg_advisory_unlock(28319)";
-const SET_IDLE_SESSION_TIMEOUT: &str = "SET idle_in_transaction_session_timeout = $1";
-// Currently the session timeout is longer than the leader lease time, so the leader lease may expire while the session is still alive.
-// Either the leader reconnects and step down or the session expires and the lock is released.
-const IDLE_SESSION_TIMEOUT: &str = "10s";
-
 // Separator between value and expire time.
 const LEASE_SEP: &str = r#"||__metadata_lease_sep||"#;
 
-// SQL to put a value with expire time. Parameters: key, value, LEASE_SEP, expire_time
-const PUT_IF_NOT_EXISTS_WITH_EXPIRE_TIME: &str = r#"
-WITH prev AS (
-    SELECT k, v FROM greptime_metakv WHERE k = $1
-), insert AS (
-    INSERT INTO greptime_metakv
-    VALUES($1, $2 || $3 || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $4, 'YYYY-MM-DD HH24:MI:SS.MS'))
-    ON CONFLICT (k) DO NOTHING
-)
+struct ElectionSqlFactory<'a> {
+    lock_id: u64,
+    table_name: &'a str,
+}
 
-SELECT k, v FROM prev;
-"#;
+struct ElectionSqlSet {
+    campaign: String,
+    step_down: String,
+    // SQL to put a value with expire time.
+    //
+    // Parameters for the query:
+    // `$1`: key,
+    // `$2`: value,
+    // `$3`: lease time in seconds
+    //
+    // Returns:
+    // If the key already exists, return the previous value.
+    put_value_with_lease: String,
+    // SQL to update a value with expire time.
+    //
+    // Parameters for the query:
+    // `$1`: key,
+    // `$2`: previous value,
+    // `$3`: updated value,
+    // `$4`: lease time in seconds
+    update_value_with_lease: String,
+    // SQL to get a value with expire time.
+    //
+    // Parameters:
+    // `$1`: key
+    get_value_with_lease: String,
+    // SQL to get all values with expire time with the given key prefix.
+    //
+    // Parameters:
+    // `$1`: key prefix like 'prefix%'
+    //
+    // Returns:
+    // column 0: value,
+    // column 1: current timestamp
+    get_value_with_lease_by_prefix: String,
+    // SQL to delete a value.
+    //
+    // Parameters:
+    // `$1`: key
+    //
+    // Returns:
+    // column 0: key deleted,
+    // column 1: value deleted
+    delete_value: String,
+}
 
-// SQL to update a value with expire time. Parameters: key, prev_value_with_lease, updated_value, LEASE_SEP, expire_time
-const CAS_WITH_EXPIRE_TIME: &str = r#"
-UPDATE greptime_metakv
-SET k=$1,
-v=$3 || $4 || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $5, 'YYYY-MM-DD HH24:MI:SS.MS')
-WHERE 
-    k=$1 AND v=$2
-"#;
+impl<'a> ElectionSqlFactory<'a> {
+    fn new(lock_id: u64, table_name: &'a str) -> Self {
+        Self {
+            lock_id,
+            table_name,
+        }
+    }
 
-const GET_WITH_CURRENT_TIMESTAMP: &str = r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM greptime_metakv WHERE k = $1"#;
+    fn build(self) -> ElectionSqlSet {
+        ElectionSqlSet {
+            campaign: self.campaign_sql(),
+            step_down: self.step_down_sql(),
+            put_value_with_lease: self.put_value_with_lease_sql(),
+            update_value_with_lease: self.update_value_with_lease_sql(),
+            get_value_with_lease: self.get_value_with_lease_sql(),
+            get_value_with_lease_by_prefix: self.get_value_with_lease_by_prefix_sql(),
+            delete_value: self.delete_value_sql(),
+        }
+    }
 
-const PREFIX_GET_WITH_CURRENT_TIMESTAMP: &str = r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM greptime_metakv WHERE k LIKE $1"#;
+    // Currently the session timeout is longer than the leader lease time, so the leader lease may expire while the session is still alive.
+    // Either the leader reconnects and step down or the session expires and the lock is released.
+    fn set_idle_session_timeout_sql(&self) -> &str {
+        "SET idle_session_timeout = '10s';"
+    }
 
-const POINT_DELETE: &str = "DELETE FROM greptime_metakv WHERE k = $1 RETURNING k,v;";
+    fn campaign_sql(&self) -> String {
+        format!("SELECT pg_try_advisory_lock({})", self.lock_id)
+    }
+
+    fn step_down_sql(&self) -> String {
+        format!("SELECT pg_advisory_unlock({})", self.lock_id)
+    }
+
+    fn put_value_with_lease_sql(&self) -> String {
+        format!(
+            r#"WITH prev AS (
+                SELECT k, v FROM {} WHERE k = $1
+            ), insert AS (
+                INSERT INTO {}
+                VALUES($1, convert_to($2 || '{}' || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $3, 'YYYY-MM-DD HH24:MI:SS.MS'), 'UTF8'))
+                ON CONFLICT (k) DO NOTHING
+            )
+            SELECT k, v FROM prev;
+            "#,
+            self.table_name, self.table_name, LEASE_SEP
+        )
+    }
+
+    fn update_value_with_lease_sql(&self) -> String {
+        format!(
+            r#"UPDATE {} 
+               SET v = convert_to($3 || '{}' || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $4, 'YYYY-MM-DD HH24:MI:SS.MS'), 'UTF8')
+               WHERE k = $1 AND v = $2"#,
+            self.table_name, LEASE_SEP
+        )
+    }
+
+    fn get_value_with_lease_sql(&self) -> String {
+        format!(
+            r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM {} WHERE k = $1"#,
+            self.table_name
+        )
+    }
+
+    fn get_value_with_lease_by_prefix_sql(&self) -> String {
+        format!(
+            r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM {} WHERE k LIKE $1"#,
+            self.table_name
+        )
+    }
+
+    fn delete_value_sql(&self) -> String {
+        format!(
+            "DELETE FROM {} WHERE k = $1 RETURNING k,v;",
+            self.table_name
+        )
+    }
+}
 
 /// Parse the value and expire time from the given string. The value should be in the format "value || LEASE_SEP || expire_time".
 fn parse_value_and_expire_time(value: &str) -> Result<(String, Timestamp)> {
@@ -130,6 +226,7 @@ pub struct PgElection {
     leader_watcher: broadcast::Sender<LeaderChangeMessage>,
     store_key_prefix: String,
     candidate_lease_ttl_secs: u64,
+    sql_set: ElectionSqlSet,
 }
 
 impl PgElection {
@@ -138,10 +235,13 @@ impl PgElection {
         client: Client,
         store_key_prefix: String,
         candidate_lease_ttl_secs: u64,
+        table_name: &str,
+        lock_id: u64,
     ) -> Result<ElectionRef> {
+        let sql_factory = ElectionSqlFactory::new(lock_id, table_name);
         // Set idle session timeout to IDLE_SESSION_TIMEOUT to avoid dead advisory lock.
         client
-            .execute(SET_IDLE_SESSION_TIMEOUT, &[&IDLE_SESSION_TIMEOUT])
+            .execute(sql_factory.set_idle_session_timeout_sql(), &[])
             .await
             .context(PostgresExecutionSnafu)?;
 
@@ -154,6 +254,7 @@ impl PgElection {
             leader_watcher: tx,
             store_key_prefix,
             candidate_lease_ttl_secs,
+            sql_set: sql_factory.build(),
         }))
     }
 
@@ -265,7 +366,7 @@ impl Election for PgElection {
         loop {
             let res = self
                 .client
-                .query(CAMPAIGN, &[])
+                .query(&self.sql_set.campaign, &[])
                 .await
                 .context(PostgresExecutionSnafu)?;
             if let Some(row) = res.first() {
@@ -319,12 +420,13 @@ impl PgElection {
     /// Returns value, expire time and current time. If `with_origin` is true, the origin string is also returned.
     async fn get_value_with_lease(
         &self,
-        key: &String,
+        key: &str,
         with_origin: bool,
     ) -> Result<Option<(String, Timestamp, Timestamp, Option<String>)>> {
+        let key = key.as_bytes();
         let res = self
             .client
-            .query(GET_WITH_CURRENT_TIMESTAMP, &[&key])
+            .query(&self.sql_set.get_value_with_lease, &[&key])
             .await
             .context(PostgresExecutionSnafu)?;
 
@@ -332,7 +434,7 @@ impl PgElection {
             Ok(None)
         } else {
             // Safety: Checked if res is empty above.
-            let current_time_str = res[0].get(1);
+            let current_time_str = res[0].try_get(1).unwrap_or_default();
             let current_time = match Timestamp::from_str(current_time_str, None) {
                 Ok(ts) => ts,
                 Err(_) => UnexpectedSnafu {
@@ -341,8 +443,9 @@ impl PgElection {
                 .fail()?,
             };
             // Safety: Checked if res is empty above.
-            let value_and_expire_time = res[0].get(0);
-            let (value, expire_time) = parse_value_and_expire_time(value_and_expire_time)?;
+            let value_and_expire_time =
+                String::from_utf8_lossy(res[0].try_get(0).unwrap_or_default());
+            let (value, expire_time) = parse_value_and_expire_time(&value_and_expire_time)?;
 
             if with_origin {
                 Ok(Some((
@@ -362,17 +465,17 @@ impl PgElection {
         &self,
         key_prefix: &str,
     ) -> Result<(Vec<(String, Timestamp)>, Timestamp)> {
-        let key_prefix = format!("{}%", key_prefix);
+        let key_prefix = format!("{}%", key_prefix).as_bytes().to_vec();
         let res = self
             .client
-            .query(PREFIX_GET_WITH_CURRENT_TIMESTAMP, &[&key_prefix])
+            .query(&self.sql_set.get_value_with_lease_by_prefix, &[&key_prefix])
             .await
             .context(PostgresExecutionSnafu)?;
 
         let mut values_with_leases = vec![];
         let mut current = Timestamp::default();
         for row in res {
-            let current_time_str = row.get(1);
+            let current_time_str = row.try_get(1).unwrap_or_default();
             current = match Timestamp::from_str(current_time_str, None) {
                 Ok(ts) => ts,
                 Err(_) => UnexpectedSnafu {
@@ -381,8 +484,8 @@ impl PgElection {
                 .fail()?,
             };
 
-            let value_and_expire_time = row.get(0);
-            let (value, expire_time) = parse_value_and_expire_time(value_and_expire_time)?;
+            let value_and_expire_time = String::from_utf8_lossy(row.try_get(0).unwrap_or_default());
+            let (value, expire_time) = parse_value_and_expire_time(&value_and_expire_time)?;
 
             values_with_leases.push((value, expire_time));
         }
@@ -390,15 +493,16 @@ impl PgElection {
     }
 
     async fn update_value_with_lease(&self, key: &str, prev: &str, updated: &str) -> Result<()> {
+        let key = key.as_bytes();
+        let prev = prev.as_bytes();
         let res = self
             .client
             .execute(
-                CAS_WITH_EXPIRE_TIME,
+                &self.sql_set.update_value_with_lease,
                 &[
                     &key,
                     &prev,
                     &updated,
-                    &LEASE_SEP,
                     &(self.candidate_lease_ttl_secs as f64),
                 ],
             )
@@ -408,7 +512,7 @@ impl PgElection {
         ensure!(
             res == 1,
             UnexpectedSnafu {
-                violated: format!("Failed to update key: {}", key),
+                violated: format!("Failed to update key: {}", String::from_utf8_lossy(key)),
             }
         );
 
@@ -422,12 +526,12 @@ impl PgElection {
         value: &str,
         lease_ttl_secs: u64,
     ) -> Result<bool> {
+        let key = key.as_bytes();
+        let lease_ttl_secs = lease_ttl_secs as f64;
+        let params: Vec<&(dyn ToSql + Sync)> = vec![&key, &value, &lease_ttl_secs];
         let res = self
             .client
-            .query(
-                PUT_IF_NOT_EXISTS_WITH_EXPIRE_TIME,
-                &[&key, &value, &LEASE_SEP, &(lease_ttl_secs as f64)],
-            )
+            .query(&self.sql_set.put_value_with_lease, &params)
             .await
             .context(PostgresExecutionSnafu)?;
         Ok(res.is_empty())
@@ -435,10 +539,11 @@ impl PgElection {
 
     /// Returns `true` if the deletion is successful.
     /// Caution: Should only delete the key if the lease is expired.
-    async fn delete_value(&self, key: &String) -> Result<bool> {
+    async fn delete_value(&self, key: &str) -> Result<bool> {
+        let key = key.as_bytes();
         let res = self
             .client
-            .query(POINT_DELETE, &[&key])
+            .query(&self.sql_set.delete_value, &[&key])
             .await
             .context(PostgresExecutionSnafu)?;
 
@@ -550,7 +655,7 @@ impl PgElection {
         {
             self.delete_value(&key).await?;
             self.client
-                .query(STEP_DOWN, &[])
+                .query(&self.sql_set.step_down, &[])
                 .await
                 .context(PostgresExecutionSnafu)?;
             if let Err(e) = self
@@ -626,7 +731,7 @@ mod tests {
     use super::*;
     use crate::error::PostgresExecutionSnafu;
 
-    async fn create_postgres_client() -> Result<Client> {
+    async fn create_postgres_client(table_name: Option<&str>) -> Result<Client> {
         let endpoint = env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
         if endpoint.is_empty() {
             return UnexpectedSnafu {
@@ -640,15 +745,29 @@ mod tests {
         tokio::spawn(async move {
             connection.await.context(PostgresExecutionSnafu).unwrap();
         });
+        if let Some(table_name) = table_name {
+            let create_table_sql = format!(
+                "CREATE TABLE IF NOT EXISTS {}(k bytea PRIMARY KEY, v bytea);",
+                table_name
+            );
+            client.execute(&create_table_sql, &[]).await.unwrap();
+        }
         Ok(client)
+    }
+
+    async fn drop_table(client: &Client, table_name: &str) {
+        let sql = format!("DROP TABLE IF EXISTS {};", table_name);
+        client.execute(&sql, &[]).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_postgres_crud() {
-        let client = create_postgres_client().await.unwrap();
-
         let key = "test_key".to_string();
         let value = "test_value".to_string();
+
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let table_name = "test_postgres_crud_greptime_metakv";
+        let client = create_postgres_client(Some(table_name)).await.unwrap();
 
         let (tx, _) = broadcast::channel(100);
         let pg_election = PgElection {
@@ -657,8 +776,9 @@ mod tests {
             is_leader: AtomicBool::new(false),
             leader_infancy: AtomicBool::new(true),
             leader_watcher: tx,
-            store_key_prefix: "test_prefix".to_string(),
+            store_key_prefix: uuid,
             candidate_lease_ttl_secs: 10,
+            sql_set: ElectionSqlFactory::new(28319, table_name).build(),
         };
 
         let res = pg_election
@@ -714,10 +834,17 @@ mod tests {
             .unwrap();
         assert!(res.is_empty());
         assert!(current == Timestamp::default());
+
+        drop_table(&pg_election.client, table_name).await;
     }
 
-    async fn candidate(leader_value: String, candidate_lease_ttl_secs: u64) {
-        let client = create_postgres_client().await.unwrap();
+    async fn candidate(
+        leader_value: String,
+        candidate_lease_ttl_secs: u64,
+        store_key_prefix: String,
+        table_name: String,
+    ) {
+        let client = create_postgres_client(None).await.unwrap();
 
         let (tx, _) = broadcast::channel(100);
         let pg_election = PgElection {
@@ -726,8 +853,9 @@ mod tests {
             is_leader: AtomicBool::new(false),
             leader_infancy: AtomicBool::new(true),
             leader_watcher: tx,
-            store_key_prefix: "test_prefix".to_string(),
+            store_key_prefix,
             candidate_lease_ttl_secs,
+            sql_set: ElectionSqlFactory::new(28319, &table_name).build(),
         };
 
         let node_info = MetasrvNodeInfo {
@@ -743,16 +871,23 @@ mod tests {
     async fn test_candidate_registration() {
         let leader_value_prefix = "test_leader".to_string();
         let candidate_lease_ttl_secs = 5;
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let table_name = "test_candidate_registration_greptime_metakv";
         let mut handles = vec![];
+        let client = create_postgres_client(Some(table_name)).await.unwrap();
+
         for i in 0..10 {
             let leader_value = format!("{}{}", leader_value_prefix, i);
-            let handle = tokio::spawn(candidate(leader_value, candidate_lease_ttl_secs));
+            let handle = tokio::spawn(candidate(
+                leader_value,
+                candidate_lease_ttl_secs,
+                uuid.clone(),
+                table_name.to_string(),
+            ));
             handles.push(handle);
         }
         // Wait for candidates to registrate themselves and renew their leases at least once.
         tokio::time::sleep(Duration::from_secs(3)).await;
-
-        let client = create_postgres_client().await.unwrap();
 
         let (tx, _) = broadcast::channel(100);
         let leader_value = "test_leader".to_string();
@@ -762,8 +897,9 @@ mod tests {
             is_leader: AtomicBool::new(false),
             leader_infancy: AtomicBool::new(true),
             leader_watcher: tx,
-            store_key_prefix: "test_prefix".to_string(),
+            store_key_prefix: uuid.clone(),
             candidate_lease_ttl_secs,
+            sql_set: ElectionSqlFactory::new(28319, table_name).build(),
         };
 
         let candidates = pg_election.all_candidates().await.unwrap();
@@ -780,20 +916,21 @@ mod tests {
 
         // Garbage collection
         for i in 0..10 {
-            let key = format!(
-                "{}{}{}{}",
-                "test_prefix", CANDIDATES_ROOT, leader_value_prefix, i
-            );
+            let key = format!("{}{}{}{}", uuid, CANDIDATES_ROOT, leader_value_prefix, i);
             let res = pg_election.delete_value(&key).await.unwrap();
             assert!(res);
         }
+
+        drop_table(&pg_election.client, table_name).await;
     }
 
     #[tokio::test]
     async fn test_elected_and_step_down() {
         let leader_value = "test_leader".to_string();
         let candidate_lease_ttl_secs = 5;
-        let client = create_postgres_client().await.unwrap();
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let table_name = "test_elected_and_step_down_greptime_metakv";
+        let client = create_postgres_client(Some(table_name)).await.unwrap();
 
         let (tx, mut rx) = broadcast::channel(100);
         let leader_pg_election = PgElection {
@@ -802,8 +939,9 @@ mod tests {
             is_leader: AtomicBool::new(false),
             leader_infancy: AtomicBool::new(true),
             leader_watcher: tx,
-            store_key_prefix: "test_prefix".to_string(),
+            store_key_prefix: uuid,
             candidate_lease_ttl_secs,
+            sql_set: ElectionSqlFactory::new(28320, table_name).build(),
         };
 
         leader_pg_election.elected().await.unwrap();
@@ -894,13 +1032,17 @@ mod tests {
             }
             _ => panic!("Expected LeaderChangeMessage::StepDown"),
         }
+
+        drop_table(&leader_pg_election.client, table_name).await;
     }
 
     #[tokio::test]
     async fn test_leader_action() {
         let leader_value = "test_leader".to_string();
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let table_name = "test_leader_action_greptime_metakv";
         let candidate_lease_ttl_secs = 5;
-        let client = create_postgres_client().await.unwrap();
+        let client = create_postgres_client(Some(table_name)).await.unwrap();
 
         let (tx, mut rx) = broadcast::channel(100);
         let leader_pg_election = PgElection {
@@ -909,14 +1051,15 @@ mod tests {
             is_leader: AtomicBool::new(false),
             leader_infancy: AtomicBool::new(true),
             leader_watcher: tx,
-            store_key_prefix: "test_prefix".to_string(),
+            store_key_prefix: uuid,
             candidate_lease_ttl_secs,
+            sql_set: ElectionSqlFactory::new(28321, table_name).build(),
         };
 
         // Step 1: No leader exists, campaign and elected.
         let res = leader_pg_election
             .client
-            .query(CAMPAIGN, &[])
+            .query(&leader_pg_election.sql_set.campaign, &[])
             .await
             .unwrap();
         let res: bool = res[0].get(0);
@@ -947,7 +1090,7 @@ mod tests {
         // Step 2: As a leader, renew the lease.
         let res = leader_pg_election
             .client
-            .query(CAMPAIGN, &[])
+            .query(&leader_pg_election.sql_set.campaign, &[])
             .await
             .unwrap();
         let res: bool = res[0].get(0);
@@ -967,7 +1110,7 @@ mod tests {
 
         let res = leader_pg_election
             .client
-            .query(CAMPAIGN, &[])
+            .query(&leader_pg_election.sql_set.campaign, &[])
             .await
             .unwrap();
         let res: bool = res[0].get(0);
@@ -995,7 +1138,7 @@ mod tests {
         // Step 4: Re-campaign and elected.
         let res = leader_pg_election
             .client
-            .query(CAMPAIGN, &[])
+            .query(&leader_pg_election.sql_set.campaign, &[])
             .await
             .unwrap();
         let res: bool = res[0].get(0);
@@ -1052,7 +1195,7 @@ mod tests {
         // Step 6: Re-campaign and elected.
         let res = leader_pg_election
             .client
-            .query(CAMPAIGN, &[])
+            .query(&leader_pg_election.sql_set.campaign, &[])
             .await
             .unwrap();
         let res: bool = res[0].get(0);
@@ -1083,7 +1226,7 @@ mod tests {
         // Step 7: Something wrong, the leader key changed by others.
         let res = leader_pg_election
             .client
-            .query(CAMPAIGN, &[])
+            .query(&leader_pg_election.sql_set.campaign, &[])
             .await
             .unwrap();
         let res: bool = res[0].get(0);
@@ -1116,13 +1259,25 @@ mod tests {
             }
             _ => panic!("Expected LeaderChangeMessage::StepDown"),
         }
+
+        // Clean up
+        leader_pg_election
+            .client
+            .query(&leader_pg_election.sql_set.step_down, &[])
+            .await
+            .unwrap();
+
+        drop_table(&leader_pg_election.client, table_name).await;
     }
 
     #[tokio::test]
     async fn test_follower_action() {
+        common_telemetry::init_default_ut_logging();
         let candidate_lease_ttl_secs = 5;
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let table_name = "test_follower_action_greptime_metakv";
 
-        let follower_client = create_postgres_client().await.unwrap();
+        let follower_client = create_postgres_client(Some(table_name)).await.unwrap();
         let (tx, mut rx) = broadcast::channel(100);
         let follower_pg_election = PgElection {
             leader_value: "test_follower".to_string(),
@@ -1130,11 +1285,12 @@ mod tests {
             is_leader: AtomicBool::new(false),
             leader_infancy: AtomicBool::new(true),
             leader_watcher: tx,
-            store_key_prefix: "test_prefix".to_string(),
+            store_key_prefix: uuid.clone(),
             candidate_lease_ttl_secs,
+            sql_set: ElectionSqlFactory::new(28322, table_name).build(),
         };
 
-        let leader_client = create_postgres_client().await.unwrap();
+        let leader_client = create_postgres_client(Some(table_name)).await.unwrap();
         let (tx, _) = broadcast::channel(100);
         let leader_pg_election = PgElection {
             leader_value: "test_leader".to_string(),
@@ -1142,13 +1298,14 @@ mod tests {
             is_leader: AtomicBool::new(false),
             leader_infancy: AtomicBool::new(true),
             leader_watcher: tx,
-            store_key_prefix: "test_prefix".to_string(),
+            store_key_prefix: uuid,
             candidate_lease_ttl_secs,
+            sql_set: ElectionSqlFactory::new(28322, table_name).build(),
         };
 
         leader_pg_election
             .client
-            .query(CAMPAIGN, &[])
+            .query(&leader_pg_election.sql_set.campaign, &[])
             .await
             .unwrap();
         leader_pg_election.elected().await.unwrap();
@@ -1185,5 +1342,14 @@ mod tests {
             }
             _ => panic!("Expected LeaderChangeMessage::StepDown"),
         }
+
+        // Clean up
+        leader_pg_election
+            .client
+            .query(&leader_pg_election.sql_set.step_down, &[])
+            .await
+            .unwrap();
+
+        drop_table(&follower_pg_election.client, table_name).await;
     }
 }

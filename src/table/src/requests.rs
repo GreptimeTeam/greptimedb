@@ -28,7 +28,9 @@ use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, FulltextOptions};
 use greptime_proto::v1::region::compact_request;
 use serde::{Deserialize, Serialize};
-use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY};
+use store_api::metric_engine_consts::{
+    is_metric_engine_option_key, LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY,
+};
 use store_api::mito_engine_options::is_mito_engine_option_key;
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 
@@ -48,6 +50,10 @@ pub fn validate_table_option(key: &str) -> bool {
     }
 
     if is_mito_engine_option_key(key) {
+        return true;
+    }
+
+    if is_metric_engine_option_key(key) {
         return true;
     }
 
@@ -185,6 +191,8 @@ pub struct AddColumnRequest {
     pub column_schema: ColumnSchema,
     pub is_key: bool,
     pub location: Option<AddColumnLocation>,
+    /// Add column if not exists.
+    pub add_if_not_exists: bool,
 }
 
 /// Change column datatype request
@@ -214,13 +222,29 @@ pub enum AlterKind {
     UnsetTableOptions {
         keys: Vec<UnsetRegionOption>,
     },
-    SetColumnFulltext {
+    SetIndex {
+        options: SetIndexOptions,
+    },
+    UnsetIndex {
+        options: UnsetIndexOptions,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SetIndexOptions {
+    Fulltext {
         column_name: String,
         options: FulltextOptions,
     },
-    UnsetColumnFulltext {
+    Inverted {
         column_name: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum UnsetIndexOptions {
+    Fulltext { column_name: String },
+    Inverted { column_name: String },
 }
 
 #[derive(Debug)]
@@ -317,6 +341,13 @@ pub struct CopyDatabaseRequest {
     pub with: HashMap<String, String>,
     pub connection: HashMap<String, String>,
     pub time_range: Option<TimestampRange>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct CopyQueryToRequest {
+    pub location: String,
+    pub with: HashMap<String, String>,
+    pub connection: HashMap<String, String>,
 }
 
 #[cfg(test)]

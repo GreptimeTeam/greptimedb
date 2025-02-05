@@ -9,7 +9,7 @@ Affected Rows: 2
 select count(*) from "HelloWorld";
 
 +----------+
-| COUNT(*) |
+| count(*) |
 +----------+
 | 2        |
 +----------+
@@ -25,7 +25,7 @@ Affected Rows: 1
 select count(*) from test;
 
 +----------+
-| COUNT(*) |
+| count(*) |
 +----------+
 | 1        |
 +----------+
@@ -33,7 +33,7 @@ select count(*) from test;
 select count(*) from (select count(*) from test where a = 'a');
 
 +----------+
-| COUNT(*) |
+| count(*) |
 +----------+
 | 1        |
 +----------+
@@ -41,7 +41,7 @@ select count(*) from (select count(*) from test where a = 'a');
 select count(*) from (select * from test cross join "HelloWorld");
 
 +----------+
-| COUNT(*) |
+| count(*) |
 +----------+
 | 2        |
 +----------+
@@ -56,15 +56,15 @@ Affected Rows: 0
 
 -- Append table
 create table count_where_bug (
-    tag String,
+    `tag` String,
     ts TimestampMillisecond time index,
     num Int64,
-    primary key (tag),
+    primary key (`tag`),
 ) engine=mito with('append_mode'='true');
 
 Affected Rows: 0
 
-insert into count_where_bug (tag, ts, num)
+insert into count_where_bug (`tag`, ts, num)
 values  ('a', '2024-09-06T06:00:01Z', 1),
         ('a', '2024-09-06T06:00:02Z', 2),
         ('a', '2024-09-06T06:00:03Z', 3),
@@ -73,10 +73,10 @@ values  ('a', '2024-09-06T06:00:01Z', 1),
 
 Affected Rows: 5
 
-select count(1) from count_where_bug where tag = 'b';
+select count(1) from count_where_bug where `tag` = 'b';
 
 +-----------------+
-| COUNT(Int64(1)) |
+| count(Int64(1)) |
 +-----------------+
 | 2               |
 +-----------------+
@@ -84,7 +84,7 @@ select count(1) from count_where_bug where tag = 'b';
 select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
 
 +-----------------+
-| COUNT(Int64(1)) |
+| count(Int64(1)) |
 +-----------------+
 | 1               |
 +-----------------+
@@ -92,7 +92,7 @@ select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
 select count(1) from count_where_bug where num != 3;
 
 +-----------------+
-| COUNT(Int64(1)) |
+| count(Int64(1)) |
 +-----------------+
 | 4               |
 +-----------------+

@@ -117,20 +117,22 @@ fn make_test_app(tx: Arc<mpsc::Sender<(String, String)>>, db_name: Option<&str>)
         })
     }
     let server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(instance.clone(), None)
+        .with_sql_handler(instance.clone())
         .with_user_provider(Arc::new(user_provider))
         .with_influxdb_handler(instance)
         .build();
-    server.build(server.make_app())
+    server.build(server.make_app()).unwrap()
 }
 
 #[tokio::test]
 async fn test_influxdb_write() {
+    common_telemetry::init_default_ut_logging();
+
     let (tx, mut rx) = mpsc::channel(100);
     let tx = Arc::new(tx);
 
     let app = make_test_app(tx.clone(), None);
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     let result = client.get("/v1/influxdb/health").send().await;
     assert_eq!(result.status(), 200);
@@ -197,7 +199,7 @@ async fn test_influxdb_write() {
 
     // make new app for db=influxdb
     let app = make_test_app(tx, Some("influxdb"));
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // right request
     let result = client
@@ -236,11 +238,13 @@ async fn test_influxdb_write() {
 
 #[tokio::test]
 async fn test_influxdb_write_v2() {
+    common_telemetry::init_default_ut_logging();
+
     let (tx, mut rx) = mpsc::channel(100);
     let tx = Arc::new(tx);
 
     let public_db_app = make_test_app(tx.clone(), None);
-    let public_db_client = TestClient::new(public_db_app);
+    let public_db_client = TestClient::new(public_db_app).await;
 
     let result = public_db_client.get("/v1/influxdb/health").send().await;
     assert_eq!(result.status(), 200);
@@ -280,7 +284,7 @@ async fn test_influxdb_write_v2() {
 
     // make new app for 'influxdb' database
     let app = make_test_app(tx, Some("influxdb"));
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // right request with `bucket` query string
     let result = client

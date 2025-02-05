@@ -76,7 +76,7 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
         create_udf(
             name,
             input_types,
-            Arc::new(DataType::Float64),
+            DataType::Float64,
             Volatility::Immutable,
             Arc::new(move |input: &_| Self::new(range_length).calc(input)) as _,
         )

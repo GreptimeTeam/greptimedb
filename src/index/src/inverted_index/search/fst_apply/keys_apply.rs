@@ -23,7 +23,8 @@ use crate::inverted_index::error::{
 };
 use crate::inverted_index::search::fst_apply::FstApplier;
 use crate::inverted_index::search::predicate::Predicate;
-use crate::inverted_index::{Bytes, FstMap};
+use crate::inverted_index::FstMap;
+use crate::Bytes;
 
 /// `KeysFstApplier` is responsible for applying a search using a set of predefined keys
 /// against an FstMap to fetch associated values.

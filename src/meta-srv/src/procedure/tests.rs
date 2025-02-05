@@ -291,6 +291,7 @@ async fn test_on_datanode_create_logical_regions() {
         }
     });
 
+    procedure.check_tables_already_exist().await.unwrap();
     let status = procedure.on_datanode_create_regions().await.unwrap();
     assert!(matches!(status, Status::Executing { persist: true }));
     assert!(matches!(

@@ -349,7 +349,9 @@ pub(crate) fn create_datanode_opts(
             providers,
             store: default_store,
         },
-        grpc: GrpcOptions::default().with_addr(PEER_PLACEHOLDER_ADDR),
+        grpc: GrpcOptions::default()
+            .with_addr(PEER_PLACEHOLDER_ADDR)
+            .with_hostname(PEER_PLACEHOLDER_ADDR),
         mode,
         wal: wal_config,
         ..Default::default()
@@ -390,14 +392,15 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
         ..Default::default()
     };
     let http_server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(
-            ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()),
-            None,
-        )
+        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()))
+        .with_logs_handler(instance.instance.clone())
         .with_metrics_handler(MetricsHandler)
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
         .build();
-    (http_server.build(http_server.make_app()), instance.guard)
+    (
+        http_server.build(http_server.make_app()).unwrap(),
+        instance.guard,
+    )
 }
 
 pub async fn setup_test_http_app_with_frontend(
@@ -424,11 +427,9 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
     let mut http_server = HttpServerBuilder::new(http_opts);
 
     http_server = http_server
-        .with_sql_handler(
-            ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()),
-            Some(instance.instance.clone()),
-        )
+        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()))
         .with_log_ingest_handler(instance.instance.clone(), None, None)
+        .with_logs_handler(instance.instance.clone())
         .with_otlp_handler(instance.instance.clone())
         .with_greptime_config_options(instance.opts.to_toml().unwrap());
 
@@ -438,8 +439,13 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
 
     let http_server = http_server.build();
 
-    let app = http_server.build(http_server.make_app());
+    let app = http_server.build(http_server.make_app()).unwrap();
     (app, instance.guard)
+}
+
+async fn run_sql(sql: &str, instance: &GreptimeDbStandalone) {
+    let result = instance.instance.do_query(sql, QueryContext::arc()).await;
+    let _ = result.first().unwrap().as_ref().unwrap();
 }
 
 pub async fn setup_test_prom_app_with_frontend(
@@ -450,11 +456,20 @@ pub async fn setup_test_prom_app_with_frontend(
 
     let instance = setup_standalone_instance(name, store_type).await;
 
-    create_test_table(instance.instance.as_ref(), "demo").await;
-
-    let sql = "INSERT INTO demo VALUES ('host1', 1.1, 2.2, 0), ('host2', 2.1, 4.3, 600000)";
-    let result = instance.instance.do_query(sql, QueryContext::arc()).await;
-    let _ = result.first().unwrap().as_ref().unwrap();
+    // build physical table
+    let sql = "CREATE TABLE phy (ts timestamp time index, val double, host string primary key) engine=metric with ('physical_metric_table' = '')";
+    run_sql(sql, &instance).await;
+    // build metric tables
+    let sql = "CREATE TABLE demo (ts timestamp time index, val double, host string primary key) engine=metric with ('on_physical_table' = 'phy')";
+    run_sql(sql, &instance).await;
+    let sql = "CREATE TABLE demo_metrics (ts timestamp time index, val double, idc string primary key) engine=metric with ('on_physical_table' = 'phy')";
+    run_sql(sql, &instance).await;
+    // insert rows
+    let sql = "INSERT INTO demo(host, val, ts) VALUES ('host1', 1.1, 0), ('host2', 2.1, 600000)";
+    run_sql(sql, &instance).await;
+    let sql =
+        "INSERT INTO demo_metrics(idc, val, ts) VALUES ('idc1', 1.1, 0), ('idc2', 2.1, 600000)";
+    run_sql(sql, &instance).await;
 
     let http_opts = HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
@@ -463,15 +478,13 @@ pub async fn setup_test_prom_app_with_frontend(
     let frontend_ref = instance.instance.clone();
     let is_strict_mode = true;
     let http_server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(
-            ServerSqlQueryHandlerAdapter::arc(frontend_ref.clone()),
-            Some(frontend_ref.clone()),
-        )
+        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(frontend_ref.clone()))
+        .with_logs_handler(instance.instance.clone())
         .with_prom_handler(frontend_ref.clone(), true, is_strict_mode)
         .with_prometheus_handler(frontend_ref)
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
         .build();
-    let app = http_server.build(http_server.make_app());
+    let app = http_server.build(http_server.make_app()).unwrap();
     (app, instance.guard)
 }
 

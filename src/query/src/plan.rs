@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::TableReference;
-use datafusion_expr::LogicalPlan as DfLogicalPlan;
+use datafusion_expr::{BinaryExpr, Expr, Join, LogicalPlan, Operator};
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 pub use table::metadata::TableType;
@@ -32,7 +32,7 @@ struct TableNamesExtractAndRewriter {
 }
 
 impl TreeNodeRewriter for TableNamesExtractAndRewriter {
-    type Node = DfLogicalPlan;
+    type Node = LogicalPlan;
 
     /// descend
     fn f_down<'a>(
@@ -40,7 +40,7 @@ impl TreeNodeRewriter for TableNamesExtractAndRewriter {
         node: Self::Node,
     ) -> datafusion::error::Result<Transformed<Self::Node>> {
         match node {
-            DfLogicalPlan::TableScan(mut scan) => {
+            LogicalPlan::TableScan(mut scan) => {
                 if let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>() {
                     if let Some(provider) = source
                         .table_provider
@@ -96,7 +96,7 @@ impl TreeNodeRewriter for TableNamesExtractAndRewriter {
                         };
                     }
                 }
-                Ok(Transformed::yes(DfLogicalPlan::TableScan(scan)))
+                Ok(Transformed::yes(LogicalPlan::TableScan(scan)))
             }
             node => Ok(Transformed::no(node)),
         }
@@ -115,12 +115,43 @@ impl TableNamesExtractAndRewriter {
 /// Extracts and rewrites the table names in the plan in the fully qualified style,
 /// return the table names and new plan.
 pub fn extract_and_rewrite_full_table_names(
-    plan: DfLogicalPlan,
+    plan: LogicalPlan,
     query_ctx: QueryContextRef,
-) -> Result<(HashSet<TableName>, DfLogicalPlan)> {
+) -> Result<(HashSet<TableName>, LogicalPlan)> {
     let mut extractor = TableNamesExtractAndRewriter::new(query_ctx);
     let plan = plan.rewrite(&mut extractor).context(DataFusionSnafu)?;
     Ok((extractor.table_names, plan.data))
+}
+
+/// A trait to extract expressions from a logical plan.
+pub trait ExtractExpr {
+    /// Gets expressions from a logical plan.
+    /// It handles [Join] specially so [LogicalPlan::with_new_exprs()] can use the expressions
+    /// this method returns.
+    fn expressions_consider_join(&self) -> Vec<Expr>;
+}
+
+impl ExtractExpr for LogicalPlan {
+    fn expressions_consider_join(&self) -> Vec<Expr> {
+        match self {
+            LogicalPlan::Join(Join { on, filter, .. }) => {
+                // The first part of expr is equi-exprs,
+                // and the struct of each equi-expr is like `left-expr = right-expr`.
+                // We only normalize the filter_expr (non equality predicate from ON clause).
+                on.iter()
+                    .map(|(left, right)| {
+                        Expr::BinaryExpr(BinaryExpr {
+                            left: Box::new(left.clone()),
+                            op: Operator::Eq,
+                            right: Box::new(right.clone()),
+                        })
+                    })
+                    .chain(filter.clone())
+                    .collect()
+            }
+            _ => self.expressions(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -136,7 +167,7 @@ pub(crate) mod tests {
 
     use super::*;
 
-    pub(crate) fn mock_plan() -> LogicalPlan {
+    fn mock_plan() -> LogicalPlan {
         let schema = Schema::new(vec![
             Field::new("id", DataType::Int32, true),
             Field::new("name", DataType::Utf8, true),
@@ -174,7 +205,7 @@ pub(crate) mod tests {
 
         assert_eq!(
             "Filter: devices.id > Int32(500)\n  TableScan: greptime.test.devices",
-            format!("{:?}", plan)
+            plan.to_string()
         );
     }
 }

@@ -91,6 +91,7 @@ mod tests {
     use std::sync::Arc;
 
     use common_query::prelude::{TypeSignature, Volatility};
+    use datatypes::arrow::datatypes::IntervalDayTime;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::value::Value;
     use datatypes::vectors::{
@@ -139,7 +140,12 @@ mod tests {
 
         let times = vec![Some(123), None, Some(42), None];
         // Intervals in milliseconds
-        let intervals = vec![1000, 2000, 3000, 1000];
+        let intervals = vec![
+            IntervalDayTime::new(0, 1000),
+            IntervalDayTime::new(0, 2000),
+            IntervalDayTime::new(0, 3000),
+            IntervalDayTime::new(0, 1000),
+        ];
         let results = [Some(122), None, Some(39), None];
 
         let time_vector = TimestampSecondVector::from(times.clone());

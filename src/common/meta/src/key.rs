@@ -51,9 +51,16 @@
 //! 10. Table flow key: `__flow/source_table/{table_id}/{flownode_id}/{flow_id}/{partition_id}`
 //!     - Mapping source table's {table_id} to {flownode_id}
 //!     - Used in `Flownode` booting.
+//!
 //! 11. View info key: `__view_info/{view_id}`
 //!     - The value is a [ViewInfoValue] struct; it contains the encoded logical plan.
 //!     - This key is mainly used in constructing the view in Datanode and Frontend.
+//!
+//! 12. Kafka topic key: `__topic_name/kafka/{topic_name}`
+//！    - The key is used to mark existing topics in kafka for WAL.
+//!
+//! 13. Topic name to region map key `__topic_region/{topic_name}/{region_id}`
+//!     - Mapping {topic_name} to {region_id}
 //!
 //! All keys have related managers. The managers take care of the serialization and deserialization
 //! of keys and values, and the interaction with the underlying KV store backend.
@@ -100,6 +107,8 @@ pub mod table_route;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_utils;
 mod tombstone;
+pub mod topic_name;
+pub mod topic_region;
 pub(crate) mod txn_helper;
 pub mod view_info;
 
@@ -158,6 +167,10 @@ pub const CATALOG_NAME_KEY_PREFIX: &str = "__catalog_name";
 pub const SCHEMA_NAME_KEY_PREFIX: &str = "__schema_name";
 pub const TABLE_ROUTE_PREFIX: &str = "__table_route";
 pub const NODE_ADDRESS_PREFIX: &str = "__node_address";
+pub const KAFKA_TOPIC_KEY_PREFIX: &str = "__topic_name/kafka";
+// The legacy topic key prefix is used to store the topic name in previous versions.
+pub const LEGACY_TOPIC_KEY_PREFIX: &str = "__created_wal_topics/kafka";
+pub const TOPIC_REGION_PREFIX: &str = "__topic_region";
 
 /// The keys with these prefixes will be loaded into the cache when the leader starts.
 pub const CACHE_KEY_PREFIXES: [&str; 5] = [
@@ -174,6 +187,10 @@ pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
 pub type FlowId = u32;
 /// The partition of flow.
 pub type FlowPartitionId = u32;
+
+lazy_static! {
+    pub static ref NAME_PATTERN_REGEX: Regex = Regex::new(NAME_PATTERN).unwrap();
+}
 
 lazy_static! {
     static ref TABLE_INFO_KEY_PATTERN: Regex =
@@ -221,6 +238,18 @@ lazy_static! {
 lazy_static! {
     static ref NODE_ADDRESS_PATTERN: Regex =
         Regex::new(&format!("^{NODE_ADDRESS_PREFIX}/([0-9]+)/([0-9]+)$")).unwrap();
+}
+
+lazy_static! {
+    pub static ref KAFKA_TOPIC_KEY_PATTERN: Regex =
+        Regex::new(&format!("^{KAFKA_TOPIC_KEY_PREFIX}/(.*)$")).unwrap();
+}
+
+lazy_static! {
+    pub static ref TOPIC_REGION_PATTERN: Regex = Regex::new(&format!(
+        "^{TOPIC_REGION_PREFIX}/({NAME_PATTERN})/([0-9]+)$"
+    ))
+    .unwrap();
 }
 
 /// The key of metadata.

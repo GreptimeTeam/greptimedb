@@ -54,7 +54,7 @@ impl TxnOpGetResponseSet {
 impl From<&mut Vec<TxnOpResponse>> for TxnOpGetResponseSet {
     fn from(value: &mut Vec<TxnOpResponse>) -> Self {
         let value = value
-            .extract_if(|resp| matches!(resp, TxnOpResponse::ResponseGet(_)))
+            .extract_if(.., |resp| matches!(resp, TxnOpResponse::ResponseGet(_)))
             .flat_map(|resp| {
                 // Safety: checked
                 let TxnOpResponse::ResponseGet(r) = resp else {

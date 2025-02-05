@@ -167,9 +167,9 @@ impl WorkerGroup {
                 .vector_cache_size(config.vector_cache_size.as_bytes())
                 .page_cache_size(config.page_cache_size.as_bytes())
                 .selector_result_cache_size(config.selector_result_cache_size.as_bytes())
-                .index_metadata_size(config.inverted_index.metadata_cache_size.as_bytes())
-                .index_content_size(config.inverted_index.content_cache_size.as_bytes())
-                .index_content_page_size(config.inverted_index.content_cache_page_size.as_bytes())
+                .index_metadata_size(config.index.metadata_cache_size.as_bytes())
+                .index_content_size(config.index.content_cache_size.as_bytes())
+                .index_content_page_size(config.index.content_cache_page_size.as_bytes())
                 .puffin_metadata_size(config.index.metadata_cache_size.as_bytes())
                 .write_cache(write_cache)
                 .build(),
@@ -365,23 +365,20 @@ async fn write_cache_from_config(
     puffin_manager_factory: PuffinManagerFactory,
     intermediate_manager: IntermediateManager,
 ) -> Result<Option<WriteCacheRef>> {
-    if !config.enable_experimental_write_cache {
+    if !config.enable_write_cache {
         return Ok(None);
     }
 
-    // TODO(yingwen): Remove this and document the config once the write cache is ready.
-    warn!("Write cache is an experimental feature");
-
-    tokio::fs::create_dir_all(Path::new(&config.experimental_write_cache_path))
+    tokio::fs::create_dir_all(Path::new(&config.write_cache_path))
         .await
         .context(CreateDirSnafu {
-            dir: &config.experimental_write_cache_path,
+            dir: &config.write_cache_path,
         })?;
 
     let cache = WriteCache::new_fs(
-        &config.experimental_write_cache_path,
-        config.experimental_write_cache_size,
-        config.experimental_write_cache_ttl,
+        &config.write_cache_path,
+        config.write_cache_size,
+        config.write_cache_ttl,
         puffin_manager_factory,
         intermediate_manager,
     )

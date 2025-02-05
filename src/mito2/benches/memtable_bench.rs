@@ -25,6 +25,7 @@ use mito2::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtable
 use mito2::memtable::time_series::TimeSeriesMemtable;
 use mito2::memtable::{KeyValues, Memtable};
 use mito2::region::options::MergeMode;
+use mito2::row_converter::DensePrimaryKeyCodec;
 use mito2::test_util::memtable_util::{self, region_metadata_to_row_schema};
 use rand::rngs::ThreadRng;
 use rand::seq::SliceRandom;
@@ -43,8 +44,14 @@ fn write_rows(c: &mut Criterion) {
     // Note that this test only generate one time series.
     let mut group = c.benchmark_group("write");
     group.bench_function("partition_tree", |b| {
-        let memtable =
-            PartitionTreeMemtable::new(1, metadata.clone(), None, &PartitionTreeConfig::default());
+        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+        let memtable = PartitionTreeMemtable::new(
+            1,
+            codec,
+            metadata.clone(),
+            None,
+            &PartitionTreeConfig::default(),
+        );
         let kvs =
             memtable_util::build_key_values(&metadata, "hello".to_string(), 42, &timestamps, 1);
         b.iter(|| {
@@ -71,13 +78,14 @@ fn full_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("full_scan");
     group.sample_size(10);
     group.bench_function("partition_tree", |b| {
-        let memtable = PartitionTreeMemtable::new(1, metadata.clone(), None, &config);
+        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+        let memtable = PartitionTreeMemtable::new(1, codec, metadata.clone(), None, &config);
         for kvs in generator.iter() {
             memtable.write(&kvs).unwrap();
         }
 
         b.iter(|| {
-            let iter = memtable.iter(None, None).unwrap();
+            let iter = memtable.iter(None, None, None).unwrap();
             for batch in iter {
                 let _batch = batch.unwrap();
             }
@@ -90,7 +98,7 @@ fn full_scan(c: &mut Criterion) {
         }
 
         b.iter(|| {
-            let iter = memtable.iter(None, None).unwrap();
+            let iter = memtable.iter(None, None, None).unwrap();
             for batch in iter {
                 let _batch = batch.unwrap();
             }
@@ -108,14 +116,15 @@ fn filter_1_host(c: &mut Criterion) {
     let mut group = c.benchmark_group("filter_1_host");
     group.sample_size(10);
     group.bench_function("partition_tree", |b| {
-        let memtable = PartitionTreeMemtable::new(1, metadata.clone(), None, &config);
+        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+        let memtable = PartitionTreeMemtable::new(1, codec, metadata.clone(), None, &config);
         for kvs in generator.iter() {
             memtable.write(&kvs).unwrap();
         }
         let predicate = generator.random_host_filter();
 
         b.iter(|| {
-            let iter = memtable.iter(None, Some(predicate.clone())).unwrap();
+            let iter = memtable.iter(None, Some(predicate.clone()), None).unwrap();
             for batch in iter {
                 let _batch = batch.unwrap();
             }
@@ -129,7 +138,7 @@ fn filter_1_host(c: &mut Criterion) {
         let predicate = generator.random_host_filter();
 
         b.iter(|| {
-            let iter = memtable.iter(None, Some(predicate.clone())).unwrap();
+            let iter = memtable.iter(None, Some(predicate.clone()), None).unwrap();
             for batch in iter {
                 let _batch = batch.unwrap();
             }
@@ -266,6 +275,7 @@ impl CpuDataGenerator {
                 schema: self.column_schemas.clone(),
                 rows,
             }),
+            write_hint: None,
         };
 
         KeyValues::new(&self.metadata, mutation).unwrap()

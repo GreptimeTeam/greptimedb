@@ -169,6 +169,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to collect recordbatch"))]
+    CollectRecordbatch {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_recordbatch::error::Error,
+    },
+
     #[snafu(display("Failed to plan statement"))]
     PlanStatement {
         #[snafu(implicit)]
@@ -224,6 +231,13 @@ pub enum Error {
         source: servers::error::Error,
     },
 
+    #[snafu(display("Failed to create logical plan for prometheus metric names query"))]
+    PrometheusMetricNamesQueryPlan {
+        #[snafu(implicit)]
+        location: Location,
+        source: servers::error::Error,
+    },
+
     #[snafu(display("Failed to describe schema for given statement"))]
     DescribeStatement {
         #[snafu(implicit)]
@@ -236,14 +250,6 @@ pub enum Error {
         msg: String,
         #[snafu(implicit)]
         location: Location,
-    },
-
-    #[cfg(feature = "python")]
-    #[snafu(display("Failed to start script manager"))]
-    StartScriptManager {
-        #[snafu(implicit)]
-        location: Location,
-        source: script::error::Error,
     },
 
     #[snafu(display("Failed to insert value into table: {}", table_name))]
@@ -357,7 +363,10 @@ impl ErrorExt for Error {
             Error::HandleHeartbeatResponse { source, .. } => source.status_code(),
 
             Error::PromStoreRemoteQueryPlan { source, .. }
+            | Error::PrometheusMetricNamesQueryPlan { source, .. }
             | Error::ExecutePromql { source, .. } => source.status_code(),
+
+            Error::CollectRecordbatch { .. } => StatusCode::EngineExecuteQuery,
 
             Error::SqlExecIntercepted { source, .. } => source.status_code(),
             Error::StartServer { source, .. } => source.status_code(),
@@ -393,9 +402,6 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Error::FindTableRoute { source, .. } => source.status_code(),
-
-            #[cfg(feature = "python")]
-            Error::StartScriptManager { source, .. } => source.status_code(),
 
             Error::TableOperation { source, .. } => source.status_code(),
 

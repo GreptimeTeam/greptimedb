@@ -13,12 +13,14 @@
 // limitations under the License.
 
 mod column_to_row;
+mod fill_impure_default;
 mod row_to_region;
 mod stmt_to_region;
 mod table_to_region;
 
 use api::v1::SemanticType;
 pub use column_to_row::ColumnToRow;
+pub use fill_impure_default::fill_reqs_with_impure_default;
 pub use row_to_region::RowToRegion;
 use snafu::{OptionExt, ResultExt};
 pub use stmt_to_region::StatementToRegion;

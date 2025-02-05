@@ -25,7 +25,7 @@ use futures::{FutureExt, TryStreamExt};
 use moka::future::Cache;
 use moka::notification::RemovalCause;
 use object_store::util::join_path;
-use object_store::{ErrorKind, Metakey, ObjectStore, Reader};
+use object_store::{ErrorKind, ObjectStore, Reader};
 use parquet::file::metadata::ParquetMetaData;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -195,7 +195,6 @@ impl FileCache {
         let mut lister = self
             .local_store
             .lister_with(FILE_DIR)
-            .metakey(Metakey::ContentLength)
             .await
             .context(OpenDalSnafu)?;
         // Use i64 for total_size to reduce the risk of overflow.
@@ -209,6 +208,12 @@ impl FileCache {
             let Some(key) = parse_index_key(entry.name()) else {
                 continue;
             };
+
+            let meta = self
+                .local_store
+                .stat(entry.path())
+                .await
+                .context(OpenDalSnafu)?;
             let file_size = meta.content_length() as u32;
             self.memory_index
                 .insert(key, IndexValue { file_size })
@@ -406,7 +411,7 @@ mod tests {
         let cache = FileCache::new(
             local_store.clone(),
             ReadableSize::mb(10),
-            Some(Duration::from_millis(5)),
+            Some(Duration::from_millis(10)),
         );
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
@@ -432,7 +437,7 @@ mod tests {
 
         let exist = cache.reader(key).await;
         assert!(exist.is_some());
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(15)).await;
         cache.memory_index.run_pending_tasks().await;
         let non = cache.reader(key).await;
         assert!(non.is_none());

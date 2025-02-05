@@ -218,9 +218,9 @@ impl CacheStrategy {
 
     /// Calls [CacheManager::index_cache()].
     /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
-    pub fn index_cache(&self) -> Option<&InvertedIndexCacheRef> {
+    pub fn inverted_index_cache(&self) -> Option<&InvertedIndexCacheRef> {
         match self {
-            CacheStrategy::EnableAll(cache_manager) => cache_manager.index_cache(),
+            CacheStrategy::EnableAll(cache_manager) => cache_manager.inverted_index_cache(),
             CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
         }
     }
@@ -409,7 +409,7 @@ impl CacheManager {
         self.write_cache.as_ref()
     }
 
-    pub(crate) fn index_cache(&self) -> Option<&InvertedIndexCacheRef> {
+    pub(crate) fn inverted_index_cache(&self) -> Option<&InvertedIndexCacheRef> {
         self.index_cache.as_ref()
     }
 

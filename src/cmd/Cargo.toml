@@ -10,9 +10,8 @@ name = "greptime"
 path = "src/bin/greptime.rs"
 
 [features]
-default = ["python", "servers/pprof", "servers/mem-prof"]
+default = ["servers/pprof", "servers/mem-prof"]
 tokio-console = ["common-telemetry/tokio-console"]
-python = ["frontend/python"]
 
 [lints]
 workspace = true
@@ -58,6 +57,7 @@ humantime.workspace = true
 lazy_static.workspace = true
 meta-client.workspace = true
 meta-srv.workspace = true
+metric-engine.workspace = true
 mito2.workspace = true
 moka.workspace = true
 nu-ansi-term = "0.46"

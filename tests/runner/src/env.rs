@@ -70,6 +70,7 @@ pub enum WalConfig {
 pub struct StoreConfig {
     pub store_addrs: Vec<String>,
     pub setup_etcd: bool,
+    pub setup_pg: bool,
 }
 
 #[derive(Clone)]
@@ -159,6 +160,7 @@ impl Env {
             self.build_db();
             self.setup_wal();
             self.setup_etcd();
+            self.setup_pg();
 
             let db_ctx = GreptimeDBContext::new(self.wal.clone(), self.store_config.clone());
 
@@ -354,6 +356,8 @@ impl Env {
                         "--log-dir={}/greptimedb-frontend/logs",
                         self.sqlness_home.display()
                     ),
+                    "-c".to_string(),
+                    self.generate_config_file(subcommand, db_ctx),
                 ];
                 (
                     args,
@@ -383,7 +387,21 @@ impl Env {
                     "-c".to_string(),
                     self.generate_config_file(subcommand, db_ctx),
                 ];
-                if db_ctx.store_config().store_addrs.is_empty() {
+                if db_ctx.store_config().setup_pg {
+                    let client_ports = self
+                        .store_config
+                        .store_addrs
+                        .iter()
+                        .map(|s| s.split(':').nth(1).unwrap().parse::<u16>().unwrap())
+                        .collect::<Vec<_>>();
+                    let client_port = client_ports.first().unwrap_or(&5432);
+                    let pg_server_addr = format!(
+                        "postgresql://greptimedb:admin@127.0.0.1:{}/postgres",
+                        client_port
+                    );
+                    args.extend(vec!["--backend".to_string(), "postgres-store".to_string()]);
+                    args.extend(vec!["--store-addrs".to_string(), pg_server_addr]);
+                } else if db_ctx.store_config().store_addrs.is_empty() {
                     args.extend(vec!["--backend".to_string(), "memory-store".to_string()])
                 }
                 (args, vec![METASRV_ADDR.to_string()])
@@ -440,6 +458,7 @@ impl Env {
             "start".to_string(),
         ];
         args.push(format!("--rpc-addr=127.0.0.1:2941{id}"));
+        args.push(format!("--rpc-hostname=127.0.0.1:2941{id}"));
         args.push(format!("--http-addr=127.0.0.1:2943{id}"));
         args.push(format!("--data-home={}", data_home.display()));
         args.push(format!("--log-dir={}/logs", data_home.display()));
@@ -464,12 +483,14 @@ impl Env {
             "start".to_string(),
         ];
         args.push(format!("--rpc-addr=127.0.0.1:2968{id}"));
+        args.push(format!("--rpc-hostname=127.0.0.1:2968{id}"));
         args.push(format!("--node-id={id}"));
         args.push(format!(
             "--log-dir={}/greptimedb-flownode/logs",
             sqlness_home.display()
         ));
         args.push("--metasrv-addrs=127.0.0.1:29302".to_string());
+        args.push(format!("--http-addr=127.0.0.1:2951{id}"));
         (args, format!("127.0.0.1:2968{id}"))
     }
 
@@ -482,6 +503,7 @@ impl Env {
                     Env::stop_server(server_process);
                 }
             }
+
             if is_full_restart {
                 if let Some(mut metasrv_process) =
                     db.metasrv_process.lock().expect("poisoned lock").take()
@@ -493,11 +515,12 @@ impl Env {
                 {
                     Env::stop_server(&mut frontend_process);
                 }
-                if let Some(mut flownode_process) =
-                    db.flownode_process.lock().expect("poisoned lock").take()
-                {
-                    Env::stop_server(&mut flownode_process);
-                }
+            }
+
+            if let Some(mut flownode_process) =
+                db.flownode_process.lock().expect("poisoned lock").take()
+            {
+                Env::stop_server(&mut flownode_process);
             }
         }
 
@@ -531,13 +554,13 @@ impl Env {
                     .lock()
                     .expect("lock poisoned")
                     .replace(frontend);
-
-                let flownode = self.start_server("flownode", &db.ctx, false).await;
-                db.flownode_process
-                    .lock()
-                    .expect("lock poisoned")
-                    .replace(flownode);
             }
+            let flownode = self.start_server("flownode", &db.ctx, false).await;
+            db.flownode_process
+                .lock()
+                .expect("lock poisoned")
+                .replace(flownode);
+
             processes
         };
 
@@ -567,6 +590,20 @@ impl Env {
                 .map(|s| s.split(':').nth(1).unwrap().parse::<u16>().unwrap())
                 .collect::<Vec<_>>();
             util::setup_etcd(client_ports, None, None);
+        }
+    }
+
+    /// Setup PostgreSql if needed.
+    fn setup_pg(&self) {
+        if self.store_config.setup_pg {
+            let client_ports = self
+                .store_config
+                .store_addrs
+                .iter()
+                .map(|s| s.split(':').nth(1).unwrap().parse::<u16>().unwrap())
+                .collect::<Vec<_>>();
+            let client_port = client_ports.first().unwrap_or(&5432);
+            util::setup_pg(*client_port, None);
         }
     }
 

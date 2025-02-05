@@ -1,4 +1,6 @@
 on:
+  schedule:
+    - cron: "0 15 * * 1-5"
   merge_group:
   pull_request:
     types: [ opened, synchronize, reopened, ready_for_review ]
@@ -43,7 +45,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ windows-2022, ubuntu-20.04 ]
+        os: [ ubuntu-20.04 ]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -57,6 +59,8 @@ jobs:
           # Shares across multiple jobs
           # Shares with `Clippy` job
           shared-key: "check-lint"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run cargo check
         run: cargo check --locked --workspace --all-targets
 
@@ -67,11 +71,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Shares across multiple jobs
-          shared-key: "check-toml"
       - name: Install taplo
         run: cargo +stable install taplo-cli --version ^0.9 --locked --force
       - name: Run taplo
@@ -94,13 +93,15 @@ jobs:
         with:
           # Shares across multiple jobs
           shared-key: "build-binaries"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-gc-bin
         shell: bash
         run: cargo install cargo-gc-bin --force
       - name: Build greptime binaries
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
-        run: cargo gc -- --bin greptime --bin sqlness-runner
+        run: cargo gc -- --bin greptime --bin sqlness-runner --features pg_kvbackend
       - name: Pack greptime binaries
         shell: bash
         run: |
@@ -142,11 +143,6 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Shares across multiple jobs
-          shared-key: "fuzz-test-targets"
       - name: Set Rust Fuzz
         shell: bash
         run: |
@@ -200,11 +196,6 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Shares across multiple jobs
-          shared-key: "fuzz-test-targets"
       - name: Set Rust Fuzz
         shell: bash
         run: |
@@ -255,13 +246,15 @@ jobs:
         with:
           # Shares across multiple jobs
           shared-key: "build-greptime-ci"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-gc-bin
         shell: bash
         run: cargo install cargo-gc-bin --force
       - name: Build greptime bianry
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
-        run: cargo gc --profile ci -- --bin greptime
+        run: cargo gc --profile ci -- --bin greptime --features pg_kvbackend
       - name: Pack greptime binary
         shell: bash
         run: |
@@ -317,11 +310,6 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Shares across multiple jobs
-          shared-key: "fuzz-test-targets"
       - name: Set Rust Fuzz
         shell: bash
         run: |
@@ -466,11 +454,6 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Shares across multiple jobs
-          shared-key: "fuzz-test-targets"
       - name: Set Rust Fuzz
         shell: bash
         run: |
@@ -573,13 +556,16 @@ jobs:
           - name: "Remote WAL"
             opts: "-w kafka -k 127.0.0.1:9092"
             kafka: true
+          - name: "Pg Kvbackend"
+            opts: "--setup-pg"
+            kafka: false
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - if: matrix.mode.kafka
         name: Setup kafka server
-        working-directory: tests-integration/fixtures/kafka
-        run: docker compose -f docker-compose-standalone.yml up -d --wait
+        working-directory: tests-integration/fixtures
+        run: docker compose up -d --wait kafka
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:
@@ -609,11 +595,6 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: rustfmt
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Shares across multiple jobs
-          shared-key: "check-rust-fmt"
       - name: Check format
         run: make fmt-check
 
@@ -635,55 +616,100 @@ jobs:
           # Shares across multiple jobs
           # Shares with `Check` job
           shared-key: "check-lint"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run cargo clippy
         run: make clippy
 
-  coverage:
-    if: github.event.pull_request.draft == false
-    runs-on: ubuntu-20.04-8-cores
+  conflict-check:
+    name: Check for conflict
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Merge Conflict Finder
+        uses: olivernybroe/action-conflict-finder@v4.0
+
+  test:
+    if: github.event_name != 'merge_group'
+    runs-on: ubuntu-22.04-arm
     timeout-minutes: 60
-    needs:  [clippy, fmt]
+    needs:  [conflict-check, clippy, fmt]
     steps:
       - uses: actions/checkout@v4
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: KyleMayes/install-llvm-action@v1
-        with:
-          version: "14.0"
+      - uses: rui314/setup-mold@v1
       - name: Install toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          components: llvm-tools-preview
+            cache: false
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
           # Shares cross multiple jobs
           shared-key: "coverage-test"
-      - name: Docker Cache
-        uses: ScribeMD/docker-cache@0.3.7
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
+      - name: Setup external services
+        working-directory: tests-integration/fixtures
+        run: docker compose up -d --wait
+      - name: Run nextest cases
+        run: cargo nextest run --workspace -F dashboard -F pg_kvbackend
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+          RUST_BACKTRACE: 1
+          RUST_MIN_STACK: 8388608 # 8MB
+          CARGO_INCREMENTAL: 0
+          GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
+          GT_S3_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+          GT_S3_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+          GT_S3_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+          GT_MINIO_BUCKET: greptime
+          GT_MINIO_ACCESS_KEY_ID: superpower_ci_user
+          GT_MINIO_ACCESS_KEY: superpower_password
+          GT_MINIO_REGION: us-west-2
+          GT_MINIO_ENDPOINT_URL: http://127.0.0.1:9000
+          GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
+          GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
+          GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
+          GT_KAFKA_SASL_ENDPOINTS: 127.0.0.1:9093
+          UNITTEST_LOG_DIR: "__unittest_logs"
+
+  coverage:
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-20.04-8-cores
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-protoc@v3
         with:
-          key: docker-${{ runner.os }}-coverage
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: rui314/setup-mold@v1
+      - name: Install toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: llvm-tools
+          cache: false
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares cross multiple jobs
+          shared-key: "coverage-test"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Setup etcd server
-        working-directory: tests-integration/fixtures/etcd
-        run: docker compose -f docker-compose-standalone.yml up -d --wait
-      - name: Setup kafka server
-        working-directory: tests-integration/fixtures/kafka
-        run: docker compose -f docker-compose-standalone.yml up -d --wait
-      - name: Setup minio
-        working-directory: tests-integration/fixtures/minio
-        run: docker compose -f docker-compose-standalone.yml up -d --wait
-      - name: Setup postgres server
-        working-directory: tests-integration/fixtures/postgres
-        run: docker compose -f docker-compose-standalone.yml up -d --wait
+      - name: Setup external services
+        working-directory: tests-integration/fixtures
+        run: docker compose up -d --wait
       - name: Run nextest cases
         run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend
         env:
-          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
           RUST_BACKTRACE: 1
           CARGO_INCREMENTAL: 0
           GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}

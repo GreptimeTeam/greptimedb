@@ -21,10 +21,12 @@ fastbloom = "0.8"
 fst.workspace = true
 futures.workspace = true
 greptime-proto.workspace = true
+itertools.workspace = true
+jieba-rs = "0.7"
 mockall.workspace = true
-parquet.workspace = true
 pin-project.workspace = true
 prost.workspace = true
+puffin.workspace = true
 regex.workspace = true
 regex-automata.workspace = true
 serde.workspace = true
@@ -33,6 +35,7 @@ snafu.workspace = true
 tantivy = { version = "0.22", features = ["zstd-compression"] }
 tantivy-jieba = "0.11.0"
 tokio.workspace = true
+tokio-util.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

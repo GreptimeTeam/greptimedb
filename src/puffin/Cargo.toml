@@ -20,6 +20,7 @@ common-error.workspace = true
 common-macro.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
+common-test-util.workspace = true
 derive_builder.workspace = true
 futures.workspace = true
 lz4_flex = "0.11"
@@ -35,4 +36,4 @@ tokio-util.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-common-test-util.workspace = true
+common-base = { workspace = true, features = ["testing"] }

@@ -17,15 +17,16 @@ use std::sync::Arc;
 use common_error::ext::BoxedError;
 use common_function::function_registry::FUNCTION_REGISTRY;
 use common_function::scalars::udf::create_udf;
+use common_query::error::RegisterUdfSnafu;
 use common_query::logical_plan::SubstraitPlanDecoder;
 use datafusion::catalog::CatalogProviderList;
 use datafusion::common::DataFusionError;
 use datafusion::error::Result;
 use datafusion::execution::context::SessionState;
 use datafusion::execution::registry::SerializerRegistry;
-use datafusion::execution::FunctionRegistry;
+use datafusion::execution::{FunctionRegistry, SessionStateBuilder};
 use datafusion::logical_expr::LogicalPlan;
-use datafusion_expr::UserDefinedLogicalNode;
+use datafusion_expr::{ScalarUDF, UserDefinedLogicalNode};
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
 use prost::Message;
 use session::context::QueryContextRef;
@@ -34,9 +35,9 @@ use substrait::extension_serializer::ExtensionSerializer;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
 use crate::dist_plan::MergeScanLogicalPlan;
-use crate::error::DataFusionSnafu;
 
 /// Extended [`substrait::extension_serializer::ExtensionSerializer`] but supports [`MergeScanLogicalPlan`] serialization.
+#[derive(Debug)]
 pub struct DefaultSerializer;
 
 impl SerializerRegistry for DefaultSerializer {
@@ -84,21 +85,18 @@ impl SerializerRegistry for DefaultSerializer {
 /// The datafusion `[LogicalPlan]` decoder.
 pub struct DefaultPlanDecoder {
     session_state: SessionState,
+    query_ctx: QueryContextRef,
 }
 
 impl DefaultPlanDecoder {
     pub fn new(
-        mut session_state: SessionState,
+        session_state: SessionState,
         query_ctx: &QueryContextRef,
     ) -> crate::error::Result<Self> {
-        // Substrait decoder will look up the UDFs in SessionState, so we need to register them
-        // Note: the query context must be passed to set the timezone
-        for func in FUNCTION_REGISTRY.functions() {
-            let udf = Arc::new(create_udf(func, query_ctx.clone(), Default::default()).into());
-            session_state.register_udf(udf).context(DataFusionSnafu)?;
-        }
-
-        Ok(Self { session_state })
+        Ok(Self {
+            session_state,
+            query_ctx: query_ctx.clone(),
+        })
     }
 }
 
@@ -111,8 +109,25 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
         optimize: bool,
     ) -> common_query::error::Result<LogicalPlan> {
         // The session_state already has the `DefaultSerialzier` as `SerializerRegistry`.
+        let mut session_state = SessionStateBuilder::new_from_existing(self.session_state.clone())
+            .with_catalog_list(catalog_list)
+            .build();
+        // Substrait decoder will look up the UDFs in SessionState, so we need to register them
+        // Note: the query context must be passed to set the timezone
+        // We MUST register the UDFs after we build the session state, otherwise the UDFs will be lost
+        // if they have the same name as the default UDFs or their alias.
+        // e.g. The default UDF `to_char()` has an alias `date_format()`, if we register a UDF with the name `date_format()`
+        // before we build the session state, the UDF will be lost.
+        for func in FUNCTION_REGISTRY.functions() {
+            let udf: Arc<ScalarUDF> = Arc::new(
+                create_udf(func.clone(), self.query_ctx.clone(), Default::default()).into(),
+            );
+            session_state
+                .register_udf(udf)
+                .context(RegisterUdfSnafu { name: func.name() })?;
+        }
         let logical_plan = DFLogicalSubstraitConvertor
-            .decode(message, catalog_list.clone(), self.session_state.clone())
+            .decode(message, session_state)
             .await
             .map_err(BoxedError::new)
             .context(common_query::error::DecodePlanSnafu)?;
@@ -129,13 +144,28 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
 
 #[cfg(test)]
 mod tests {
+    use datafusion::catalog::TableProvider;
+    use datafusion_expr::{col, lit, LogicalPlanBuilder, LogicalTableSource};
+    use datatypes::arrow::datatypes::SchemaRef;
     use session::context::QueryContext;
 
     use super::*;
     use crate::dummy_catalog::DummyCatalogList;
     use crate::optimizer::test_util::mock_table_provider;
-    use crate::plan::tests::mock_plan;
     use crate::QueryEngineFactory;
+
+    fn mock_plan(schema: SchemaRef) -> LogicalPlan {
+        let table_source = LogicalTableSource::new(schema);
+        let projection = None;
+        let builder =
+            LogicalPlanBuilder::scan("devices", Arc::new(table_source), projection).unwrap();
+
+        builder
+            .filter(col("k0").eq(lit("hello")))
+            .unwrap()
+            .build()
+            .unwrap()
+    }
 
     #[tokio::test]
     async fn test_serializer_decode_plan() {
@@ -144,7 +174,8 @@ mod tests {
 
         let engine = factory.query_engine();
 
-        let plan = mock_plan();
+        let table_provider = Arc::new(mock_table_provider(1.into()));
+        let plan = mock_plan(table_provider.schema().clone());
 
         let bytes = DFLogicalSubstraitConvertor
             .encode(&plan, DefaultSerializer)
@@ -154,7 +185,6 @@ mod tests {
             .engine_context(QueryContext::arc())
             .new_plan_decoder()
             .unwrap();
-        let table_provider = Arc::new(mock_table_provider(1.into()));
         let catalog_list = Arc::new(DummyCatalogList::with_table_provider(table_provider));
 
         let decode_plan = plan_decoder
@@ -163,9 +193,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            "Filter: devices.k0 > Int32(500)
-  TableScan: devices projection=[k0, ts, v0]",
-            format!("{:?}", decode_plan),
+            "Filter: devices.k0 = Utf8(\"hello\")
+  TableScan: devices",
+            decode_plan.to_string(),
         );
     }
 }

@@ -19,11 +19,11 @@ use api::v1::alter_database_expr::Kind as AlterDatabaseKind;
 use api::v1::alter_table_expr::Kind as AlterTableKind;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{
-    AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer, ColumnDataType,
-    ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn,
-    DropColumns, ExpireAfter, ModifyColumnType, ModifyColumnTypes, RenameTable, SemanticType,
-    SetColumnFulltext, SetDatabaseOptions, SetTableOptions, TableName, UnsetColumnFulltext,
-    UnsetDatabaseOptions, UnsetTableOptions,
+    set_index, unset_index, AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer,
+    ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
+    DropColumn, DropColumns, ExpireAfter, ModifyColumnType, ModifyColumnTypes, RenameTable,
+    SemanticType, SetDatabaseOptions, SetFulltext, SetIndex, SetInverted, SetTableOptions,
+    TableName, UnsetDatabaseOptions, UnsetFulltext, UnsetIndex, UnsetInverted, UnsetTableOptions,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
@@ -281,8 +281,29 @@ pub fn validate_create_expr(create: &CreateTableExpr) -> Result<()> {
         }
         .fail();
     }
+    // verify do not contain interval type column issue #3235
+    for column in &create.column_defs {
+        if is_interval_type(&column.data_type()) {
+            return InvalidSqlSnafu {
+                err_msg: format!(
+                    "column name `{}` is interval type, which is not supported",
+                    column.name
+                ),
+            }
+            .fail();
+        }
+    }
 
     Ok(())
+}
+
+fn is_interval_type(data_type: &ColumnDataType) -> bool {
+    matches!(
+        data_type,
+        ColumnDataType::IntervalYearMonth
+            | ColumnDataType::IntervalDayTime
+            | ColumnDataType::IntervalMonthDayNano
+    )
 }
 
 fn find_primary_keys(
@@ -477,6 +498,7 @@ pub fn column_schemas_to_defs(
         .collect()
 }
 
+/// Converts a SQL alter table statement into a gRPC alter table expression.
 pub(crate) fn to_alter_table_expr(
     alter_table: AlterTable,
     query_ctx: &QueryContextRef,
@@ -493,18 +515,29 @@ pub(crate) fn to_alter_table_expr(
             }
             .fail();
         }
-        AlterTableOperation::AddColumn {
-            column_def,
-            location,
-        } => AlterTableKind::AddColumns(AddColumns {
-            add_columns: vec![AddColumn {
-                column_def: Some(
-                    sql_column_def_to_grpc_column_def(&column_def, Some(&query_ctx.timezone()))
-                        .map_err(BoxedError::new)
-                        .context(ExternalSnafu)?,
-                ),
-                location: location.as_ref().map(From::from),
-            }],
+        AlterTableOperation::AddColumns { add_columns } => AlterTableKind::AddColumns(AddColumns {
+            add_columns: add_columns
+                .into_iter()
+                .map(|add_column| {
+                    let column_def = sql_column_def_to_grpc_column_def(
+                        &add_column.column_def,
+                        Some(&query_ctx.timezone()),
+                    )
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+                    if is_interval_type(&column_def.data_type()) {
+                        return NotSupportedSnafu {
+                            feat: "Add column with interval type",
+                        }
+                        .fail();
+                    }
+                    Ok(AddColumn {
+                        column_def: Some(column_def),
+                        location: add_column.location.as_ref().map(From::from),
+                        add_if_not_exists: add_column.add_if_not_exists,
+                    })
+                })
+                .collect::<Result<Vec<AddColumn>>>()?,
         }),
         AlterTableOperation::ModifyColumnType {
             column_name,
@@ -515,6 +548,12 @@ pub(crate) fn to_alter_table_expr(
             let (target_type, target_type_extension) = ColumnDataTypeWrapper::try_from(target_type)
                 .map(|w| w.to_parts())
                 .context(ColumnDataTypeSnafu)?;
+            if is_interval_type(&target_type) {
+                return NotSupportedSnafu {
+                    feat: "Modify column type to interval type",
+                }
+                .fail();
+            }
             AlterTableKind::ModifyColumnTypes(ModifyColumnTypes {
                 modify_column_types: vec![ModifyColumnType {
                     column_name: column_name.value,
@@ -541,23 +580,39 @@ pub(crate) fn to_alter_table_expr(
         AlterTableOperation::UnsetTableOptions { keys } => {
             AlterTableKind::UnsetTableOptions(UnsetTableOptions { keys })
         }
-        AlterTableOperation::SetColumnFulltext {
-            column_name,
-            options,
-        } => AlterTableKind::SetColumnFulltext(SetColumnFulltext {
-            column_name: column_name.value,
-            enable: options.enable,
-            analyzer: match options.analyzer {
-                FulltextAnalyzer::English => Analyzer::English.into(),
-                FulltextAnalyzer::Chinese => Analyzer::Chinese.into(),
+        AlterTableOperation::SetIndex { options } => AlterTableKind::SetIndex(match options {
+            sql::statements::alter::SetIndexOperation::Fulltext {
+                column_name,
+                options,
+            } => SetIndex {
+                options: Some(set_index::Options::Fulltext(SetFulltext {
+                    column_name: column_name.value,
+                    enable: options.enable,
+                    analyzer: match options.analyzer {
+                        FulltextAnalyzer::English => Analyzer::English.into(),
+                        FulltextAnalyzer::Chinese => Analyzer::Chinese.into(),
+                    },
+                    case_sensitive: options.case_sensitive,
+                })),
             },
-            case_sensitive: options.case_sensitive,
+            sql::statements::alter::SetIndexOperation::Inverted { column_name } => SetIndex {
+                options: Some(set_index::Options::Inverted(SetInverted {
+                    column_name: column_name.value,
+                })),
+            },
         }),
-        AlterTableOperation::UnsetColumnFulltext { column_name } => {
-            AlterTableKind::UnsetColumnFulltext(UnsetColumnFulltext {
-                column_name: column_name.value,
-            })
-        }
+        AlterTableOperation::UnsetIndex { options } => AlterTableKind::UnsetIndex(match options {
+            sql::statements::alter::UnsetIndexOperation::Fulltext { column_name } => UnsetIndex {
+                options: Some(unset_index::Options::Fulltext(UnsetFulltext {
+                    column_name: column_name.value,
+                })),
+            },
+            sql::statements::alter::UnsetIndexOperation::Inverted { column_name } => UnsetIndex {
+                options: Some(unset_index::Options::Inverted(UnsetInverted {
+                    column_name: column_name.value,
+                })),
+            },
+        }),
     };
 
     Ok(AlterTableExpr {

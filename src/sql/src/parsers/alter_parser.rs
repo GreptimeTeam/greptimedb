@@ -20,13 +20,15 @@ use snafu::{ensure, ResultExt};
 use sqlparser::ast::Ident;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
-use sqlparser::tokenizer::Token;
+use sqlparser::tokenizer::{Token, TokenWithLocation};
 
 use crate::error::{self, InvalidColumnOptionSnafu, Result, SetFulltextOptionSnafu};
 use crate::parser::ParserContext;
+use crate::parsers::create_parser::INVERTED;
 use crate::parsers::utils::validate_column_fulltext_create_option;
 use crate::statements::alter::{
-    AlterDatabase, AlterDatabaseOperation, AlterTable, AlterTableOperation, KeyValueOption,
+    AddColumn, AlterDatabase, AlterDatabaseOperation, AlterTable, AlterTableOperation,
+    KeyValueOption, SetIndexOperation, UnsetIndexOperation,
 };
 use crate::statements::statement::Statement;
 use crate::util::parse_option_string;
@@ -120,7 +122,8 @@ impl ParserContext<'_> {
                                 .expect_keyword(Keyword::COLUMN)
                                 .context(error::SyntaxSnafu)?;
                             let name = Self::canonicalize_identifier(
-                                self.parse_identifier().context(error::SyntaxSnafu)?,
+                                Self::parse_identifier(&mut self.parser)
+                                    .context(error::SyntaxSnafu)?,
                             );
                             AlterTableOperation::DropColumn { name }
                         }
@@ -185,30 +188,12 @@ impl ParserContext<'_> {
         {
             Ok(AlterTableOperation::AddConstraint(constraint))
         } else {
-            let _ = self.parser.parse_keyword(Keyword::COLUMN);
-            let mut column_def = self.parser.parse_column_def().context(error::SyntaxSnafu)?;
-            column_def.name = Self::canonicalize_identifier(column_def.name);
-            let location = if self.parser.parse_keyword(Keyword::FIRST) {
-                Some(AddColumnLocation::First)
-            } else if let Token::Word(word) = self.parser.peek_token().token {
-                if word.value.eq_ignore_ascii_case("AFTER") {
-                    let _ = self.parser.next_token();
-                    let name = Self::canonicalize_identifier(
-                        self.parse_identifier().context(error::SyntaxSnafu)?,
-                    );
-                    Some(AddColumnLocation::After {
-                        column_name: name.value,
-                    })
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            Ok(AlterTableOperation::AddColumn {
-                column_def,
-                location,
-            })
+            self.parser.prev_token();
+            let add_columns = self
+                .parser
+                .parse_comma_separated(parse_add_columns)
+                .context(error::SyntaxSnafu)?;
+            Ok(AlterTableOperation::AddColumns { add_columns })
         }
     }
 
@@ -226,15 +211,13 @@ impl ParserContext<'_> {
         match self.parser.peek_token().token {
             Token::Word(w) => {
                 if w.value.eq_ignore_ascii_case("UNSET") {
-                    let _ = self.parser.next_token();
-
-                    self.parser
-                        .expect_keyword(Keyword::FULLTEXT)
-                        .context(error::SyntaxSnafu)?;
-
-                    Ok(AlterTableOperation::UnsetColumnFulltext { column_name })
+                    // consume the current token.
+                    self.parser.next_token();
+                    self.parse_alter_column_unset_index(column_name)
                 } else if w.keyword == Keyword::SET {
-                    self.parse_alter_column_fulltext(column_name)
+                    // consume the current token.
+                    self.parser.next_token();
+                    self.parse_alter_column_set_index(column_name)
                 } else {
                     let data_type = self.parser.parse_data_type().context(error::SyntaxSnafu)?;
                     Ok(AlterTableOperation::ModifyColumnType {
@@ -250,13 +233,62 @@ impl ParserContext<'_> {
         }
     }
 
+    fn parse_alter_column_unset_index(
+        &mut self,
+        column_name: Ident,
+    ) -> Result<AlterTableOperation> {
+        match self.parser.next_token() {
+            TokenWithLocation {
+                token: Token::Word(w),
+                ..
+            } if w.keyword == Keyword::FULLTEXT => Ok(AlterTableOperation::UnsetIndex {
+                options: UnsetIndexOperation::Fulltext { column_name },
+            }),
+
+            TokenWithLocation {
+                token: Token::Word(w),
+                ..
+            } if w.value.eq_ignore_ascii_case(INVERTED) => {
+                self.parser
+                    .expect_keyword(Keyword::INDEX)
+                    .context(error::SyntaxSnafu)?;
+                Ok(AlterTableOperation::UnsetIndex {
+                    options: UnsetIndexOperation::Inverted { column_name },
+                })
+            }
+            _ => self.expected(
+                format!("{:?} OR INVERTED INDEX", Keyword::FULLTEXT).as_str(),
+                self.parser.peek_token(),
+            ),
+        }
+    }
+
+    fn parse_alter_column_set_index(&mut self, column_name: Ident) -> Result<AlterTableOperation> {
+        match self.parser.next_token() {
+            TokenWithLocation {
+                token: Token::Word(w),
+                ..
+            } if w.keyword == Keyword::FULLTEXT => self.parse_alter_column_fulltext(column_name),
+
+            TokenWithLocation {
+                token: Token::Word(w),
+                ..
+            } if w.value.eq_ignore_ascii_case(INVERTED) => {
+                self.parser
+                    .expect_keyword(Keyword::INDEX)
+                    .context(error::SyntaxSnafu)?;
+                Ok(AlterTableOperation::SetIndex {
+                    options: SetIndexOperation::Inverted { column_name },
+                })
+            }
+            _ => self.expected(
+                format!("{:?} OR INVERTED INDEX", Keyword::FULLTEXT).as_str(),
+                self.parser.peek_token(),
+            ),
+        }
+    }
+
     fn parse_alter_column_fulltext(&mut self, column_name: Ident) -> Result<AlterTableOperation> {
-        let _ = self.parser.next_token();
-
-        self.parser
-            .expect_keyword(Keyword::FULLTEXT)
-            .context(error::SyntaxSnafu)?;
-
         let mut options = self
             .parser
             .parse_options(Keyword::WITH)
@@ -280,9 +312,11 @@ impl ParserContext<'_> {
             "true".to_string(),
         );
 
-        Ok(AlterTableOperation::SetColumnFulltext {
-            column_name,
-            options: options.try_into().context(SetFulltextOptionSnafu)?,
+        Ok(AlterTableOperation::SetIndex {
+            options: SetIndexOperation::Fulltext {
+                column_name,
+                options: options.try_into().context(SetFulltextOptionSnafu)?,
+            },
         })
     }
 }
@@ -304,6 +338,35 @@ fn parse_string_options(parser: &mut Parser) -> std::result::Result<(String, Str
     Ok((name, value))
 }
 
+fn parse_add_columns(parser: &mut Parser) -> std::result::Result<AddColumn, ParserError> {
+    parser.expect_keyword(Keyword::ADD)?;
+    let _ = parser.parse_keyword(Keyword::COLUMN);
+    let add_if_not_exists = parser.parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
+    let mut column_def = parser.parse_column_def()?;
+    column_def.name = ParserContext::canonicalize_identifier(column_def.name);
+    let location = if parser.parse_keyword(Keyword::FIRST) {
+        Some(AddColumnLocation::First)
+    } else if let Token::Word(word) = parser.peek_token().token {
+        if word.value.eq_ignore_ascii_case("AFTER") {
+            let _ = parser.next_token();
+            let name =
+                ParserContext::canonicalize_identifier(ParserContext::parse_identifier(parser)?);
+            Some(AddColumnLocation::After {
+                column_name: name.value,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    Ok(AddColumn {
+        column_def,
+        location,
+        add_if_not_exists,
+    })
+}
+
 /// Parses a comma separated list of string literals.
 fn parse_string_option_names(parser: &mut Parser) -> std::result::Result<String, ParserError> {
     parser.parse_literal_string()
@@ -315,7 +378,7 @@ mod tests {
 
     use common_error::ext::ErrorExt;
     use datatypes::schema::{FulltextAnalyzer, FulltextOptions};
-    use sqlparser::ast::{ColumnOption, DataType};
+    use sqlparser::ast::{ColumnDef, ColumnOption, ColumnOptionDef, DataType};
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
@@ -397,19 +460,18 @@ mod tests {
                 assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
 
                 let alter_operation = alter_table.alter_operation();
-                assert_matches!(alter_operation, AlterTableOperation::AddColumn { .. });
+                assert_matches!(alter_operation, AlterTableOperation::AddColumns { .. });
                 match alter_operation {
-                    AlterTableOperation::AddColumn {
-                        column_def,
-                        location,
-                    } => {
-                        assert_eq!("tagk_i", column_def.name.value);
-                        assert_eq!(DataType::String(None), column_def.data_type);
-                        assert!(column_def
+                    AlterTableOperation::AddColumns { add_columns } => {
+                        assert_eq!(add_columns.len(), 1);
+                        assert_eq!("tagk_i", add_columns[0].column_def.name.value);
+                        assert_eq!(DataType::String(None), add_columns[0].column_def.data_type);
+                        assert!(add_columns[0]
+                            .column_def
                             .options
                             .iter()
                             .any(|o| matches!(o.option, ColumnOption::Null)));
-                        assert_eq!(&None, location);
+                        assert_eq!(&None, &add_columns[0].location);
                     }
                     _ => unreachable!(),
                 }
@@ -433,19 +495,17 @@ mod tests {
                 assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
 
                 let alter_operation = alter_table.alter_operation();
-                assert_matches!(alter_operation, AlterTableOperation::AddColumn { .. });
+                assert_matches!(alter_operation, AlterTableOperation::AddColumns { .. });
                 match alter_operation {
-                    AlterTableOperation::AddColumn {
-                        column_def,
-                        location,
-                    } => {
-                        assert_eq!("tagk_i", column_def.name.value);
-                        assert_eq!(DataType::String(None), column_def.data_type);
-                        assert!(column_def
+                    AlterTableOperation::AddColumns { add_columns } => {
+                        assert_eq!("tagk_i", add_columns[0].column_def.name.value);
+                        assert_eq!(DataType::String(None), add_columns[0].column_def.data_type);
+                        assert!(add_columns[0]
+                            .column_def
                             .options
                             .iter()
                             .any(|o| matches!(o.option, ColumnOption::Null)));
-                        assert_eq!(&Some(AddColumnLocation::First), location);
+                        assert_eq!(&Some(AddColumnLocation::First), &add_columns[0].location);
                     }
                     _ => unreachable!(),
                 }
@@ -456,7 +516,8 @@ mod tests {
 
     #[test]
     fn test_parse_alter_add_column_with_after() {
-        let sql = "ALTER TABLE my_metric_1 ADD tagk_i STRING Null AFTER ts;";
+        let sql =
+            "ALTER TABLE my_metric_1 ADD tagk_i STRING Null AFTER ts, add column tagl_i String;";
         let mut result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -469,24 +530,103 @@ mod tests {
                 assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
 
                 let alter_operation = alter_table.alter_operation();
-                assert_matches!(alter_operation, AlterTableOperation::AddColumn { .. });
+                assert_matches!(alter_operation, AlterTableOperation::AddColumns { .. });
                 match alter_operation {
-                    AlterTableOperation::AddColumn {
-                        column_def,
-                        location,
-                    } => {
-                        assert_eq!("tagk_i", column_def.name.value);
-                        assert_eq!(DataType::String(None), column_def.data_type);
-                        assert!(column_def
-                            .options
+                    AlterTableOperation::AddColumns { add_columns } => {
+                        let expecteds: Vec<(Option<AddColumnLocation>, ColumnDef)> = vec![
+                            (
+                                Some(AddColumnLocation::After {
+                                    column_name: "ts".to_string(),
+                                }),
+                                ColumnDef {
+                                    name: Ident::new("tagk_i"),
+                                    data_type: DataType::String(None),
+                                    options: vec![ColumnOptionDef {
+                                        name: None,
+                                        option: ColumnOption::Null,
+                                    }],
+                                    collation: None,
+                                },
+                            ),
+                            (
+                                None,
+                                ColumnDef {
+                                    name: Ident::new("tagl_i"),
+                                    data_type: DataType::String(None),
+                                    options: vec![],
+                                    collation: None,
+                                },
+                            ),
+                        ];
+                        for (add_column, expected) in add_columns
                             .iter()
-                            .any(|o| matches!(o.option, ColumnOption::Null)));
-                        assert_eq!(
-                            &Some(AddColumnLocation::After {
-                                column_name: "ts".to_string()
-                            }),
-                            location
-                        );
+                            .zip(expecteds)
+                            .collect::<Vec<(&AddColumn, (Option<AddColumnLocation>, ColumnDef))>>()
+                        {
+                            assert_eq!(add_column.column_def, expected.1);
+                            assert_eq!(&expected.0, &add_column.location);
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_parse_add_column_if_not_exists() {
+        let sql = "ALTER TABLE test ADD COLUMN IF NOT EXISTS a INTEGER, ADD COLUMN b STRING, ADD COLUMN IF NOT EXISTS c INT;";
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(result.len(), 1);
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::AlterTable { .. });
+        match statement {
+            Statement::AlterTable(alter) => {
+                assert_eq!(alter.table_name.0[0].value, "test");
+                assert_matches!(
+                    alter.alter_operation,
+                    AlterTableOperation::AddColumns { .. }
+                );
+                match alter.alter_operation {
+                    AlterTableOperation::AddColumns { add_columns } => {
+                        let expected = vec![
+                            AddColumn {
+                                column_def: ColumnDef {
+                                    name: Ident::new("a"),
+                                    data_type: DataType::Integer(None),
+                                    collation: None,
+                                    options: vec![],
+                                },
+                                location: None,
+                                add_if_not_exists: true,
+                            },
+                            AddColumn {
+                                column_def: ColumnDef {
+                                    name: Ident::new("b"),
+                                    data_type: DataType::String(None),
+                                    collation: None,
+                                    options: vec![],
+                                },
+                                location: None,
+                                add_if_not_exists: false,
+                            },
+                            AddColumn {
+                                column_def: ColumnDef {
+                                    name: Ident::new("c"),
+                                    data_type: DataType::Int(None),
+                                    collation: None,
+                                    options: vec![],
+                                },
+                                location: None,
+                                add_if_not_exists: true,
+                            },
+                        ];
+                        for (idx, add_column) in add_columns.into_iter().enumerate() {
+                            assert_eq!(add_column, expected[idx]);
+                        }
                     }
                     _ => unreachable!(),
                 }
@@ -504,7 +644,7 @@ mod tests {
         let err = result.output_msg();
         assert_eq!(
             err,
-            "sql parser error: Expected COLUMN, found: a at Line: 1, Column 30"
+            "Invalid SQL syntax: sql parser error: Expected: COLUMN, found: a at Line: 1, Column: 30"
         );
 
         let sql = "ALTER TABLE my_metric_1 DROP COLUMN a";
@@ -650,7 +790,7 @@ mod tests {
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap_err();
         let err = result.output_msg();
-        assert_eq!(err, "sql parser error: Expected ADD or DROP or MODIFY or RENAME or SET after ALTER TABLE, found: table_t");
+        assert_eq!(err, "Invalid SQL syntax: sql parser error: Expected ADD or DROP or MODIFY or RENAME or SET after ALTER TABLE, found: table_t");
 
         let sql = "ALTER TABLE test_table RENAME table_t";
         let mut result =
@@ -764,14 +904,13 @@ mod tests {
                 assert_eq!("test_table", alter_table.table_name().0[0].value);
 
                 let alter_operation = alter_table.alter_operation();
-                assert_matches!(
-                    alter_operation,
-                    AlterTableOperation::SetColumnFulltext { .. }
-                );
                 match alter_operation {
-                    AlterTableOperation::SetColumnFulltext {
-                        column_name,
-                        options,
+                    AlterTableOperation::SetIndex {
+                        options:
+                            SetIndexOperation::Fulltext {
+                                column_name,
+                                options,
+                            },
                     } => {
                         assert_eq!("a", column_name.value);
                         assert_eq!(
@@ -784,7 +923,7 @@ mod tests {
                         );
                     }
                     _ => unreachable!(),
-                }
+                };
             }
             _ => unreachable!(),
         }
@@ -803,10 +942,12 @@ mod tests {
                 let alter_operation = alter_table.alter_operation();
                 assert_eq!(
                     alter_operation,
-                    &AlterTableOperation::UnsetColumnFulltext {
-                        column_name: Ident {
-                            value: "a".to_string(),
-                            quote_style: None
+                    &AlterTableOperation::UnsetIndex {
+                        options: UnsetIndexOperation::Fulltext {
+                            column_name: Ident {
+                                value: "a".to_string(),
+                                quote_style: None
+                            }
                         }
                     }
                 );
@@ -826,5 +967,66 @@ mod tests {
             err,
             "Invalid column option, column name: a, error: invalid FULLTEXT option: abcd"
         );
+    }
+
+    #[test]
+    fn test_parse_alter_column_inverted() {
+        let sql = "ALTER TABLE test_table MODIFY COLUMN a SET INVERTED INDEX";
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+
+        assert_eq!(1, result.len());
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::AlterTable { .. });
+        match statement {
+            Statement::AlterTable(alter_table) => {
+                assert_eq!("test_table", alter_table.table_name().0[0].value);
+
+                let alter_operation = alter_table.alter_operation();
+                match alter_operation {
+                    AlterTableOperation::SetIndex {
+                        options: SetIndexOperation::Inverted { column_name },
+                    } => assert_eq!("a", column_name.value),
+                    _ => unreachable!(),
+                };
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "ALTER TABLE test_table MODIFY COLUMN a UNSET INVERTED INDEX";
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::AlterTable { .. });
+        match statement {
+            Statement::AlterTable(alter_table) => {
+                assert_eq!("test_table", alter_table.table_name().0[0].value);
+
+                let alter_operation = alter_table.alter_operation();
+                assert_eq!(
+                    alter_operation,
+                    &AlterTableOperation::UnsetIndex {
+                        options: UnsetIndexOperation::Inverted {
+                            column_name: Ident {
+                                value: "a".to_string(),
+                                quote_style: None
+                            }
+                        }
+                    }
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        let invalid_sql = "ALTER TABLE test_table MODIFY COLUMN a SET INVERTED";
+        ParserContext::create_with_dialect(
+            invalid_sql,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap_err();
     }
 }

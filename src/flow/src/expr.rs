@@ -22,6 +22,7 @@ mod linear;
 pub(crate) mod relation;
 mod scalar;
 mod signature;
+pub(crate) mod utils;
 
 use arrow::compute::FilterBuilder;
 use datatypes::prelude::{ConcreteDataType, DataType};
@@ -52,6 +53,16 @@ pub struct Batch {
     row_count: usize,
     /// describe if corresponding rows in batch is insert or delete, None means all rows are insert
     diffs: Option<VectorRef>,
+}
+
+impl From<common_recordbatch::RecordBatch> for Batch {
+    fn from(value: common_recordbatch::RecordBatch) -> Self {
+        Self {
+            row_count: value.num_rows(),
+            batch: value.columns,
+            diffs: None,
+        }
+    }
 }
 
 impl PartialEq for Batch {
@@ -309,8 +320,7 @@ impl VectorDiff {
 
     fn try_new(vector: VectorRef, diff: Option<VectorRef>) -> Result<Self, EvalError> {
         ensure!(
-            diff.as_ref()
-                .map_or(true, |diff| diff.len() == vector.len()),
+            diff.as_ref().is_none_or(|diff| diff.len() == vector.len()),
             InvalidArgumentSnafu {
                 reason: "Length of vector and diff should be the same"
             }

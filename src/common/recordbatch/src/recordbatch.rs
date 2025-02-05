@@ -17,6 +17,7 @@ use std::slice;
 use std::sync::Arc;
 
 use datafusion::arrow::util::pretty::pretty_format_batches;
+use datatypes::arrow::array::RecordBatchOptions;
 use datatypes::prelude::DataType;
 use datatypes::schema::SchemaRef;
 use datatypes::value::Value;
@@ -35,7 +36,7 @@ use crate::DfRecordBatch;
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecordBatch {
     pub schema: SchemaRef,
-    columns: Vec<VectorRef>,
+    pub columns: Vec<VectorRef>,
     df_record_batch: DfRecordBatch,
 }
 
@@ -71,6 +72,21 @@ impl RecordBatch {
             columns,
             df_record_batch,
         }
+    }
+
+    /// Create an empty [`RecordBatch`] from `schema` with `num_rows`.
+    pub fn new_with_count(schema: SchemaRef, num_rows: usize) -> Result<Self> {
+        let df_record_batch = DfRecordBatch::try_new_with_options(
+            schema.arrow_schema().clone(),
+            vec![],
+            &RecordBatchOptions::new().with_row_count(Some(num_rows)),
+        )
+        .context(error::NewDfRecordBatchSnafu)?;
+        Ok(RecordBatch {
+            schema,
+            columns: vec![],
+            df_record_batch,
+        })
     }
 
     pub fn try_project(&self, indices: &[usize]) -> Result<Self> {

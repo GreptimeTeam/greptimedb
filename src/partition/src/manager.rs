@@ -327,7 +327,7 @@ fn create_partitions_from_region_routes(
 
 fn find_regions0(partition_rule: PartitionRuleRef, filter: &Expr) -> Result<HashSet<RegionNumber>> {
     match filter {
-        Expr::BinaryExpr(BinaryExpr { left, op, right }) if op.is_comparison_operator() => {
+        Expr::BinaryExpr(BinaryExpr { left, op, right }) if op.supports_propagation() => {
             let column_op_value = match (left.as_ref(), right.as_ref()) {
                 (Expr::Column(c), Expr::Literal(v)) => Some((&c.name, *op, v)),
                 (Expr::Literal(v), Expr::Column(c)) => Some((

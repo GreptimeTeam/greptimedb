@@ -46,7 +46,7 @@ use crate::inverted_index::create::sort::SortedStream;
 use crate::inverted_index::error::{
     CloseSnafu, FlushSnafu, ReadSnafu, Result, UnknownIntermediateCodecMagicSnafu, WriteSnafu,
 };
-use crate::inverted_index::Bytes;
+use crate::Bytes;
 
 /// `IntermediateWriter` serializes and writes intermediate data to the wrapped `writer`
 pub struct IntermediateWriter<W> {

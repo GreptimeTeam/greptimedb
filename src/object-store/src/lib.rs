@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use opendal::raw::{normalize_path as raw_normalize_path, Access, HttpClient};
+pub use opendal::raw::{Access, HttpClient};
 pub use opendal::{
     services, Buffer, Builder as ObjectStoreBuilder, Entry, EntryMode, Error, ErrorKind,
-    FuturesAsyncReader, FuturesAsyncWriter, Lister, Metakey, Operator as ObjectStore, Reader,
-    Result, Writer,
+    FuturesAsyncReader, FuturesAsyncWriter, Lister, Operator as ObjectStore, Reader, Result,
+    Writer,
 };
 
 pub mod layers;

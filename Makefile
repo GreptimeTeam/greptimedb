@@ -8,7 +8,7 @@ CARGO_BUILD_OPTS := --locked
 IMAGE_REGISTRY ?= docker.io
 IMAGE_NAMESPACE ?= greptime
 IMAGE_TAG ?= latest
-DEV_BUILDER_IMAGE_TAG ?= 2024-10-19-a5c00e85-20241024184445
+DEV_BUILDER_IMAGE_TAG ?= 2024-12-25-9d0fa5d5-20250124085746
 BUILDX_MULTI_PLATFORM_BUILD ?= false
 BUILDX_BUILDER_NAME ?= gtbuilder
 BASE_IMAGE ?= ubuntu
@@ -165,15 +165,14 @@ nextest: ## Install nextest tools.
 sqlness-test: ## Run sqlness test.
 	cargo sqlness ${SQLNESS_OPTS}
 
-# Run fuzz test ${FUZZ_TARGET}.
 RUNS ?= 1
 FUZZ_TARGET ?= fuzz_alter_table
 .PHONY: fuzz
-fuzz:
+fuzz: ## Run fuzz test ${FUZZ_TARGET}.
 	cargo fuzz run ${FUZZ_TARGET} --fuzz-dir tests-fuzz -D -s none -- -runs=${RUNS}
 
 .PHONY: fuzz-ls
-fuzz-ls:
+fuzz-ls: ## List all fuzz targets.
 	cargo fuzz list --fuzz-dir tests-fuzz
 
 .PHONY: check

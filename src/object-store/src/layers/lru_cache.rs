@@ -16,8 +16,7 @@ use std::sync::Arc;
 
 use opendal::raw::oio::Reader;
 use opendal::raw::{
-    Access, Layer, LayeredAccess, OpDelete, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead,
-    RpWrite,
+    Access, Layer, LayeredAccess, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead, RpWrite,
 };
 use opendal::Result;
 mod read_cache;
@@ -25,6 +24,8 @@ use std::time::Instant;
 
 use common_telemetry::{error, info};
 use read_cache::ReadCache;
+
+use crate::layers::lru_cache::read_cache::CacheAwareDeleter;
 
 /// An opendal layer with local LRU file cache supporting.
 pub struct LruCacheLayer<C: Access> {
@@ -103,6 +104,8 @@ impl<I: Access, C: Access> LayeredAccess for LruCacheAccess<I, C> {
     type BlockingWriter = I::BlockingWriter;
     type Lister = I::Lister;
     type BlockingLister = I::BlockingLister;
+    type Deleter = CacheAwareDeleter<C, I::Deleter>;
+    type BlockingDeleter = I::BlockingDeleter;
 
     fn inner(&self) -> &Self::Inner {
         &self.inner
@@ -122,12 +125,11 @@ impl<I: Access, C: Access> LayeredAccess for LruCacheAccess<I, C> {
         result
     }
 
-    async fn delete(&self, path: &str, args: OpDelete) -> Result<RpDelete> {
-        let result = self.inner.delete(path, args).await;
-
-        self.read_cache.invalidate_entries_with_prefix(path);
-
-        result
+    async fn delete(&self) -> Result<(RpDelete, Self::Deleter)> {
+        self.inner
+            .delete()
+            .await
+            .map(|(rp, deleter)| (rp, CacheAwareDeleter::new(self.read_cache.clone(), deleter)))
     }
 
     async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Lister)> {
@@ -149,5 +151,9 @@ impl<I: Access, C: Access> LayeredAccess for LruCacheAccess<I, C> {
 
     fn blocking_list(&self, path: &str, args: OpList) -> Result<(RpList, Self::BlockingLister)> {
         self.inner.blocking_list(path, args)
+    }
+
+    fn blocking_delete(&self) -> Result<(RpDelete, Self::BlockingDeleter)> {
+        self.inner.blocking_delete()
     }
 }

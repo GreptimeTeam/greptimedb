@@ -119,7 +119,7 @@ transform:
           field: input_s
           resolution: s
           ignore_missing: true
-    
+
     transform:
       - fields:
             - input_s, ts
@@ -370,5 +370,53 @@ transform:
     assert_eq!(
         output.rows[0].values[1].value_data,
         Some(ValueData::TimestampMillisecondValue(1722583122284))
+    );
+}
+
+#[test]
+fn test_timestamp_without_processor() {
+    let test_input = r#"
+    {
+        "input_s": 1722580862,
+        "input_nano": 1722583122284583936
+    }"#;
+
+    let pipeline_yaml = r#"
+transform:
+  - fields:
+      - input_s
+    type: timestamp, s
+  - fields:
+      - input_nano
+    type: timestamp, ns
+"#;
+
+    let expected_schema = vec![
+        common::make_column_schema(
+            "input_s".to_string(),
+            ColumnDataType::TimestampSecond,
+            SemanticType::Field,
+        ),
+        common::make_column_schema(
+            "input_nano".to_string(),
+            ColumnDataType::TimestampNanosecond,
+            SemanticType::Field,
+        ),
+        common::make_column_schema(
+            "greptime_timestamp".to_string(),
+            ColumnDataType::TimestampNanosecond,
+            SemanticType::Timestamp,
+        ),
+    ];
+
+    let output = common::parse_and_exec(test_input, pipeline_yaml);
+    assert_eq!(output.schema, expected_schema);
+    assert_eq!(
+        output.rows[0].values[0].value_data,
+        Some(ValueData::TimestampSecondValue(1722580862))
+    );
+    assert_eq!(
+        output.rows[0].values[1].value_data,
+        Some(ValueData::TimestampNanosecondValue(1722583122284583936))
     );
 }

@@ -91,6 +91,12 @@ pub struct CompactionRegion {
     pub(crate) current_version: CompactionVersion,
     pub(crate) file_purger: Option<Arc<LocalFilePurger>>,
     pub(crate) ttl: Option<TimeToLive>,
+
+    /// Controls the parallelism of this compaction task. Default is 1.
+    ///
+    /// The parallel is inside this compaction task, not across different compaction tasks.
+    /// It can be different windows of the same compaction task or something like this.
+    pub max_parallelism: usize,
 }
 
 /// OpenCompactionRegionRequest represents the request to open a compaction region.
@@ -99,6 +105,7 @@ pub struct OpenCompactionRegionRequest {
     pub region_id: RegionId,
     pub region_dir: String,
     pub region_options: RegionOptions,
+    pub max_parallelism: usize,
 }
 
 /// Open a compaction region from a compaction request.
@@ -205,6 +212,7 @@ pub async fn open_compaction_region(
         current_version,
         file_purger: Some(file_purger),
         ttl: Some(ttl),
+        max_parallelism: req.max_parallelism,
     })
 }
 
@@ -266,6 +274,7 @@ impl Compactor for DefaultCompactor {
         let mut futs = Vec::with_capacity(picker_output.outputs.len());
         let mut compacted_inputs =
             Vec::with_capacity(picker_output.outputs.iter().map(|o| o.inputs.len()).sum());
+        let internal_parallelism = compaction_region.max_parallelism.max(1);
 
         for output in picker_output.outputs.drain(..) {
             compacted_inputs.extend(output.inputs.iter().map(|f| f.meta_ref().clone()));
@@ -357,9 +366,8 @@ impl Compactor for DefaultCompactor {
         }
         let mut output_files = Vec::with_capacity(futs.len());
         while !futs.is_empty() {
-            let mut task_chunk =
-                Vec::with_capacity(crate::compaction::task::MAX_PARALLEL_COMPACTION);
-            for _ in 0..crate::compaction::task::MAX_PARALLEL_COMPACTION {
+            let mut task_chunk = Vec::with_capacity(internal_parallelism);
+            for _ in 0..internal_parallelism {
                 if let Some(task) = futs.pop() {
                     task_chunk.push(common_runtime::spawn_compact(task));
                 }

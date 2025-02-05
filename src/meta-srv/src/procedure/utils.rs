@@ -26,6 +26,7 @@ pub mod mock {
     use common_meta::peer::Peer;
     use common_runtime::runtime::BuilderBuild;
     use common_runtime::{Builder as RuntimeBuilder, Runtime};
+    use hyper_util::rt::TokioIo;
     use servers::grpc::region_server::{RegionServerHandler, RegionServerRequestHandler};
     use tokio::sync::mpsc;
     use tonic::codec::CompressionEncoding;
@@ -77,7 +78,7 @@ pub mod mock {
                     datanode.addr.clone(),
                     service_fn(move |_| {
                         let client = client.take().unwrap();
-                        async move { Ok::<_, Error>(client) }
+                        async move { Ok::<_, Error>(TokioIo::new(client)) }
                     }),
                 )
                 .unwrap();

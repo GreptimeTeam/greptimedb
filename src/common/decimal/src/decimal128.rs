@@ -164,7 +164,7 @@ impl FromStr for Decimal128 {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let len = s.as_bytes().len();
+        let len = s.len();
         if len <= BYTES_TO_OVERFLOW_RUST_DECIMAL {
             let rd = RustDecimal::from_str_exact(s).context(ParseRustDecimalStrSnafu { raw: s })?;
             Ok(Self::from(rd))

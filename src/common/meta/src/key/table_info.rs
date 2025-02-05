@@ -190,6 +190,13 @@ impl TableInfoManager {
         ))
     }
 
+    /// Checks if the table exists.
+    pub async fn exists(&self, table_id: TableId) -> Result<bool> {
+        let key = TableInfoKey::new(table_id);
+        let raw_key = key.to_bytes();
+        self.kv_backend.exists(&raw_key).await
+    }
+
     pub async fn get(
         &self,
         table_id: TableId,

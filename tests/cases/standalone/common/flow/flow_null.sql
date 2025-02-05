@@ -88,8 +88,8 @@ VALUES
 ADMIN FLUSH_FLOW('calc_ngx_country');
 
 SELECT
-    "ngx_access_log.client",
-    "ngx_access_log.country",
+    client,
+    country,
     country_count,
     time_window
 FROM
@@ -105,8 +105,8 @@ VALUES
 ADMIN FLUSH_FLOW('calc_ngx_country');
 
 SELECT
-    "ngx_access_log.client",
-    "ngx_access_log.country",
+    client,
+    country,
     country_count,
     time_window
 FROM
@@ -121,8 +121,8 @@ VALUES
 ADMIN FLUSH_FLOW('calc_ngx_country');
 
 SELECT
-    "ngx_access_log.client",
-    "ngx_access_log.country",
+    client,
+    country,
     country_count,
     time_window
 FROM

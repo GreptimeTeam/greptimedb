@@ -47,32 +47,20 @@ impl<'a> MemtableRowGroupPageFetcher<'a> {
         parquet_meta: &'a ParquetMetaData,
         bytes: Bytes,
     ) -> Self {
-        let metadata = parquet_meta.row_group(row_group_idx);
-        let row_count = metadata.num_rows() as usize;
-        let page_locations = parquet_meta
-            .offset_index()
-            .map(|x| x[row_group_idx].as_slice());
-
         Self {
-            base: RowGroupBase {
-                metadata,
-                page_locations,
-                row_count,
-                column_chunks: vec![None; metadata.columns().len()],
-                // the cached `column_uncompressed_pages` would never be used in Memtable readers.
-                column_uncompressed_pages: vec![None; metadata.columns().len()],
-            },
+            // the cached `column_uncompressed_pages` would never be used in Memtable readers.
+            base: RowGroupBase::new(parquet_meta, row_group_idx),
             bytes,
         }
     }
 
     /// Fetches column pages from memory file.
     pub(crate) fn fetch(&mut self, projection: &ProjectionMask, selection: Option<&RowSelection>) {
-        if let Some((selection, page_locations)) = selection.zip(self.base.page_locations) {
+        if let Some((selection, offset_index)) = selection.zip(self.base.offset_index) {
             // Selection provided.
             let (fetch_ranges, page_start_offsets) =
                 self.base
-                    .calc_sparse_read_ranges(projection, page_locations, selection);
+                    .calc_sparse_read_ranges(projection, offset_index, selection);
             if fetch_ranges.is_empty() {
                 return;
             }

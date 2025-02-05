@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
@@ -32,13 +32,15 @@ use store_api::metric_engine_consts::{
     METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX, METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
     METADATA_SCHEMA_VALUE_COLUMN_INDEX, METADATA_SCHEMA_VALUE_COLUMN_NAME,
 };
-use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
+use store_api::mito_engine_options::{
+    APPEND_MODE_KEY, MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, TTL_KEY,
+};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionCreateRequest, RegionRequest};
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::RegionId;
 
-use crate::engine::options::set_data_region_options;
+use crate::engine::options::{set_data_region_options, IndexOptions, PhysicalRegionOptions};
 use crate::engine::MetricEngineInner;
 use crate::error::{
     AddingFieldColumnSnafu, ColumnNotFoundSnafu, ColumnTypeMismatchSnafu,
@@ -91,6 +93,7 @@ impl MetricEngineInner {
         region_id: RegionId,
         request: RegionCreateRequest,
     ) -> Result<()> {
+        let physical_region_options = PhysicalRegionOptions::try_from(&request.options)?;
         let (data_region_id, metadata_region_id) = Self::transform_region_id(region_id);
 
         // create metadata region
@@ -107,11 +110,11 @@ impl MetricEngineInner {
 
         // create data region
         let create_data_region_request = self.create_request_for_data_region(&request);
-        let physical_column_set = create_data_region_request
+        let physical_columns = create_data_region_request
             .column_metadatas
             .iter()
-            .map(|metadata| metadata.column_schema.name.clone())
-            .collect::<HashSet<_>>();
+            .map(|metadata| (metadata.column_schema.name.clone(), metadata.column_id))
+            .collect::<HashMap<_, _>>();
         self.mito
             .handle_request(
                 data_region_id,
@@ -121,15 +124,22 @@ impl MetricEngineInner {
             .with_context(|_| CreateMitoRegionSnafu {
                 region_type: DATA_REGION_SUBDIR,
             })?;
+        let primary_key_encoding = self.mito.get_primary_key_encoding(data_region_id).context(
+            PhysicalRegionNotFoundSnafu {
+                region_id: data_region_id,
+            },
+        )?;
 
-        info!("Created physical metric region {region_id}");
+        info!("Created physical metric region {region_id}, primary key encoding={primary_key_encoding}, physical_region_options={physical_region_options:?}");
         PHYSICAL_REGION_COUNT.inc();
 
         // remember this table
-        self.state
-            .write()
-            .unwrap()
-            .add_physical_region(data_region_id, physical_column_set);
+        self.state.write().unwrap().add_physical_region(
+            data_region_id,
+            physical_columns,
+            primary_key_encoding,
+            physical_region_options,
+        );
 
         Ok(())
     }
@@ -180,17 +190,18 @@ impl MetricEngineInner {
         // find new columns to add
         let mut new_columns = vec![];
         let mut existing_columns = vec![];
-        {
+        let index_option = {
             let state = &self.state.read().unwrap();
-            let physical_columns =
-                state
-                    .physical_columns()
-                    .get(&data_region_id)
-                    .with_context(|| PhysicalRegionNotFoundSnafu {
-                        region_id: data_region_id,
-                    })?;
+            let region_state = state
+                .physical_region_states()
+                .get(&data_region_id)
+                .with_context(|| PhysicalRegionNotFoundSnafu {
+                    region_id: data_region_id,
+                })?;
+            let physical_columns = region_state.physical_columns();
+
             for col in &request.column_metadatas {
-                if !physical_columns.contains(&col.column_schema.name) {
+                if !physical_columns.contains_key(&col.column_schema.name) {
                     // Multi-field on physical table is explicit forbidden at present
                     // TODO(ruihang): support multi-field on both logical and physical column
                     ensure!(
@@ -204,7 +215,9 @@ impl MetricEngineInner {
                     existing_columns.push(col.column_schema.name.clone());
                 }
             }
-        }
+
+            region_state.options().index
+        };
 
         if !new_columns.is_empty() {
             info!("Found new columns {new_columns:?} to add to physical region {data_region_id}");
@@ -213,6 +226,7 @@ impl MetricEngineInner {
                 data_region_id,
                 logical_region_id,
                 &mut new_columns,
+                index_option,
             )
             .await?;
 
@@ -277,21 +291,17 @@ impl MetricEngineInner {
         data_region_id: RegionId,
         logical_region_id: RegionId,
         new_columns: &mut [ColumnMetadata],
+        index_options: IndexOptions,
     ) -> Result<()> {
         // alter data region
         self.data_region
-            .add_columns(data_region_id, new_columns)
+            .add_columns(data_region_id, new_columns, index_options)
             .await?;
 
-        // safety: previous step has checked this
-        self.state.write().unwrap().add_physical_columns(
-            data_region_id,
-            new_columns
-                .iter()
-                .map(|meta| meta.column_schema.name.clone()),
-        );
-        info!("Create region {logical_region_id} leads to adding columns {new_columns:?} to physical region {data_region_id}");
-        PHYSICAL_COLUMN_COUNT.add(new_columns.len() as _);
+        // Return early if no new columns are added.
+        if new_columns.is_empty() {
+            return Ok(());
+        }
 
         // correct the column id
         let after_alter_physical_schema = self.data_region.physical_columns(data_region_id).await?;
@@ -320,6 +330,16 @@ impl MetricEngineInner {
                 *col = (*column_metadata).clone();
             }
         }
+
+        // safety: previous step has checked this
+        self.state.write().unwrap().add_physical_columns(
+            data_region_id,
+            new_columns
+                .iter()
+                .map(|meta| (meta.column_schema.name.clone(), meta.column_id)),
+        );
+        info!("Create region {logical_region_id} leads to adding columns {new_columns:?} to physical region {data_region_id}");
+        PHYSICAL_COLUMN_COUNT.add(new_columns.len() as _);
 
         Ok(())
     }
@@ -504,7 +524,10 @@ impl MetricEngineInner {
         data_region_request.primary_key = primary_key;
 
         // set data region options
-        set_data_region_options(&mut data_region_request.options);
+        set_data_region_options(
+            &mut data_region_request.options,
+            self.config.experimental_sparse_primary_key_encoding,
+        );
 
         data_region_request
     }
@@ -520,7 +543,8 @@ impl MetricEngineInner {
                 DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
                 ConcreteDataType::uint32_datatype(),
                 false,
-            ),
+            )
+            .with_inverted_index(true),
         };
         let tsid_col = ColumnMetadata {
             column_id: ReservedColumnId::tsid(),
@@ -529,7 +553,8 @@ impl MetricEngineInner {
                 DATA_SCHEMA_TSID_COLUMN_NAME,
                 ConcreteDataType::uint64_datatype(),
                 false,
-            ),
+            )
+            .with_inverted_index(false),
         };
         [metric_name_col, tsid_col]
     }
@@ -539,7 +564,10 @@ impl MetricEngineInner {
 pub(crate) fn region_options_for_metadata_region(
     mut original: HashMap<String, String>,
 ) -> HashMap<String, String> {
+    // TODO(ruihang, weny): add whitelist for metric engine options.
     original.remove(APPEND_MODE_KEY);
+    // Don't allow to set primary key encoding for metadata region.
+    original.remove(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING);
     original.insert(TTL_KEY.to_string(), FOREVER.to_string());
     original
 }
@@ -549,6 +577,7 @@ mod test {
     use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
 
     use super::*;
+    use crate::config::EngineConfig;
     use crate::engine::MetricEngine;
     use crate::test_util::TestEnv;
 
@@ -707,7 +736,7 @@ mod test {
 
         // set up
         let env = TestEnv::new().await;
-        let engine = MetricEngine::new(env.mito());
+        let engine = MetricEngine::new(env.mito(), EngineConfig::default());
         let engine_inner = engine.inner;
 
         // check create data region request

@@ -26,14 +26,16 @@ use common_time::Timestamp;
 use datatypes::arrow;
 use datatypes::arrow::array::ArrayRef;
 use datatypes::data_type::{ConcreteDataType, DataType};
-use datatypes::prelude::{MutableVector, ScalarVectorBuilder, Vector, VectorRef};
+use datatypes::prelude::{MutableVector, Vector, VectorRef};
+use datatypes::types::TimestampType;
 use datatypes::value::{Value, ValueRef};
 use datatypes::vectors::{
-    Helper, UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder,
+    Helper, TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
+    TimestampSecondVector, UInt64Vector, UInt8Vector,
 };
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error::{
@@ -51,7 +53,7 @@ use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::dedup::LastNonNullIter;
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::region::options::MergeMode;
-use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
 
 /// Initial vector builder capacity.
 const INITIAL_BUILDER_CAPACITY: usize = 0;
@@ -95,7 +97,7 @@ impl MemtableBuilder for TimeSeriesMemtableBuilder {
 pub struct TimeSeriesMemtable {
     id: MemtableId,
     region_metadata: RegionMetadataRef,
-    row_codec: Arc<McmpRowCodec>,
+    row_codec: Arc<DensePrimaryKeyCodec>,
     series_set: SeriesSet,
     alloc_tracker: AllocTracker,
     max_timestamp: AtomicI64,
@@ -115,12 +117,7 @@ impl TimeSeriesMemtable {
         dedup: bool,
         merge_mode: MergeMode,
     ) -> Self {
-        let row_codec = Arc::new(McmpRowCodec::new(
-            region_metadata
-                .primary_key_columns()
-                .map(|c| SortField::new(c.column_schema.data_type.clone()))
-                .collect(),
-        ));
+        let row_codec = Arc::new(DensePrimaryKeyCodec::new(&region_metadata));
         let series_set = SeriesSet::new(region_metadata.clone(), row_codec.clone());
         let dedup = if merge_mode == MergeMode::LastNonNull {
             false
@@ -151,12 +148,13 @@ impl TimeSeriesMemtable {
 
     fn write_key_value(&self, kv: KeyValue, stats: &mut WriteMetrics) -> Result<()> {
         ensure!(
-            kv.num_primary_keys() == self.row_codec.num_fields(),
+            self.row_codec.num_fields() == kv.num_primary_keys(),
             PrimaryKeyLengthMismatchSnafu {
                 expect: self.row_codec.num_fields(),
-                actual: kv.num_primary_keys()
+                actual: kv.num_primary_keys(),
             }
         );
+
         let primary_key_encoded = self.row_codec.encode(kv.primary_keys())?;
         let fields = kv.fields().collect::<Vec<_>>();
 
@@ -241,6 +239,7 @@ impl Memtable for TimeSeriesMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         filters: Option<Predicate>,
+        sequence: Option<SequenceNumber>,
     ) -> Result<BoxedBatchIterator> {
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
@@ -253,7 +252,7 @@ impl Memtable for TimeSeriesMemtable {
 
         let iter = self
             .series_set
-            .iter_series(projection, filters, self.dedup)?;
+            .iter_series(projection, filters, self.dedup, sequence)?;
 
         if self.merge_mode == MergeMode::LastNonNull {
             let iter = LastNonNullIter::new(iter);
@@ -267,6 +266,7 @@ impl Memtable for TimeSeriesMemtable {
         &self,
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
+        sequence: Option<SequenceNumber>,
     ) -> MemtableRanges {
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
@@ -282,6 +282,7 @@ impl Memtable for TimeSeriesMemtable {
             predicate,
             dedup: self.dedup,
             merge_mode: self.merge_mode,
+            sequence,
         });
         let context = Arc::new(MemtableRangeContext::new(self.id, builder));
 
@@ -350,11 +351,11 @@ type SeriesRwLockMap = RwLock<BTreeMap<Vec<u8>, Arc<RwLock<Series>>>>;
 struct SeriesSet {
     region_metadata: RegionMetadataRef,
     series: Arc<SeriesRwLockMap>,
-    codec: Arc<McmpRowCodec>,
+    codec: Arc<DensePrimaryKeyCodec>,
 }
 
 impl SeriesSet {
-    fn new(region_metadata: RegionMetadataRef, codec: Arc<McmpRowCodec>) -> Self {
+    fn new(region_metadata: RegionMetadataRef, codec: Arc<DensePrimaryKeyCodec>) -> Self {
         Self {
             region_metadata,
             series: Default::default(),
@@ -389,6 +390,7 @@ impl SeriesSet {
         projection: HashSet<ColumnId>,
         predicate: Option<Predicate>,
         dedup: bool,
+        sequence: Option<SequenceNumber>,
     ) -> Result<Iter> {
         let primary_key_schema = primary_key_schema(&self.region_metadata);
         let primary_key_datatypes = self
@@ -406,6 +408,7 @@ impl SeriesSet {
             primary_key_datatypes,
             self.codec.clone(),
             dedup,
+            sequence,
         )
     }
 }
@@ -451,8 +454,9 @@ struct Iter {
     predicate: Vec<SimpleFilterEvaluator>,
     pk_schema: arrow::datatypes::SchemaRef,
     pk_datatypes: Vec<ConcreteDataType>,
-    codec: Arc<McmpRowCodec>,
+    codec: Arc<DensePrimaryKeyCodec>,
     dedup: bool,
+    sequence: Option<SequenceNumber>,
     metrics: Metrics,
 }
 
@@ -465,8 +469,9 @@ impl Iter {
         predicate: Option<Predicate>,
         pk_schema: arrow::datatypes::SchemaRef,
         pk_datatypes: Vec<ConcreteDataType>,
-        codec: Arc<McmpRowCodec>,
+        codec: Arc<DensePrimaryKeyCodec>,
         dedup: bool,
+        sequence: Option<SequenceNumber>,
     ) -> Result<Self> {
         let predicate = predicate
             .map(|predicate| {
@@ -487,6 +492,7 @@ impl Iter {
             pk_datatypes,
             codec,
             dedup,
+            sequence,
             metrics: Metrics::default(),
         })
     }
@@ -551,6 +557,12 @@ impl Iterator for Iter {
             self.metrics.num_batches += 1;
             self.metrics.num_rows += batch.as_ref().map(|b| b.num_rows()).unwrap_or(0);
             self.metrics.scan_cost += start.elapsed();
+
+            let mut batch = batch;
+            batch = batch.and_then(|mut batch| {
+                batch.filter_by_sequence(self.sequence)?;
+                Ok(batch)
+            });
             return Some(batch);
         }
         self.metrics.scan_cost += start.elapsed();
@@ -560,7 +572,7 @@ impl Iterator for Iter {
 }
 
 fn prune_primary_key(
-    codec: &Arc<McmpRowCodec>,
+    codec: &Arc<DensePrimaryKeyCodec>,
     pk: &[u8],
     series: &mut Series,
     datatypes: &[ConcreteDataType],
@@ -576,7 +588,7 @@ fn prune_primary_key(
     let pk_values = if let Some(pk_values) = series.pk_cache.as_ref() {
         pk_values
     } else {
-        let pk_values = codec.decode(pk);
+        let pk_values = codec.decode_dense_without_column_id(pk);
         if let Err(e) = pk_values {
             error!(e; "Failed to decode primary key");
             return true;
@@ -681,22 +693,23 @@ impl Series {
 
 /// `ValueBuilder` holds all the vector builders for field columns.
 struct ValueBuilder {
-    timestamp: Box<dyn MutableVector>,
-    sequence: UInt64VectorBuilder,
-    op_type: UInt8VectorBuilder,
+    timestamp: Vec<i64>,
+    timestamp_type: ConcreteDataType,
+    sequence: Vec<u64>,
+    op_type: Vec<u8>,
     fields: Vec<Option<Box<dyn MutableVector>>>,
     field_types: Vec<ConcreteDataType>,
 }
 
 impl ValueBuilder {
     fn new(region_metadata: &RegionMetadataRef, capacity: usize) -> Self {
-        let timestamp = region_metadata
+        let timestamp_type = region_metadata
             .time_index_column()
             .column_schema
             .data_type
-            .create_mutable_vector(capacity);
-        let sequence = UInt64VectorBuilder::with_capacity(capacity);
-        let op_type = UInt8VectorBuilder::with_capacity(capacity);
+            .clone();
+        let sequence = Vec::with_capacity(capacity);
+        let op_type = Vec::with_capacity(capacity);
 
         let field_types = region_metadata
             .field_columns()
@@ -705,7 +718,8 @@ impl ValueBuilder {
         let fields = (0..field_types.len()).map(|_| None).collect();
 
         Self {
-            timestamp,
+            timestamp: Vec::with_capacity(capacity),
+            timestamp_type,
             sequence,
             op_type,
             fields,
@@ -717,9 +731,10 @@ impl ValueBuilder {
     /// We don't need primary keys since they've already be encoded.
     fn push(&mut self, ts: ValueRef, sequence: u64, op_type: u8, fields: Vec<ValueRef>) {
         debug_assert_eq!(fields.len(), self.fields.len());
-        self.timestamp.push_value_ref(ts);
-        self.sequence.push_value_ref(ValueRef::UInt64(sequence));
-        self.op_type.push_value_ref(ValueRef::UInt8(op_type));
+        self.timestamp
+            .push(ts.as_timestamp().unwrap().unwrap().value());
+        self.sequence.push(sequence);
+        self.op_type.push(op_type);
         let num_rows = self.timestamp.len();
         for (idx, field_value) in fields.into_iter().enumerate() {
             if !field_value.is_null() || self.fields[idx].is_some() {
@@ -834,9 +849,23 @@ impl From<ValueBuilder> for Values {
                 }
             })
             .collect::<Vec<_>>();
-        let sequence = Arc::new(value.sequence.finish());
-        let op_type = Arc::new(value.op_type.finish());
-        let timestamp = value.timestamp.to_vector();
+        let sequence = Arc::new(UInt64Vector::from_vec(value.sequence));
+        let op_type = Arc::new(UInt8Vector::from_vec(value.op_type));
+        let timestamp: VectorRef = match value.timestamp_type {
+            ConcreteDataType::Timestamp(TimestampType::Second(_)) => {
+                Arc::new(TimestampSecondVector::from_vec(value.timestamp))
+            }
+            ConcreteDataType::Timestamp(TimestampType::Millisecond(_)) => {
+                Arc::new(TimestampMillisecondVector::from_vec(value.timestamp))
+            }
+            ConcreteDataType::Timestamp(TimestampType::Microsecond(_)) => {
+                Arc::new(TimestampMicrosecondVector::from_vec(value.timestamp))
+            }
+            ConcreteDataType::Timestamp(TimestampType::Nanosecond(_)) => {
+                Arc::new(TimestampNanosecondVector::from_vec(value.timestamp))
+            }
+            _ => unreachable!(),
+        };
 
         if cfg!(debug_assertions) {
             debug_assert_eq!(timestamp.len(), sequence.len());
@@ -860,6 +889,7 @@ struct TimeSeriesIterBuilder {
     projection: HashSet<ColumnId>,
     predicate: Option<Predicate>,
     dedup: bool,
+    sequence: Option<SequenceNumber>,
     merge_mode: MergeMode,
 }
 
@@ -869,6 +899,7 @@ impl IterBuilder for TimeSeriesIterBuilder {
             self.projection.clone(),
             self.predicate.clone(),
             self.dedup,
+            self.sequence,
         )?;
 
         if self.merge_mode == MergeMode::LastNonNull {
@@ -896,6 +927,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
+    use crate::row_converter::SortField;
 
     fn schema_for_test() -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
@@ -1153,6 +1185,7 @@ mod tests {
                 schema: column_schema,
                 rows,
             }),
+            write_hint: None,
         };
         KeyValues::new(schema.as_ref(), mutation).unwrap()
     }
@@ -1160,10 +1193,15 @@ mod tests {
     #[test]
     fn test_series_set_concurrency() {
         let schema = schema_for_test();
-        let row_codec = Arc::new(McmpRowCodec::new(
+        let row_codec = Arc::new(DensePrimaryKeyCodec::with_fields(
             schema
                 .primary_key_columns()
-                .map(|c| SortField::new(c.column_schema.data_type.clone()))
+                .map(|c| {
+                    (
+                        c.column_id,
+                        SortField::new(c.column_schema.data_type.clone()),
+                    )
+                })
                 .collect(),
         ));
         let set = Arc::new(SeriesSet::new(schema.clone(), row_codec));
@@ -1257,7 +1295,7 @@ mod tests {
             *expected_ts.entry(ts).or_default() += if dedup { 1 } else { 2 };
         }
 
-        let iter = memtable.iter(None, None).unwrap();
+        let iter = memtable.iter(None, None, None).unwrap();
         let mut read = HashMap::new();
 
         for ts in iter
@@ -1297,7 +1335,7 @@ mod tests {
         let memtable = TimeSeriesMemtable::new(schema, 42, None, true, MergeMode::LastRow);
         memtable.write(&kvs).unwrap();
 
-        let iter = memtable.iter(Some(&[3]), None).unwrap();
+        let iter = memtable.iter(Some(&[3]), None, None).unwrap();
 
         let mut v0_all = vec![];
 

@@ -18,8 +18,10 @@
 mod join;
 mod reduce;
 
+use std::collections::BTreeSet;
+
 use crate::error::Error;
-use crate::expr::{Id, LocalId, MapFilterProject, SafeMfpPlan, TypedExpr};
+use crate::expr::{GlobalId, Id, LocalId, MapFilterProject, SafeMfpPlan, ScalarExpr, TypedExpr};
 use crate::plan::join::JoinPlan;
 pub(crate) use crate::plan::reduce::{AccumulablePlan, AggrWithIndex, KeyValPlan, ReducePlan};
 use crate::repr::{DiffRow, RelationDesc};
@@ -61,6 +63,7 @@ impl TypedPlan {
     pub fn projection(self, exprs: Vec<TypedExpr>) -> Result<Self, Error> {
         let input_arity = self.schema.typ.column_types.len();
         let output_arity = exprs.len();
+
         let (exprs, _expr_typs): (Vec<_>, Vec<_>) = exprs
             .into_iter()
             .map(|TypedExpr { expr, typ }| (expr, typ))
@@ -70,6 +73,7 @@ impl TypedPlan {
             .project(input_arity..input_arity + output_arity)?
             .into_safe();
         let out_typ = self.schema.apply_mfp(&mfp)?;
+
         let mfp = mfp.mfp;
         // special case for mfp to compose when the plan is already mfp
         let plan = match self.plan {
@@ -187,5 +191,80 @@ pub enum Plan {
 impl Plan {
     pub fn with_types(self, schema: RelationDesc) -> TypedPlan {
         TypedPlan { schema, plan: self }
+    }
+}
+
+impl Plan {
+    /// Get nth expr using column ref
+    pub fn get_nth_expr(&self, n: usize) -> Option<ScalarExpr> {
+        match self {
+            Self::Mfp { mfp, .. } => mfp.get_nth_expr(n),
+            Self::Reduce { key_val_plan, .. } => key_val_plan.get_nth_expr(n),
+            _ => None,
+        }
+    }
+
+    /// Get the first input plan if exists
+    pub fn get_first_input_plan(&self) -> Option<&TypedPlan> {
+        match self {
+            Plan::Let { value, .. } => Some(value),
+            Plan::Mfp { input, .. } => Some(input),
+            Plan::Reduce { input, .. } => Some(input),
+            Plan::Join { inputs, .. } => inputs.first(),
+            Plan::Union { inputs, .. } => inputs.first(),
+            _ => None,
+        }
+    }
+
+    /// Get mutable ref to the first input plan if exists
+    pub fn get_mut_first_input_plan(&mut self) -> Option<&mut TypedPlan> {
+        match self {
+            Plan::Let { value, .. } => Some(value),
+            Plan::Mfp { input, .. } => Some(input),
+            Plan::Reduce { input, .. } => Some(input),
+            Plan::Join { inputs, .. } => inputs.first_mut(),
+            Plan::Union { inputs, .. } => inputs.first_mut(),
+            _ => None,
+        }
+    }
+
+    /// Find all the used collection in the plan
+    pub fn find_used_collection(&self) -> BTreeSet<GlobalId> {
+        fn recur_find_use(plan: &Plan, used: &mut BTreeSet<GlobalId>) {
+            match plan {
+                Plan::Get { id } => {
+                    match id {
+                        Id::Local(_) => (),
+                        Id::Global(g) => {
+                            used.insert(*g);
+                        }
+                    };
+                }
+                Plan::Let { value, body, .. } => {
+                    recur_find_use(&value.plan, used);
+                    recur_find_use(&body.plan, used);
+                }
+                Plan::Mfp { input, .. } => {
+                    recur_find_use(&input.plan, used);
+                }
+                Plan::Reduce { input, .. } => {
+                    recur_find_use(&input.plan, used);
+                }
+                Plan::Join { inputs, .. } => {
+                    for input in inputs {
+                        recur_find_use(&input.plan, used);
+                    }
+                }
+                Plan::Union { inputs, .. } => {
+                    for input in inputs {
+                        recur_find_use(&input.plan, used);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut ret = Default::default();
+        recur_find_use(self, &mut ret);
+        ret
     }
 }

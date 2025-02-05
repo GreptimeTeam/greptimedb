@@ -23,13 +23,14 @@ use api::helper::{
     ColumnDataTypeWrapper,
 };
 use api::v1::column_def::options_from_column_schema;
-use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value};
+use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value, WriteHint};
 use common_telemetry::info;
 use datatypes::prelude::DataType;
 use prometheus::HistogramTimer;
 use prost::Message;
 use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::codec::{infer_primary_key_encoding_from_hint, PrimaryKeyEncoding};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{
@@ -42,7 +43,7 @@ use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::error::{
     CompactRegionSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu, Error, FillDefaultSnafu,
-    FlushRegionSnafu, InvalidRequestSnafu, Result,
+    FlushRegionSnafu, InvalidRequestSnafu, Result, UnexpectedImpureDefaultSnafu,
 };
 use crate::manifest::action::RegionEdit;
 use crate::memtable::MemtableId;
@@ -63,6 +64,8 @@ pub struct WriteRequest {
     name_to_index: HashMap<String, usize>,
     /// Whether each column has null.
     has_null: Vec<bool>,
+    /// Write hint.
+    pub hint: Option<WriteHint>,
 }
 
 impl WriteRequest {
@@ -112,7 +115,19 @@ impl WriteRequest {
             rows,
             name_to_index,
             has_null,
+            hint: None,
         })
+    }
+
+    /// Sets the write hint.
+    pub fn with_hint(mut self, hint: Option<WriteHint>) -> Self {
+        self.hint = hint;
+        self
+    }
+
+    /// Returns the encoding hint.
+    pub fn primary_key_encoding(&self) -> PrimaryKeyEncoding {
+        infer_primary_key_encoding_from_hint(self.hint.as_ref())
     }
 
     /// Returns estimated size of the request.
@@ -155,7 +170,7 @@ impl WriteRequest {
                 ensure!(
                     is_column_type_value_eq(
                         input_col.datatype,
-                        input_col.datatype_extension.clone(),
+                        input_col.datatype_extension,
                         &column.column_schema.data_type
                     ),
                     InvalidRequestSnafu {
@@ -333,6 +348,14 @@ impl WriteRequest {
             }
             OpType::Put => {
                 // For put requests, we use the default value from column schema.
+                if column.column_schema.is_default_impure() {
+                    UnexpectedImpureDefaultSnafu {
+                        region_id: self.region_id,
+                        column: &column.column_schema.name,
+                        default_value: format!("{:?}", column.column_schema.default_constraint()),
+                    }
+                    .fail()?
+                }
                 column
                     .column_schema
                     .create_default()
@@ -540,7 +563,8 @@ impl WorkerRequest {
         let (sender, receiver) = oneshot::channel();
         let worker_request = match value {
             RegionRequest::Put(v) => {
-                let write_request = WriteRequest::new(region_id, OpType::Put, v.rows)?;
+                let write_request =
+                    WriteRequest::new(region_id, OpType::Put, v.rows)?.with_hint(v.hint);
                 WorkerRequest::Write(SenderWriteRequest {
                     sender: sender.into(),
                     request: write_request,
@@ -1037,6 +1061,57 @@ mod tests {
         let request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows).unwrap();
         let err = request.check_schema(&metadata).unwrap_err();
         check_invalid_request(&err, r#"unknown columns: ["k1"]"#);
+    }
+
+    #[test]
+    fn test_fill_impure_columns_err() {
+        let rows = Rows {
+            schema: vec![new_column_schema(
+                "k0",
+                ColumnDataType::Int64,
+                SemanticType::Tag,
+            )],
+            rows: vec![Row {
+                values: vec![i64_value(1)],
+            }],
+        };
+        let metadata = {
+            let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+            builder
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: datatypes::schema::ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    )
+                    .with_default_constraint(Some(ColumnDefaultConstraint::Function(
+                        "now()".to_string(),
+                    )))
+                    .unwrap(),
+                    semantic_type: SemanticType::Timestamp,
+                    column_id: 1,
+                })
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: datatypes::schema::ColumnSchema::new(
+                        "k0",
+                        ConcreteDataType::int64_datatype(),
+                        true,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 2,
+                })
+                .primary_key(vec![2]);
+            builder.build().unwrap()
+        };
+
+        let mut request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows).unwrap();
+        let err = request.check_schema(&metadata).unwrap_err();
+        assert!(err.is_fill_default());
+        assert!(request
+            .fill_missing_columns(&metadata)
+            .unwrap_err()
+            .to_string()
+            .contains("Unexpected impure default value with region_id"));
     }
 
     #[test]

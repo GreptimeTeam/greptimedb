@@ -112,6 +112,7 @@ impl RegionEngine for MetaRegionEngine {
 }
 
 /// Mock a [DummyTableProvider] with a single region.
+/// The schema is: `k0: string tag, ts: timestamp, v0: float64 field`
 pub(crate) fn mock_table_provider(region_id: RegionId) -> DummyTableProvider {
     let metadata = Arc::new(mock_region_metadata(region_id));
     let engine = Arc::new(MetaRegionEngine::with_metadata(metadata.clone()));
@@ -119,7 +120,7 @@ pub(crate) fn mock_table_provider(region_id: RegionId) -> DummyTableProvider {
 }
 
 /// Returns a mock region metadata.
-/// The schema is: `k0: string, ts: timestamp, v0: float64`
+/// The schema is: `k0: string tag, ts: timestamp, v0: float64 field`
 fn mock_region_metadata(region_id: RegionId) -> RegionMetadata {
     let mut builder = RegionMetadataBuilder::new(region_id);
     builder

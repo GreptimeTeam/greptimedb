@@ -12,29 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
+use std::ops::Range;
 
-use parquet::arrow::arrow_reader::RowSelection;
-use parquet::file::metadata::RowGroupMetaData;
+use greptime_proto::v1::index::BloomFilterMeta;
+use itertools::Itertools;
 
 use crate::bloom_filter::error::Result;
 use crate::bloom_filter::reader::BloomFilterReader;
-use crate::bloom_filter::{BloomFilterMeta, BloomFilterSegmentLocation, Bytes};
-
-/// Enumerates types of predicates for value filtering.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Predicate {
-    /// Predicate for matching values in a list.
-    InList(InListPredicate),
-}
-
-/// `InListPredicate` contains a list of acceptable values. A value needs to match at least
-/// one of the elements (logical OR semantic) for the predicate to be satisfied.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InListPredicate {
-    /// List of acceptable values.
-    pub list: HashSet<Bytes>,
-}
+use crate::Bytes;
 
 pub struct BloomFilterApplier {
     reader: Box<dyn BloomFilterReader + Send>,
@@ -42,92 +28,174 @@ pub struct BloomFilterApplier {
 }
 
 impl BloomFilterApplier {
-    pub async fn new(mut reader: Box<dyn BloomFilterReader + Send>) -> Result<Self> {
+    pub async fn new(reader: Box<dyn BloomFilterReader + Send>) -> Result<Self> {
         let meta = reader.metadata().await?;
 
         Ok(Self { reader, meta })
     }
 
-    /// Searches for matching row groups using bloom filters.
-    ///
-    /// This method applies bloom filter index to eliminate row groups that definitely
-    /// don't contain the searched values. It works by:
-    ///
-    /// 1. Computing prefix sums for row counts
-    /// 2. Calculating bloom filter segment locations for each row group
-    ///     1. A row group may span multiple bloom filter segments
-    /// 3. Probing bloom filter segments
-    /// 4. Removing non-matching row groups from the basement
-    ///     1. If a row group doesn't match any bloom filter segment with any probe, it is removed
-    ///
-    /// # Note
-    /// The method modifies the `basement` map in-place by removing row groups that
-    /// don't match the bloom filter criteria.
+    /// Searches ranges of rows that match the given probes in the given search range.
     pub async fn search(
         &mut self,
         probes: &HashSet<Bytes>,
-        row_group_metas: &[RowGroupMetaData],
-        basement: &mut BTreeMap<usize, Option<RowSelection>>,
-    ) -> Result<()> {
-        // 0. Fast path - if basement is empty return empty vec
-        if basement.is_empty() {
-            return Ok(());
-        }
+        search_range: Range<usize>,
+    ) -> Result<Vec<Range<usize>>> {
+        let rows_per_segment = self.meta.rows_per_segment as usize;
+        let start_seg = search_range.start / rows_per_segment;
+        let end_seg = search_range.end.div_ceil(rows_per_segment);
 
-        // 1. Compute prefix sum for row counts
-        let mut sum = 0usize;
-        let mut prefix_sum = Vec::with_capacity(row_group_metas.len() + 1);
-        prefix_sum.push(0usize);
-        for meta in row_group_metas {
-            sum += meta.num_rows() as usize;
-            prefix_sum.push(sum);
-        }
+        let locs = &self.meta.segment_loc_indices[start_seg..end_seg];
 
-        // 2. Calculate bloom filter segment locations
-        let mut row_groups_to_remove = HashSet::new();
-        for &row_group_idx in basement.keys() {
-            // TODO(ruihang): support further filter over row selection
+        // dedup locs
+        let deduped_locs = locs
+            .iter()
+            .dedup()
+            .map(|i| self.meta.bloom_filter_locs[*i as usize])
+            .collect::<Vec<_>>();
+        let bfs = self.reader.bloom_filter_vec(&deduped_locs).await?;
 
-            // todo: dedup & overlap
-            let rows_range_start = prefix_sum[row_group_idx] / self.meta.rows_per_segment;
-            let rows_range_end = (prefix_sum[row_group_idx + 1] as f64
-                / self.meta.rows_per_segment as f64)
-                .ceil() as usize;
-
-            let mut is_any_range_hit = false;
-            for i in rows_range_start..rows_range_end {
-                // 3. Probe each bloom filter segment
-                let loc = BloomFilterSegmentLocation {
-                    offset: self.meta.bloom_filter_segments[i].offset,
-                    size: self.meta.bloom_filter_segments[i].size,
-                    elem_count: self.meta.bloom_filter_segments[i].elem_count,
-                };
-                let bloom = self.reader.bloom_filter(&loc).await?;
-
-                // Check if any probe exists in bloom filter
-                let mut matches = false;
-                for probe in probes {
-                    if bloom.contains(probe) {
-                        matches = true;
-                        break;
+        let mut ranges: Vec<Range<usize>> = Vec::with_capacity(bfs.len());
+        for ((_, mut group), bloom) in locs
+            .iter()
+            .zip(start_seg..end_seg)
+            .group_by(|(x, _)| **x)
+            .into_iter()
+            .zip(bfs.iter())
+        {
+            let start = group.next().unwrap().1 * rows_per_segment; // SAFETY: group is not empty
+            let end = group.last().map_or(start + rows_per_segment, |(_, end)| {
+                (end + 1) * rows_per_segment
+            });
+            let actual_start = start.max(search_range.start);
+            let actual_end = end.min(search_range.end);
+            for probe in probes {
+                if bloom.contains(probe) {
+                    match ranges.last_mut() {
+                        Some(last) if last.end == actual_start => {
+                            last.end = actual_end;
+                        }
+                        _ => {
+                            ranges.push(actual_start..actual_end);
+                        }
                     }
-                }
-
-                is_any_range_hit |= matches;
-                if matches {
                     break;
                 }
             }
-            if !is_any_range_hit {
-                row_groups_to_remove.insert(row_group_idx);
-            }
         }
 
-        // 4. Remove row groups that do not match any bloom filter segment
-        for row_group_idx in row_groups_to_remove {
-            basement.remove(&row_group_idx);
+        Ok(ranges)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+
+    use futures::io::Cursor;
+
+    use super::*;
+    use crate::bloom_filter::creator::BloomFilterCreator;
+    use crate::bloom_filter::reader::BloomFilterReaderImpl;
+    use crate::external_provider::MockExternalTempFileProvider;
+
+    #[tokio::test]
+    #[allow(clippy::single_range_in_vec_init)]
+    async fn test_appliter() {
+        let mut writer = Cursor::new(Vec::new());
+        let mut creator = BloomFilterCreator::new(
+            4,
+            Arc::new(MockExternalTempFileProvider::new()),
+            Arc::new(AtomicUsize::new(0)),
+            None,
+        );
+
+        let rows = vec![
+            // seg 0
+            vec![b"row00".to_vec(), b"seg00".to_vec(), b"overl".to_vec()],
+            vec![b"row01".to_vec(), b"seg00".to_vec(), b"overl".to_vec()],
+            vec![b"row02".to_vec(), b"seg00".to_vec(), b"overl".to_vec()],
+            vec![b"row03".to_vec(), b"seg00".to_vec(), b"overl".to_vec()],
+            // seg 1
+            vec![b"row04".to_vec(), b"seg01".to_vec(), b"overl".to_vec()],
+            vec![b"row05".to_vec(), b"seg01".to_vec(), b"overl".to_vec()],
+            vec![b"row06".to_vec(), b"seg01".to_vec(), b"overp".to_vec()],
+            vec![b"row07".to_vec(), b"seg01".to_vec(), b"overp".to_vec()],
+            // seg 2
+            vec![b"row08".to_vec(), b"seg02".to_vec(), b"overp".to_vec()],
+            vec![b"row09".to_vec(), b"seg02".to_vec(), b"overp".to_vec()],
+            vec![b"row10".to_vec(), b"seg02".to_vec(), b"overp".to_vec()],
+            vec![b"row11".to_vec(), b"seg02".to_vec(), b"overp".to_vec()],
+            // duplicate rows
+            // seg 3
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            // seg 4
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            // seg 5
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            // seg 6
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+            vec![b"dup".to_vec()],
+        ];
+
+        let cases = vec![
+            (vec![b"row00".to_vec()], 0..28, vec![0..4]), // search one row in full range
+            (vec![b"row05".to_vec()], 4..8, vec![4..8]),  // search one row in partial range
+            (vec![b"row03".to_vec()], 4..8, vec![]), // search for a row that doesn't exist in the partial range
+            (
+                vec![b"row01".to_vec(), b"row06".to_vec()],
+                0..28,
+                vec![0..8],
+            ), // search multiple rows in multiple ranges
+            (
+                vec![b"row01".to_vec(), b"row11".to_vec()],
+                0..28,
+                vec![0..4, 8..12],
+            ), // search multiple rows in multiple ranges
+            (vec![b"row99".to_vec()], 0..28, vec![]), // search for a row that doesn't exist in the full range
+            (vec![b"row00".to_vec()], 12..12, vec![]), // search in an empty range
+            (
+                vec![b"row04".to_vec(), b"row05".to_vec()],
+                0..12,
+                vec![4..8],
+            ), // search multiple rows in same segment
+            (vec![b"seg01".to_vec()], 0..28, vec![4..8]), // search rows in a segment
+            (vec![b"seg01".to_vec()], 6..28, vec![6..8]), // search rows in a segment in partial range
+            (vec![b"overl".to_vec()], 0..28, vec![0..8]), // search rows in multiple segments
+            (vec![b"overl".to_vec()], 2..28, vec![2..8]), // search range starts from the middle of a segment
+            (vec![b"overp".to_vec()], 0..10, vec![4..10]), // search range ends at the middle of a segment
+            (vec![b"dup".to_vec()], 0..12, vec![]), // search for a duplicate row not in the range
+            (vec![b"dup".to_vec()], 0..16, vec![12..16]), // search for a duplicate row in the range
+            (vec![b"dup".to_vec()], 0..28, vec![12..28]), // search for a duplicate row in the full range
+        ];
+
+        for row in rows {
+            creator.push_row_elems(row).await.unwrap();
         }
 
-        Ok(())
+        creator.finish(&mut writer).await.unwrap();
+
+        let bytes = writer.into_inner();
+
+        let reader = BloomFilterReaderImpl::new(bytes);
+
+        let mut applier = BloomFilterApplier::new(Box::new(reader)).await.unwrap();
+
+        for (probes, search_range, expected) in cases {
+            let probes: HashSet<Bytes> = probes.into_iter().collect();
+            let ranges = applier.search(&probes, search_range).await.unwrap();
+            assert_eq!(ranges, expected);
+        }
     }
 }

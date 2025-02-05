@@ -28,7 +28,7 @@ pub mod set_variables;
 pub mod show;
 pub mod statement;
 pub mod tql;
-mod transform;
+pub(crate) mod transform;
 pub mod truncate;
 
 use std::str::FromStr;
@@ -61,7 +61,7 @@ use crate::error::{
 };
 use crate::statements::create::Column;
 pub use crate::statements::option_map::OptionMap;
-pub use crate::statements::transform::{get_data_type_by_alias_name, transform_statements};
+pub(crate) use crate::statements::transform::transform_statements;
 
 const VECTOR_TYPE_NAME: &str = "VECTOR";
 
@@ -136,9 +136,10 @@ fn parse_string_to_value(
             let v = parse_string_to_vector_type_value(&s, Some(d.dim)).context(DatatypeSnafu)?;
             Ok(Value::Binary(v.into()))
         }
-        _ => {
-            unreachable!()
+        _ => ParseSqlValueSnafu {
+            msg: format!("Failed to parse {s} to {data_type} value"),
         }
+        .fail(),
     }
 }
 
@@ -430,7 +431,13 @@ fn parse_column_default_constraint(
                 }
                 .fail();
             }
-            _ => unreachable!(),
+            _ => {
+                return UnsupportedDefaultValueSnafu {
+                    column_name,
+                    expr: Expr::Value(SqlValue::Null),
+                }
+                .fail();
+            }
         };
 
         Ok(Some(default_constraint))
@@ -487,10 +494,10 @@ pub fn column_to_schema(
     if let Some(inverted_index_cols) = invereted_index_cols {
         if inverted_index_cols.is_empty() {
             if primary_keys.contains(&column.name().value) {
-                column_schema = column_schema.set_inverted_index(false);
+                column_schema.insert_inverted_index_placeholder();
             }
         } else if inverted_index_cols.contains(&column.name().value) {
-            column_schema = column_schema.set_inverted_index(true);
+            column_schema.set_inverted_index(true);
         }
     }
 
@@ -680,9 +687,10 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
         ConcreteDataType::Duration(_)
         | ConcreteDataType::Null(_)
         | ConcreteDataType::List(_)
-        | ConcreteDataType::Dictionary(_) => {
-            unreachable!()
+        | ConcreteDataType::Dictionary(_) => error::ConcreteTypeNotSupportedSnafu {
+            t: data_type.clone(),
         }
+        .fail(),
     }
 }
 

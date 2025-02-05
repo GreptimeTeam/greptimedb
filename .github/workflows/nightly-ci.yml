@@ -109,14 +109,15 @@ jobs:
           UNITTEST_LOG_DIR: "__unittest_logs"
 
   cleanbuild-linux-nix:
-    runs-on: ubuntu-latest-8-cores
+    name: Run clean build on Linux
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v27
         with:
-          nix_path: nixpkgs=channel:nixos-unstable
-      - run: nix-shell --pure --run "cargo build"
+          nix_path: nixpkgs=channel:nixos-24.11
+      - run: nix develop --command cargo build
 
   check-status:
     name: Check status

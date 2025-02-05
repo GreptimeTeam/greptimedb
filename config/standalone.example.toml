@@ -39,6 +39,12 @@ timeout = "30s"
 ## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
 ## Set to 0 to disable limit.
 body_limit = "64MB"
+## HTTP CORS support, it's turned on by default
+## This allows browser to access http APIs without CORS restrictions
+enable_cors = true
+## Customize allowed origins for HTTP CORS.
+## @toml2docs:none-default
+cors_allowed_origins = ["https://example.com"]
 
 ## The gRPC server options.
 [grpc]
@@ -284,6 +290,12 @@ max_retry_times = 3
 ## Initial retry delay of procedures, increases exponentially
 retry_delay = "500ms"
 
+## flow engine options.
+[flow]
+## The number of flow worker in flownode.
+## Not setting(or set to 0) this value will use the number of CPU cores divided by 2.
+#+num_workers=0
+
 # Example of using S3 as the storage.
 # [storage]
 # type = "S3"
@@ -337,7 +349,7 @@ data_home = "/tmp/greptimedb/"
 type = "File"
 
 ## Read cache configuration for object storage such as 'S3' etc, it's configured by default when using object storage. It is recommended to configure it when using object storage for better performance.
-## A local file directory, defaults to `{data_home}/object_cache/read`. An empty string means disabling.
+## A local file directory, defaults to `{data_home}`. An empty string means disabling.
 ## @toml2docs:none-default
 #+ cache_path = ""
 
@@ -518,18 +530,18 @@ auto_flush_interval = "1h"
 ## @toml2docs:none-default="Auto"
 #+ selector_result_cache_size = "512MB"
 
-## Whether to enable the experimental write cache, it's enabled by default when using object storage. It is recommended to enable it when using object storage for better performance.
-enable_experimental_write_cache = false
+## Whether to enable the write cache, it's enabled by default when using object storage. It is recommended to enable it when using object storage for better performance.
+enable_write_cache = false
 
-## File system path for write cache, defaults to `{data_home}/object_cache/write`.
-experimental_write_cache_path = ""
+## File system path for write cache, defaults to `{data_home}`.
+write_cache_path = ""
 
 ## Capacity for write cache. If your disk space is sufficient, it is recommended to set it larger.
-experimental_write_cache_size = "5GiB"
+write_cache_size = "5GiB"
 
 ## TTL for write cache.
 ## @toml2docs:none-default
-experimental_write_cache_ttl = "8h"
+write_cache_ttl = "8h"
 
 ## Buffer size for SST writing.
 sst_write_buffer_size = "8MB"
@@ -559,6 +571,15 @@ aux_path = ""
 ## The max capacity of the staging directory.
 staging_size = "2GB"
 
+## Cache size for inverted index metadata.
+metadata_cache_size = "64MiB"
+
+## Cache size for inverted index content.
+content_cache_size = "128MiB"
+
+## Page size for inverted index content cache.
+content_cache_page_size = "64KiB"
+
 ## The options for inverted index in Mito engine.
 [region_engine.mito.inverted_index]
 
@@ -585,15 +606,6 @@ mem_threshold_on_create = "auto"
 
 ## Deprecated, use `region_engine.mito.index.aux_path` instead.
 intermediate_path = ""
-
-## Cache size for inverted index metadata.
-metadata_cache_size = "64MiB"
-
-## Cache size for inverted index content.
-content_cache_size = "128MiB"
-
-## Page size for inverted index content cache.
-content_cache_page_size = "8MiB"
 
 ## The options for full-text index in Mito engine.
 [region_engine.mito.fulltext_index]
@@ -664,6 +676,12 @@ fork_dictionary_bytes = "1GiB"
 [[region_engine]]
 ## Enable the file engine.
 [region_engine.file]
+
+[[region_engine]]
+## Metric engine options.
+[region_engine.metric]
+## Whether to enable the experimental sparse primary key encoding.
+experimental_sparse_primary_key_encoding = false
 
 ## The logging options.
 [logging]

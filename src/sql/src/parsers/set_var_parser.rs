@@ -28,11 +28,14 @@ impl ParserContext<'_> {
         let spstatement = self.parser.parse_set().context(error::SyntaxSnafu)?;
         match spstatement {
             SpStatement::SetVariable {
-                variable,
+                variables,
                 value,
                 hivevar,
                 ..
-            } if !hivevar => Ok(Statement::SetVariables(SetVariables { variable, value })),
+            } if !hivevar => Ok(Statement::SetVariables(SetVariables {
+                variable: (*variables)[0].clone(),
+                value,
+            })),
 
             SpStatement::SetTimeZone { value, .. } => Ok(Statement::SetVariables(SetVariables {
                 variable: ObjectName(vec![Ident {

@@ -25,6 +25,7 @@ use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
+use hyper_util::rt::TokioIo;
 use tonic::codec::CompressionEncoding;
 use tower::service_fn;
 
@@ -44,12 +45,32 @@ pub struct MockInfo {
 pub async fn mock_with_memstore() -> MockInfo {
     let kv_backend = Arc::new(MemoryKvBackend::new());
     let in_memory = Arc::new(MemoryKvBackend::new());
-    mock(Default::default(), kv_backend, None, None, Some(in_memory)).await
+    mock(
+        MetasrvOptions {
+            server_addr: "127.0.0.1:3002".to_string(),
+            ..Default::default()
+        },
+        kv_backend,
+        None,
+        None,
+        Some(in_memory),
+    )
+    .await
 }
 
 pub async fn mock_with_etcdstore(addr: &str) -> MockInfo {
     let kv_backend = EtcdStore::with_endpoints([addr], 128).await.unwrap();
-    mock(Default::default(), kv_backend, None, None, None).await
+    mock(
+        MetasrvOptions {
+            server_addr: "127.0.0.1:3002".to_string(),
+            ..Default::default()
+        },
+        kv_backend,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 pub async fn mock(
@@ -118,7 +139,7 @@ pub async fn mock(
 
             async move {
                 if let Some(client) = client {
-                    Ok(client)
+                    Ok(TokioIo::new(client))
                 } else {
                     Err(std::io::Error::new(
                         std::io::ErrorKind::Other,

@@ -43,7 +43,7 @@ use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::Peer;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
-use common_meta::wal_options_allocator::{WalOptionsAllocator, WalOptionsAllocatorRef};
+use common_meta::wal_options_allocator::{build_wal_options_allocator, WalOptionsAllocatorRef};
 use common_procedure::{ProcedureInfo, ProcedureManagerRef};
 use common_telemetry::info;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
@@ -54,7 +54,7 @@ use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, Sto
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::region_server::RegionServer;
 use file_engine::config::EngineConfig as FileEngineConfig;
-use flow::{FlowWorkerManager, FlownodeBuilder, FrontendInvoker};
+use flow::{FlowConfig, FlowWorkerManager, FlownodeBuilder, FlownodeOptions, FrontendInvoker};
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
@@ -76,10 +76,10 @@ use tokio::sync::{broadcast, RwLock};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
-    BuildCacheRegistrySnafu, CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu,
-    InitMetadataSnafu, InitTimezoneSnafu, LoadLayeredConfigSnafu, OtherSnafu, Result,
-    ShutdownDatanodeSnafu, ShutdownFlownodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu,
-    StartFlownodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
+    BuildCacheRegistrySnafu, BuildWalOptionsAllocatorSnafu, CreateDirSnafu, IllegalConfigSnafu,
+    InitDdlManagerSnafu, InitMetadataSnafu, InitTimezoneSnafu, LoadLayeredConfigSnafu, OtherSnafu,
+    Result, ShutdownDatanodeSnafu, ShutdownFlownodeSnafu, ShutdownFrontendSnafu,
+    StartDatanodeSnafu, StartFlownodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
     StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
@@ -145,6 +145,7 @@ pub struct StandaloneOptions {
     pub storage: StorageConfig,
     pub metadata_store: KvBackendConfig,
     pub procedure: ProcedureConfig,
+    pub flow: FlowConfig,
     pub logging: LoggingOptions,
     pub user_provider: Option<String>,
     /// Options for different store engines.
@@ -173,6 +174,7 @@ impl Default for StandaloneOptions {
             storage: StorageConfig::default(),
             metadata_store: KvBackendConfig::default(),
             procedure: ProcedureConfig::default(),
+            flow: FlowConfig::default(),
             logging: LoggingOptions::default(),
             export_metrics: ExportMetricsOption::default(),
             user_provider: None,
@@ -461,7 +463,8 @@ impl StartCommand {
 
         let mut plugins = Plugins::new();
         let plugin_opts = opts.plugins;
-        let opts = opts.component;
+        let mut opts = opts.component;
+        opts.grpc.detect_hostname();
         let fe_opts = opts.frontend_options();
         let dn_opts = opts.datanode_options();
 
@@ -522,8 +525,12 @@ impl StartCommand {
             Self::create_table_metadata_manager(kv_backend.clone()).await?;
 
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
+        let flownode_options = FlownodeOptions {
+            flow: opts.flow.clone(),
+            ..Default::default()
+        };
         let flow_builder = FlownodeBuilder::new(
-            Default::default(),
+            flownode_options,
             plugins.clone(),
             table_metadata_manager.clone(),
             catalog_manager.clone(),
@@ -562,10 +569,11 @@ impl StartCommand {
                 .step(10)
                 .build(),
         );
-        let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
-            opts.wal.clone().into(),
-            kv_backend.clone(),
-        ));
+        let kafka_options = opts.wal.clone().into();
+        let wal_options_allocator = build_wal_options_allocator(&kafka_options, kv_backend.clone())
+            .await
+            .context(BuildWalOptionsAllocatorSnafu)?;
+        let wal_options_allocator = Arc::new(wal_options_allocator);
         let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_sequence,
             wal_options_allocator.clone(),

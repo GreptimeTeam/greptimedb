@@ -20,8 +20,8 @@ mod logs;
 mod opentsdb;
 mod otlp;
 mod prom_store;
+mod promql;
 mod region_query;
-mod script;
 pub mod standalone;
 
 use std::sync::Arc;
@@ -48,6 +48,7 @@ use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
 use pipeline::pipeline_operator::PipelineOperator;
 use prometheus::HistogramTimer;
+use promql_parser::label::Matcher;
 use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
@@ -66,7 +67,7 @@ use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{
     InfluxdbLineProtocolHandler, LogQueryHandler, OpenTelemetryProtocolHandler,
-    OpentsdbProtocolHandler, PipelineHandler, PromStoreProtocolHandler, ScriptHandler,
+    OpentsdbProtocolHandler, PipelineHandler, PromStoreProtocolHandler,
 };
 use servers::server::ServerHandlers;
 use session::context::QueryContextRef;
@@ -88,7 +89,6 @@ use crate::error::{
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::HeartbeatTask;
 use crate::limiter::LimiterRef;
-use crate::script::ScriptExecutor;
 
 #[async_trait]
 pub trait FrontendInstance:
@@ -98,7 +98,6 @@ pub trait FrontendInstance:
     + InfluxdbLineProtocolHandler
     + PromStoreProtocolHandler
     + OpenTelemetryProtocolHandler
-    + ScriptHandler
     + PrometheusHandler
     + PipelineHandler
     + LogQueryHandler
@@ -115,7 +114,6 @@ pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
 pub struct Instance {
     options: FrontendOptions,
     catalog_manager: CatalogManagerRef,
-    script_executor: Arc<ScriptExecutor>,
     pipeline_operator: Arc<PipelineOperator>,
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
@@ -204,8 +202,6 @@ impl FrontendInstance for Instance {
         if let Some(heartbeat_task) = &self.heartbeat_task {
             heartbeat_task.start().await?;
         }
-
-        self.script_executor.start(self)?;
 
         if let Some(t) = self.export_metrics_task.as_ref() {
             if t.send_by_handler {
@@ -456,6 +452,17 @@ impl PrometheusHandler for Instance {
         Ok(interceptor.post_execute(output, query_ctx)?)
     }
 
+    async fn query_metric_names(
+        &self,
+        matchers: Vec<Matcher>,
+        ctx: &QueryContextRef,
+    ) -> server_error::Result<Vec<String>> {
+        self.handle_query_metric_names(matchers, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)
+    }
+
     fn catalog_manager(&self) -> CatalogManagerRef {
         self.catalog_manager.clone()
     }
@@ -495,7 +502,8 @@ pub fn check_permission(
         | Statement::Explain(_)
         | Statement::Tql(_)
         | Statement::Delete(_)
-        | Statement::DeclareCursor(_) => {}
+        | Statement::DeclareCursor(_)
+        | Statement::Copy(sql::statements::copy::Copy::CopyQueryTo(_)) => {}
         // database ops won't be checked
         Statement::CreateDatabase(_)
         | Statement::ShowDatabases(_)
@@ -570,6 +578,7 @@ pub fn check_permission(
             validate_db_permission!(stmt, query_ctx);
         }
         Statement::ShowStatus(_stmt) => {}
+        Statement::ShowSearchPath(_stmt) => {}
         Statement::DescribeTable(stmt) => {
             validate_param(stmt.name(), query_ctx)?;
         }

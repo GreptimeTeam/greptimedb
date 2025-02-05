@@ -45,7 +45,9 @@ flow.workspace = true
 frontend = { workspace = true, features = ["testing"] }
 futures.workspace = true
 futures-util.workspace = true
-loki-api = "0.1"
+hyper-util = { workspace = true, features = ["tokio"] }
+log-query = { workspace = true }
+loki-api.workspace = true
 meta-client.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
 moka.workspace = true
@@ -64,7 +66,7 @@ session.workspace = true
 similar-asserts.workspace = true
 snafu.workspace = true
 sql.workspace = true
-sqlx = { version = "0.6", features = [
+sqlx = { version = "0.8", features = [
     "runtime-tokio-rustls",
     "mysql",
     "postgres",
@@ -85,13 +87,13 @@ zstd.workspace = true
 datafusion.workspace = true
 datafusion-expr.workspace = true
 hex.workspace = true
+http.workspace = true
 itertools.workspace = true
 opentelemetry-proto.workspace = true
 partition.workspace = true
 paste.workspace = true
 prost.workspace = true
 rand.workspace = true
-script.workspace = true
 session = { workspace = true, features = ["testing"] }
 store-api.workspace = true
 tokio-postgres = { workspace = true }

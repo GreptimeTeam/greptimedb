@@ -107,7 +107,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
-        error: prost::DecodeError,
+        error: prost::UnknownEnumValue,
     },
 
     #[snafu(display(
@@ -137,7 +137,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
-        error: prost::DecodeError,
+        error: prost::UnknownEnumValue,
+    },
+
+    #[snafu(display("Missing alter index options"))]
+    MissingAlterIndexOption {
+        #[snafu(implicit)]
+        location: Location,
     },
 }
 
@@ -164,7 +170,8 @@ impl ErrorExt for Error {
             }
             Error::InvalidSetTableOptionRequest { .. }
             | Error::InvalidUnsetTableOptionRequest { .. }
-            | Error::InvalidSetFulltextOptionRequest { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidSetFulltextOptionRequest { .. }
+            | Error::MissingAlterIndexOption { .. } => StatusCode::InvalidArguments,
         }
     }
 

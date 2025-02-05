@@ -19,7 +19,7 @@ use greptime_proto::v1::index::{InvertedIndexMeta, InvertedIndexStats};
 use snafu::ResultExt;
 
 use crate::inverted_index::error::{FstCompileSnafu, FstInsertSnafu, Result, WriteSnafu};
-use crate::inverted_index::Bytes;
+use crate::Bytes;
 
 /// `SingleIndexWriter` writes values to the blob storage for an individual inverted index
 pub struct SingleIndexWriter<W, S> {
@@ -149,7 +149,7 @@ mod tests {
 
     use super::*;
     use crate::inverted_index::error::Error;
-    use crate::inverted_index::Bytes;
+    use crate::Bytes;
 
     #[tokio::test]
     async fn test_single_index_writer_write_empty() {

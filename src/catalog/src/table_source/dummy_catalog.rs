@@ -15,12 +15,12 @@
 //! Dummy catalog for region server.
 
 use std::any::Any;
+use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_catalog::format_full_table_name;
-use datafusion::catalog::schema::SchemaProvider;
-use datafusion::catalog::{CatalogProvider, CatalogProviderList};
+use datafusion::catalog::{CatalogProvider, CatalogProviderList, SchemaProvider};
 use datafusion::datasource::TableProvider;
 use snafu::OptionExt;
 use table::table::adapter::DfTableProviderAdapter;
@@ -38,6 +38,12 @@ impl DummyCatalogList {
     /// Creates a new catalog list with the given catalog manager.
     pub fn new(catalog_manager: CatalogManagerRef) -> Self {
         Self { catalog_manager }
+    }
+}
+
+impl fmt::Debug for DummyCatalogList {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DummyCatalogList").finish()
     }
 }
 
@@ -91,6 +97,14 @@ impl CatalogProvider for DummyCatalogProvider {
     }
 }
 
+impl fmt::Debug for DummyCatalogProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DummyCatalogProvider")
+            .field("catalog_name", &self.catalog_name)
+            .finish()
+    }
+}
+
 /// A dummy schema provider for [DummyCatalogList].
 #[derive(Clone)]
 struct DummySchemaProvider {
@@ -125,5 +139,14 @@ impl SchemaProvider for DummySchemaProvider {
 
     fn table_exist(&self, _name: &str) -> bool {
         true
+    }
+}
+
+impl fmt::Debug for DummySchemaProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DummySchemaProvider")
+            .field("catalog_name", &self.catalog_name)
+            .field("schema_name", &self.schema_name)
+            .finish()
     }
 }

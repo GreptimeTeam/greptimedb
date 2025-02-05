@@ -18,27 +18,29 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use common_base::range_read::RangeReader;
 use fastbloom::BloomFilter;
+use greptime_proto::v1::index::{BloomFilterLoc, BloomFilterMeta};
+use prost::Message;
 use snafu::{ensure, ResultExt};
 
 use crate::bloom_filter::error::{
-    DeserializeJsonSnafu, FileSizeTooSmallSnafu, IoSnafu, Result, UnexpectedMetaSizeSnafu,
+    DecodeProtoSnafu, FileSizeTooSmallSnafu, IoSnafu, Result, UnexpectedMetaSizeSnafu,
 };
-use crate::bloom_filter::{BloomFilterMeta, BloomFilterSegmentLocation, SEED};
+use crate::bloom_filter::SEED;
 
 /// Minimum size of the bloom filter, which is the size of the length of the bloom filter.
 const BLOOM_META_LEN_SIZE: u64 = 4;
 
 /// Default prefetch size of bloom filter meta.
-pub const DEFAULT_PREFETCH_SIZE: u64 = 1024; // 1KiB
+pub const DEFAULT_PREFETCH_SIZE: u64 = 8192; // 8KiB
 
 /// `BloomFilterReader` reads the bloom filter from the file.
 #[async_trait]
-pub trait BloomFilterReader {
+pub trait BloomFilterReader: Sync {
     /// Reads range of bytes from the file.
-    async fn range_read(&mut self, offset: u64, size: u32) -> Result<Bytes>;
+    async fn range_read(&self, offset: u64, size: u32) -> Result<Bytes>;
 
     /// Reads bunch of ranges from the file.
-    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+    async fn read_vec(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
         let mut results = Vec::with_capacity(ranges.len());
         for range in ranges {
             let size = (range.end - range.start) as u32;
@@ -49,10 +51,10 @@ pub trait BloomFilterReader {
     }
 
     /// Reads the meta information of the bloom filter.
-    async fn metadata(&mut self) -> Result<BloomFilterMeta>;
+    async fn metadata(&self) -> Result<BloomFilterMeta>;
 
     /// Reads a bloom filter with the given location.
-    async fn bloom_filter(&mut self, loc: &BloomFilterSegmentLocation) -> Result<BloomFilter> {
+    async fn bloom_filter(&self, loc: &BloomFilterLoc) -> Result<BloomFilter> {
         let bytes = self.range_read(loc.offset, loc.size as _).await?;
         let vec = bytes
             .chunks_exact(std::mem::size_of::<u64>())
@@ -60,8 +62,30 @@ pub trait BloomFilterReader {
             .collect();
         let bm = BloomFilter::from_vec(vec)
             .seed(&SEED)
-            .expected_items(loc.elem_count);
+            .expected_items(loc.element_count as _);
         Ok(bm)
+    }
+
+    async fn bloom_filter_vec(&self, locs: &[BloomFilterLoc]) -> Result<Vec<BloomFilter>> {
+        let ranges = locs
+            .iter()
+            .map(|l| l.offset..l.offset + l.size)
+            .collect::<Vec<_>>();
+        let bss = self.read_vec(&ranges).await?;
+
+        let mut result = Vec::with_capacity(bss.len());
+        for (bs, loc) in bss.into_iter().zip(locs.iter()) {
+            let vec = bs
+                .chunks_exact(std::mem::size_of::<u64>())
+                .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
+                .collect();
+            let bm = BloomFilter::from_vec(vec)
+                .seed(&SEED)
+                .expected_items(loc.element_count as _);
+            result.push(bm);
+        }
+
+        Ok(result)
     }
 }
 
@@ -80,23 +104,23 @@ impl<R: RangeReader> BloomFilterReaderImpl<R> {
 
 #[async_trait]
 impl<R: RangeReader> BloomFilterReader for BloomFilterReaderImpl<R> {
-    async fn range_read(&mut self, offset: u64, size: u32) -> Result<Bytes> {
+    async fn range_read(&self, offset: u64, size: u32) -> Result<Bytes> {
         self.reader
             .read(offset..offset + size as u64)
             .await
             .context(IoSnafu)
     }
 
-    async fn read_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+    async fn read_vec(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
         self.reader.read_vec(ranges).await.context(IoSnafu)
     }
 
-    async fn metadata(&mut self) -> Result<BloomFilterMeta> {
+    async fn metadata(&self) -> Result<BloomFilterMeta> {
         let metadata = self.reader.metadata().await.context(IoSnafu)?;
         let file_size = metadata.content_length;
 
         let mut meta_reader =
-            BloomFilterMetaReader::new(&mut self.reader, file_size, Some(DEFAULT_PREFETCH_SIZE));
+            BloomFilterMetaReader::new(&self.reader, file_size, Some(DEFAULT_PREFETCH_SIZE));
         meta_reader.metadata().await
     }
 }
@@ -148,11 +172,11 @@ impl<R: RangeReader> BloomFilterMetaReader<R> {
                 .read(metadata_start..self.file_size - BLOOM_META_LEN_SIZE)
                 .await
                 .context(IoSnafu)?;
-            serde_json::from_slice(&meta).context(DeserializeJsonSnafu)
+            BloomFilterMeta::decode(meta).context(DecodeProtoSnafu)
         } else {
             let metadata_start = self.file_size - length - BLOOM_META_LEN_SIZE - meta_start;
             let meta = &suffix[metadata_start as usize..suffix_len - BLOOM_META_LEN_SIZE as usize];
-            serde_json::from_slice(meta).context(DeserializeJsonSnafu)
+            BloomFilterMeta::decode(meta).context(DecodeProtoSnafu)
         }
     }
 
@@ -232,17 +256,17 @@ mod tests {
             let meta = reader.metadata().await.unwrap();
 
             assert_eq!(meta.rows_per_segment, 2);
-            assert_eq!(meta.seg_count, 2);
+            assert_eq!(meta.segment_count, 2);
             assert_eq!(meta.row_count, 3);
-            assert_eq!(meta.bloom_filter_segments.len(), 2);
+            assert_eq!(meta.bloom_filter_locs.len(), 2);
 
-            assert_eq!(meta.bloom_filter_segments[0].offset, 0);
-            assert_eq!(meta.bloom_filter_segments[0].elem_count, 4);
+            assert_eq!(meta.bloom_filter_locs[0].offset, 0);
+            assert_eq!(meta.bloom_filter_locs[0].element_count, 4);
             assert_eq!(
-                meta.bloom_filter_segments[1].offset,
-                meta.bloom_filter_segments[0].size
+                meta.bloom_filter_locs[1].offset,
+                meta.bloom_filter_locs[0].size
             );
-            assert_eq!(meta.bloom_filter_segments[1].elem_count, 2);
+            assert_eq!(meta.bloom_filter_locs[1].element_count, 2);
         }
     }
 
@@ -250,12 +274,12 @@ mod tests {
     async fn test_bloom_filter_reader() {
         let bytes = mock_bloom_filter_bytes().await;
 
-        let mut reader = BloomFilterReaderImpl::new(bytes);
+        let reader = BloomFilterReaderImpl::new(bytes);
         let meta = reader.metadata().await.unwrap();
 
-        assert_eq!(meta.bloom_filter_segments.len(), 2);
+        assert_eq!(meta.bloom_filter_locs.len(), 2);
         let bf = reader
-            .bloom_filter(&meta.bloom_filter_segments[0])
+            .bloom_filter(&meta.bloom_filter_locs[0])
             .await
             .unwrap();
         assert!(bf.contains(&b"a"));
@@ -264,7 +288,7 @@ mod tests {
         assert!(bf.contains(&b"d"));
 
         let bf = reader
-            .bloom_filter(&meta.bloom_filter_segments[1])
+            .bloom_filter(&meta.bloom_filter_locs[1])
             .await
             .unwrap();
         assert!(bf.contains(&b"e"));

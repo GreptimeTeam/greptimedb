@@ -25,14 +25,16 @@ use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, DEFAULT_OTLP_E
 use common_wal::config::raft_engine::RaftEngineConfig;
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
-use file_engine::config::EngineConfig;
+use file_engine::config::EngineConfig as FileEngineConfig;
 use frontend::frontend::FrontendOptions;
 use meta_client::MetaClientOptions;
 use meta_srv::metasrv::MetasrvOptions;
 use meta_srv::selector::SelectorType;
+use metric_engine::config::EngineConfig as MetricEngineConfig;
 use mito2::config::MitoConfig;
 use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
+use servers::http::HttpOptions;
 
 #[allow(deprecated)]
 #[test]
@@ -69,10 +71,13 @@ fn test_load_datanode_example_config() {
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
                     auto_flush_interval: Duration::from_secs(3600),
-                    experimental_write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
+                    write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     ..Default::default()
                 }),
-                RegionEngineConfig::File(EngineConfig {}),
+                RegionEngineConfig::File(FileEngineConfig {}),
+                RegionEngineConfig::Metric(MetricEngineConfig {
+                    experimental_sparse_primary_key_encoding: false,
+                }),
             ],
             logging: LoggingOptions {
                 level: Some("info".to_string()),
@@ -85,7 +90,9 @@ fn test_load_datanode_example_config() {
                 remote_write: Some(Default::default()),
                 ..Default::default()
             },
-            grpc: GrpcOptions::default().with_addr("127.0.0.1:3001"),
+            grpc: GrpcOptions::default()
+                .with_addr("127.0.0.1:3001")
+                .with_hostname("127.0.0.1:3001"),
             rpc_addr: Some("127.0.0.1:3001".to_string()),
             rpc_hostname: Some("127.0.0.1".to_string()),
             rpc_runtime_size: Some(8),
@@ -137,6 +144,11 @@ fn test_load_frontend_example_config() {
                 remote_write: Some(Default::default()),
                 ..Default::default()
             },
+            grpc: GrpcOptions::default().with_hostname("127.0.0.1:4001"),
+            http: HttpOptions {
+                cors_allowed_origins: vec!["https://example.com".to_string()],
+                ..Default::default()
+            },
             ..Default::default()
         },
         ..Default::default()
@@ -154,6 +166,7 @@ fn test_load_metasrv_example_config() {
         component: MetasrvOptions {
             selector: SelectorType::default(),
             data_home: "/tmp/metasrv/".to_string(),
+            server_addr: "127.0.0.1:3002".to_string(),
             logging: LoggingOptions {
                 dir: "/tmp/greptimedb/logs".to_string(),
                 level: Some("info".to_string()),
@@ -203,10 +216,13 @@ fn test_load_standalone_example_config() {
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
                     auto_flush_interval: Duration::from_secs(3600),
-                    experimental_write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
+                    write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     ..Default::default()
                 }),
-                RegionEngineConfig::File(EngineConfig {}),
+                RegionEngineConfig::File(FileEngineConfig {}),
+                RegionEngineConfig::Metric(MetricEngineConfig {
+                    experimental_sparse_primary_key_encoding: false,
+                }),
             ],
             storage: StorageConfig {
                 data_home: "/tmp/greptimedb/".to_string(),
@@ -221,6 +237,10 @@ fn test_load_standalone_example_config() {
             export_metrics: ExportMetricsOption {
                 self_import: Some(Default::default()),
                 remote_write: Some(Default::default()),
+                ..Default::default()
+            },
+            http: HttpOptions {
+                cors_allowed_origins: vec!["https://example.com".to_string()],
                 ..Default::default()
             },
             ..Default::default()

@@ -1,8 +1,6 @@
 node_id = 1
 mode = 'distributed'
 require_lease_before_startup = true
-rpc_addr = '127.0.0.1:29410'
-rpc_hostname = '127.0.0.1'
 rpc_runtime_size = 8
 
 [wal]

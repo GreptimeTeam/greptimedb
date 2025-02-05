@@ -123,6 +123,14 @@ impl ColumnSchema {
         self.default_constraint.as_ref()
     }
 
+    /// Check if the default constraint is a impure function.
+    pub fn is_default_impure(&self) -> bool {
+        self.default_constraint
+            .as_ref()
+            .map(|c| c.is_function())
+            .unwrap_or(false)
+    }
+
     #[inline]
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
@@ -150,11 +158,35 @@ impl ColumnSchema {
         self
     }
 
-    pub fn set_inverted_index(mut self, value: bool) -> Self {
-        let _ = self
-            .metadata
-            .insert(INVERTED_INDEX_KEY.to_string(), value.to_string());
+    /// Set the inverted index for the column.
+    /// Similar to [with_inverted_index] but don't take the ownership.
+    ///
+    /// [with_inverted_index]: Self::with_inverted_index
+    pub fn set_inverted_index(&mut self, value: bool) {
+        match value {
+            true => {
+                self.metadata
+                    .insert(INVERTED_INDEX_KEY.to_string(), value.to_string());
+            }
+            false => {
+                self.metadata.remove(INVERTED_INDEX_KEY);
+            }
+        }
+    }
+
+    /// Set the inverted index for the column.
+    /// Similar to [set_inverted_index] but take the ownership and return a owned value.
+    ///
+    /// [set_inverted_index]: Self::set_inverted_index
+    pub fn with_inverted_index(mut self, value: bool) -> Self {
+        self.set_inverted_index(value);
         self
+    }
+
+    // Put a placeholder to invalidate schemas.all(!has_inverted_index_key).
+    pub fn insert_inverted_index_placeholder(&mut self) {
+        self.metadata
+            .insert(INVERTED_INDEX_KEY.to_string(), "".to_string());
     }
 
     pub fn is_inverted_indexed(&self) -> bool {
@@ -164,8 +196,15 @@ impl ColumnSchema {
             .unwrap_or(false)
     }
 
-    pub fn has_fulltext_index_key(&self) -> bool {
-        self.metadata.contains_key(FULLTEXT_KEY)
+    pub fn is_fulltext_indexed(&self) -> bool {
+        self.fulltext_options()
+            .unwrap_or_default()
+            .map(|option| option.enable)
+            .unwrap_or_default()
+    }
+
+    pub fn is_skipping_indexed(&self) -> bool {
+        self.skipping_index_options().unwrap_or_default().is_some()
     }
 
     pub fn has_inverted_index_key(&self) -> bool {
@@ -280,6 +319,15 @@ impl ColumnSchema {
                     Ok(None)
                 }
             }
+        }
+    }
+
+    /// Creates an impure default value for this column, only if it have a impure default constraint.
+    /// Otherwise, returns `Ok(None)`.
+    pub fn create_impure_default(&self) -> Result<Option<Value>> {
+        match &self.default_constraint {
+            Some(c) => c.create_impure_default(&self.data_type),
+            None => Ok(None),
         }
     }
 
@@ -399,7 +447,21 @@ impl TryFrom<&Field> for ColumnSchema {
             }
             None => None,
         };
-        let is_time_index = metadata.contains_key(TIME_INDEX_KEY);
+        let mut is_time_index = metadata.contains_key(TIME_INDEX_KEY);
+        if is_time_index && !data_type.is_timestamp() {
+            // If the column is time index but the data type is not timestamp, it is invalid.
+            // We set the time index to false and remove the metadata.
+            // This is possible if we cast the time index column to another type. DataFusion will
+            // keep the metadata:
+            // https://github.com/apache/datafusion/pull/12951
+            is_time_index = false;
+            metadata.remove(TIME_INDEX_KEY);
+            common_telemetry::debug!(
+                "Column {} is not timestamp ({:?}) but has time index metadata",
+                data_type,
+                field.name(),
+            );
+        }
 
         Ok(ColumnSchema {
             name: field.name().clone(),
@@ -609,7 +671,7 @@ impl TryFrom<HashMap<String, String>> for SkippingIndexOptions {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::datatypes::DataType as ArrowDataType;
+    use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
 
     use super::*;
     use crate::value::Value;
@@ -830,5 +892,41 @@ mod tests {
             column_schema.metadata.get(TYPE_KEY).unwrap(),
             &ConcreteDataType::vector_datatype(3).name()
         );
+    }
+
+    #[test]
+    fn test_column_schema_fix_time_index() {
+        let field = Field::new(
+            "test",
+            ArrowDataType::Timestamp(TimeUnit::Second, None),
+            false,
+        );
+        let field = field.with_metadata(Metadata::from([(
+            TIME_INDEX_KEY.to_string(),
+            "true".to_string(),
+        )]));
+        let column_schema = ColumnSchema::try_from(&field).unwrap();
+        assert_eq!("test", column_schema.name);
+        assert_eq!(
+            ConcreteDataType::timestamp_second_datatype(),
+            column_schema.data_type
+        );
+        assert!(!column_schema.is_nullable);
+        assert!(column_schema.is_time_index);
+        assert!(column_schema.default_constraint.is_none());
+        assert_eq!(1, column_schema.metadata().len());
+
+        let field = Field::new("test", ArrowDataType::Int32, false);
+        let field = field.with_metadata(Metadata::from([(
+            TIME_INDEX_KEY.to_string(),
+            "true".to_string(),
+        )]));
+        let column_schema = ColumnSchema::try_from(&field).unwrap();
+        assert_eq!("test", column_schema.name);
+        assert_eq!(ConcreteDataType::int32_datatype(), column_schema.data_type);
+        assert!(!column_schema.is_nullable);
+        assert!(!column_schema.is_time_index);
+        assert!(column_schema.default_constraint.is_none());
+        assert!(column_schema.metadata.is_empty());
     }
 }

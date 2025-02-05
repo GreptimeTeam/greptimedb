@@ -18,7 +18,6 @@ use arrow::error::ArrowError;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use common_recordbatch::error::Error as RecordbatchError;
 use datafusion_common::DataFusionError;
 use datatypes::arrow;
 use datatypes::arrow::datatypes::DataType as ArrowDatatype;
@@ -31,21 +30,6 @@ use statrs::StatsError;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Failed to execute Python UDF: {}", msg))]
-    PyUdf {
-        // TODO(discord9): find a way that prevent circle depend(query<-script<-query) and can use script's error type
-        msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to create temporary recordbatch when eval Python UDF"))]
-    UdfTempRecordBatch {
-        #[snafu(implicit)]
-        location: Location,
-        source: RecordbatchError,
-    },
-
     #[snafu(display("Failed to execute function"))]
     ExecuteFunction {
         #[snafu(source)]
@@ -253,6 +237,15 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to register UDF: {}", name))]
+    RegisterUdf {
+        name: String,
+        #[snafu(source)]
+        error: DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -260,9 +253,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::UdfTempRecordBatch { .. }
-            | Error::PyUdf { .. }
-            | Error::CreateAccumulator { .. }
+            Error::CreateAccumulator { .. }
             | Error::DowncastVector { .. }
             | Error::InvalidInputState { .. }
             | Error::InvalidInputCol { .. }
@@ -286,7 +277,8 @@ impl ErrorExt for Error {
 
             Error::MissingTableMutationHandler { .. }
             | Error::MissingProcedureServiceHandler { .. }
-            | Error::MissingFlowServiceHandler { .. } => StatusCode::Unexpected,
+            | Error::MissingFlowServiceHandler { .. }
+            | Error::RegisterUdf { .. } => StatusCode::Unexpected,
 
             Error::UnsupportedInputDataType { .. }
             | Error::TypeCast { .. }
