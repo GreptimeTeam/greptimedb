@@ -66,6 +66,7 @@ impl AnalyzerRule for DistPlannerAnalyzer {
 impl DistPlannerAnalyzer {
     fn inspect_plan_with_subquery(plan: LogicalPlan) -> DfResult<Transformed<LogicalPlan>> {
         // Workaround for https://github.com/GreptimeTeam/greptimedb/issues/5469
+        // FIXME(yingwen): Remove this once we update DataFusion.
         if let LogicalPlan::Limit(_) = &plan {
             return Ok(Transformed::no(plan));
         }
