@@ -23,7 +23,7 @@ curl https://raw.githubusercontent.com/brendangregg/FlameGraph/master/flamegraph
 Start GreptimeDB instance with environment variables:
 
 ```bash
-MALLOC_CONF=prof:true ./target/debug/greptime standalone start
+_RJEM_MALLOC_CONF=prof:true ./target/debug/greptime standalone start
 ```
 
 Dump memory profiling data through HTTP API:
