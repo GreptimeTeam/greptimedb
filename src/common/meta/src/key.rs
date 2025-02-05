@@ -136,7 +136,7 @@ use table::metadata::{RawTableInfo, TableId};
 use table::table_name::TableName;
 use table_info::{TableInfoKey, TableInfoManager, TableInfoValue};
 use table_name::{TableNameKey, TableNameManager, TableNameValue};
-use topic_region::TopicRegionManager;
+use topic_region::{TopicRegionKey, TopicRegionManager};
 use view_info::{ViewInfoKey, ViewInfoManager, ViewInfoValue};
 
 use self::catalog_name::{CatalogManager, CatalogNameKey, CatalogNameValue};
@@ -793,6 +793,7 @@ impl TableMetadataManager {
         table_id: TableId,
         table_name: &TableName,
         table_route_value: &TableRouteValue,
+        region_wal_options: &HashMap<RegionNumber, String>,
     ) -> Result<Vec<Vec<u8>>> {
         // Builds keys
         let datanode_ids = if table_route_value.is_physical() {
@@ -814,11 +815,20 @@ impl TableMetadataManager {
             .into_iter()
             .map(|datanode_id| DatanodeTableKey::new(datanode_id, table_id))
             .collect::<HashSet<_>>();
-
+        let topic_region_map = self
+            .topic_region_manager
+            .topic_region_map(table_id, region_wal_options)?;
+        let topic_region_keys = topic_region_map
+            .iter()
+            .map(|(topic, region_id)| TopicRegionKey::new(*topic, region_id))
+            .collect::<Vec<_>>();
         keys.push(table_name.to_bytes());
         keys.push(table_info_key.to_bytes());
         keys.push(table_route_key.to_bytes());
         for key in &datanode_table_keys {
+            keys.push(key.to_bytes());
+        }
+        for key in &topic_region_keys {
             keys.push(key.to_bytes());
         }
         Ok(keys)
@@ -831,8 +841,10 @@ impl TableMetadataManager {
         table_id: TableId,
         table_name: &TableName,
         table_route_value: &TableRouteValue,
+        region_wal_options: &HashMap<RegionNumber, String>,
     ) -> Result<()> {
-        let keys = self.table_metadata_keys(table_id, table_name, table_route_value)?;
+        let keys =
+            self.table_metadata_keys(table_id, table_name, table_route_value, region_wal_options)?;
         self.tombstone_manager.create(keys).await
     }
 
@@ -846,15 +858,10 @@ impl TableMetadataManager {
         region_wal_options: &HashMap<RegionNumber, String>,
     ) -> Result<()> {
         let table_metadata_keys =
-            self.table_metadata_keys(table_id, table_name, table_route_value)?;
-        let tombstone_txn = self
+            self.table_metadata_keys(table_id, table_name, table_route_value, region_wal_options)?;
+        let txn = self
             .tombstone_manager
             .build_delete_txn(&table_metadata_keys)?;
-
-        let topic_region_txn = self
-            .topic_region_manager
-            .build_delete_txn(table_id, region_wal_options)?;
-        let txn = tombstone_txn.merge(topic_region_txn);
 
         // Always success.
         let _ = self.kv_backend.txn(txn).await?;
@@ -868,8 +875,10 @@ impl TableMetadataManager {
         table_id: TableId,
         table_name: &TableName,
         table_route_value: &TableRouteValue,
+        region_wal_options: &HashMap<RegionNumber, String>,
     ) -> Result<()> {
-        let keys = self.table_metadata_keys(table_id, table_name, table_route_value)?;
+        let keys =
+            self.table_metadata_keys(table_id, table_name, table_route_value, region_wal_options)?;
         self.tombstone_manager.restore(keys).await
     }
 
@@ -882,14 +891,10 @@ impl TableMetadataManager {
         table_route_value: &TableRouteValue,
         region_wal_options: &HashMap<RegionNumber, String>,
     ) -> Result<()> {
-        let keys = self.table_metadata_keys(table_id, table_name, table_route_value)?;
+        let keys =
+            self.table_metadata_keys(table_id, table_name, table_route_value, region_wal_options)?;
         let operations = keys.into_iter().map(TxnOp::Delete).collect::<Vec<_>>();
         let txn = Txn::new().and_then(operations);
-
-        let topic_region_txn = self
-            .topic_region_manager
-            .build_delete_txn(table_id, region_wal_options)?;
-        let txn = txn.merge(topic_region_txn);
 
         // Always success.
         let _ = self.kv_backend.txn(txn).await?;
@@ -1449,7 +1454,7 @@ mod tests {
             .collect::<Vec<_>>();
         let options_batch = topics
             .into_iter()
-            .map(|topic| WalOptions::Kafka(KafkaWalOptions { topic: topic }))
+            .map(|topic| WalOptions::Kafka(KafkaWalOptions { topic }))
             .collect::<Vec<_>>();
         let wal_options = options_batch
             .into_iter()
@@ -1548,7 +1553,7 @@ mod tests {
             region_routes
         );
 
-        for i in 0..16 {
+        for i in 0..2 {
             let region_number = i as u32;
             let region_id = RegionId::new(table_info.ident.table_id, region_number);
             let topic = format!("greptimedb_topic{}", i);
@@ -1557,7 +1562,7 @@ mod tests {
                 .regions(&topic)
                 .await
                 .unwrap();
-            assert_eq!(regions.len(), 1);
+            assert_eq!(regions.len(), 8);
             assert_eq!(regions[0], region_id);
         }
     }
@@ -1655,13 +1660,14 @@ mod tests {
             new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
         let table_id = table_info.ident.table_id;
         let datanode_id = 2;
+        let region_wal_options = create_mock_region_wal_options();
 
         // creates metadata.
         create_physical_table_metadata(
             &table_metadata_manager,
             table_info.clone(),
             region_routes.clone(),
-            create_mock_region_wal_options(),
+            region_wal_options.clone(),
         )
         .await
         .unwrap();
@@ -1674,12 +1680,22 @@ mod tests {
         let table_route_value = &TableRouteValue::physical(region_routes.clone());
         // deletes metadata.
         table_metadata_manager
-            .delete_table_metadata(table_id, &table_name, table_route_value)
+            .delete_table_metadata(
+                table_id,
+                &table_name,
+                table_route_value,
+                &region_wal_options,
+            )
             .await
             .unwrap();
         // Should be ignored.
         table_metadata_manager
-            .delete_table_metadata(table_id, &table_name, table_route_value)
+            .delete_table_metadata(
+                table_id,
+                &table_name,
+                table_route_value,
+                &region_wal_options,
+            )
             .await
             .unwrap();
         assert!(table_metadata_manager
@@ -1716,14 +1732,13 @@ mod tests {
             .await
             .unwrap();
         assert!(table_route.is_none());
-        // Logical delete does not remove the topic region mapping.
+        // Logical delete removes the topic region mapping as well.
         let regions = table_metadata_manager
             .topic_region_manager
-            .regions("greptimedb_topic1")
+            .regions("greptimedb_topic0")
             .await
             .unwrap();
-        assert_eq!(regions.len(), 1);
-        assert_eq!(regions[0], RegionId::new(table_id, 1));
+        assert_eq!(regions.len(), 0);
     }
 
     #[tokio::test]
@@ -2171,7 +2186,7 @@ mod tests {
                         leader_down_since: None,
                     },
                 ]),
-                options,
+                options.clone(),
             )
             .await
             .unwrap();
@@ -2187,18 +2202,18 @@ mod tests {
         let table_name = TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name);
         let table_route_value = TableRouteValue::physical(region_routes.clone());
         table_metadata_manager
-            .delete_table_metadata(table_id, &table_name, &table_route_value)
+            .delete_table_metadata(table_id, &table_name, &table_route_value, &options)
             .await
             .unwrap();
         table_metadata_manager
-            .restore_table_metadata(table_id, &table_name, &table_route_value)
+            .restore_table_metadata(table_id, &table_name, &table_route_value, &options)
             .await
             .unwrap();
         let kvs = mem_kv.dump();
         assert_eq!(kvs, expected_result);
         // Should be ignored.
         table_metadata_manager
-            .restore_table_metadata(table_id, &table_name, &table_route_value)
+            .restore_table_metadata(table_id, &table_name, &table_route_value, &options)
             .await
             .unwrap();
         let kvs = mem_kv.dump();

@@ -133,7 +133,11 @@ impl DropTableProcedure {
         );
         // Deletes table metadata logically.
         self.executor
-            .on_delete_metadata(&self.context, table_route_value)
+            .on_delete_metadata(
+                &self.context,
+                table_route_value,
+                &self.data.region_wal_options,
+            )
             .await?;
         info!("Deleted table metadata for table {table_id}");
         self.data.state = DropTableState::InvalidateTableCache;
@@ -249,7 +253,11 @@ impl Procedure for DropTableProcedure {
             self.data.physical_region_routes.clone(),
         );
         self.executor
-            .on_restore_metadata(&self.context, table_route_value)
+            .on_restore_metadata(
+                &self.context,
+                table_route_value,
+                &self.data.region_wal_options,
+            )
             .await
             .map_err(ProcedureError::external)
     }

@@ -115,9 +115,15 @@ impl DropTableExecutor {
         &self,
         ctx: &DdlContext,
         table_route_value: &TableRouteValue,
+        region_wal_options: &HashMap<u32, String>,
     ) -> Result<()> {
         ctx.table_metadata_manager
-            .delete_table_metadata(self.table_id, &self.table, table_route_value)
+            .delete_table_metadata(
+                self.table_id,
+                &self.table,
+                table_route_value,
+                region_wal_options,
+            )
             .await
     }
 
@@ -170,9 +176,15 @@ impl DropTableExecutor {
         &self,
         ctx: &DdlContext,
         table_route_value: &TableRouteValue,
+        region_wal_options: &HashMap<u32, String>,
     ) -> Result<()> {
         ctx.table_metadata_manager
-            .restore_table_metadata(self.table_id, &self.table, table_route_value)
+            .restore_table_metadata(
+                self.table_id,
+                &self.table,
+                table_route_value,
+                region_wal_options,
+            )
             .await
     }
 

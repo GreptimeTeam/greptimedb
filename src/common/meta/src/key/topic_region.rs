@@ -191,23 +191,6 @@ impl TopicRegionManager {
         Ok(())
     }
 
-    pub(crate) fn build_delete_txn(
-        &self,
-        table_id: TableId,
-        region_wal_options: &HashMap<RegionNumber, String>,
-    ) -> Result<Txn> {
-        let topic_region_map = self.topic_region_map(table_id, region_wal_options)?;
-        let topic_region_keys = topic_region_map
-            .iter()
-            .map(|(topic, region_id)| TopicRegionKey::new(*topic, region_id))
-            .collect::<Vec<_>>();
-        let operations = topic_region_keys
-            .into_iter()
-            .map(|key| TxnOp::Delete(key.to_bytes()))
-            .collect::<Vec<_>>();
-        Ok(Txn::new().and_then(operations))
-    }
-
     pub async fn batch_delete(&self, keys: Vec<TopicRegionKey<'_>>) -> Result<()> {
         let raw_keys = keys.iter().map(|key| key.to_bytes()).collect::<Vec<_>>();
         let req = BatchDeleteRequest {
@@ -218,7 +201,7 @@ impl TopicRegionManager {
         Ok(())
     }
 
-    fn topic_region_map(
+    pub fn topic_region_map(
         &self,
         table_id: TableId,
         region_wal_options: &HashMap<RegionNumber, String>,

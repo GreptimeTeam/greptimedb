@@ -109,9 +109,17 @@ impl TableMetadataBencher {
                 let table_info = table_info.unwrap();
                 let table_route = table_route.unwrap();
                 let table_id = table_info.table_info.ident.table_id;
+
+                let regions: Vec<_> = (0..64).collect();
+                let region_wal_options = create_region_wal_options(regions);
                 let _ = self
                     .table_metadata_manager
-                    .delete_table_metadata(table_id, &table_info.table_name(), &table_route)
+                    .delete_table_metadata(
+                        table_id,
+                        &table_info.table_name(),
+                        &table_route,
+                        &region_wal_options,
+                    )
                     .await;
                 start.elapsed()
             },
