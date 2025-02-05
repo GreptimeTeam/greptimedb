@@ -20,6 +20,7 @@ use api::v1::region::compact_request;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{info, warn};
 use common_time::TimeToLive;
+use itertools::Itertools;
 use object_store::manager::ObjectStoreManagerRef;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -278,18 +279,6 @@ impl Compactor for DefaultCompactor {
 
         for output in picker_output.outputs.drain(..) {
             compacted_inputs.extend(output.inputs.iter().map(|f| f.meta_ref().clone()));
-
-            info!(
-                "Region {} compaction input: [{}]",
-                compaction_region.region_id,
-                output
-                    .inputs
-                    .iter()
-                    .map(|f| f.file_id().to_string())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
-
             let write_opts = WriteOptions {
                 write_buffer_size: compaction_region.engine_config.sst_write_buffer_size,
                 ..Default::default()
@@ -318,6 +307,11 @@ impl Compactor for DefaultCompactor {
                 .max()
                 .flatten();
             futs.push(async move {
+                let input_file_names = output
+                    .inputs
+                    .iter()
+                    .map(|f| f.file_id().to_string())
+                    .join(",");
                 let reader = CompactionSstReaderBuilder {
                     metadata: region_metadata.clone(),
                     sst_layer: sst_layer.clone(),
@@ -330,7 +324,7 @@ impl Compactor for DefaultCompactor {
                 }
                 .build_sst_reader()
                 .await?;
-                let file_meta_opt = sst_layer
+                let output_files = sst_layer
                     .write_sst(
                         SstWriteRequest {
                             op_type: OperationType::Compact,
@@ -361,7 +355,13 @@ impl Compactor for DefaultCompactor {
                         sequence: max_sequence,
                     })
                     .collect::<Vec<_>>();
-                Ok(file_meta_opt)
+                let output_file_names =
+                    output_files.iter().map(|f| f.file_id.to_string()).join(",");
+                info!(
+                    "Region {} compaction inputs: [{}], outputs: [{}]",
+                    region_id, input_file_names, output_file_names
+                );
+                Ok(output_files)
             });
         }
         let mut output_files = Vec::with_capacity(futs.len());
