@@ -26,6 +26,7 @@ use common_procedure::{
 };
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
+use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use strum::AsRefStr;
@@ -271,7 +272,7 @@ pub struct DropTableData {
     pub physical_region_routes: Vec<RegionRoute>,
     pub physical_table_id: Option<TableId>,
     #[serde(default)]
-    pub region_wal_options: HashMap<u32, String>,
+    pub region_wal_options: HashMap<u32, WalOptions>,
     #[serde(default)]
     pub allow_rollback: bool,
 }

@@ -21,6 +21,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_telemetry::debug;
 use common_telemetry::tracing_context::TracingContext;
+use common_wal::options::WalOptions;
 use futures::future::join_all;
 use snafu::ensure;
 use store_api::storage::RegionId;
@@ -115,7 +116,7 @@ impl DropTableExecutor {
         &self,
         ctx: &DdlContext,
         table_route_value: &TableRouteValue,
-        region_wal_options: &HashMap<u32, String>,
+        region_wal_options: &HashMap<u32, WalOptions>,
     ) -> Result<()> {
         ctx.table_metadata_manager
             .delete_table_metadata(
@@ -132,7 +133,7 @@ impl DropTableExecutor {
         &self,
         ctx: &DdlContext,
         table_route_value: &TableRouteValue,
-        region_wal_options: &HashMap<u32, String>,
+        region_wal_options: &HashMap<u32, WalOptions>,
     ) -> Result<()> {
         ctx.table_metadata_manager
             .delete_table_metadata_tombstone(
@@ -149,7 +150,7 @@ impl DropTableExecutor {
         &self,
         ctx: &DdlContext,
         table_route_value: &TableRouteValue,
-        region_wal_options: &HashMap<u32, String>,
+        region_wal_options: &HashMap<u32, WalOptions>,
     ) -> Result<()> {
         ctx.table_metadata_manager
             .destroy_table_metadata(
@@ -176,7 +177,7 @@ impl DropTableExecutor {
         &self,
         ctx: &DdlContext,
         table_route_value: &TableRouteValue,
-        region_wal_options: &HashMap<u32, String>,
+        region_wal_options: &HashMap<u32, WalOptions>,
     ) -> Result<()> {
         ctx.table_metadata_manager
             .restore_table_metadata(

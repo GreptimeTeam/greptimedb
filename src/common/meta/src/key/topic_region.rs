@@ -206,34 +206,48 @@ impl TopicRegionManager {
         table_id: TableId,
         region_wal_options: &HashMap<RegionNumber, String>,
     ) -> Result<Vec<(RegionId, String)>> {
+        let region_wal_options = region_wal_options
+            .iter()
+            .map(|(region_number, wal_options)| {
+                match serde_json::from_str::<WalOptions>(wal_options)
+                    .context(ParseWalOptionsSnafu { wal_options })
+                {
+                    Ok(options) => Ok((*region_number, options)),
+                    Err(e) => Err(e),
+                }
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+        Ok(self.topic_region_map_inner(table_id, &region_wal_options))
+    }
+
+    pub fn topic_region_map_inner(
+        &self,
+        table_id: TableId,
+        region_wal_options: &HashMap<RegionNumber, WalOptions>,
+    ) -> Vec<(RegionId, String)> {
         let region_ids = region_wal_options
             .keys()
             .map(|region_number| RegionId::new(table_id, *region_number))
             .collect::<Vec<_>>();
         let keys = region_ids
             .into_iter()
-            .zip(region_wal_options.values())
-            .filter_map(|(region_id, topic_json)| {
-                // topic json is a serialized json string of `RegionWalOptions`.
-                // TODO: Use WalOptions instead of String to avoid deserialization everywhere.
-                let topic =
-                    serde_json::from_str::<WalOptions>(topic_json).context(ParseWalOptionsSnafu {
-                        wal_options: topic_json,
-                    });
-                match topic {
-                    Ok(WalOptions::Kafka(kafka)) => Some(Ok((region_id, kafka.topic))),
-                    Ok(WalOptions::RaftEngine) => None,
-                    Err(e) => Some(Err(e)),
-                }
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(keys)
+            .filter_map(
+                |region_id| match region_wal_options.get(&region_id.region_number()) {
+                    Some(WalOptions::Kafka(kafka)) => Some((region_id, kafka.topic.clone())),
+                    Some(WalOptions::RaftEngine) => None,
+                    None => None,
+                },
+            )
+            .collect::<Vec<_>>();
+        keys
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
+    use common_wal::options::KafkaWalOptions;
 
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
@@ -279,5 +293,42 @@ mod tests {
             .collect::<Vec<_>>();
         key_values.sort_by_key(|id| id.as_u64());
         assert_eq!(key_values, expected);
+    }
+
+    #[test]
+    fn test_topic_region_map() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let manager = TopicRegionManager::new(kv_backend.clone());
+
+        let table_id = 1;
+        let region_wal_options = (0..64)
+            .map(|i| {
+                let region_number = i;
+                let wal_options = if i % 2 == 0 {
+                    WalOptions::Kafka(KafkaWalOptions {
+                        topic: format!("topic_{}", i),
+                    })
+                } else {
+                    WalOptions::RaftEngine
+                };
+                (region_number, serde_json::to_string(&wal_options).unwrap())
+            })
+            .collect::<HashMap<_, _>>();
+
+        let mut topic_region_map = manager
+            .topic_region_map(table_id, &region_wal_options)
+            .unwrap();
+        let mut expected = (0..64)
+            .filter_map(|i| {
+                if i % 2 == 0 {
+                    Some((RegionId::new(table_id, i), format!("topic_{}", i)))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        topic_region_map.sort_by_key(|(region_id, _)| region_id.as_u64());
+        expected.sort_by_key(|(region_id, _)| region_id.as_u64());
+        assert_eq!(topic_region_map, expected);
     }
 }

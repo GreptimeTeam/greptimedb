@@ -12,16 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use common_catalog::consts::METRIC_ENGINE;
 use common_error::ext::BoxedError;
 use common_procedure::error::Error as ProcedureError;
+use common_wal::options::WalOptions;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
+use store_api::storage::RegionNumber;
 use table::metadata::TableId;
 use table::table_reference::TableReference;
 
 use crate::ddl::DetectingRegion;
-use crate::error::{Error, OperateDatanodeSnafu, Result, TableNotFoundSnafu, UnsupportedSnafu};
+use crate::error::{
+    Error, OperateDatanodeSnafu, ParseWalOptionsSnafu, Result, TableNotFoundSnafu, UnsupportedSnafu,
+};
+use crate::key::datanode_table::DatanodeTableValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::TableMetadataManagerRef;
 use crate::peer::Peer;
@@ -149,6 +156,32 @@ pub fn convert_region_routes_to_detecting_regions(
                 .map(|peer| (cluster_id, peer.id, route.region.id))
         })
         .collect::<Vec<_>>()
+}
+
+/// Parses [WalOptions] from serialized strings in hashmap.
+pub fn parse_region_wal_options(
+    serialized_options: &HashMap<RegionNumber, String>,
+) -> Result<HashMap<RegionNumber, WalOptions>> {
+    let mut region_wal_options = HashMap::new();
+    for (region_number, wal_options) in serialized_options {
+        let wal_option = serde_json::from_str::<WalOptions>(wal_options)
+            .context(ParseWalOptionsSnafu { wal_options })?;
+        region_wal_options.insert(*region_number, wal_option);
+    }
+    Ok(region_wal_options)
+}
+
+/// Extracts region wal options from [DatanodeTableValue]s.
+pub fn extract_region_wal_options(
+    datanode_table_values: &Vec<DatanodeTableValue>,
+) -> Result<HashMap<RegionNumber, WalOptions>> {
+    let mut region_wal_options = HashMap::new();
+    for value in datanode_table_values {
+        let serialized_options = &value.region_info.region_wal_options;
+        let parsed_options = parse_region_wal_options(serialized_options)?;
+        region_wal_options.extend(parsed_options);
+    }
+    Ok(region_wal_options)
 }
 
 #[cfg(test)]

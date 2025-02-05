@@ -26,6 +26,7 @@ use super::cursor::DropDatabaseCursor;
 use super::{DropDatabaseContext, DropTableTarget};
 use crate::ddl::drop_database::State;
 use crate::ddl::drop_table::executor::DropTableExecutor;
+use crate::ddl::utils::extract_region_wal_options;
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::key::table_route::TableRouteValue;
@@ -112,19 +113,12 @@ impl State for DropDatabaseExecutor {
         // Deletes topic-region mapping if dropping physical table
         let region_wal_options =
             if let TableRouteValue::Physical(table_route_value) = &table_route_value {
-                ddl_ctx
+                let datanode_table_values = ddl_ctx
                     .table_metadata_manager
                     .datanode_table_manager()
                     .regions(self.physical_table_id, table_route_value)
-                    .await?
-                    .into_iter()
-                    .flat_map(|datanode_table_value| {
-                        datanode_table_value
-                            .region_info
-                            .region_wal_options
-                            .into_iter()
-                    })
-                    .collect::<HashMap<_, _>>()
+                    .await?;
+                extract_region_wal_options(&datanode_table_values)?
             } else {
                 HashMap::new()
             };

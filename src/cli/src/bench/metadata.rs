@@ -49,7 +49,12 @@ impl TableMetadataBencher {
 
                 let regions: Vec<_> = (0..64).collect();
                 let region_routes = create_region_routes(regions.clone());
-                let region_wal_options = create_region_wal_options(regions);
+                let region_wal_options = create_region_wal_options(regions)
+                    .into_iter()
+                    .map(|(region_id, wal_options)| {
+                        (region_id, serde_json::to_string(&wal_options).unwrap())
+                    })
+                    .collect();
 
                 let start = Instant::now();
 

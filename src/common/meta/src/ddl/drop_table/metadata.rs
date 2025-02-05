@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use common_catalog::format_full_table_name;
 use snafu::OptionExt;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 
 use crate::ddl::drop_table::DropTableProcedure;
+use crate::ddl::utils::extract_region_wal_options;
 use crate::error::{self, Result};
 
 impl DropTableProcedure {
@@ -49,21 +48,13 @@ impl DropTableProcedure {
             self.data.allow_rollback = engine.as_str() == METRIC_ENGINE_NAME;
 
             // Deletes topic-region mapping if dropping physical table
-            let region_wal_options = self
+            let datanode_table_values = self
                 .context
                 .table_metadata_manager
                 .datanode_table_manager()
                 .regions(physical_table_id, &physical_table_route_value)
-                .await?
-                .into_iter()
-                .flat_map(|datanode_table_value| {
-                    datanode_table_value
-                        .region_info
-                        .region_wal_options
-                        .into_iter()
-                })
-                .collect::<HashMap<_, _>>();
-            self.data.region_wal_options = region_wal_options;
+                .await?;
+            self.data.region_wal_options = extract_region_wal_options(&datanode_table_values)?;
         }
 
         self.data.physical_region_routes = physical_table_route_value.region_routes;
