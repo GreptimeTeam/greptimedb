@@ -41,20 +41,11 @@ const NAME: &str = "vec_sub";
 /// +---------------------------------------------------------------+
 /// | [0,-1]                                                        |
 /// +---------------------------------------------------------------+
-///
-/// -- Negative scalar to simulate subtraction
-/// SELECT vec_to_string(vec_sub('[-1.0, -1.0]', '[1.0, 2.0]'));
-///
-/// +-----------------------------------------------------------------+
-/// | vec_to_string(vec_sub(Utf8("[-1.0, -1.0]"),Utf8("[1.0, 2.0]"))) |
-/// +-----------------------------------------------------------------+
-/// | [-2,-3]                                                         |
-/// +-----------------------------------------------------------------+
-///
+/// 
 #[derive(Debug, Clone, Default)]
-pub struct SubFunction;
+pub struct VectorSubFunction;
 
-impl Function for SubFunction {
+impl Function for VectorSubFunction {
     fn name(&self) -> &str {
         NAME
     }
@@ -142,7 +133,7 @@ impl Function for SubFunction {
     }
 }
 
-impl Display for SubFunction {
+impl Display for VectorSubFunction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", NAME.to_ascii_uppercase())
     }
@@ -159,7 +150,7 @@ mod tests {
 
     #[test]
     fn test_sub() {
-        let func = SubFunction;
+        let func = VectorSubFunction;
 
         let input0 = Arc::new(StringVector::from(vec![
             Some("[1.0,2.0,3.0]".to_string()),
@@ -194,7 +185,7 @@ mod tests {
 
     #[test]
     fn test_sub_error() {
-        let func = SubFunction;
+        let func = VectorSubFunction;
 
         let input0 = Arc::new(StringVector::from(vec![
             Some("[1.0,2.0,3.0]".to_string()),
