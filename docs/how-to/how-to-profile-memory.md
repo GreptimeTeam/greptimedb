@@ -5,7 +5,7 @@ This crate provides an easy approach to dump memory profiling info.
 ## Prerequisites
 ### jemalloc
 ```bash
-# for macOS
+# for MacOS
 brew install jemalloc
 
 # for Ubuntu
@@ -22,6 +22,13 @@ curl https://raw.githubusercontent.com/brendangregg/FlameGraph/master/flamegraph
 
 Start GreptimeDB instance with environment variables:
 
+# for Linux
+
+```bash
+MALLOC_CONF=prof:true ./target/debug/greptime standalone start
+```
+
+# for MacOS
 ```bash
 _RJEM_MALLOC_CONF=prof:true ./target/debug/greptime standalone start
 ```
