@@ -163,7 +163,8 @@ impl RegionEngine for MetricEngine {
                 }
             }
             RegionRequest::Flush(req) => self.inner.flush_region(region_id, req).await,
-            RegionRequest::Delete(_) | RegionRequest::Truncate(_) => {
+            RegionRequest::Truncate(_) => UnsupportedRegionRequestSnafu { request }.fail(),
+            RegionRequest::Delete(_) => {
                 if self.inner.is_physical_region(region_id) {
                     self.inner
                         .mito
