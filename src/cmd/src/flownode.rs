@@ -133,7 +133,7 @@ struct StartCommand {
     rpc_bind_addr: Option<String>,
     /// The address advertised to the metasrv, and used for connections from outside the host.
     /// If left empty or unset, the server will automatically use the IP address of the first network interface
-    /// on the host, with the same port number as the one specified in `bind_addr`.
+    /// on the host, with the same port number as the one specified in `rpc_bind_addr`.
     #[clap(long, alias = "rpc-hostname")]
     rpc_server_addr: Option<String>,
     /// Metasrv address list;

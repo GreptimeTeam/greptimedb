@@ -138,7 +138,7 @@ struct StartCommand {
     rpc_bind_addr: Option<String>,
     /// The communication server address for the frontend and datanode to connect to metasrv.
     /// If left empty or unset, the server will automatically use the IP address of the first network interface
-    /// on the host, with the same port number as the one specified in `bind_addr`.
+    /// on the host, with the same port number as the one specified in `rpc_bind_addr`.
     #[clap(long, alias = "server-addr")]
     rpc_server_addr: Option<String>,
     #[clap(long, alias = "store-addr", value_delimiter = ',', num_args = 1..)]
