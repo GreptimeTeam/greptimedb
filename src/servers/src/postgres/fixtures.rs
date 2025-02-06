@@ -115,11 +115,7 @@ pub(crate) fn process<'a>(query: &str, query_ctx: QueryContextRef) -> Option<Vec
     }
 }
 
-static LIMIT_CAST_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)(LIMIT\\s+\\d+)::bigint").unwrap());
 pub(crate) fn rewrite_sql(query: &str) -> Cow<'_, str> {
-    //TODO(sunng87): remove this when we upgraded datafusion to 43 or newer
-    let query = LIMIT_CAST_PATTERN.replace_all(query, "$1");
     // DBeaver tricky replacement for datafusion not support sql
     // TODO: add more here
     query
@@ -218,11 +214,6 @@ mod test {
 
     #[test]
     fn test_rewrite() {
-        let sql = "SELECT * FROM number LIMIT 1::bigint";
-        let sql2 = "SELECT * FROM number limit      1::BIGINT";
-
-        assert_eq!("SELECT * FROM number LIMIT 1", rewrite_sql(sql));
-        assert_eq!("SELECT * FROM number limit      1", rewrite_sql(sql2));
         assert_eq!(
             "SELECT db.oid as _oid,db.* FROM pg_catalog.pg_database db",
             rewrite_sql("SELECT db.oid,db.* FROM pg_catalog.pg_database db")

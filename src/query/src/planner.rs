@@ -109,6 +109,7 @@ impl DfLogicalPlanner {
         let result = sql_to_rel
             .statement_to_plan(df_stmt)
             .context(PlanSqlSnafu)?;
+        common_telemetry::debug!("Logical planner, statement to plan result: {result}");
         let plan = RangePlanRewriter::new(table_provider, query_ctx.clone())
             .rewrite(result)
             .await?;
@@ -119,6 +120,7 @@ impl DfLogicalPlanner {
             .engine_state
             .optimize_by_extension_rules(plan, &context)
             .context(DataFusionSnafu)?;
+        common_telemetry::debug!("Logical planner, optimize result: {plan}");
 
         Ok(plan)
     }

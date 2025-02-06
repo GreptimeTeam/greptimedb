@@ -121,7 +121,7 @@ fn make_test_app(tx: Arc<mpsc::Sender<(String, String)>>, db_name: Option<&str>)
         .with_user_provider(Arc::new(user_provider))
         .with_influxdb_handler(instance)
         .build();
-    server.build(server.make_app())
+    server.build(server.make_app()).unwrap()
 }
 
 #[tokio::test]

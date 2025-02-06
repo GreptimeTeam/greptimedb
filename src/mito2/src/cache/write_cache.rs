@@ -23,7 +23,10 @@ use futures::AsyncWriteExt;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
-use crate::access_layer::{new_fs_cache_store, SstWriteRequest};
+use crate::access_layer::{
+    new_fs_cache_store, FilePathProvider, RegionFilePathFactory, SstInfoArray, SstWriteRequest,
+    WriteCachePathProvider,
+};
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
 use crate::error::{self, Result};
 use crate::metrics::{
@@ -32,9 +35,9 @@ use crate::metrics::{
 };
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
-use crate::sst::index::IndexerBuilder;
+use crate::sst::index::IndexerBuilderImpl;
 use crate::sst::parquet::writer::ParquetWriter;
-use crate::sst::parquet::{SstInfo, WriteOptions};
+use crate::sst::parquet::WriteOptions;
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 
 /// A cache for uploading files to remote object stores.
@@ -103,22 +106,21 @@ impl WriteCache {
         write_request: SstWriteRequest,
         upload_request: SstUploadRequest,
         write_opts: &WriteOptions,
-    ) -> Result<Option<SstInfo>> {
+    ) -> Result<SstInfoArray> {
         let timer = FLUSH_ELAPSED
             .with_label_values(&["write_sst"])
             .start_timer();
 
         let region_id = write_request.metadata.region_id;
-        let file_id = write_request.file_id;
-        let parquet_key = IndexKey::new(region_id, file_id, FileType::Parquet);
-        let puffin_key = IndexKey::new(region_id, file_id, FileType::Puffin);
 
         let store = self.file_cache.local_store();
-        let indexer = IndexerBuilder {
+        let path_provider = WriteCachePathProvider {
+            file_cache: self.file_cache.clone(),
+            region_id,
+        };
+        let indexer = IndexerBuilderImpl {
             op_type: write_request.op_type,
-            file_id,
-            file_path: self.file_cache.cache_file_path(puffin_key),
-            metadata: &write_request.metadata,
+            metadata: write_request.metadata.clone(),
             row_group_size: write_opts.row_group_size,
             puffin_manager: self.puffin_manager_factory.build(store),
             intermediate_manager: self.intermediate_manager.clone(),
@@ -126,17 +128,16 @@ impl WriteCache {
             inverted_index_config: write_request.inverted_index_config,
             fulltext_index_config: write_request.fulltext_index_config,
             bloom_filter_index_config: write_request.bloom_filter_index_config,
-        }
-        .build()
-        .await;
+        };
 
         // Write to FileCache.
         let mut writer = ParquetWriter::new_with_object_store(
             self.file_cache.local_store(),
-            self.file_cache.cache_file_path(parquet_key),
             write_request.metadata,
             indexer,
-        );
+            path_provider,
+        )
+        .await;
 
         let sst_info = writer
             .write_all(write_request.source, write_request.max_sequence, write_opts)
@@ -145,22 +146,29 @@ impl WriteCache {
         timer.stop_and_record();
 
         // Upload sst file to remote object store.
-        let Some(sst_info) = sst_info else {
-            // No data need to upload.
-            return Ok(None);
-        };
-
-        let parquet_path = &upload_request.upload_path;
-        let remote_store = &upload_request.remote_store;
-        self.upload(parquet_key, parquet_path, remote_store).await?;
-
-        if sst_info.index_metadata.file_size > 0 {
-            let puffin_key = IndexKey::new(region_id, file_id, FileType::Puffin);
-            let puffin_path = &upload_request.index_upload_path;
-            self.upload(puffin_key, puffin_path, remote_store).await?;
+        if sst_info.is_empty() {
+            return Ok(sst_info);
         }
 
-        Ok(Some(sst_info))
+        let remote_store = &upload_request.remote_store;
+        for sst in &sst_info {
+            let parquet_key = IndexKey::new(region_id, sst.file_id, FileType::Parquet);
+            let parquet_path = upload_request
+                .dest_path_provider
+                .build_sst_file_path(sst.file_id);
+            self.upload(parquet_key, &parquet_path, remote_store)
+                .await?;
+
+            if sst.index_metadata.file_size > 0 {
+                let puffin_key = IndexKey::new(region_id, sst.file_id, FileType::Puffin);
+                let puffin_path = &upload_request
+                    .dest_path_provider
+                    .build_index_file_path(sst.file_id);
+                self.upload(puffin_key, puffin_path, remote_store).await?;
+            }
+        }
+
+        Ok(sst_info)
     }
 
     /// Removes a file from the cache by `index_key`.
@@ -319,10 +327,8 @@ impl WriteCache {
 
 /// Request to write and upload a SST.
 pub struct SstUploadRequest {
-    /// Path to upload the file.
-    pub upload_path: String,
-    /// Path to upload the index file.
-    pub index_upload_path: String,
+    /// Destination path provider of which SST files in write cache should be uploaded to.
+    pub dest_path_provider: RegionFilePathFactory,
     /// Remote object store to upload.
     pub remote_store: ObjectStore,
 }
@@ -336,11 +342,9 @@ mod tests {
     use crate::cache::test_util::new_fs_store;
     use crate::cache::{CacheManager, CacheStrategy};
     use crate::region::options::IndexOptions;
-    use crate::sst::file::FileId;
-    use crate::sst::location::{index_file_path, sst_file_path};
     use crate::sst::parquet::reader::ParquetReaderBuilder;
     use crate::test_util::sst_util::{
-        assert_parquet_metadata_eq, new_batch_by_range, new_source, sst_file_handle,
+        assert_parquet_metadata_eq, new_batch_by_range, new_source, sst_file_handle_with_file_id,
         sst_region_metadata,
     };
     use crate::test_util::TestEnv;
@@ -351,9 +355,9 @@ mod tests {
         // and now just use local file system to mock.
         let mut env = TestEnv::new();
         let mock_store = env.init_object_store_manager();
-        let file_id = FileId::random();
-        let upload_path = sst_file_path("test", file_id);
-        let index_upload_path = index_file_path("test", file_id);
+        let path_provider = RegionFilePathFactory {
+            region_dir: "test".to_string(),
+        };
 
         let local_dir = create_temp_dir("");
         let local_store = new_fs_store(local_dir.path().to_str().unwrap());
@@ -373,7 +377,6 @@ mod tests {
 
         let write_request = SstWriteRequest {
             op_type: OperationType::Flush,
-            file_id,
             metadata,
             source,
             storage: None,
@@ -386,8 +389,7 @@ mod tests {
         };
 
         let upload_request = SstUploadRequest {
-            upload_path: upload_path.clone(),
-            index_upload_path: index_upload_path.clone(),
+            dest_path_provider: path_provider.clone(),
             remote_store: mock_store.clone(),
         };
 
@@ -397,18 +399,22 @@ mod tests {
         };
 
         // Write to cache and upload sst to mock remote store
-        write_cache
+        let sst_info = write_cache
             .write_and_upload_sst(write_request, upload_request, &write_opts)
             .await
             .unwrap()
-            .unwrap();
+            .remove(0); //todo(hl): we assume it only creates one file.
+
+        let file_id = sst_info.file_id;
+        let sst_upload_path = path_provider.build_sst_file_path(file_id);
+        let index_upload_path = path_provider.build_index_file_path(file_id);
 
         // Check write cache contains the key
         let key = IndexKey::new(region_id, file_id, FileType::Parquet);
         assert!(write_cache.file_cache.contains_key(&key));
 
         // Check file data
-        let remote_data = mock_store.read(&upload_path).await.unwrap();
+        let remote_data = mock_store.read(&sst_upload_path).await.unwrap();
         let cache_data = local_store
             .read(&write_cache.file_cache.cache_file_path(key))
             .await
@@ -436,6 +442,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_metadata_from_write_cache() {
+        common_telemetry::init_default_ut_logging();
         let mut env = TestEnv::new();
         let data_home = env.data_home().display().to_string();
         let mock_store = env.init_object_store_manager();
@@ -456,8 +463,7 @@ mod tests {
 
         // Create source
         let metadata = Arc::new(sst_region_metadata());
-        let handle = sst_file_handle(0, 1000);
-        let file_id = handle.file_id();
+
         let source = new_source(&[
             new_batch_by_range(&["a", "d"], 0, 60),
             new_batch_by_range(&["b", "f"], 0, 40),
@@ -467,7 +473,6 @@ mod tests {
         // Write to local cache and upload sst to mock remote store
         let write_request = SstWriteRequest {
             op_type: OperationType::Flush,
-            file_id,
             metadata,
             source,
             storage: None,
@@ -482,11 +487,10 @@ mod tests {
             row_group_size: 512,
             ..Default::default()
         };
-        let upload_path = sst_file_path(&data_home, file_id);
-        let index_upload_path = index_file_path(&data_home, file_id);
         let upload_request = SstUploadRequest {
-            upload_path: upload_path.clone(),
-            index_upload_path: index_upload_path.clone(),
+            dest_path_provider: RegionFilePathFactory {
+                region_dir: data_home.clone(),
+            },
             remote_store: mock_store.clone(),
         };
 
@@ -494,10 +498,11 @@ mod tests {
             .write_and_upload_sst(write_request, upload_request, &write_opts)
             .await
             .unwrap()
-            .unwrap();
+            .remove(0);
         let write_parquet_metadata = sst_info.file_metadata.unwrap();
 
         // Read metadata from write cache
+        let handle = sst_file_handle_with_file_id(sst_info.file_id, 0, 1000);
         let builder = ParquetReaderBuilder::new(data_home, handle.clone(), mock_store.clone())
             .cache(CacheStrategy::EnableAll(cache_manager.clone()));
         let reader = builder.build().await.unwrap();

@@ -141,7 +141,7 @@ fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
         .with_sql_handler(instance.clone())
         .with_prom_handler(instance, true, is_strict_mode)
         .build();
-    server.build(server.make_app())
+    server.build(server.make_app()).unwrap()
 }
 
 #[tokio::test]

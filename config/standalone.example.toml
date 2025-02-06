@@ -39,11 +39,17 @@ timeout = "30s"
 ## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
 ## Set to 0 to disable limit.
 body_limit = "64MB"
+## HTTP CORS support, it's turned on by default
+## This allows browser to access http APIs without CORS restrictions
+enable_cors = true
+## Customize allowed origins for HTTP CORS.
+## @toml2docs:none-default
+cors_allowed_origins = ["https://example.com"]
 
 ## The gRPC server options.
 [grpc]
 ## The address to bind the gRPC server.
-addr = "127.0.0.1:4001"
+bind_addr = "127.0.0.1:4001"
 ## The number of server worker threads.
 runtime_size = 8
 
