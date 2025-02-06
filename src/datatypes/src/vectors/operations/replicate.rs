@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::prelude::*;
+pub(crate) use crate::vectors::decimal::replicate_decimal128;
 pub(crate) use crate::vectors::null::replicate_null;
 pub(crate) use crate::vectors::primitive::replicate_primitive;
 
@@ -45,7 +46,7 @@ mod tests {
 
     use super::*;
     use crate::vectors::constant::ConstantVector;
-    use crate::vectors::{Int32Vector, NullVector, StringVector, VectorOp};
+    use crate::vectors::{Decimal128Vector, Int32Vector, NullVector, StringVector, VectorOp};
 
     #[test]
     fn test_replicate_primitive() {
@@ -166,5 +167,24 @@ mod tests {
         impl_replicate_timestamp_test!(Millisecond);
         impl_replicate_timestamp_test!(Microsecond);
         impl_replicate_timestamp_test!(Nanosecond);
+    }
+
+    #[test]
+    fn test_replicate_decimal() {
+        let data = vec![100];
+        // create a decimal vector
+        let v = Decimal128Vector::from_values(data.clone())
+            .with_precision_and_scale(10, 2)
+            .unwrap();
+        let offsets = [5];
+        let v = v.replicate(&offsets);
+        assert_eq!(5, v.len());
+
+        let expect: VectorRef = Arc::new(
+            Decimal128Vector::from_values(vec![100; 5])
+                .with_precision_and_scale(10, 2)
+                .unwrap(),
+        );
+        assert_eq!(expect, v);
     }
 }
