@@ -1,7 +1,7 @@
 ---
 Feature Name: Remote WAL Purge
 Tracking Issue: https://github.com/GreptimeTeam/greptimedb/issues/5474
-Date: 2025-2-6
+Date: 2025-02-06
 Author: "Yuhan Wang <profsyb@gmail.com>"
 ---
 
