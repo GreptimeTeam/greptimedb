@@ -16,6 +16,7 @@ use std::mem;
 use std::sync::Arc;
 
 use api::v1::{Mutation, OpType, Rows, WalEntry, WriteHint};
+use futures::stream::{FuturesUnordered, StreamExt};
 use snafu::ResultExt;
 use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
@@ -219,12 +220,16 @@ impl RegionWriteCtx {
                 self.notifiers[mutations[0].0].err = Some(Arc::new(err));
             }
         } else {
-            let write_tasks = mutations.into_iter().map(|(i, kvs)| {
+            let mut tasks = FuturesUnordered::new();
+            for (i, kvs) in mutations {
                 let mutable = mutable.clone();
                 // use tokio runtime to schedule tasks.
-                common_runtime::spawn_blocking_global(move || (i, mutable.write(&kvs)))
-            });
-            for result in futures::future::join_all(write_tasks).await {
+                tasks.push(common_runtime::spawn_blocking_global(move || {
+                    (i, mutable.write(&kvs))
+                }));
+            }
+
+            while let Some(result) = tasks.next().await {
                 // first unwrap the result from `spawn` above
                 let (i, result) = result.unwrap();
                 if let Err(err) = result {
