@@ -376,7 +376,7 @@ fn extract_field_from_attr_and_combine_schema(
     attrs: &jsonb::Value,
 ) -> Result<Vec<GreptimeValue>> {
     // note we use schema.len instead of select_keys.len
-    // becasue the len of the row value should always matches the len of the schema
+    // because the len of the row value should always matches the len of the schema
     let mut extracted_values = vec![GreptimeValue::default(); select_schema.schema.len()];
 
     for key in select_info.keys.iter() {
