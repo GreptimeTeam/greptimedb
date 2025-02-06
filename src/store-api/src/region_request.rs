@@ -21,7 +21,7 @@ use api::v1::column_def::as_fulltext_option;
 use api::v1::region::{
     alter_request, compact_request, region_request, AlterRequest, AlterRequests, CloseRequest,
     CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
-    FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
+    FlushRequest, InsertRequests, OpenRequest, SequencesRequest, TruncateRequest,
 };
 use api::v1::{self, set_index, Analyzer, Option as PbOption, Rows, SemanticType, WriteHint};
 pub use common_base::AffectedRows;
@@ -121,6 +121,7 @@ pub enum RegionRequest {
     Compact(RegionCompactRequest),
     Truncate(RegionTruncateRequest),
     Catchup(RegionCatchupRequest),
+    Sequences(RegionSequencesRequest),
 }
 
 impl RegionRequest {
@@ -141,6 +142,7 @@ impl RegionRequest {
             region_request::Body::Creates(creates) => make_region_creates(creates),
             region_request::Body::Drops(drops) => make_region_drops(drops),
             region_request::Body::Alters(alters) => make_region_alters(alters),
+            region_request::Body::Sequences(sequences) => make_region_sequences(sequences),
         }
     }
 
@@ -303,6 +305,23 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
         region_id,
         RegionRequest::Truncate(RegionTruncateRequest {}),
     )])
+}
+
+/// Convert [SequencesRequest] to a [RegionSequencesRequest] with first region id in region_ids.
+fn make_region_sequences(sequence: SequencesRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let region_ids: Vec<_> = sequence
+        .region_ids
+        .into_iter()
+        .map(RegionId::from)
+        .collect();
+    if let Some(first) = region_ids.first() {
+        Ok(vec![(
+            *first,
+            RegionRequest::Sequences(RegionSequencesRequest { region_ids }),
+        )])
+    } else {
+        Ok(vec![])
+    }
 }
 
 /// Request to put data into a region.
@@ -1104,6 +1123,7 @@ impl fmt::Display for RegionRequest {
             RegionRequest::Compact(_) => write!(f, "Compact"),
             RegionRequest::Truncate(_) => write!(f, "Truncate"),
             RegionRequest::Catchup(_) => write!(f, "Catchup"),
+            RegionRequest::Sequences(_) => write!(f, "GetSequence"),
         }
     }
 }
