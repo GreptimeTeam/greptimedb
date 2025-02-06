@@ -139,7 +139,7 @@ impl BulkPartEncoder {
 
 impl BulkPartEncoder {
     /// Encodes mutations to a [BulkPart], returns true if encoded data has been written to `dest`.
-    fn encode_mutations(&self, mutations: &[Mutation]) -> Result<Option<BulkPart>> {
+    pub(crate) fn encode_mutations(&self, mutations: &[Mutation]) -> Result<Option<BulkPart>> {
         let Some((arrow_record_batch, min_ts, max_ts)) =
             mutations_to_record_batch(mutations, &self.metadata, &self.pk_encoder, self.dedup)?
         else {

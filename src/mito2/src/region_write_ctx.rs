@@ -16,15 +16,18 @@ use std::mem;
 use std::sync::Arc;
 
 use api::v1::{Mutation, OpType, Rows, WalEntry, WriteHint};
+use futures::future::try_join_all;
 use snafu::ResultExt;
 use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
 use store_api::storage::{RegionId, SequenceNumber};
 
-use crate::error::{Error, Result, WriteGroupSnafu};
-use crate::memtable::KeyValues;
+use crate::error::{Error, JoinSnafu, Result, WriteGroupSnafu};
+use crate::memtable::bulk::part::BulkPartEncoder;
+use crate::memtable::BulkPart;
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::request::OptionOutputTx;
+use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use crate::wal::{EntryId, WalWriter};
 
 /// Notifier to notify write result on drop.
@@ -93,6 +96,8 @@ pub(crate) struct RegionWriteCtx {
     notifiers: Vec<WriteNotify>,
     /// The write operation is failed and we should not write to the mutable memtable.
     failed: bool,
+    /// Bulk parts to write to the memtable.
+    bulk_parts: Vec<Option<BulkPart>>,
 
     // Metrics:
     /// Rows to put.
@@ -125,6 +130,7 @@ impl RegionWriteCtx {
             provider,
             notifiers: Vec::new(),
             failed: false,
+            bulk_parts: Vec::new(),
             put_num: 0,
             delete_num: 0,
         }
@@ -208,20 +214,57 @@ impl RegionWriteCtx {
 
         let mutable = &self.version.memtables.mutable;
         // Takes mutations from the wal entry.
-        let mutations = mem::take(&mut self.wal_entry.mutations);
-        for (mutation, notify) in mutations.into_iter().zip(&mut self.notifiers) {
+        let bulk_parts = mem::take(&mut self.bulk_parts);
+        for (bulk_part, notify) in bulk_parts.into_iter().zip(&mut self.notifiers) {
             // Write mutation to the memtable.
-            let Some(kvs) = KeyValues::new(&self.version.metadata, mutation) else {
+            let Some(bulk_part) = bulk_part else {
                 continue;
             };
-            if let Err(e) = mutable.write(&kvs) {
+            if let Err(e) = mutable.write_bulk(bulk_part) {
                 notify.err = Some(Arc::new(e));
             }
+            // let Some(kvs) = KeyValues::new(&self.version.metadata, mutation) else {
+            //     continue;
+            // };
+            // if let Err(e) = mutable.write(&kvs) {
+            //     notify.err = Some(Arc::new(e));
+            // }
         }
 
         // Updates region sequence and entry id. Since we stores last sequence and entry id in region, we need
         // to decrease `next_sequence` and `next_entry_id` by 1.
         self.version_control
             .set_sequence_and_entry_id(self.next_sequence - 1, self.next_entry_id - 1);
+    }
+
+    /// Encodes mutations into bulks and clears rows.
+    pub(crate) async fn encode_bulks(&mut self) -> Result<()> {
+        let mut tasks = Vec::with_capacity(self.wal_entry.mutations.len());
+        for mutation in self.wal_entry.mutations.drain(..) {
+            let metadata = self.version.metadata.clone();
+            let task = common_runtime::spawn_blocking_global(move || {
+                let encoder = BulkPartEncoder::new(metadata, true, DEFAULT_ROW_GROUP_SIZE);
+                let mutations = [mutation];
+                let part_opt = encoder.encode_mutations(&mutations)?;
+                let [mut mutation] = mutations;
+                // TODO(yingwen): This require clone the data, we should avoid this.
+                mutation.bulk = part_opt
+                    .as_ref()
+                    .map(|part| part.data.to_vec())
+                    .unwrap_or_default();
+                mutation.rows = None;
+                Ok((part_opt, mutation))
+            });
+            tasks.push(task);
+        }
+
+        let results = try_join_all(tasks).await.context(JoinSnafu)?;
+        for result in results {
+            let (part_opt, mutation) = result?;
+            self.wal_entry.mutations.push(mutation);
+            self.bulk_parts.push(part_opt);
+        }
+
+        Ok(())
     }
 }

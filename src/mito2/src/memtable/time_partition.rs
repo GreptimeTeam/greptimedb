@@ -29,7 +29,7 @@ use store_api::metadata::RegionMetadataRef;
 use crate::error::{InvalidRequestSnafu, Result};
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::version::SmallMemtableVec;
-use crate::memtable::{KeyValues, MemtableBuilderRef, MemtableId, MemtableRef};
+use crate::memtable::{BulkPart, KeyValues, MemtableBuilderRef, MemtableId, MemtableRef};
 
 /// A partition holds rows with timestamps between `[min, max)`.
 #[derive(Debug, Clone)]
@@ -139,6 +139,18 @@ impl TimePartitions {
 
         // Slow path: We have to split kvs by partitions.
         self.write_multi_parts(kvs, &parts)
+    }
+
+    /// Write bulk to the memtables.
+    ///
+    /// It creates new partitions if necessary.
+    pub fn write_bulk(&self, bulk_part: BulkPart) -> Result<()> {
+        // Get all parts.
+        let parts = self.list_partitions();
+
+        // TODO(yingwen): Now we never flush so we always have a partition.
+        let last_part = parts.last().unwrap();
+        last_part.memtable.write_bulk(bulk_part)
     }
 
     /// Append memtables in partitions to `memtables`.
