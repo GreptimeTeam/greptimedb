@@ -486,12 +486,10 @@ fn parse_export_logs_service_request_to_rows(
     let mut parse_ctx = ParseContext::new(select_info);
     let mut rows = parse_resource(&mut parse_ctx, request.resource_logs)?;
 
-    let extra_schema_len = parse_ctx.select_schema.schema.len();
     schemas.extend(parse_ctx.select_schema.schema);
 
     rows.iter_mut().for_each(|row| {
-        row.values
-            .resize(extra_schema_len, GreptimeValue::default());
+        row.values.resize(schemas.len(), GreptimeValue::default());
     });
 
     Ok(Rows {
