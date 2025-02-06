@@ -349,7 +349,7 @@ impl Env {
                     "start".to_string(),
                     "--metasrv-addrs=127.0.0.1:29302".to_string(),
                     "--http-addr=127.0.0.1:29503".to_string(),
-                    format!("--rpc-addr={}", GRPC_SERVER_ADDR),
+                    format!("--rpc-bind-addr={}", GRPC_SERVER_ADDR),
                     format!("--mysql-addr={}", MYSQL_SERVER_ADDR),
                     format!("--postgres-addr={}", POSTGRES_SERVER_ADDR),
                     format!(
@@ -373,9 +373,9 @@ impl Env {
                     DEFAULT_LOG_LEVEL.to_string(),
                     subcommand.to_string(),
                     "start".to_string(),
-                    "--bind-addr".to_string(),
+                    "--rpc-bind-addr".to_string(),
                     "127.0.0.1:29302".to_string(),
-                    "--server-addr".to_string(),
+                    "--rpc-server-addr".to_string(),
                     "127.0.0.1:29302".to_string(),
                     "--enable-region-failover".to_string(),
                     "false".to_string(),
@@ -457,8 +457,8 @@ impl Env {
             subcommand.to_string(),
             "start".to_string(),
         ];
-        args.push(format!("--rpc-addr=127.0.0.1:2941{id}"));
-        args.push(format!("--rpc-hostname=127.0.0.1:2941{id}"));
+        args.push(format!("--rpc-bind-addr=127.0.0.1:2941{id}"));
+        args.push(format!("--rpc-server-addr=127.0.0.1:2941{id}"));
         args.push(format!("--http-addr=127.0.0.1:2943{id}"));
         args.push(format!("--data-home={}", data_home.display()));
         args.push(format!("--log-dir={}/logs", data_home.display()));
@@ -482,8 +482,8 @@ impl Env {
             subcommand.to_string(),
             "start".to_string(),
         ];
-        args.push(format!("--rpc-addr=127.0.0.1:2968{id}"));
-        args.push(format!("--rpc-hostname=127.0.0.1:2968{id}"));
+        args.push(format!("--rpc-bind-addr=127.0.0.1:2968{id}"));
+        args.push(format!("--rpc-server-addr=127.0.0.1:2968{id}"));
         args.push(format!("--node-id={id}"));
         args.push(format!(
             "--log-dir={}/greptimedb-flownode/logs",
