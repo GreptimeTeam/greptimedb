@@ -29,15 +29,41 @@ pub struct StringNormalizationRule;
 
 impl AnalyzerRule for StringNormalizationRule {
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
-        plan.transform(|plan| {
-            let mut converter = StringNormalizationConverter;
-            let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
-            let expr = plan
-                .expressions_consider_join()
-                .into_iter()
-                .map(|e| e.rewrite(&mut converter).map(|x| x.data))
-                .collect::<Result<Vec<_>>>()?;
-            plan.with_new_exprs(expr, inputs).map(Transformed::yes)
+        plan.transform(|plan| match plan {
+            LogicalPlan::Projection(_)
+            | LogicalPlan::Filter(_)
+            | LogicalPlan::Window(_)
+            | LogicalPlan::Aggregate(_)
+            | LogicalPlan::Sort(_)
+            | LogicalPlan::Join(_)
+            | LogicalPlan::Repartition(_)
+            | LogicalPlan::Union(_)
+            | LogicalPlan::TableScan(_)
+            | LogicalPlan::EmptyRelation(_)
+            | LogicalPlan::Subquery(_)
+            | LogicalPlan::SubqueryAlias(_)
+            | LogicalPlan::Statement(_)
+            | LogicalPlan::Values(_)
+            | LogicalPlan::Analyze(_)
+            | LogicalPlan::Extension(_)
+            | LogicalPlan::Distinct(_)
+            | LogicalPlan::Dml(_)
+            | LogicalPlan::Copy(_)
+            | LogicalPlan::Unnest(_)
+            | LogicalPlan::RecursiveQuery(_) => {
+                let mut converter = StringNormalizationConverter;
+                let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
+                let expr = plan
+                    .expressions_consider_join()
+                    .into_iter()
+                    .map(|e| e.rewrite(&mut converter).map(|x| x.data))
+                    .collect::<Result<Vec<_>>>()?;
+                plan.with_new_exprs(expr, inputs).map(Transformed::yes)
+            }
+            LogicalPlan::Limit(_)
+            | LogicalPlan::Explain(_)
+            | LogicalPlan::Ddl(_)
+            | LogicalPlan::DescribeTable(_) => Ok(Transformed::no(plan)),
         })
         .map(|x| x.data)
     }

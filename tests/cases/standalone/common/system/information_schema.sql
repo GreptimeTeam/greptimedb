@@ -11,6 +11,10 @@ order by table_schema, table_name;
 
 select * from information_schema.columns order by table_schema, table_name, column_name;
 
+select table_schema, table_name from information_schema.tables order by table_name limit 5;
+
+select table_schema, table_name from information_schema.tables order by table_name limit 5 offset 0;
+
 create
 database my_db;
 
