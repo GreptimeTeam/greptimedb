@@ -21,7 +21,7 @@ use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
-use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::{displayable, ExecutionPlan};
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::Result as DataFusionResult;
 use datafusion_physical_expr::expressions::Column as PhysicalColumn;
@@ -67,11 +67,19 @@ impl WindowedSortPhysicalRule {
         plan: Arc<dyn ExecutionPlan>,
         _config: &datafusion::config::ConfigOptions,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        common_telemetry::info!(
+            "[DBG] do optimize, plan {}",
+            displayable(plan.as_ref()).indent(false).to_string()
+        );
         let result = plan
             .transform_down(|plan| {
                 if let Some(sort_exec) = plan.as_any().downcast_ref::<SortExec>() {
                     // TODO: support multiple expr in windowed sort
                     if sort_exec.expr().len() != 1 {
+                        common_telemetry::info!(
+                            "[DBG] sort len, plan {}",
+                            displayable(plan.as_ref()).indent(false).to_string()
+                        );
                         return Ok(Transformed::no(plan));
                     }
 
@@ -80,6 +88,10 @@ impl WindowedSortPhysicalRule {
                     let sort_input = remove_repartition(sort_exec.input().clone())?.data;
                     // Gets scanner info from the input without repartition before filter.
                     let Some(scanner_info) = fetch_partition_range(sort_input.clone())? else {
+                        common_telemetry::info!(
+                            "[DBG] no scanner info, plan {}",
+                            displayable(plan.as_ref()).indent(false).to_string()
+                        );
                         return Ok(Transformed::no(plan));
                     };
 
