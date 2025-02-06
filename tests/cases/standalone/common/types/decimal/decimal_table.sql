@@ -371,3 +371,5 @@ SELECT * FROM public."all_types" ORDER BY m1 DESC LIMIT 100;
 ADMIN flush_table('all_types');
 
 SELECT * FROM public."all_types" ORDER BY m1 DESC LIMIT 100;
+
+DROP TABLE all_types;
