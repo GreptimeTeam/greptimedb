@@ -383,7 +383,7 @@ fn extract_field_from_attr_and_combine_schema(
         let Some(value) = attrs.get_by_name_ignore_case(key).cloned() else {
             continue;
         };
-        let Some((schema, value)) = decide_column_schema(key, value)? else {
+        let Some((schema, value)) = decide_column_schema_and_convert_value(key, value)? else {
             continue;
         };
 
@@ -413,7 +413,7 @@ fn extract_field_from_attr_and_combine_schema(
     Ok(extracted_values)
 }
 
-fn decide_column_schema(
+fn decide_column_schema_and_convert_value(
     column_name: &str,
     value: JsonbValue,
 ) -> Result<Option<(ColumnSchema, GreptimeValue)>> {
