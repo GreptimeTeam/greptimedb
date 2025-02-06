@@ -621,8 +621,8 @@ fn parse_log(log_records: Vec<LogRecord>, parse_ctx: &mut ParseContext) -> Resul
 
 fn merge_values(
     log: Vec<GreptimeValue>,
-    scope: &Vec<GreptimeValue>,
-    resource: &Vec<GreptimeValue>,
+    scope: &[GreptimeValue],
+    resource: &[GreptimeValue],
 ) -> Vec<GreptimeValue> {
     log.into_iter()
         .enumerate()
