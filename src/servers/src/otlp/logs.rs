@@ -371,17 +371,13 @@ fn build_otlp_build_in_row(
 }
 
 fn extract_field_from_attr_and_combine_schema(
-    parse_ctx: &mut ParseContext,
+    select_info: &SelectInfo,
+    selector_schema: &mut SchemaInfo,
     jsonb: &jsonb::Value,
-) -> Result<()> {
-    if parse_ctx.select_info.keys.is_empty() {
-        return Ok(());
-    }
+) -> Result<Vec<GreptimeValue>> {
+    let mut extracted_values = vec![GreptimeValue::default(); select_info.keys.len()];
 
-    let schema_info = &mut parse_ctx.extra_schema;
-    let extracted_values = &mut parse_ctx.extracted_values;
-
-    for k in parse_ctx.select_info.keys.iter() {
+    for k in select_info.keys.iter() {
         let Some(value) = jsonb.get_by_name_ignore_case(k).cloned() else {
             continue;
         };
@@ -389,8 +385,8 @@ fn extract_field_from_attr_and_combine_schema(
             continue;
         };
 
-        if let Some(index) = schema_info.index.get(k) {
-            let column_schema = &schema_info.schema[*index];
+        if let Some(index) = selector_schema.index.get(k) {
+            let column_schema = &selector_schema.schema[*index];
             ensure!(
                 column_schema.datatype == schema.datatype,
                 IncompatibleSchemaSnafu {
@@ -403,13 +399,15 @@ fn extract_field_from_attr_and_combine_schema(
             extracted_values[*index] = value;
         } else {
             let key = k.clone();
-            schema_info.schema.push(schema);
-            schema_info.index.insert(key, schema_info.schema.len() - 1);
+            selector_schema.schema.push(schema);
+            selector_schema
+                .index
+                .insert(key, selector_schema.schema.len() - 1);
             extracted_values.push(value);
         }
     }
 
-    Ok(())
+    Ok(extracted_values)
 }
 
 fn decide_column_schema(
@@ -486,43 +484,41 @@ fn parse_export_logs_service_request_to_rows(
     let mut schemas = build_otlp_logs_identity_schema();
 
     let mut parse_ctx = ParseContext::new(select_info);
-    let parse_infos = parse_resource(&mut parse_ctx, request.resource_logs)?;
+    let mut rows = parse_resource(&mut parse_ctx, request.resource_logs)?;
 
-    let extra_schema_len = parse_ctx.extra_schema.schema.len();
-    schemas.extend(parse_ctx.extra_schema.schema);
+    let extra_schema_len = parse_ctx.select_schema.schema.len();
+    schemas.extend(parse_ctx.select_schema.schema);
 
-    let mut results = Vec::with_capacity(parse_infos.len());
-    for parse_info in parse_infos.into_iter() {
-        let mut row = parse_info.values;
-        let mut extras = parse_info.extracted_values;
-        if extras.len() < extra_schema_len {
-            extras.resize(extra_schema_len, GreptimeValue::default());
-        }
-        row.values.extend(extras);
-        results.push(row);
-    }
+    rows.iter_mut().for_each(|row| {
+        row.values
+            .resize(extra_schema_len, GreptimeValue::default());
+    });
 
     Ok(Rows {
         schema: schemas,
-        rows: results,
+        rows,
     })
 }
 
 fn parse_resource(
     parse_ctx: &mut ParseContext,
     resource_logs_vec: Vec<ResourceLogs>,
-) -> Result<Vec<ParseInfo>> {
+) -> Result<Vec<Row>> {
     let mut results = Vec::new();
 
     for r in resource_logs_vec {
-        let resource_attr = r
+        parse_ctx.resource_attr = r
             .resource
             .map(|resource| key_value_to_jsonb(resource.attributes))
             .unwrap_or(JsonbValue::Null);
+
         parse_ctx.resource_url = r.schema_url;
 
-        extract_field_from_attr_and_combine_schema(parse_ctx, &resource_attr)?;
-        parse_ctx.resource_attr = resource_attr;
+        parse_ctx.resource_values = extract_field_from_attr_and_combine_schema(
+            &parse_ctx.select_info,
+            &mut parse_ctx.select_schema,
+            &parse_ctx.resource_attr,
+        )?;
 
         let rows = parse_scope(r.scope_logs, parse_ctx)?;
         results.extend(rows);
@@ -531,12 +527,12 @@ fn parse_resource(
 }
 
 struct ParseContext<'a> {
-    // selector keys
+    // selector keys and schema
     select_info: Box<SelectInfo>,
-    // selector schema
-    extra_schema: SchemaInfo,
-    // extracted values
-    extracted_values: Vec<GreptimeValue>,
+    select_schema: SchemaInfo,
+    // selected layered values
+    resource_values: Vec<GreptimeValue>,
+    scope_values: Vec<GreptimeValue>,
 
     // passdown values
     resource_url: String,
@@ -549,11 +545,12 @@ struct ParseContext<'a> {
 
 impl<'a> ParseContext<'a> {
     pub fn new(select_info: Box<SelectInfo>) -> ParseContext<'a> {
-        let extract_len = select_info.keys.len();
+        let len = select_info.keys.len();
         ParseContext {
             select_info,
-            extra_schema: SchemaInfo::new_with_capacity(extract_len),
-            extracted_values: Vec::with_capacity(extract_len),
+            select_schema: SchemaInfo::new_with_capacity(len),
+            resource_values: vec![],
+            scope_values: vec![],
             resource_url: String::new(),
             resource_attr: JsonbValue::Null,
             scope_name: None,
@@ -564,20 +561,20 @@ impl<'a> ParseContext<'a> {
     }
 }
 
-fn parse_scope(
-    scopes_log_vec: Vec<ScopeLogs>,
-    parse_ctx: &mut ParseContext,
-) -> Result<Vec<ParseInfo>> {
+fn parse_scope(scopes_log_vec: Vec<ScopeLogs>, parse_ctx: &mut ParseContext) -> Result<Vec<Row>> {
     let mut results = Vec::new();
     for scope_logs in scopes_log_vec {
         let (scope_attrs, scope_version, scope_name) = scope_to_jsonb(scope_logs.scope);
         parse_ctx.scope_name = scope_name;
         parse_ctx.scope_version = scope_version;
         parse_ctx.scope_url = scope_logs.schema_url;
-
-        extract_field_from_attr_and_combine_schema(parse_ctx, &scope_attrs)?;
-
         parse_ctx.scope_attrs = scope_attrs;
+
+        parse_ctx.scope_values = extract_field_from_attr_and_combine_schema(
+            &parse_ctx.select_info,
+            &mut parse_ctx.select_schema,
+            &parse_ctx.scope_attrs,
+        )?;
 
         let rows = parse_log(scope_logs.log_records, parse_ctx)?;
         results.extend(rows);
@@ -585,26 +582,45 @@ fn parse_scope(
     Ok(results)
 }
 
-fn parse_log(log_records: Vec<LogRecord>, parse_ctx: &mut ParseContext) -> Result<Vec<ParseInfo>> {
+fn parse_log(log_records: Vec<LogRecord>, parse_ctx: &mut ParseContext) -> Result<Vec<Row>> {
     let mut result = Vec::with_capacity(log_records.len());
 
     for log in log_records {
-        let (row, log_attr) = build_otlp_build_in_row(log, parse_ctx);
+        let (mut row, log_attr) = build_otlp_build_in_row(log, parse_ctx);
 
-        extract_field_from_attr_and_combine_schema(parse_ctx, &log_attr)?;
+        let log_values = extract_field_from_attr_and_combine_schema(
+            &parse_ctx.select_info,
+            &mut parse_ctx.select_schema,
+            &log_attr,
+        )?;
 
-        let parse_info = ParseInfo {
-            values: row,
-            extracted_values: parse_ctx.extracted_values.clone(),
-        };
-        result.push(parse_info);
+        let extracted_values = merge_values(
+            log_values,
+            &parse_ctx.scope_values,
+            &parse_ctx.resource_values,
+        );
+
+        row.values.extend(extracted_values);
+
+        result.push(row);
     }
     Ok(result)
 }
 
-struct ParseInfo {
-    values: Row,
-    extracted_values: Vec<GreptimeValue>,
+fn merge_values(
+    log: Vec<GreptimeValue>,
+    scope: &Vec<GreptimeValue>,
+    resource: &Vec<GreptimeValue>,
+) -> Vec<GreptimeValue> {
+    log.into_iter()
+        .enumerate()
+        .map(|(i, value)| GreptimeValue {
+            value_data: value
+                .value_data
+                .or_else(|| scope.get(i).and_then(|x| x.value_data.clone()))
+                .or_else(|| resource.get(i).and_then(|x| x.value_data.clone())),
+        })
+        .collect()
 }
 
 /// transform otlp logs request to pipeline value

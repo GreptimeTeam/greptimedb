@@ -103,11 +103,7 @@ pub async fn loki_ingest(
 
     // fill Null for missing values
     for row in rows.iter_mut() {
-        if row.len() < schemas.len() {
-            for _ in row.len()..schemas.len() {
-                row.push(GreptimeValue { value_data: None });
-            }
-        }
+        row.resize(schemas.len(), GreptimeValue::default());
     }
 
     let rows = Rows {
