@@ -112,12 +112,17 @@ pub struct Column {
 /// Column extensions for greptimedb dialect.
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Default, Serialize)]
 pub struct ColumnExtensions {
-    /// Fulltext options.
-    pub fulltext_options: Option<OptionMap>,
-    /// Vector options.
+    /// Vector type options.
     pub vector_options: Option<OptionMap>,
+
+    /// Fulltext index options.
+    pub fulltext_index_options: Option<OptionMap>,
     /// Skipping index options.
     pub skipping_index_options: Option<OptionMap>,
+    /// Inverted index options.
+    ///
+    /// Inverted index doesn't have options at present. There won't be any options in that map.
+    pub inverted_index_options: Option<OptionMap>,
 }
 
 impl Column {
@@ -152,7 +157,7 @@ impl Display for Column {
         }
 
         write!(f, "{}", self.column_def)?;
-        if let Some(fulltext_options) = &self.extensions.fulltext_options {
+        if let Some(fulltext_options) = &self.extensions.fulltext_index_options {
             if !fulltext_options.is_empty() {
                 let options = fulltext_options.kv_pairs();
                 write!(f, " FULLTEXT WITH({})", format_list_comma!(options))?;
@@ -175,7 +180,7 @@ impl Display for Column {
 
 impl ColumnExtensions {
     pub fn build_fulltext_options(&self) -> Result<Option<FulltextOptions>> {
-        let Some(options) = self.fulltext_options.as_ref() else {
+        let Some(options) = self.fulltext_index_options.as_ref() else {
             return Ok(None);
         };
 

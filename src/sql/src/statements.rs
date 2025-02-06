@@ -1502,7 +1502,7 @@ mod tests {
                 options: vec![],
             },
             extensions: ColumnExtensions {
-                fulltext_options: Some(
+                fulltext_index_options: Some(
                     HashMap::from_iter([
                         (
                             COLUMN_FULLTEXT_OPT_KEY_ANALYZER.to_string(),
@@ -1517,6 +1517,7 @@ mod tests {
                 ),
                 vector_options: None,
                 skipping_index_options: None,
+                inverted_index_options: None,
             },
         };
 

@@ -114,7 +114,7 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
                 opt.case_sensitive.to_string(),
             ),
         ]);
-        extensions.fulltext_options = Some(map.into());
+        extensions.fulltext_index_options = Some(map.into());
     }
 
     if let Some(opt) = column_schema
