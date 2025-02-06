@@ -133,6 +133,7 @@ impl Memtable for BulkMemtable {
     }
 
     fn write_bulk(&self, fragment: BulkPart) -> Result<()> {
+        self.alloc_tracker.on_allocation(fragment.data.len());
         let mut parts = self.parts.write().unwrap();
         parts.push(fragment);
         Ok(())
@@ -163,6 +164,7 @@ impl Memtable for BulkMemtable {
     }
 
     fn freeze(&self) -> Result<()> {
+        self.alloc_tracker.done_allocating();
         Ok(())
     }
 
