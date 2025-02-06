@@ -43,8 +43,9 @@ const CURSOR_COUNT_WARNING_LIMIT: usize = 10;
 #[builder(build_fn(skip))]
 pub struct QueryContext {
     current_catalog: String,
-    #[builder(default = "false")]
-    is_snapshot_read: bool,
+    /// mapping of RegionId to SequenceNumber, for snapshot read, meaning that the read should only
+    /// container data that was committed before(and include) the given sequence number
+    seq_snapshot: Option<HashMap<u64, u64>>,
     // we use Arc<RwLock>> for modifiable fields
     #[builder(default)]
     mutable_session_data: Arc<RwLock<MutableInner>>,
@@ -118,7 +119,8 @@ impl From<&RegionRequestHeader> for QueryContext {
                 .current_schema(ctx.current_schema.clone())
                 .timezone(parse_timezone(Some(&ctx.timezone)))
                 .extensions(ctx.extensions.clone())
-                .channel(ctx.channel.into());
+                .channel(ctx.channel.into())
+                .seq_snapshot(ctx.seq_snapshot.as_ref().map(|s| s.seq_snapshot.clone()));
         }
         builder.build()
     }
@@ -132,6 +134,7 @@ impl From<api::v1::QueryContext> for QueryContext {
             .timezone(parse_timezone(Some(&ctx.timezone)))
             .extensions(ctx.extensions)
             .channel(ctx.channel.into())
+            .seq_snapshot(ctx.seq_snapshot.map(|s| s.seq_snapshot))
             .build()
     }
 }
@@ -143,6 +146,7 @@ impl From<QueryContext> for api::v1::QueryContext {
             mutable_session_data: mutable_inner,
             extensions,
             channel,
+            seq_snapshot,
             ..
         }: QueryContext,
     ) -> Self {
@@ -153,6 +157,7 @@ impl From<QueryContext> for api::v1::QueryContext {
             timezone: mutable_inner.timezone.to_string(),
             extensions,
             channel: channel as u32,
+            seq_snapshot: seq_snapshot.map(|s| api::v1::SequenceSnapshot { seq_snapshot: s }),
         }
     }
 }
@@ -326,6 +331,14 @@ impl QueryContext {
         let rb = guard.cursors.get(name);
         rb.cloned()
     }
+
+    pub fn snapshots(&self) -> &Option<HashMap<u64, u64>> {
+        &self.seq_snapshot
+    }
+
+    pub fn get_snapshot(&self, region_id: u64) -> Option<u64> {
+        self.seq_snapshot.as_ref()?.get(&region_id).cloned()
+    }
 }
 
 impl QueryContextBuilder {
@@ -336,7 +349,7 @@ impl QueryContextBuilder {
                 .current_catalog
                 .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string()),
             // default to be false
-            is_snapshot_read: self.is_snapshot_read.unwrap_or_default(),
+            seq_snapshot: self.seq_snapshot.unwrap_or_default(),
             mutable_session_data: self.mutable_session_data.unwrap_or_default(),
             mutable_query_context_data: self.mutable_query_context_data.unwrap_or_default(),
             sql_dialect: self
