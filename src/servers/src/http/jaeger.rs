@@ -27,6 +27,7 @@ use session::context::{Channel, QueryContext, QueryContextRef};
 
 use crate::error::{FailedToExecuteJaegerQuerySnafu, InvalidJaegerQuerySnafu, Result};
 use crate::http::{handler, ApiState, GreptimeQueryOutput, HttpRecordsOutput};
+use crate::metrics::METRIC_JAEGER_QUERY_ELAPSED;
 use crate::otlp::trace::TRACE_TABLE_NAME;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
@@ -306,10 +307,18 @@ pub async fn handle_get_services(
     Query(query_params): Query<JaegerQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
 ) -> impl IntoResponse {
+    debug!(
+        "Received Jaeger '/api/services' request, query_params: {:?}",
+        query_params
+    );
     query_ctx.set_channel(Channel::Jaeger);
     let query_ctx = Arc::new(query_ctx);
 
     let db = query_params.db.unwrap_or("public".to_string());
+    // Record the query time histogram.
+    let _timer = METRIC_JAEGER_QUERY_ELAPSED
+        .with_label_values(&[&db, "/api/services"])
+        .start_timer();
     let sql = get_services_sql(&db, TRACE_TABLE_NAME);
 
     let records = get_records(state.sql_handler, query_ctx, &sql).await;
@@ -357,9 +366,17 @@ pub async fn handle_get_traces(
     Query(query_params): Query<JaegerQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
 ) -> impl IntoResponse {
-    debug!("Query params: {:?}", query_params);
+    debug!(
+        "Received Jaeger '/api/traces' request, query_params: {:?}",
+        query_params
+    );
     query_ctx.set_channel(Channel::Jaeger);
     let query_ctx = Arc::new(query_ctx);
+    let db = query_params.db.clone().unwrap_or("public".to_string());
+    // Record the query time histogram.
+    let _timer = METRIC_JAEGER_QUERY_ELAPSED
+        .with_label_values(&[&db, "/api/traces"])
+        .start_timer();
 
     match QueryTraceParams::from_jaeger_query_params(query_params) {
         Ok(query_params) => {
@@ -418,10 +435,18 @@ pub async fn handle_get_trace_by_id(
     Query(query_params): Query<JaegerQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
 ) -> impl IntoResponse {
+    debug!(
+        "Received Jaeger '/api/traces/{}' request, query_params: {:?}",
+        trace_id, query_params
+    );
     query_ctx.set_channel(Channel::Jaeger);
     let query_ctx = Arc::new(query_ctx);
 
     let db = query_params.db.unwrap_or("public".to_string());
+    // Record the query time histogram.
+    let _timer = METRIC_JAEGER_QUERY_ELAPSED
+        .with_label_values(&[&db, "/api/traces"])
+        .start_timer();
     let sql = get_trace_sql(&db, TRACE_TABLE_NAME, &trace_id);
 
     let records = get_records(state.sql_handler, query_ctx, &sql).await;
@@ -460,11 +485,20 @@ pub async fn handle_get_operations(
     Query(query_params): Query<JaegerQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
 ) -> impl IntoResponse {
+    debug!(
+        "Received Jaeger '/api/operations' request, query_params: {:?}",
+        query_params
+    );
     if let Some(service_name) = query_params.service_name {
         query_ctx.set_channel(Channel::Jaeger);
         let query_ctx = Arc::new(query_ctx);
 
         let db = query_params.db.unwrap_or("public".to_string());
+        // Record the query time histogram.
+        let _timer = METRIC_JAEGER_QUERY_ELAPSED
+            .with_label_values(&[&db, "/api/operations"])
+            .start_timer();
+
         let sql = get_operations_sql(
             &db,
             TRACE_TABLE_NAME,
@@ -527,10 +561,18 @@ pub async fn handle_get_operations_by_service(
     Query(query_params): Query<JaegerQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
 ) -> impl IntoResponse {
+    debug!(
+        "Received Jaeger '/api/services/{}/operations' request, query_params: {:?}",
+        service_name, query_params
+    );
     query_ctx.set_channel(Channel::Jaeger);
     let query_ctx = Arc::new(query_ctx);
 
     let db = query_params.db.unwrap_or("public".to_string());
+    // Record the query time histogram.
+    let _timer = METRIC_JAEGER_QUERY_ELAPSED
+        .with_label_values(&[&db, "/api/services"])
+        .start_timer();
     let sql = get_operations_sql(&db, TRACE_TABLE_NAME, &service_name, None);
 
     let records = get_records(state.sql_handler, query_ctx, &sql).await;
