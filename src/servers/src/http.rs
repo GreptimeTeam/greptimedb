@@ -605,9 +605,16 @@ impl HttpServerBuilder {
             log_validator: validator,
             ingest_interceptor,
         };
+
         let router = self.router.nest(
+            &format!("/{HTTP_API_VERSION}"),
+            HttpServer::route_pipelines(log_state.clone()),
+        );
+        // deprecated since v0.11.0. Use `/logs` and `/pipelines` instead.
+        let router = router.nest(
             &format!("/{HTTP_API_VERSION}/events"),
-            HttpServer::route_log(log_state.clone()),
+            #[allow(deprecated)]
+            HttpServer::route_log_deprecated(log_state.clone()),
         );
 
         let router = router.nest(
@@ -893,9 +900,29 @@ impl HttpServer {
             .with_state(log_state)
     }
 
-    fn route_log<S>(log_state: LogState) -> Router<S> {
+    #[deprecated(since = "0.11.0", note = "Use `route_pipelines()` instead.")]
+    fn route_log_deprecated<S>(log_state: LogState) -> Router<S> {
         Router::new()
             .route("/logs", routing::post(event::log_ingester))
+            .route(
+                "/pipelines/{pipeline_name}",
+                routing::post(event::add_pipeline),
+            )
+            .route(
+                "/pipelines/{pipeline_name}",
+                routing::delete(event::delete_pipeline),
+            )
+            .route("/pipelines/dryrun", routing::post(event::pipeline_dryrun))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
+            )
+            .with_state(log_state)
+    }
+
+    fn route_pipelines<S>(log_state: LogState) -> Router<S> {
+        Router::new()
+            .route("/pipelines/ingest", routing::post(event::log_ingester))
             .route(
                 "/pipelines/{pipeline_name}",
                 routing::post(event::add_pipeline),

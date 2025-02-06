@@ -1227,7 +1227,7 @@ transform:
 
     // 1. create pipeline
     let res = client
-        .post("/v1/events/pipelines/greptime_guagua")
+        .post("/v1/pipelines/greptime_guagua")
         .header("Content-Type", "application/x-yaml")
         .body(body)
         .send()
@@ -1242,7 +1242,7 @@ transform:
     );
 
     let res = client
-        .post("/v1/events/pipelines/test")
+        .post("/v1/pipelines/test")
         .header("Content-Type", "application/x-yaml")
         .body(body)
         .send()
@@ -1286,7 +1286,7 @@ transform:
 ]
 "#;
     let res = client
-        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test")
+        .post("/v1/pipelines/ingest?db=public&table=logs1&pipeline_name=test")
         .header("Content-Type", "application/json")
         .body(data_body)
         .send()
@@ -1297,7 +1297,7 @@ transform:
 
     // 3. remove pipeline
     let res = client
-        .delete(format!("/v1/events/pipelines/test?version={}", encoded).as_str())
+        .delete(format!("/v1/pipelines/test?version={}", encoded).as_str())
         .send()
         .await;
 
@@ -1315,7 +1315,7 @@ transform:
 
     // 4. write data failed
     let res = client
-        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test")
+        .post("/v1/pipelines/ingest?db=public&table=logs1&pipeline_name=test")
         .header("Content-Type", "application/json")
         .body(data_body)
         .send()
@@ -1336,7 +1336,7 @@ pub async fn test_identify_pipeline(store_type: StorageType) {
     let body = r#"{"__time__":1453809242,"__topic__":"","__source__":"10.170.***.***","ip":"10.200.**.***","time":"26/Jan/2016:19:54:02 +0800","url":"POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","status":"200","user-agent":"aliyun-sdk-java"}
 {"__time__":1453809242,"__topic__":"","__source__":"10.170.***.***","ip":"10.200.**.***","time":"26/Jan/2016:19:54:02 +0800","url":"POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","status":"200","user-agent":"aliyun-sdk-java","hasagei":"hasagei","dongdongdong":"guaguagua"}"#;
     let res = client
-        .post("/v1/events/logs?db=public&table=logs&pipeline_name=greptime_identity")
+        .post("/v1/pipelines/ingest?db=public&table=logs&pipeline_name=greptime_identity")
         .header("Content-Type", "application/json")
         .body(body)
         .send()
@@ -1402,7 +1402,7 @@ pub async fn test_identify_pipeline_with_flatten(store_type: StorageType) {
                 HeaderValue::from_static("flatten_json_object=true"),
             ),
         ],
-        "/v1/events/logs?table=logs&pipeline_name=greptime_identity",
+        "/v1/pipelines/ingest?table=logs&pipeline_name=greptime_identity",
         body.as_bytes().to_vec(),
         false,
     )
@@ -1463,7 +1463,7 @@ transform:
 
     // 1. create pipeline
     let res = client
-        .post("/v1/events/pipelines/test")
+        .post("/v1/pipelines/test")
         .header("Content-Type", "application/x-yaml")
         .body(pipeline_content)
         .send()
@@ -1579,7 +1579,7 @@ transform:
         ]
         "#;
         let res = client
-            .post("/v1/events/pipelines/dryrun?pipeline_name=test")
+            .post("/v1/pipelines/dryrun?pipeline_name=test")
             .header("Content-Type", "application/json")
             .body(data_body)
             .send()
@@ -1609,7 +1609,7 @@ transform:
             }
         "#;
         let res = client
-            .post("/v1/events/pipelines/dryrun")
+            .post("/v1/pipelines/dryrun")
             .header("Content-Type", "application/json")
             .body(body)
             .send()
@@ -1637,7 +1637,7 @@ transform:
         });
         body["pipeline"] = json!(pipeline_content);
         let res = client
-            .post("/v1/events/pipelines/dryrun")
+            .post("/v1/pipelines/dryrun")
             .header("Content-Type", "application/json")
             .body(body.to_string())
             .send()
@@ -1665,7 +1665,7 @@ transform:
         ]
         });
         let res = client
-            .post("/v1/events/pipelines/dryrun")
+            .post("/v1/pipelines/dryrun")
             .header("Content-Type", "application/json")
             .body(body.to_string())
             .send()
@@ -1706,7 +1706,7 @@ transform:
 
     // 1. create pipeline
     let res = client
-        .post("/v1/events/pipelines/test")
+        .post("/v1/pipelines/test")
         .header("Content-Type", "application/x-yaml")
         .body(body)
         .send()
@@ -1741,7 +1741,7 @@ transform:
 2024-05-25 20:16:37.218 hello world
 "#;
     let res = client
-        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test")
+        .post("/v1/pipelines/ingest?db=public&table=logs1&pipeline_name=test")
         .header("Content-Type", "text/plain")
         .body(data_body)
         .send()
