@@ -1198,4 +1198,47 @@ mod tests {
             assert_eq!(query_params, expected);
         }
     }
+
+    #[test]
+    fn test_query_trace_sql() {
+        // The tests is the tuple of `(test_query_params, expected)`.
+        let tests = vec![
+            (
+                QueryTraceParams {
+                    db: "public".to_string(),
+                    service_name: "test-service-0".to_string(),
+                    limit: Some(100),
+                    ..Default::default()
+                },
+                format!(
+                    "SELECT trace_id, timestamp, duration_nano, service_name, span_name, span_id, span_attributes FROM public.{} WHERE service_name = 'test-service-0' LIMIT 100",
+                    TRACE_TABLE_NAME
+                ),
+            ),
+            (
+                QueryTraceParams {
+                    db: "public".to_string(),
+                    service_name: "test-service-0".to_string(),
+                    operation_name: Some("access-mysql".to_string()),
+                    start_time: Some(1738726754492422000),
+                    end_time: Some(1738726754642422000),
+                    min_duration: Some(50000000),
+                    max_duration: Some(100000000),
+                    limit: Some(10),
+                    tags: Some(HashMap::from([
+                        ("http.status_code".to_string(), JsonValue::Number(Number::from(200))),
+                    ])),
+                },
+                format!(
+                    "SELECT trace_id, timestamp, duration_nano, service_name, span_name, span_id, span_attributes FROM public.{} WHERE service_name = 'test-service-0' AND span_name = 'access-mysql' AND timestamp >= 1738726754492422000 AND timestamp <= 1738726754642422000 AND duration_nano >= 50000000 AND duration_nano <= 100000000 AND json_get_int(span_attributes, '[\"http.status_code\"]') = 200 LIMIT 10",
+                    TRACE_TABLE_NAME
+                ),
+            ),
+        ];
+
+        for (query_params, expected) in tests {
+            let sql = query_trace_sql(TRACE_TABLE_NAME, query_params);
+            assert_eq!(sql, expected);
+        }
+    }
 }
