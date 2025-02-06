@@ -1239,7 +1239,7 @@ impl From<QueryContext> for PbQueryContext {
             timezone,
             extensions,
             channel: channel as u32,
-            seq_snapshot: None,
+            snapshot_seqs: None,
         }
     }
 }
