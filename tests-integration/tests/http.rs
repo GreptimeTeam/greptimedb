@@ -1403,12 +1403,12 @@ dispatcher:
   field: type
   rules:
     - value: http
-      table_part: http
+      table_suffix: http
       pipeline: http
     - value: db
-      table_part: db
+      table_suffix: db
     - value: not_found
-      table_part: not_found
+      table_suffix: not_found
       pipeline: not_found
 
 transform:

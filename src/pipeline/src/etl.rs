@@ -28,7 +28,7 @@ use error::{
 };
 use itertools::Itertools;
 use processor::{IntermediateStatus, Processor, Processors};
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use transform::{Transformer, Transforms};
 use value::Value;
 use yaml_rust::YamlLoader;
@@ -56,9 +56,7 @@ where
         Content::Yaml(str) => {
             let docs = YamlLoader::load_from_str(str).context(YamlLoadSnafu)?;
 
-            if docs.len() != 1 {
-                return YamlParseSnafu.fail();
-            }
+            ensure!(docs.len() == 1, YamlParseSnafu);
 
             let doc = &docs[0];
 
@@ -110,16 +108,23 @@ where
 /// Where the pipeline executed is dispatched to, with context information
 #[derive(Debug, Hash, PartialEq, Eq, Clone, PartialOrd, Ord)]
 pub struct DispatchedTo {
-    pub table_part: String,
+    pub table_suffix: String,
     pub pipeline: Option<String>,
 }
 
 impl From<&Rule> for DispatchedTo {
     fn from(value: &Rule) -> Self {
         DispatchedTo {
-            table_part: value.table_part.clone(),
+            table_suffix: value.table_suffix.clone(),
             pipeline: value.pipeline.clone(),
         }
+    }
+}
+
+impl DispatchedTo {
+    /// Generate destination table name from input
+    pub fn dispatched_to_table_name(&self, original: &str) -> String {
+        format!("{}_{}", &original, self.table_suffix)
     }
 }
 
@@ -506,9 +511,9 @@ dispatcher:
   field: typename
   rules:
     - value: http
-      table_part: http_events
+      table_suffix: http_events
     - value: database
-      table_part: db_events
+      table_suffix: db_events
       pipeline: database_pipeline
 
 transform:
@@ -526,7 +531,7 @@ transform:
             dispatcher.rules[0],
             crate::dispatcher::Rule {
                 value: Value::String("http".to_string()),
-                table_part: "http_events".to_string(),
+                table_suffix: "http_events".to_string(),
                 pipeline: None
             }
         );
@@ -535,7 +540,7 @@ transform:
             dispatcher.rules[1],
             crate::dispatcher::Rule {
                 value: Value::String("database".to_string()),
-                table_part: "db_events".to_string(),
+                table_suffix: "db_events".to_string(),
                 pipeline: Some("database_pipeline".to_string()),
             }
         );
@@ -550,9 +555,9 @@ dispatcher:
   _field: typename
   rules:
     - value: http
-      table_part: http_events
+      table_suffix: http_events
     - value: database
-      table_part: db_events
+      table_suffix: db_events
       pipeline: database_pipeline
 
 transform:
@@ -570,9 +575,9 @@ dispatcher:
   field: typename
   rules:
     - value: http
-      _table_part: http_events
+      _table_suffix: http_events
     - value: database
-      _table_part: db_events
+      _table_suffix: db_events
       pipeline: database_pipeline
 
 transform:
@@ -590,9 +595,9 @@ dispatcher:
   field: typename
   rules:
     - _value: http
-      table_part: http_events
+      table_suffix: http_events
     - _value: database
-      table_part: db_events
+      table_suffix: db_events
       pipeline: database_pipeline
 
 transform:

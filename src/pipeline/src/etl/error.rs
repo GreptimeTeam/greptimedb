@@ -595,8 +595,8 @@ pub enum Error {
     },
     #[snafu(display("Field is required for dispatcher"))]
     FieldRequiredForDispatcher,
-    #[snafu(display("Table_part is required for dispatcher rule"))]
-    TablePartRequiredForDispatcherRule,
+    #[snafu(display("Table_suffix is required for dispatcher rule"))]
+    TableSuffixRequiredForDispatcherRule,
     #[snafu(display("Value is required for dispatcher rule"))]
     ValueRequiredForDispatcherRule,
     #[snafu(display(

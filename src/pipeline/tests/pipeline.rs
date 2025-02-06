@@ -817,7 +817,7 @@ dispatcher:
   field: logger
   rules:
     - value: http
-      table_part: http
+      table_suffix: http
       pipeline: access_log_pipeline
 
 transform:
@@ -838,7 +838,7 @@ transform:
         .unwrap()
         .into_dispatched()
         .expect("expect dispatched result ");
-    assert_eq!(dispatched_to.table_part, "http");
+    assert_eq!(dispatched_to.table_suffix, "http");
     assert_eq!(dispatched_to.pipeline.unwrap(), "access_log_pipeline");
 
     let mut status = json_to_intermediate_state(input_value2).unwrap();

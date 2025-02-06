@@ -127,7 +127,7 @@ pub(crate) async fn run_pipeline(
         for (dispatched_to, coll) in dispatched {
             // we generate the new table name according to `table_part` and
             // current custom table name.
-            let table_name = format!("{}_{}", &table_name, dispatched_to.table_part);
+            let table_name = dispatched_to.dispatched_to_table_name(&table_name);
             let next_pipeline_name = dispatched_to
                 .pipeline
                 .as_deref()
