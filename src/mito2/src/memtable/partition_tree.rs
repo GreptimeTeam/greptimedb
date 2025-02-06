@@ -19,8 +19,6 @@ mod dedup;
 mod dict;
 mod merger;
 mod partition;
-// TODO(weny): remove this
-#[allow(unused)]
 mod primary_key_filter;
 mod shard;
 mod shard_builder;

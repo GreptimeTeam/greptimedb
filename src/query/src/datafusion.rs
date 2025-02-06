@@ -267,6 +267,8 @@ impl DatafusionQueryEngine {
         let _timer = metrics::CREATE_PHYSICAL_ELAPSED.start_timer();
         let state = ctx.state();
 
+        common_telemetry::debug!("Create physical plan, input plan: {logical_plan}");
+
         // special handle EXPLAIN plan
         if matches!(logical_plan, DfLogicalPlan::Explain(_)) {
             return state
@@ -285,6 +287,8 @@ impl DatafusionQueryEngine {
             .map_err(BoxedError::new)
             .context(QueryExecutionSnafu)?;
 
+        common_telemetry::debug!("Create physical plan, analyzed plan: {analyzed_plan}");
+
         // skip optimize for MergeScan
         let optimized_plan = if let DfLogicalPlan::Extension(ext) = &analyzed_plan
             && ext.node.name() == MergeScanLogicalPlan::name()
@@ -298,6 +302,8 @@ impl DatafusionQueryEngine {
                 .map_err(BoxedError::new)
                 .context(QueryExecutionSnafu)?
         };
+
+        common_telemetry::debug!("Create physical plan, optimized plan: {optimized_plan}");
 
         let physical_plan = state
             .query_planner()

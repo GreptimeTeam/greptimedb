@@ -77,27 +77,32 @@ impl BinaryVector {
             .unwrap()
             .iter()
         {
-            let v = if let Some(binary) = binary {
-                let bytes_size = dim as usize * std::mem::size_of::<f32>();
-                if let Ok(s) = String::from_utf8(binary.to_vec()) {
-                    let v = parse_string_to_vector_type_value(&s, Some(dim))?;
-                    Some(v)
-                } else if binary.len() == dim as usize * std::mem::size_of::<f32>() {
-                    Some(binary.to_vec())
-                } else {
-                    return InvalidVectorSnafu {
-                        msg: format!(
-                            "Unexpected bytes size for vector value, expected {}, got {}",
-                            bytes_size,
-                            binary.len()
-                        ),
-                    }
-                    .fail();
-                }
-            } else {
-                None
+            let Some(binary) = binary else {
+                vector.push(None);
+                continue;
             };
-            vector.push(v);
+
+            if let Ok(s) = String::from_utf8(binary.to_vec()) {
+                if let Ok(v) = parse_string_to_vector_type_value(&s, Some(dim)) {
+                    vector.push(Some(v));
+                    continue;
+                }
+            }
+
+            let expected_bytes_size = dim as usize * std::mem::size_of::<f32>();
+            if binary.len() == expected_bytes_size {
+                vector.push(Some(binary.to_vec()));
+                continue;
+            } else {
+                return InvalidVectorSnafu {
+                    msg: format!(
+                        "Unexpected bytes size for vector value, expected {}, got {}",
+                        expected_bytes_size,
+                        binary.len()
+                    ),
+                }
+                .fail();
+            }
         }
         Ok(BinaryVector::from(vector))
     }

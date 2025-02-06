@@ -55,6 +55,16 @@ ALTER TABLE test_alt_table ADD COLUMN m INTEGER;
 
 Affected Rows: 0
 
+-- Should fail issue #5422
+ALTER TABLE test_alt_table ADD COLUMN n interval;
+
+Error: 1001(Unsupported), Not supported: Add column with interval type
+
+-- Should fail issue #5422
+ALTER TABLE test_alt_table MODIFY COLUMN m interval;
+
+Error: 1001(Unsupported), Not supported: Modify column type to interval type
+
 DESC TABLE test_alt_table;
 
 +--------+----------------------+-----+------+---------+---------------+

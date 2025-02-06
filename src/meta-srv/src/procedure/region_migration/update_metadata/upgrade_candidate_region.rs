@@ -67,7 +67,7 @@ impl UpdateMetadata {
         // Removes the candidate region in followers.
         let removed = region_route
             .follower_peers
-            .extract_if(|peer| peer.id == candidate.id)
+            .extract_if(.., |peer| peer.id == candidate.id)
             .collect::<Vec<_>>();
 
         if removed.len() > 1 {

@@ -26,7 +26,7 @@ use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::{Picker, PickerOutput};
 use crate::compaction::run::{find_sorted_runs, reduce_runs, Item};
 use crate::compaction::{get_expired_ssts, CompactionOutput};
-use crate::sst::file::{overlaps, FileHandle, FileId, Level};
+use crate::sst::file::{overlaps, FileHandle, Level};
 use crate::sst::version::LevelMeta;
 
 const LEVEL_COMPACTED: Level = 1;
@@ -134,7 +134,6 @@ impl TwcsPicker {
             for input in split_inputs {
                 debug_assert!(input.len() > 1);
                 output.push(CompactionOutput {
-                    output_file_id: FileId::random(),
                     output_level: LEVEL_COMPACTED, // always compact to l1
                     inputs: input,
                     filter_deleted,
@@ -373,7 +372,7 @@ mod tests {
 
     use super::*;
     use crate::compaction::test_util::{new_file_handle, new_file_handles};
-    use crate::sst::file::{FileMeta, Level};
+    use crate::sst::file::{FileId, FileMeta, Level};
     use crate::test_util::NoopFilePurger;
 
     #[test]

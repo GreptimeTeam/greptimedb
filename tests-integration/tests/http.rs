@@ -151,6 +151,51 @@ pub async fn test_http_auth(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+#[tokio::test]
+pub async fn test_cors() {
+    let (app, mut guard) = setup_test_http_app_with_frontend(StorageType::File, "test_cors").await;
+    let client = TestClient::new(app).await;
+
+    let res = client.get("/health").send().await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .expect("expect cors header origin"),
+        "*"
+    );
+
+    let res = client
+        .options("/health")
+        .header("Access-Control-Request-Headers", "x-greptime-auth")
+        .header("Access-Control-Request-Method", "DELETE")
+        .header("Origin", "https://example.com")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .expect("expect cors header origin"),
+        "*"
+    );
+    assert_eq!(
+        res.headers()
+            .get(http::header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .expect("expect cors header headers"),
+        "*"
+    );
+    assert_eq!(
+        res.headers()
+            .get(http::header::ACCESS_CONTROL_ALLOW_METHODS)
+            .expect("expect cors header methods"),
+        "GET,POST,PUT,DELETE,HEAD"
+    );
+
+    guard.remove_all().await;
+}
+
 pub async fn test_sql_api(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
     let client = TestClient::new(app).await;
@@ -659,6 +704,18 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert!(prom_resp.error_type.is_none());
 
     // query `__name__` without match[]
+    // create a physical table and a logical table
+    let res = client
+        .get("/v1/sql?sql=create table physical_table (`ts` timestamp time index, message string) with ('physical_metric_table' = 'true');")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+    let res = client
+        .get("/v1/sql?sql=create table logic_table (`ts` timestamp time index, message string) with ('on_physical_table' = 'physical_table');")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+    // query `__name__`
     let res = client
         .get("/v1/prometheus/api/v1/label/__name__/values")
         .send()
@@ -668,6 +725,15 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(prom_resp.status, "success");
     assert!(prom_resp.error.is_none());
     assert!(prom_resp.error_type.is_none());
+    assert_eq!(
+        prom_resp.data,
+        PrometheusResponse::Labels(vec![
+            "demo".to_string(),
+            "demo_metrics".to_string(),
+            "logic_table".to_string(),
+            "numbers".to_string()
+        ])
+    );
 
     // buildinfo
     let res = client
@@ -836,10 +902,12 @@ addr = "127.0.0.1:4000"
 timeout = "30s"
 body_limit = "64MiB"
 is_strict_mode = false
+cors_allowed_origins = []
+enable_cors = true
 
 [grpc]
-addr = "127.0.0.1:4001"
-hostname = "127.0.0.1:4001"
+bind_addr = "127.0.0.1:4001"
+server_addr = "127.0.0.1:4001"
 max_recv_message_size = "512MiB"
 max_send_message_size = "512MiB"
 runtime_size = 8

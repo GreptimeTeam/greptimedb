@@ -126,10 +126,14 @@ impl SubCommand {
 struct StartCommand {
     #[clap(long)]
     node_id: Option<u64>,
-    #[clap(long)]
-    rpc_addr: Option<String>,
-    #[clap(long)]
-    rpc_hostname: Option<String>,
+    /// The address to bind the gRPC server.
+    #[clap(long, alias = "rpc-addr")]
+    rpc_bind_addr: Option<String>,
+    /// The address advertised to the metasrv, and used for connections from outside the host.
+    /// If left empty or unset, the server will automatically use the IP address of the first network interface
+    /// on the host, with the same port number as the one specified in `rpc_bind_addr`.
+    #[clap(long, alias = "rpc-hostname")]
+    rpc_server_addr: Option<String>,
     #[clap(long, value_delimiter = ',', num_args = 1..)]
     metasrv_addrs: Option<Vec<String>>,
     #[clap(short, long)]
@@ -181,18 +185,18 @@ impl StartCommand {
             tokio_console_addr: global_options.tokio_console_addr.clone(),
         };
 
-        if let Some(addr) = &self.rpc_addr {
-            opts.grpc.addr.clone_from(addr);
+        if let Some(addr) = &self.rpc_bind_addr {
+            opts.grpc.bind_addr.clone_from(addr);
         } else if let Some(addr) = &opts.rpc_addr {
             warn!("Use the deprecated attribute `DatanodeOptions.rpc_addr`, please use `grpc.addr` instead.");
-            opts.grpc.addr.clone_from(addr);
+            opts.grpc.bind_addr.clone_from(addr);
         }
 
-        if let Some(hostname) = &self.rpc_hostname {
-            opts.grpc.hostname.clone_from(hostname);
-        } else if let Some(hostname) = &opts.rpc_hostname {
+        if let Some(server_addr) = &self.rpc_server_addr {
+            opts.grpc.server_addr.clone_from(server_addr);
+        } else if let Some(server_addr) = &opts.rpc_hostname {
             warn!("Use the deprecated attribute `DatanodeOptions.rpc_hostname`, please use `grpc.hostname` instead.");
-            opts.grpc.hostname.clone_from(hostname);
+            opts.grpc.server_addr.clone_from(server_addr);
         }
 
         if let Some(runtime_size) = opts.rpc_runtime_size {
@@ -277,7 +281,7 @@ impl StartCommand {
 
         let plugin_opts = opts.plugins;
         let mut opts = opts.component;
-        opts.grpc.detect_hostname();
+        opts.grpc.detect_server_addr();
         let mut plugins = Plugins::new();
         plugins::setup_datanode_plugins(&mut plugins, &plugin_opts, &opts)
             .await
@@ -357,8 +361,8 @@ mod tests {
             rpc_addr = "127.0.0.1:4001"
             rpc_hostname = "192.168.0.1"
             [grpc]
-            addr = "127.0.0.1:3001"
-            hostname = "127.0.0.1"
+            bind_addr = "127.0.0.1:3001"
+            server_addr = "127.0.0.1"
             runtime_size = 8
         "#;
         write!(file, "{}", toml_str).unwrap();
@@ -369,8 +373,8 @@ mod tests {
         };
 
         let options = cmd.load_options(&Default::default()).unwrap().component;
-        assert_eq!("127.0.0.1:4001".to_string(), options.grpc.addr);
-        assert_eq!("192.168.0.1".to_string(), options.grpc.hostname);
+        assert_eq!("127.0.0.1:4001".to_string(), options.grpc.bind_addr);
+        assert_eq!("192.168.0.1".to_string(), options.grpc.server_addr);
     }
 
     #[test]
@@ -431,7 +435,7 @@ mod tests {
 
         let options = cmd.load_options(&Default::default()).unwrap().component;
 
-        assert_eq!("127.0.0.1:3001".to_string(), options.grpc.addr);
+        assert_eq!("127.0.0.1:3001".to_string(), options.grpc.bind_addr);
         assert_eq!(Some(42), options.node_id);
 
         let DatanodeWalConfig::RaftEngine(raft_engine_config) = options.wal else {
@@ -645,7 +649,7 @@ mod tests {
                     opts.http.addr,
                     DatanodeOptions::default().component.http.addr
                 );
-                assert_eq!(opts.grpc.hostname, "10.103.174.219");
+                assert_eq!(opts.grpc.server_addr, "10.103.174.219");
             },
         );
     }

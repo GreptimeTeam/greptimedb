@@ -122,7 +122,7 @@ impl PartialEq for OptionMap {
             other
                 .secrets
                 .get(key)
-                .map_or(false, |v| value.expose_secret() == v.expose_secret())
+                .is_some_and(|v| value.expose_secret() == v.expose_secret())
         })
     }
 }

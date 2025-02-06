@@ -366,7 +366,7 @@ fn intersect_ranges(lhs: &[Range<usize>], rhs: &[Range<usize>]) -> Vec<Range<usi
 fn is_blob_not_found(err: &Error) -> bool {
     matches!(
         err,
-        Error::PuffinBuildReader {
+        Error::PuffinReadBlob {
             source: puffin::error::Error::BlobNotFound { .. },
             ..
         }
@@ -455,10 +455,10 @@ mod tests {
                 .unwrap();
 
         // push 20 rows
-        let batch = new_batch("tag1", 0..10);
-        indexer.update(&batch).await.unwrap();
-        let batch = new_batch("tag2", 10..20);
-        indexer.update(&batch).await.unwrap();
+        let mut batch = new_batch("tag1", 0..10);
+        indexer.update(&mut batch).await.unwrap();
+        let mut batch = new_batch("tag2", 10..20);
+        indexer.update(&mut batch).await.unwrap();
 
         let puffin_manager = factory.build(object_store.clone());
 

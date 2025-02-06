@@ -20,6 +20,7 @@ use api::v1::region::compact_request;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{info, warn};
 use common_time::TimeToLive;
+use itertools::Itertools;
 use object_store::manager::ObjectStoreManagerRef;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -278,19 +279,6 @@ impl Compactor for DefaultCompactor {
 
         for output in picker_output.outputs.drain(..) {
             compacted_inputs.extend(output.inputs.iter().map(|f| f.meta_ref().clone()));
-
-            info!(
-                "Compaction region {} output [{}]-> {}",
-                compaction_region.region_id,
-                output
-                    .inputs
-                    .iter()
-                    .map(|f| f.file_id().to_string())
-                    .collect::<Vec<_>>()
-                    .join(","),
-                output.output_file_id
-            );
-
             let write_opts = WriteOptions {
                 write_buffer_size: compaction_region.engine_config.sst_write_buffer_size,
                 ..Default::default()
@@ -299,7 +287,6 @@ impl Compactor for DefaultCompactor {
             let region_metadata = compaction_region.region_metadata.clone();
             let sst_layer = compaction_region.access_layer.clone();
             let region_id = compaction_region.region_id;
-            let file_id = output.output_file_id;
             let cache_manager = compaction_region.cache_manager.clone();
             let storage = compaction_region.region_options.storage.clone();
             let index_options = compaction_region
@@ -320,6 +307,11 @@ impl Compactor for DefaultCompactor {
                 .max()
                 .flatten();
             futs.push(async move {
+                let input_file_names = output
+                    .inputs
+                    .iter()
+                    .map(|f| f.file_id().to_string())
+                    .join(",");
                 let reader = CompactionSstReaderBuilder {
                     metadata: region_metadata.clone(),
                     sst_layer: sst_layer.clone(),
@@ -332,11 +324,10 @@ impl Compactor for DefaultCompactor {
                 }
                 .build_sst_reader()
                 .await?;
-                let file_meta_opt = sst_layer
+                let output_files = sst_layer
                     .write_sst(
                         SstWriteRequest {
                             op_type: OperationType::Compact,
-                            file_id,
                             metadata: region_metadata,
                             source: Source::Reader(reader),
                             cache_manager,
@@ -350,9 +341,10 @@ impl Compactor for DefaultCompactor {
                         &write_opts,
                     )
                     .await?
+                    .into_iter()
                     .map(|sst_info| FileMeta {
                         region_id,
-                        file_id,
+                        file_id: sst_info.file_id,
                         time_range: sst_info.time_range,
                         level: output.output_level,
                         file_size: sst_info.file_size,
@@ -361,8 +353,15 @@ impl Compactor for DefaultCompactor {
                         num_rows: sst_info.num_rows as u64,
                         num_row_groups: sst_info.num_row_groups,
                         sequence: max_sequence,
-                    });
-                Ok(file_meta_opt)
+                    })
+                    .collect::<Vec<_>>();
+                let output_file_names =
+                    output_files.iter().map(|f| f.file_id.to_string()).join(",");
+                info!(
+                    "Region {} compaction inputs: [{}], outputs: [{}]",
+                    region_id, input_file_names, output_file_names
+                );
+                Ok(output_files)
             });
         }
         let mut output_files = Vec::with_capacity(futs.len());
@@ -377,7 +376,7 @@ impl Compactor for DefaultCompactor {
                 .await
                 .context(JoinSnafu)?
                 .into_iter()
-                .collect::<Result<Vec<_>>>()?;
+                .collect::<Result<Vec<Vec<_>>>>()?;
             output_files.extend(metas.into_iter().flatten());
         }
 

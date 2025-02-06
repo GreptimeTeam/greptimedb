@@ -26,10 +26,12 @@ use common_time::Timestamp;
 use datatypes::arrow;
 use datatypes::arrow::array::ArrayRef;
 use datatypes::data_type::{ConcreteDataType, DataType};
-use datatypes::prelude::{MutableVector, ScalarVectorBuilder, Vector, VectorRef};
+use datatypes::prelude::{MutableVector, Vector, VectorRef};
+use datatypes::types::TimestampType;
 use datatypes::value::{Value, ValueRef};
 use datatypes::vectors::{
-    Helper, UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder,
+    Helper, TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
+    TimestampSecondVector, UInt64Vector, UInt8Vector,
 };
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -706,22 +708,23 @@ impl Series {
 
 /// `ValueBuilder` holds all the vector builders for field columns.
 struct ValueBuilder {
-    timestamp: Box<dyn MutableVector>,
-    sequence: UInt64VectorBuilder,
-    op_type: UInt8VectorBuilder,
+    timestamp: Vec<i64>,
+    timestamp_type: ConcreteDataType,
+    sequence: Vec<u64>,
+    op_type: Vec<u8>,
     fields: Vec<Option<Box<dyn MutableVector>>>,
     field_types: Vec<ConcreteDataType>,
 }
 
 impl ValueBuilder {
     fn new(region_metadata: &RegionMetadataRef, capacity: usize) -> Self {
-        let timestamp = region_metadata
+        let timestamp_type = region_metadata
             .time_index_column()
             .column_schema
             .data_type
-            .create_mutable_vector(capacity);
-        let sequence = UInt64VectorBuilder::with_capacity(capacity);
-        let op_type = UInt8VectorBuilder::with_capacity(capacity);
+            .clone();
+        let sequence = Vec::with_capacity(capacity);
+        let op_type = Vec::with_capacity(capacity);
 
         let field_types = region_metadata
             .field_columns()
@@ -730,7 +733,8 @@ impl ValueBuilder {
         let fields = (0..field_types.len()).map(|_| None).collect();
 
         Self {
-            timestamp,
+            timestamp: Vec::with_capacity(capacity),
+            timestamp_type,
             sequence,
             op_type,
             fields,
@@ -757,9 +761,10 @@ impl ValueBuilder {
             field_vec.into_iter()
         };
 
-        let _ = self.timestamp.try_push_value_ref(ts);
-        let _ = self.sequence.try_push_value_ref(ValueRef::UInt64(sequence));
-        let _ = self.op_type.try_push_value_ref(ValueRef::UInt8(op_type));
+        self.timestamp
+            .push(ts.as_timestamp().unwrap().unwrap().value());
+        self.sequence.push(sequence);
+        self.op_type.push(op_type);
         let num_rows = self.timestamp.len();
         let mut size = 0;
         for (idx, field_value) in fields.enumerate() {
@@ -877,9 +882,23 @@ impl From<ValueBuilder> for Values {
                 }
             })
             .collect::<Vec<_>>();
-        let sequence = Arc::new(value.sequence.finish());
-        let op_type = Arc::new(value.op_type.finish());
-        let timestamp = value.timestamp.to_vector();
+        let sequence = Arc::new(UInt64Vector::from_vec(value.sequence));
+        let op_type = Arc::new(UInt8Vector::from_vec(value.op_type));
+        let timestamp: VectorRef = match value.timestamp_type {
+            ConcreteDataType::Timestamp(TimestampType::Second(_)) => {
+                Arc::new(TimestampSecondVector::from_vec(value.timestamp))
+            }
+            ConcreteDataType::Timestamp(TimestampType::Millisecond(_)) => {
+                Arc::new(TimestampMillisecondVector::from_vec(value.timestamp))
+            }
+            ConcreteDataType::Timestamp(TimestampType::Microsecond(_)) => {
+                Arc::new(TimestampMicrosecondVector::from_vec(value.timestamp))
+            }
+            ConcreteDataType::Timestamp(TimestampType::Nanosecond(_)) => {
+                Arc::new(TimestampNanosecondVector::from_vec(value.timestamp))
+            }
+            _ => unreachable!(),
+        };
 
         if cfg!(debug_assertions) {
             debug_assert_eq!(timestamp.len(), sequence.len());

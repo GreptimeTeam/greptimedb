@@ -544,7 +544,12 @@ where
                 .as_ref()
                 .map(|rows| rows.rows.len())
                 .unwrap_or(0);
-            region_write_ctx.push_mutation(mutation.op_type, mutation.rows, OptionOutputTx::none());
+            region_write_ctx.push_mutation(
+                mutation.op_type,
+                mutation.rows,
+                mutation.write_hint,
+                OptionOutputTx::none(),
+            );
         }
 
         // set next_entry_id and write to memtable.

@@ -26,11 +26,14 @@ use datatypes::prelude::ValueRef;
 use memcomparable::Serializer;
 use serde::Serialize;
 use snafu::{ensure, ResultExt};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
 
-use crate::error::{PrimaryKeyLengthMismatchSnafu, Result, SerializeFieldSnafu};
+use crate::error::{
+    EncodeSparsePrimaryKeySnafu, PrimaryKeyLengthMismatchSnafu, Result, SerializeFieldSnafu,
+};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::partition::{
@@ -111,6 +114,26 @@ impl PartitionTree {
         Ok(())
     }
 
+    /// Encodes the given key value into a sparse primary key.
+    fn encode_sparse_primary_key(&self, kv: &KeyValue, buffer: &mut Vec<u8>) -> Result<()> {
+        if kv.primary_key_encoding() == PrimaryKeyEncoding::Sparse {
+            // If the primary key encoding is sparse and already encoded in the metric engine,
+            // we only need to copy the encoded primary key into the destination buffer.
+            let ValueRef::Binary(primary_key) = kv.primary_keys().next().unwrap() else {
+                return EncodeSparsePrimaryKeySnafu {
+                    reason: "sparse primary key is not binary".to_string(),
+                }
+                .fail();
+            };
+            buffer.extend_from_slice(primary_key);
+        } else {
+            // For compatibility, use the sparse encoder for dense primary key.
+            self.sparse_encoder
+                .encode_to_vec(kv.primary_keys(), buffer)?;
+        }
+        Ok(())
+    }
+
     // TODO(yingwen): The size computed from values is inaccurate.
     /// Write key-values into the tree.
     ///
@@ -141,9 +164,7 @@ impl PartitionTree {
             // Encode primary key.
             pk_buffer.clear();
             if self.is_partitioned {
-                // Use sparse encoder for metric engine.
-                self.sparse_encoder
-                    .encode_to_vec(kv.primary_keys(), pk_buffer)?;
+                self.encode_sparse_primary_key(&kv, pk_buffer)?;
             } else {
                 self.row_codec.encode_key_value(&kv, pk_buffer)?;
             }
@@ -185,9 +206,7 @@ impl PartitionTree {
         // Encode primary key.
         pk_buffer.clear();
         if self.is_partitioned {
-            // Use sparse encoder for metric engine.
-            self.sparse_encoder
-                .encode_to_vec(kv.primary_keys(), pk_buffer)?;
+            self.encode_sparse_primary_key(&kv, pk_buffer)?;
         } else {
             self.row_codec.encode_key_value(&kv, pk_buffer)?;
         }

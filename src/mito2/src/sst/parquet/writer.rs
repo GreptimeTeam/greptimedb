@@ -28,6 +28,7 @@ use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 use parquet::schema::types::ColumnPath;
+use smallvec::smallvec;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
@@ -35,40 +36,48 @@ use store_api::storage::SequenceNumber;
 use tokio::io::AsyncWrite;
 use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
 
+use crate::access_layer::{FilePathProvider, SstInfoArray};
 use crate::error::{InvalidMetadataSnafu, OpenDalSnafu, Result, WriteParquetSnafu};
 use crate::read::{Batch, Source};
-use crate::sst::index::Indexer;
+use crate::sst::file::FileId;
+use crate::sst::index::{Indexer, IndexerBuilder};
 use crate::sst::parquet::format::WriteFormat;
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 
 /// Parquet SST writer.
-pub struct ParquetWriter<F: WriterFactory> {
+pub struct ParquetWriter<F: WriterFactory, I: IndexerBuilder, P: FilePathProvider> {
+    /// Path provider that creates SST and index file paths according to file id.
+    path_provider: P,
     writer: Option<AsyncArrowWriter<SizeAwareWriter<F::Writer>>>,
+    /// Current active file id.
+    current_file: FileId,
     writer_factory: F,
     /// Region metadata of the source and the target SST.
     metadata: RegionMetadataRef,
-    indexer: Indexer,
+    /// Indexer build that can create indexer for multiple files.
+    indexer_builder: I,
+    /// Current active indexer.
+    current_indexer: Option<Indexer>,
     bytes_written: Arc<AtomicUsize>,
 }
 
 pub trait WriterFactory {
     type Writer: AsyncWrite + Send + Unpin;
-    fn create(&mut self) -> impl Future<Output = Result<Self::Writer>>;
+    fn create(&mut self, file_path: &str) -> impl Future<Output = Result<Self::Writer>>;
 }
 
 pub struct ObjectStoreWriterFactory {
-    path: String,
     object_store: ObjectStore,
 }
 
 impl WriterFactory for ObjectStoreWriterFactory {
     type Writer = Compat<FuturesAsyncWriter>;
 
-    async fn create(&mut self) -> Result<Self::Writer> {
+    async fn create(&mut self, file_path: &str) -> Result<Self::Writer> {
         self.object_store
-            .writer_with(&self.path)
+            .writer_with(file_path)
             .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
             .concurrent(DEFAULT_WRITE_CONCURRENCY)
             .await
@@ -77,33 +86,70 @@ impl WriterFactory for ObjectStoreWriterFactory {
     }
 }
 
-impl ParquetWriter<ObjectStoreWriterFactory> {
-    pub fn new_with_object_store(
+impl<I, P> ParquetWriter<ObjectStoreWriterFactory, I, P>
+where
+    P: FilePathProvider,
+    I: IndexerBuilder,
+{
+    pub async fn new_with_object_store(
         object_store: ObjectStore,
-        path: String,
         metadata: RegionMetadataRef,
-        indexer: Indexer,
-    ) -> ParquetWriter<ObjectStoreWriterFactory> {
+        indexer_builder: I,
+        path_provider: P,
+    ) -> ParquetWriter<ObjectStoreWriterFactory, I, P> {
         ParquetWriter::new(
-            ObjectStoreWriterFactory { path, object_store },
+            ObjectStoreWriterFactory { object_store },
             metadata,
-            indexer,
+            indexer_builder,
+            path_provider,
         )
+        .await
     }
 }
 
-impl<F> ParquetWriter<F>
+impl<F, I, P> ParquetWriter<F, I, P>
 where
     F: WriterFactory,
+    I: IndexerBuilder,
+    P: FilePathProvider,
 {
     /// Creates a new parquet SST writer.
-    pub fn new(factory: F, metadata: RegionMetadataRef, indexer: Indexer) -> ParquetWriter<F> {
+    pub async fn new(
+        factory: F,
+        metadata: RegionMetadataRef,
+        indexer_builder: I,
+        path_provider: P,
+    ) -> ParquetWriter<F, I, P> {
+        let init_file = FileId::random();
+        let index_file_path = path_provider.build_index_file_path(init_file);
+        let indexer = indexer_builder.build(init_file, index_file_path).await;
+
         ParquetWriter {
+            path_provider,
             writer: None,
+            current_file: init_file,
             writer_factory: factory,
             metadata,
-            indexer,
+            indexer_builder,
+            current_indexer: Some(indexer),
             bytes_written: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    async fn get_or_create_indexer(&mut self) -> &mut Indexer {
+        match self.current_indexer {
+            None => {
+                self.current_file = FileId::random();
+                let index_file_path = self.path_provider.build_index_file_path(self.current_file);
+                let indexer = self
+                    .indexer_builder
+                    .build(self.current_file, index_file_path)
+                    .await;
+                self.current_indexer = Some(indexer);
+                // safety: self.current_indexer already set above.
+                self.current_indexer.as_mut().unwrap()
+            }
+            Some(ref mut indexer) => indexer,
         }
     }
 
@@ -115,7 +161,7 @@ where
         mut source: Source,
         override_sequence: Option<SequenceNumber>, // override the `sequence` field from `Source`
         opts: &WriteOptions,
-    ) -> Result<Option<SstInfo>> {
+    ) -> Result<SstInfoArray> {
         let write_format =
             WriteFormat::new(self.metadata.clone()).with_override_sequence(override_sequence);
         let mut stats = SourceStats::default();
@@ -126,26 +172,26 @@ where
             .transpose()
         {
             match res {
-                Ok(batch) => {
+                Ok(mut batch) => {
                     stats.update(&batch);
-                    self.indexer.update(&batch).await;
+                    self.get_or_create_indexer().await.update(&mut batch).await;
                 }
                 Err(e) => {
-                    self.indexer.abort().await;
+                    self.get_or_create_indexer().await.abort().await;
                     return Err(e);
                 }
             }
         }
 
-        let index_output = self.indexer.finish().await;
+        let index_output = self.get_or_create_indexer().await.finish().await;
 
         if stats.num_rows == 0 {
-            return Ok(None);
+            return Ok(smallvec![]);
         }
 
         let Some(mut arrow_writer) = self.writer.take() else {
             // No batch actually written.
-            return Ok(None);
+            return Ok(smallvec![]);
         };
 
         arrow_writer.flush().await.context(WriteParquetSnafu)?;
@@ -159,15 +205,18 @@ where
         // convert FileMetaData to ParquetMetaData
         let parquet_metadata = parse_parquet_metadata(file_meta)?;
 
+        let file_id = self.current_file;
+
         // object_store.write will make sure all bytes are written or an error is raised.
-        Ok(Some(SstInfo {
+        Ok(smallvec![SstInfo {
+            file_id,
             time_range,
             file_size,
             num_rows: stats.num_rows,
             num_row_groups: parquet_metadata.num_row_groups() as u64,
             file_metadata: Some(Arc::new(parquet_metadata)),
             index_metadata: index_output,
-        }))
+        }])
     }
 
     /// Customizes per-column config according to schema and maybe column cardinality.
@@ -229,8 +278,9 @@ where
             let props_builder = Self::customize_column_config(props_builder, &self.metadata);
             let writer_props = props_builder.build();
 
+            let sst_file_path = self.path_provider.build_sst_file_path(self.current_file);
             let writer = SizeAwareWriter::new(
-                self.writer_factory.create().await?,
+                self.writer_factory.create(&sst_file_path).await?,
                 self.bytes_written.clone(),
             );
             let arrow_writer =

@@ -37,7 +37,7 @@ use axum::Router;
 use bytes::Bytes;
 use common_telemetry::info;
 use http::header::{HeaderName, HeaderValue};
-use http::StatusCode;
+use http::{Method, StatusCode};
 use tokio::net::TcpListener;
 
 /// Test client to Axum servers.
@@ -126,6 +126,17 @@ impl TestClient {
 
         RequestBuilder {
             builder: self.client.delete(format!("http://{}{}", self.addr, url)),
+        }
+    }
+
+    /// Options preflight request
+    pub fn options(&self, url: &str) -> RequestBuilder {
+        common_telemetry::info!("OPTIONS {} {}", self.addr, url);
+
+        RequestBuilder {
+            builder: self
+                .client
+                .request(Method::OPTIONS, format!("http://{}{}", self.addr, url)),
         }
     }
 }

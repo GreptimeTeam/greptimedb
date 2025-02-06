@@ -136,12 +136,18 @@ impl SubCommand {
 
 #[derive(Debug, Default, Parser)]
 pub struct StartCommand {
+    /// The address to bind the gRPC server.
+    #[clap(long, alias = "rpc-addr")]
+    rpc_bind_addr: Option<String>,
+    /// The address advertised to the metasrv, and used for connections from outside the host.
+    /// If left empty or unset, the server will automatically use the IP address of the first network interface
+    /// on the host, with the same port number as the one specified in `rpc_bind_addr`.
+    #[clap(long, alias = "rpc-hostname")]
+    rpc_server_addr: Option<String>,
     #[clap(long)]
     http_addr: Option<String>,
     #[clap(long)]
     http_timeout: Option<u64>,
-    #[clap(long)]
-    rpc_addr: Option<String>,
     #[clap(long)]
     mysql_addr: Option<String>,
     #[clap(long)]
@@ -218,9 +224,13 @@ impl StartCommand {
             opts.http.disable_dashboard = disable_dashboard;
         }
 
-        if let Some(addr) = &self.rpc_addr {
-            opts.grpc.addr.clone_from(addr);
+        if let Some(addr) = &self.rpc_bind_addr {
+            opts.grpc.bind_addr.clone_from(addr);
             opts.grpc.tls = tls_opts.clone();
+        }
+
+        if let Some(addr) = &self.rpc_server_addr {
+            opts.grpc.server_addr.clone_from(addr);
         }
 
         if let Some(addr) = &self.mysql_addr {
@@ -269,7 +279,7 @@ impl StartCommand {
 
         let plugin_opts = opts.plugins;
         let mut opts = opts.component;
-        opts.grpc.detect_hostname();
+        opts.grpc.detect_server_addr();
         let mut plugins = Plugins::new();
         plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &opts)
             .await
@@ -413,7 +423,7 @@ mod tests {
 
         let default_opts = FrontendOptions::default().component;
 
-        assert_eq!(opts.grpc.addr, default_opts.grpc.addr);
+        assert_eq!(opts.grpc.bind_addr, default_opts.grpc.bind_addr);
         assert!(opts.mysql.enable);
         assert_eq!(opts.mysql.runtime_size, default_opts.mysql.runtime_size);
         assert!(opts.postgres.enable);
@@ -604,7 +614,7 @@ mod tests {
                 assert_eq!(fe_opts.http.addr, "127.0.0.1:14000");
 
                 // Should be default value.
-                assert_eq!(fe_opts.grpc.addr, GrpcOptions::default().addr);
+                assert_eq!(fe_opts.grpc.bind_addr, GrpcOptions::default().bind_addr);
             },
         );
     }

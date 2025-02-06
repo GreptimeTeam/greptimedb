@@ -66,8 +66,8 @@ impl<'a> DatanodeServiceBuilder<'a> {
         let handlers = ServerHandlers::default();
 
         if let Some(grpc_server) = self.grpc_server.take() {
-            let addr: SocketAddr = self.opts.grpc.addr.parse().context(ParseAddrSnafu {
-                addr: &self.opts.grpc.addr,
+            let addr: SocketAddr = self.opts.grpc.bind_addr.parse().context(ParseAddrSnafu {
+                addr: &self.opts.grpc.bind_addr,
             })?;
             let handler: ServerHandler = (Box::new(grpc_server), addr);
             handlers.insert(handler).await;
