@@ -543,6 +543,11 @@ impl RegionEngine for MitoEngine {
             .with_label_values(&[request.request_type()])
             .start_timer();
 
+        // Get sequences can happen outside region worker.
+        if let RegionRequest::Sequences(seqs) = request {
+            return self.get_region_sequences(seqs).await;
+        }
+
         self.inner
             .handle_request(region_id, request)
             .await
