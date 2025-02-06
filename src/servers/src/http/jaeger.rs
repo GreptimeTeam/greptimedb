@@ -271,6 +271,10 @@ impl QueryTraceParams {
             internal_query_params.tags = Some(tags_map);
         }
 
+        if let Some(limit) = query_params.limit {
+            internal_query_params.limit = Some(limit);
+        }
+
         Ok(internal_query_params)
     }
 }
@@ -280,6 +284,9 @@ struct QueryTraceParams {
     db: String,
     service_name: String,
     operation_name: Option<String>,
+
+    // The limit of the number of traces to return.
+    limit: Option<i32>,
 
     // FIXME(zyy17): Support tags query in the future.
     tags: Option<HashMap<String, JsonValue>>,
@@ -818,6 +825,10 @@ fn query_trace_sql(trace_table_name: &str, query_params: QueryTraceParams) -> St
         }
     }
 
+    if let Some(limit) = query_params.limit {
+        query = format!("{} LIMIT {}", query, limit);
+    }
+
     query
 }
 
@@ -1106,6 +1117,7 @@ mod tests {
                     end: Some(1738726754642422),
                     max_duration: Some("100ms".to_string()),
                     min_duration: Some("50ms".to_string()),
+                    limit: Some(10),
                     tags: Some("{\"http.status_code\":\"200\",\"latency\":\"11.234\",\"error\":\"false\",\"http.method\":\"GET\",\"http.path\":\"/api/v1/users\"}".to_string()),
                     ..Default::default()
                 },
@@ -1117,6 +1129,7 @@ mod tests {
                     end_time: Some(1738726754642422000),
                     min_duration: Some(50000000),
                     max_duration: Some(100000000),
+                    limit: Some(10),
                     tags: Some(HashMap::from([
                         ("http.status_code".to_string(), JsonValue::Number(Number::from(200))),
                         ("latency".to_string(), JsonValue::Number(Number::from_f64(11.234).unwrap())),
