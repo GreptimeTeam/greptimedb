@@ -16,6 +16,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -29,6 +30,7 @@ use table::predicate::Predicate;
 use crate::config::MitoConfig;
 use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
+use crate::memtable::bulk::BulkMemtableBuilder;
 use crate::memtable::key_values::KeyValue;
 pub use crate::memtable::key_values::KeyValues;
 use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtableBuilder};
@@ -290,6 +292,19 @@ impl MemtableBuilderProvider {
         dedup: bool,
         merge_mode: MergeMode,
     ) -> MemtableBuilderRef {
+        // todo(hl): make it an option
+        if std::env::var("enable_bulk_memtable")
+            .ok()
+            .and_then(|v| bool::from_str(&v).ok())
+            .unwrap_or(false)
+        {
+            return Arc::new(BulkMemtableBuilder::new(
+                self.write_buffer_manager.clone(),
+                dedup,
+                merge_mode,
+            ));
+        }
+
         match options {
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),

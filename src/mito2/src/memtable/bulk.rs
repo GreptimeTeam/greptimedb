@@ -26,9 +26,11 @@ use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableId, MemtableRanges, MemtableRef,
-    MemtableStats,
+    AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
+    MemtableRanges, MemtableRef, MemtableStats,
 };
+use crate::read::Batch;
+use crate::region::options::MergeMode;
 
 #[allow(unused)]
 mod context;
@@ -36,6 +38,39 @@ mod context;
 pub(crate) mod part;
 mod part_reader;
 mod row_group_reader;
+
+#[derive(Debug)]
+pub struct BulkMemtableBuilder {
+    write_buffer_manager: Option<WriteBufferManagerRef>,
+    dedup: bool,
+    merge_mode: MergeMode,
+}
+
+impl MemtableBuilder for BulkMemtableBuilder {
+    fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
+        Arc::new(BulkMemtable::new(
+            metadata.clone(),
+            id,
+            self.write_buffer_manager.clone(),
+            self.dedup,
+            self.merge_mode,
+        ))
+    }
+}
+
+impl BulkMemtableBuilder {
+    pub fn new(
+        write_buffer_manager: Option<WriteBufferManagerRef>,
+        dedup: bool,
+        merge_mode: MergeMode,
+    ) -> Self {
+        Self {
+            write_buffer_manager,
+            dedup,
+            merge_mode,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct BulkMemtable {
@@ -47,6 +82,8 @@ pub struct BulkMemtable {
     min_timestamp: AtomicI64,
     max_sequence: AtomicU64,
     num_rows: AtomicUsize,
+    dedup: bool,
+    merge_mode: MergeMode,
 }
 
 impl BulkMemtable {
@@ -54,6 +91,8 @@ impl BulkMemtable {
         region_metadata: RegionMetadataRef,
         id: MemtableId,
         write_buffer_manager: Option<WriteBufferManagerRef>,
+        dedup: bool,
+        merge_mode: MergeMode,
     ) -> Self {
         Self {
             id,
@@ -64,7 +103,19 @@ impl BulkMemtable {
             min_timestamp: AtomicI64::new(i64::MAX),
             max_sequence: Default::default(),
             num_rows: Default::default(),
+            dedup,
+            merge_mode,
         }
+    }
+}
+
+struct EmptyIter;
+
+impl Iterator for EmptyIter {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        None
     }
 }
 
@@ -93,7 +144,9 @@ impl Memtable for BulkMemtable {
         _predicate: Option<Predicate>,
         _sequence: Option<SequenceNumber>,
     ) -> Result<BoxedBatchIterator> {
-        todo!()
+        //todo(hl): temporarily disable reads.
+        //todo(hl): we should also consider dedup and merge mode when reading bulk parts,
+        Ok(Box::new(EmptyIter))
     }
 
     fn ranges(
@@ -151,6 +204,8 @@ impl Memtable for BulkMemtable {
             metadata.clone(),
             id,
             self.alloc_tracker.write_buffer_manager(),
+            self.dedup,
+            self.merge_mode,
         ))
     }
 }
