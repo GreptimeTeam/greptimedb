@@ -143,6 +143,7 @@ pub struct KeyValue {
     pub value: Value,
 }
 
+/// Value is the value of a key-value pair in Jaeger Span attributes.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 #[serde(rename_all = "camelCase")]
@@ -165,6 +166,7 @@ pub enum ValueType {
     Binary,
 }
 
+/// JaegerQueryParams is the query parameters of Jaeger HTTP API.
 #[derive(Default, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JaegerQueryParams {
@@ -194,8 +196,9 @@ pub struct JaegerQueryParams {
     /// Min duration string value of the trace. Units can be `ns`, `us` (or `µs`), `ms`, `s`, `m`, `h`.
     pub min_duration: Option<String>,
 
-    /// Tags of the trace in JSON format.
-    /// Example: tags={"key1":"value1","key2":"value2"}.
+    /// Tags of the trace in JSON format. It will be URL encoded in the raw query.
+    /// The decoded format is like: tags="{\"http.status_code\":\"200\",\"latency\":\"11.234\",\"error\":\"false\",\"http.method\":\"GET\",\"http.path\":\"/api/v1/users\"}".
+    /// The key and value of the map are both strings. The key and value is the attribute name and value of the span. The value will be converted to the corresponding type when querying.
     pub tags: Option<String>,
 
     #[serde(rename = "spanKind")]
@@ -274,6 +277,9 @@ impl QueryTraceParams {
 
         if let Some(limit) = query_params.limit {
             internal_query_params.limit = Some(limit);
+        } else {
+            // Default limit is 100.
+            internal_query_params.limit = Some(100);
         }
 
         Ok(internal_query_params)
@@ -928,6 +934,7 @@ mod tests {
 
     #[test]
     fn test_operations_from_records() {
+        // The tests is the tuple of `(test_records, contain_span_kind, expected)`.
         let tests = vec![
             (
                 HttpRecordsOutput {
@@ -1017,6 +1024,7 @@ mod tests {
 
     #[test]
     fn test_traces_from_records() {
+        // The tests is the tuple of `(test_records, expected)`.
         let tests = vec![(
             HttpRecordsOutput {
                 schema: OutputSchema {
@@ -1139,6 +1147,7 @@ mod tests {
 
     #[test]
     fn test_from_jaeger_query_params() {
+        // The tests is the tuple of `(test_query_params, expected)`.
         let tests = vec![
             (
                 JaegerQueryParams {
@@ -1148,6 +1157,7 @@ mod tests {
                 QueryTraceParams {
                     db: "public".to_string(),
                     service_name: "test-service-0".to_string(),
+                    limit: Some(100),
                     ..Default::default()
                 },
             ),
