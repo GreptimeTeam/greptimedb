@@ -246,7 +246,7 @@ pub struct SchemaInfo {
 }
 
 impl SchemaInfo {
-    pub fn new_with_capacity(capacity: usize) -> Self {
+    pub fn with_capacity(capacity: usize) -> Self {
         Self {
             schema: Vec::with_capacity(capacity),
             index: HashMap::with_capacity(capacity),
