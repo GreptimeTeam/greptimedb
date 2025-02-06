@@ -6262,12 +6262,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "loki-api"
-version = "0.1.2"
-source = "git+https://github.com/shuiyisong/tracing-loki?branch=chore%2Fprost_version#ad135292a77b6ce638d126571804c19fdaa36215"
+name = "loki-proto"
+version = "0.1.0"
+source = "git+https://github.com/GreptimeTeam/loki-proto.git?branch=main#fca73df15f257ee6c25dabb1da3886c14b8da47d"
 dependencies = [
  "prost 0.13.3",
  "prost-types 0.13.3",
+ "tonic 0.12.3",
+ "tonic-build 0.12.3",
 ]
 
 [[package]]
@@ -10397,7 +10399,7 @@ dependencies = [
  "lazy_static",
  "local-ip-address",
  "log-query",
- "loki-api",
+ "loki-proto",
  "mime_guess",
  "mysql_async",
  "notify",
@@ -11770,7 +11772,7 @@ dependencies = [
  "hyper-util",
  "itertools 0.10.5",
  "log-query",
- "loki-api",
+ "loki-proto",
  "meta-client",
  "meta-srv",
  "moka",
