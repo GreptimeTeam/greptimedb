@@ -170,7 +170,7 @@ impl RegionEngine for MetricEngine {
                         .mito
                         .handle_request(region_id, request)
                         .await
-                        .context(error::MitoFlushOperationSnafu)
+                        .context(error::MitoDeleteOperationSnafu)
                         .map(|response| response.affected_rows)
                 } else {
                     UnsupportedRegionRequestSnafu { request }.fail()
