@@ -276,6 +276,7 @@ impl CpuDataGenerator {
                 rows,
             }),
             write_hint: None,
+            bulk: Vec::new(),
         };
 
         KeyValues::new(&self.metadata, mutation).unwrap()

@@ -116,6 +116,7 @@ mod tests {
                 sequence: 1u64,
                 rows: None,
                 write_hint: None,
+                bulk: Vec::new(),
             }],
         };
         let encoded_entry = wal_entry.encode_to_vec();

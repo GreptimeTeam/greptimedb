@@ -176,7 +176,7 @@ pub const DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE: usize = 2048;
 ///                                  |
 /// // may deadlock                  |
 /// distributor.distribute().await;  |
-///                                  |  
+///                                  |
 ///                                  |
 /// receivers[0].read().await        |
 /// ```
@@ -280,6 +280,7 @@ mod tests {
                         sequence: 1u64,
                         rows: None,
                         write_hint: None,
+                        bulk: Vec::new(),
                     }],
                 }
                 .encode_to_vec(),
@@ -294,6 +295,7 @@ mod tests {
                         sequence: 2u64,
                         rows: None,
                         write_hint: None,
+                        bulk: Vec::new(),
                     }],
                 }
                 .encode_to_vec(),
@@ -308,6 +310,7 @@ mod tests {
                         sequence: 3u64,
                         rows: None,
                         write_hint: None,
+                        bulk: Vec::new(),
                     }],
                 }
                 .encode_to_vec(),
@@ -352,6 +355,7 @@ mod tests {
                         sequence: 1u64,
                         rows: None,
                         write_hint: None,
+                        bulk: Vec::new(),
                     }],
                 }
             )]
@@ -372,6 +376,7 @@ mod tests {
                         sequence: 2u64,
                         rows: None,
                         write_hint: None,
+                        bulk: Vec::new(),
                     }],
                 }
             )]
@@ -388,6 +393,7 @@ mod tests {
                 sequence: 1u64,
                 rows: None,
                 write_hint: None,
+                bulk: Vec::new(),
             }],
         };
         let region2 = RegionId::new(1, 2);
@@ -397,6 +403,7 @@ mod tests {
                 sequence: 3u64,
                 rows: None,
                 write_hint: None,
+                bulk: Vec::new(),
             }],
         };
         let region3 = RegionId::new(1, 3);
@@ -406,6 +413,7 @@ mod tests {
                 sequence: 3u64,
                 rows: None,
                 write_hint: None,
+                bulk: Vec::new(),
             }],
         };
         let provider = Provider::kafka_provider("my_topic".to_string());
@@ -484,6 +492,7 @@ mod tests {
                 sequence: 1u64,
                 rows: None,
                 write_hint: None,
+                bulk: Vec::new(),
             }],
         };
         let region2 = RegionId::new(1, 2);
@@ -561,6 +570,7 @@ mod tests {
                         sequence: 1u64,
                         rows: None,
                         write_hint: None,
+                        bulk: Vec::new(),
                     }],
                 }
                 .encode_to_vec(),
@@ -575,6 +585,7 @@ mod tests {
                         sequence: 2u64,
                         rows: None,
                         write_hint: None,
+                        bulk: Vec::new(),
                     }],
                 }
                 .encode_to_vec(),
@@ -589,6 +600,7 @@ mod tests {
                         sequence: 3u64,
                         rows: None,
                         write_hint: None,
+                        bulk: Vec::new(),
                     }],
                 }
                 .encode_to_vec(),
@@ -603,6 +615,7 @@ mod tests {
                         sequence: 4u64,
                         rows: None,
                         write_hint: None,
+                        bulk: Vec::new(),
                     }],
                 }
                 .encode_to_vec(),
@@ -638,6 +651,7 @@ mod tests {
                         sequence: 4u64,
                         rows: None,
                         write_hint: None,
+                        bulk: Vec::new(),
                     }],
                 }
             )]

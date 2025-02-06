@@ -63,15 +63,19 @@ use promql_parser::parser::{
     VectorMatchCardinality, VectorSelector,
 };
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::promql::error::{
     CatalogSnafu, ColumnNotFoundSnafu, CombineTableColumnMismatchSnafu, DataFusionPlanningSnafu,
-    ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, MultiFieldsNotSupportedSnafu,
-    MultipleMetricMatchersSnafu, MultipleVectorSnafu, NoMetricMatcherSnafu, PromqlPlanNodeSnafu,
-    Result, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu,
-    UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedMatcherOpSnafu,
-    UnsupportedVectorMatchSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, InvalidTimeRangeSnafu,
+    MultiFieldsNotSupportedSnafu, MultipleMetricMatchersSnafu, MultipleVectorSnafu,
+    NoMetricMatcherSnafu, PromqlPlanNodeSnafu, Result, TableNameNotFoundSnafu,
+    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
+    UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, UnsupportedVectorMatchSnafu,
+    ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
 };
 
 /// `time()` function in PromQL.
@@ -982,6 +986,9 @@ impl PromPlanner {
     fn build_time_index_filter(&self, offset_duration: i64) -> Result<Option<DfExpr>> {
         let start = self.ctx.start;
         let end = self.ctx.end;
+        if end < start {
+            return InvalidTimeRangeSnafu { start, end }.fail();
+        }
         let lookback_delta = self.ctx.lookback_delta;
         let range = self.ctx.range.unwrap_or_default();
         let interval = self.ctx.interval;
@@ -1146,6 +1153,10 @@ impl PromPlanner {
             .table_info()
             .meta
             .row_key_column_names()
+            .filter(|col| {
+                // remove metric engine's internal columns
+                col != &DATA_SCHEMA_TABLE_ID_COLUMN_NAME && col != &DATA_SCHEMA_TSID_COLUMN_NAME
+            })
             .cloned()
             .collect();
         self.ctx.tag_columns = tags;

@@ -61,7 +61,6 @@ impl From<&PickerOutput> for SerializedPickerOutput {
             .outputs
             .iter()
             .map(|output| SerializedCompactionOutput {
-                output_file_id: output.output_file_id,
                 output_level: output.output_level,
                 inputs: output.inputs.iter().map(|s| s.meta_ref().clone()).collect(),
                 filter_deleted: output.filter_deleted,
@@ -91,7 +90,6 @@ impl PickerOutput {
             .outputs
             .into_iter()
             .map(|output| CompactionOutput {
-                output_file_id: output.output_file_id,
                 output_level: output.output_level,
                 inputs: output
                     .inputs
@@ -167,14 +165,12 @@ mod tests {
         let picker_output = PickerOutput {
             outputs: vec![
                 CompactionOutput {
-                    output_file_id: FileId::random(),
                     output_level: 0,
                     inputs: inputs_file_handle.clone(),
                     filter_deleted: false,
                     output_time_range: None,
                 },
                 CompactionOutput {
-                    output_file_id: FileId::random(),
                     output_level: 0,
                     inputs: inputs_file_handle.clone(),
                     filter_deleted: false,
@@ -205,7 +201,6 @@ mod tests {
             .iter()
             .zip(picker_output_from_serialized.outputs.iter())
             .for_each(|(expected, actual)| {
-                assert_eq!(expected.output_file_id, actual.output_file_id);
                 assert_eq!(expected.output_level, actual.output_level);
                 expected
                     .inputs

@@ -136,6 +136,7 @@ impl RegionWriteCtx {
         op_type: i32,
         rows: Option<Rows>,
         write_hint: Option<WriteHint>,
+        bulk: Vec<u8>,
         tx: OptionOutputTx,
     ) {
         let num_rows = rows.as_ref().map(|rows| rows.rows.len()).unwrap_or(0);
@@ -144,6 +145,7 @@ impl RegionWriteCtx {
             sequence: self.next_sequence,
             rows,
             write_hint,
+            bulk,
         });
 
         let notify = WriteNotify::new(tx, num_rows);

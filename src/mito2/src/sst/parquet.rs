@@ -19,7 +19,7 @@ use std::sync::Arc;
 use common_base::readable_size::ReadableSize;
 use parquet::file::metadata::ParquetMetaData;
 
-use crate::sst::file::FileTimeRange;
+use crate::sst::file::{FileId, FileTimeRange};
 use crate::sst::index::IndexOutput;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
@@ -62,6 +62,8 @@ impl Default for WriteOptions {
 
 /// Parquet SST info returned by the writer.
 pub struct SstInfo {
+    /// SST file id.
+    pub file_id: FileId,
     /// Time range of the SST. The timestamps have the same time unit as the
     /// data in the SST.
     pub time_range: FileTimeRange,
@@ -95,12 +97,13 @@ mod tests {
     use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
     use super::*;
+    use crate::access_layer::FilePathProvider;
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
-    use crate::sst::index::Indexer;
+    use crate::sst::index::{Indexer, IndexerBuilder};
     use crate::sst::parquet::format::WriteFormat;
     use crate::sst::parquet::reader::ParquetReaderBuilder;
     use crate::sst::parquet::writer::ParquetWriter;
-    use crate::sst::DEFAULT_WRITE_CONCURRENCY;
+    use crate::sst::{location, DEFAULT_WRITE_CONCURRENCY};
     use crate::test_util::sst_util::{
         assert_parquet_metadata_eq, build_test_binary_test_region_metadata, new_batch_by_range,
         new_batch_with_binary, new_source, sst_file_handle, sst_region_metadata,
@@ -109,12 +112,38 @@ mod tests {
 
     const FILE_DIR: &str = "/";
 
+    #[derive(Clone)]
+    struct FixedPathProvider {
+        file_id: FileId,
+    }
+
+    impl FilePathProvider for FixedPathProvider {
+        fn build_index_file_path(&self, _file_id: FileId) -> String {
+            location::index_file_path(FILE_DIR, self.file_id)
+        }
+
+        fn build_sst_file_path(&self, _file_id: FileId) -> String {
+            location::sst_file_path(FILE_DIR, self.file_id)
+        }
+    }
+
+    struct NoopIndexBuilder;
+
+    #[async_trait::async_trait]
+    impl IndexerBuilder for NoopIndexBuilder {
+        async fn build(&self, _file_id: FileId, _path: String) -> Indexer {
+            Indexer::default()
+        }
+    }
+
     #[tokio::test]
     async fn test_write_read() {
         let mut env = TestEnv::new();
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
-        let file_path = handle.file_path(FILE_DIR);
+        let file_path = FixedPathProvider {
+            file_id: handle.file_id(),
+        };
         let metadata = Arc::new(sst_region_metadata());
         let source = new_source(&[
             new_batch_by_range(&["a", "d"], 0, 60),
@@ -126,18 +155,20 @@ mod tests {
             row_group_size: 50,
             ..Default::default()
         };
+
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
+            metadata.clone(),
+            NoopIndexBuilder,
             file_path,
-            metadata,
-            Indexer::default(),
-        );
+        )
+        .await;
 
         let info = writer
             .write_all(source, None, &write_opts)
             .await
             .unwrap()
-            .unwrap();
+            .remove(0);
         assert_eq!(200, info.num_rows);
         assert!(info.file_size > 0);
         assert_eq!(
@@ -168,7 +199,6 @@ mod tests {
         let mut env = TestEnv::new();
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
-        let file_path = handle.file_path(FILE_DIR);
         let metadata = Arc::new(sst_region_metadata());
         let source = new_source(&[
             new_batch_by_range(&["a", "d"], 0, 60),
@@ -183,16 +213,19 @@ mod tests {
         // Prepare data.
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
-            file_path,
             metadata.clone(),
-            Indexer::default(),
-        );
+            NoopIndexBuilder,
+            FixedPathProvider {
+                file_id: handle.file_id(),
+            },
+        )
+        .await;
 
         writer
             .write_all(source, None, &write_opts)
             .await
             .unwrap()
-            .unwrap();
+            .remove(0);
 
         // Enable page cache.
         let cache = CacheStrategy::EnableAll(Arc::new(
@@ -236,7 +269,6 @@ mod tests {
         let mut env = crate::test_util::TestEnv::new();
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
-        let file_path = handle.file_path(FILE_DIR);
         let metadata = Arc::new(sst_region_metadata());
         let source = new_source(&[
             new_batch_by_range(&["a", "d"], 0, 60),
@@ -252,16 +284,19 @@ mod tests {
         // sst info contains the parquet metadata, which is converted from FileMetaData
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
-            file_path,
             metadata.clone(),
-            Indexer::default(),
-        );
+            NoopIndexBuilder,
+            FixedPathProvider {
+                file_id: handle.file_id(),
+            },
+        )
+        .await;
 
         let sst_info = writer
             .write_all(source, None, &write_opts)
             .await
             .unwrap()
-            .expect("write_all should return sst info");
+            .remove(0);
         let writer_metadata = sst_info.file_metadata.unwrap();
 
         // read the sst file metadata
@@ -277,7 +312,6 @@ mod tests {
         let mut env = TestEnv::new();
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
-        let file_path = handle.file_path(FILE_DIR);
         let metadata = Arc::new(sst_region_metadata());
         let source = new_source(&[
             new_batch_by_range(&["a", "d"], 0, 60),
@@ -292,15 +326,18 @@ mod tests {
         // Prepare data.
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
-            file_path,
             metadata.clone(),
-            Indexer::default(),
-        );
+            NoopIndexBuilder,
+            FixedPathProvider {
+                file_id: handle.file_id(),
+            },
+        )
+        .await;
         writer
             .write_all(source, None, &write_opts)
             .await
             .unwrap()
-            .unwrap();
+            .remove(0);
 
         // Predicate
         let predicate = Some(Predicate::new(vec![Expr::BinaryExpr(BinaryExpr {
@@ -330,7 +367,6 @@ mod tests {
         let mut env = TestEnv::new();
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
-        let file_path = handle.file_path(FILE_DIR);
         let metadata = Arc::new(sst_region_metadata());
         let source = new_source(&[
             new_batch_by_range(&["a", "z"], 0, 0),
@@ -345,15 +381,18 @@ mod tests {
         // Prepare data.
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
-            file_path,
             metadata.clone(),
-            Indexer::default(),
-        );
+            NoopIndexBuilder,
+            FixedPathProvider {
+                file_id: handle.file_id(),
+            },
+        )
+        .await;
         writer
             .write_all(source, None, &write_opts)
             .await
             .unwrap()
-            .unwrap();
+            .remove(0);
 
         let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store);
         let mut reader = builder.build().await.unwrap();
@@ -365,7 +404,6 @@ mod tests {
         let mut env = TestEnv::new();
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
-        let file_path = handle.file_path(FILE_DIR);
         let metadata = Arc::new(sst_region_metadata());
         let source = new_source(&[
             new_batch_by_range(&["a", "d"], 0, 60),
@@ -380,16 +418,19 @@ mod tests {
         // Prepare data.
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
-            file_path,
             metadata.clone(),
-            Indexer::default(),
-        );
+            NoopIndexBuilder,
+            FixedPathProvider {
+                file_id: handle.file_id(),
+            },
+        )
+        .await;
 
         writer
             .write_all(source, None, &write_opts)
             .await
             .unwrap()
-            .unwrap();
+            .remove(0);
 
         // Predicate
         let predicate = Some(Predicate::new(vec![Expr::BinaryExpr(BinaryExpr {

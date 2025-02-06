@@ -62,7 +62,7 @@ impl BulkMemtable {
             alloc_tracker: AllocTracker::new(write_buffer_manager),
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
-            max_sequence: Default::default,
+            max_sequence: Default::default(),
             num_rows: Default::default(),
         }
     }

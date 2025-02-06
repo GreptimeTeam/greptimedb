@@ -288,6 +288,7 @@ mod tests {
             sequence,
             rows: Some(Rows { schema, rows }),
             write_hint: None,
+            bulk: Vec::new(),
         }
     }
 

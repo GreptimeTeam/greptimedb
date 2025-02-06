@@ -394,6 +394,7 @@ mod tests {
             sequence: START_SEQ,
             rows: Some(rows),
             write_hint: None,
+            bulk: Vec::new(),
         }
     }
 
@@ -432,6 +433,7 @@ mod tests {
             sequence: 100,
             rows: None,
             write_hint: None,
+            bulk: Vec::new(),
         };
         let kvs = KeyValues::new(&meta, mutation);
         assert!(kvs.is_none());
