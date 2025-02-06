@@ -253,13 +253,21 @@ impl QueryTraceParams {
 
         if let Some(tags) = query_params.tags {
             // Serialize the tags to a JSON map.
-            let tags_map: HashMap<String, JsonValue> =
+            let mut tags_map: HashMap<String, JsonValue> =
                 serde_json::from_str(&tags).map_err(|e| {
                     InvalidJaegerQuerySnafu {
                         reason: format!("parse tags '{}' failed: {}", tags, e),
                     }
                     .build()
                 })?;
+            for (_, v) in tags_map.iter_mut() {
+                if let Some(number) = convert_string_to_number(v) {
+                    *v = number;
+                }
+                if let Some(boolean) = convert_string_to_boolean(v) {
+                    *v = boolean;
+                }
+            }
             internal_query_params.tags = Some(tags_map);
         }
 
@@ -267,7 +275,7 @@ impl QueryTraceParams {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq)]
 struct QueryTraceParams {
     db: String,
     service_name: String,
@@ -792,6 +800,34 @@ fn normalize_span_kind(span_kind: &str) -> String {
     }
 }
 
+fn convert_string_to_number(input: &serde_json::Value) -> Option<serde_json::Value> {
+    if let Some(data) = input.as_str() {
+        if let Ok(number) = data.parse::<i64>() {
+            return Some(serde_json::Value::Number(serde_json::Number::from(number)));
+        }
+        if let Ok(number) = data.parse::<f64>() {
+            if let Some(number) = serde_json::Number::from_f64(number) {
+                return Some(serde_json::Value::Number(number));
+            }
+        }
+    }
+
+    None
+}
+
+fn convert_string_to_boolean(input: &serde_json::Value) -> Option<serde_json::Value> {
+    if let Some(data) = input.as_str() {
+        if data == "true" {
+            return Some(serde_json::Value::Bool(true));
+        }
+        if data == "false" {
+            return Some(serde_json::Value::Bool(false));
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Number, Value as JsonValue};
@@ -1013,6 +1049,56 @@ mod tests {
         for (records, expected) in tests {
             let traces = traces_from_records(records);
             assert_eq!(traces, expected);
+        }
+    }
+
+    #[test]
+    fn test_from_jaeger_query_params() {
+        let tests = vec![
+            (
+                JaegerQueryParams {
+                    service_name: Some("test-service-0".to_string()),
+                    ..Default::default()
+                },
+                QueryTraceParams {
+                    db: "public".to_string(),
+                    service_name: "test-service-0".to_string(),
+                    ..Default::default()
+                },
+            ),
+            (
+                JaegerQueryParams {
+                    service_name: Some("test-service-0".to_string()),
+                    operation_name: Some("access-mysql".to_string()),
+                    start: Some(1738726754492422),
+                    end: Some(1738726754642422),
+                    max_duration: Some("100ms".to_string()),
+                    min_duration: Some("50ms".to_string()),
+                    tags: Some("{\"http.status_code\":\"200\",\"latency\":\"11.234\",\"error\":\"false\",\"http.method\":\"GET\",\"http.path\":\"/api/v1/users\"}".to_string()),
+                    ..Default::default()
+                },
+                QueryTraceParams {
+                    db: "public".to_string(),
+                    service_name: "test-service-0".to_string(),
+                    operation_name: Some("access-mysql".to_string()),
+                    start_time: Some(1738726754492422000),
+                    end_time: Some(1738726754642422000),
+                    min_duration: Some(50000000),
+                    max_duration: Some(100000000),
+                    tags: Some(HashMap::from([
+                        ("http.status_code".to_string(), JsonValue::Number(Number::from(200))),
+                        ("latency".to_string(), JsonValue::Number(Number::from_f64(11.234).unwrap())),
+                        ("error".to_string(), JsonValue::Bool(false)),
+                        ("http.method".to_string(), JsonValue::String("GET".to_string())),
+                        ("http.path".to_string(), JsonValue::String("/api/v1/users".to_string())),
+                    ])),
+                },
+            ),
+        ];
+
+        for (query_params, expected) in tests {
+            let query_params = QueryTraceParams::from_jaeger_query_params(query_params).unwrap();
+            assert_eq!(query_params, expected);
         }
     }
 }
