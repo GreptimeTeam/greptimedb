@@ -37,7 +37,7 @@ use crate::metadata::RegionMetadataRef;
 use crate::region_request::{BatchRegionDdlRequest, RegionOpenRequest,RegionSequencesRequest};
 use crate::storage::{RegionId, ScanRequest, SequenceNumber};
 
-/// Key for storing the maping from region id to sequence numbers in the extensions field of the [RegionResponse].
+/// Key for storing the mapping from region id to sequence numbers in the extensions field of the [RegionResponse].
 pub const SEQUENCES_KEY: &str = "sequences";
 
 /// The settable region role state.
