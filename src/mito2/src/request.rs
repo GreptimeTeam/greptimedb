@@ -67,7 +67,7 @@ pub struct WriteRequest {
     /// Write hint.
     pub hint: Option<WriteHint>,
     /// Region metadata on the time of this request is created.
-    pub region_metadata: Option<RegionMetadataRef>,
+    pub(crate) region_metadata: Option<RegionMetadataRef>,
 }
 
 impl WriteRequest {
@@ -296,7 +296,7 @@ impl WriteRequest {
         }
 
         for row in &mut self.rows.rows {
-            row.values.extend(default_values.clone());
+            row.values.extend(default_values.iter().cloned());
         }
 
         for column in columns_to_fill {
@@ -1413,6 +1413,34 @@ mod tests {
         check_invalid_request(
             &err,
             "column f1 expect type Int64(Int64Type), given: STRING(12)",
+        );
+    }
+
+    #[test]
+    fn test_write_request_metadata() {
+        let rows = Rows {
+            schema: vec![
+                new_column_schema("c0", ColumnDataType::Int64, SemanticType::Tag),
+                new_column_schema("c1", ColumnDataType::Int64, SemanticType::Tag),
+            ],
+            rows: vec![Row {
+                values: vec![i64_value(1), i64_value(2)],
+            }],
+        };
+
+        let metadata = Arc::new(new_region_metadata());
+        let request = WriteRequest::new(
+            RegionId::new(1, 1),
+            OpType::Put,
+            rows,
+            Some(metadata.clone()),
+        )
+        .unwrap();
+
+        assert!(request.region_metadata.is_some());
+        assert_eq!(
+            request.region_metadata.unwrap().region_id,
+            RegionId::new(1, 1)
         );
     }
 }
