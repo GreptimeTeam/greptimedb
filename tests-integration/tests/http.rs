@@ -2791,7 +2791,7 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
 
     // Test `/api/traces` API.
     let res = client
-        .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&operation=access-mysql")
+        .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&operation=access-mysql&start=1738726754492422&end=1738726754642422&tags=%7B%22operation.type%22%3A%22access-mysql%22%7D")
         .send()
         .await;
     assert_eq!(StatusCode::OK, res.status());

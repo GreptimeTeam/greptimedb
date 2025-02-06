@@ -350,7 +350,7 @@ pub async fn handle_get_traces(
     Query(query_params): Query<JaegerQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
 ) -> impl IntoResponse {
-    debug!("query params: {:?}", query_params);
+    debug!("Query params: {:?}", query_params);
     query_ctx.set_channel(Channel::Jaeger);
     let query_ctx = Arc::new(query_ctx);
 
@@ -571,7 +571,7 @@ async fn get_records(
     match result {
         Ok(mut outputs) => {
             if let GreptimeQueryOutput::Records(records) = outputs.0.remove(0) {
-                debug!("get records: {:?}", records);
+                debug!("Get records: {:?}", records);
                 Ok(Some(records))
             } else {
                 // If the result is not records, skip it.
@@ -784,6 +784,38 @@ fn query_trace_sql(trace_table_name: &str, query_params: QueryTraceParams) -> St
 
     if let Some(max_duration) = query_params.max_duration {
         query = format!("{} AND duration_nano <= {}", query, max_duration);
+    }
+
+    // Use json functions to filter traces by tags.
+    if let Some(tags) = query_params.tags {
+        for (key, value) in tags.iter() {
+            if let JsonValue::String(value) = value {
+                query = format!(
+                    "{} AND json_get_string(span_attributes, '[\"{}\"]') = '{}'",
+                    query, key, value
+                );
+            }
+            if let JsonValue::Number(value) = value {
+                if value.is_i64() {
+                    query = format!(
+                        "{} AND json_get_int(span_attributes, '[\"{}\"]') = {}",
+                        query, key, value
+                    );
+                }
+                if value.is_f64() {
+                    query = format!(
+                        "{} AND json_get_float(span_attributes, '[\"{}\"]') = {}",
+                        query, key, value
+                    );
+                }
+            }
+            if let JsonValue::Bool(value) = value {
+                query = format!(
+                    "{} AND json_get_bool(span_attributes, '[\"{}\"]') = {}",
+                    query, key, value
+                );
+            }
+        }
     }
 
     query
