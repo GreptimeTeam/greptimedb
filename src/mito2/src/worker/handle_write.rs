@@ -69,6 +69,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.prepare_region_write_ctx(write_requests)
         };
 
+        // Encodes all data into bulk parts before writing into the wal.
+        {
+            let _timer = WRITE_STAGE_ELAPSED
+                .with_label_values(&["encode_bulk"])
+                .start_timer();
+            for region_ctx in region_ctxs.values_mut() {
+                // TODO(yingwen): We don't do region level parallelism as we only test
+                // one region now.
+                if let Err(e) = region_ctx.encode_bulks().await.map_err(Arc::new) {
+                    region_ctx.set_error(e);
+                }
+            }
+        }
+
         // Write to WAL.
         {
             let _timer = WRITE_STAGE_ELAPSED
