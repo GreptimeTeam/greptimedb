@@ -22,7 +22,6 @@ use common_telemetry::{debug, error};
 use snafu::ensure;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::LogStore;
-use store_api::metadata::RegionMetadata;
 use store_api::storage::RegionId;
 
 use crate::error::{InvalidRequestSnafu, RegionLeaderStateSnafu, RejectWriteSnafu, Result};
@@ -36,7 +35,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// Takes and handles all write requests.
     pub(crate) async fn handle_write_requests(
         &mut self,
-        mut write_requests: Vec<SenderWriteRequest>,
+        write_requests: &mut Vec<SenderWriteRequest>,
         allow_stall: bool,
     ) {
         if write_requests.is_empty() {
@@ -56,7 +55,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         if self.write_buffer_manager.should_stall() && allow_stall {
             self.stalled_count.add(write_requests.len() as i64);
-            self.stalled_requests.append(&mut write_requests);
+            self.stalled_requests.append(write_requests);
             self.listener.on_write_stall();
             return;
         }
@@ -150,8 +149,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let stalled = std::mem::take(&mut self.stalled_requests);
         self.stalled_count.sub(stalled.requests.len() as i64);
         // We already stalled these requests, don't stall them again.
-        for (_, (_, requests)) in stalled.requests {
-            self.handle_write_requests(requests, false).await;
+        for (_, (_, mut requests)) in stalled.requests {
+            self.handle_write_requests(&mut requests, false).await;
         }
     }
 
@@ -159,25 +158,25 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) fn reject_stalled_requests(&mut self) {
         let stalled = std::mem::take(&mut self.stalled_requests);
         self.stalled_count.sub(stalled.requests.len() as i64);
-        for (_, (_, requests)) in stalled.requests {
-            reject_write_requests(requests);
+        for (_, (_, mut requests)) in stalled.requests {
+            reject_write_requests(&mut requests);
         }
     }
 
     /// Rejects a specific region's stalled requests.
     pub(crate) fn reject_region_stalled_requests(&mut self, region_id: &RegionId) {
         debug!("Rejects stalled requests for region {}", region_id);
-        let requests = self.stalled_requests.remove(region_id);
+        let mut requests = self.stalled_requests.remove(region_id);
         self.stalled_count.sub(requests.len() as i64);
-        reject_write_requests(requests);
+        reject_write_requests(&mut requests);
     }
 
     /// Handles a specific region's stalled requests.
     pub(crate) async fn handle_region_stalled_requests(&mut self, region_id: &RegionId) {
         debug!("Handles stalled requests for region {}", region_id);
-        let requests = self.stalled_requests.remove(region_id);
+        let mut requests = self.stalled_requests.remove(region_id);
         self.stalled_count.sub(requests.len() as i64);
-        self.handle_write_requests(requests, true).await;
+        self.handle_write_requests(&mut requests, true).await;
     }
 }
 
@@ -185,11 +184,11 @@ impl<S> RegionWorkerLoop<S> {
     /// Validates and groups requests by region.
     fn prepare_region_write_ctx(
         &mut self,
-        write_requests: Vec<SenderWriteRequest>,
+        write_requests: &mut Vec<SenderWriteRequest>,
     ) -> HashMap<RegionId, RegionWriteCtx> {
         // Initialize region write context map.
         let mut region_ctxs = HashMap::new();
-        for mut sender_req in write_requests {
+        for mut sender_req in write_requests.drain(..) {
             let region_id = sender_req.request.region_id;
 
             // If region is waiting for alteration, add requests to pending writes.
@@ -257,13 +256,21 @@ impl<S> RegionWorkerLoop<S> {
                 continue;
             }
 
-            // If the primary key is dense, we need to fill missing columns.
-            if sender_req.request.primary_key_encoding() == PrimaryKeyEncoding::Dense {
-                // Checks whether request schema is compatible with region schema.
-                if let Err(e) = maybe_fill_missing_columns(
-                    &mut sender_req.request,
-                    &region_ctx.version().metadata,
-                ) {
+            // Double check the request schema
+            let need_fill_missing_columns =
+                if let Some(ref region_metadata) = sender_req.request.region_metadata {
+                    region_ctx.version().metadata.schema_version != region_metadata.schema_version
+                } else {
+                    true
+                };
+            // Only fill missing columns if primary key is dense encoded.
+            if need_fill_missing_columns
+                && sender_req.request.primary_key_encoding() == PrimaryKeyEncoding::Dense
+            {
+                if let Err(e) = sender_req
+                    .request
+                    .maybe_fill_missing_columns(&region_ctx.version().metadata)
+                {
                     sender_req.sender.send(Err(e));
 
                     continue;
@@ -291,10 +298,10 @@ impl<S> RegionWorkerLoop<S> {
 }
 
 /// Send rejected error to all `write_requests`.
-fn reject_write_requests(write_requests: Vec<SenderWriteRequest>) {
+fn reject_write_requests(write_requests: &mut Vec<SenderWriteRequest>) {
     WRITE_REJECT_TOTAL.inc_by(write_requests.len() as u64);
 
-    for req in write_requests {
+    for req in write_requests.drain(..) {
         req.sender.send(
             RejectWriteSnafu {
                 region_id: req.request.region_id,
@@ -302,22 +309,6 @@ fn reject_write_requests(write_requests: Vec<SenderWriteRequest>) {
             .fail(),
         );
     }
-}
-
-/// Checks the schema and fill missing columns.
-fn maybe_fill_missing_columns(request: &mut WriteRequest, metadata: &RegionMetadata) -> Result<()> {
-    if let Err(e) = request.check_schema(metadata) {
-        if e.is_fill_default() {
-            // TODO(yingwen): Add metrics for this case.
-            // We need to fill default value. The write request may be a request
-            // sent before changing the schema.
-            request.fill_missing_columns(metadata)?;
-        } else {
-            return Err(e);
-        }
-    }
-
-    Ok(())
 }
 
 /// Rejects delete request under append mode.
