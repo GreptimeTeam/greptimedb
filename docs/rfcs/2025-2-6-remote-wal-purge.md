@@ -51,7 +51,7 @@ After a period of time, metasrv will submit a purge procedure to ProcedureManage
 The procedure is divided into following stages:
 
 1. Preparation:
-   - Retrive `last_entry_id` of each region kvbackend.
+   - Retrieve `last_entry_id` of each region kvbackend.
    - Choose regions that have a relatively small `last_entry_id` as candidate regions, which means we need to send a flush request to these regions.
 2. Communication:
    - Send flush requests to candidate regions.
