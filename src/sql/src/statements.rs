@@ -463,8 +463,6 @@ pub fn has_primary_key_option(column_def: &ColumnDef) -> bool {
 pub fn column_to_schema(
     column: &Column,
     time_index: &str,
-    invereted_index_cols: &Option<Vec<String>>,
-    primary_keys: &[String],
     timezone: Option<&Timezone>,
 ) -> Result<ColumnSchema> {
     let is_time_index = column.name().value == time_index;
@@ -486,20 +484,6 @@ pub fn column_to_schema(
         .context(error::InvalidDefaultSnafu {
             column: &column.name().value,
         })?;
-
-    // To keep compatibility,
-    // 1. if inverted index columns is not set, leave it empty meaning primary key columns will be used
-    // 2. if inverted index columns is set and non-empty, set selected columns to be inverted indexed
-    // 3. if inverted index columns is set and empty, set primary key columns to be non-inverted indexed explicitly
-    if let Some(inverted_index_cols) = invereted_index_cols {
-        if inverted_index_cols.is_empty() {
-            if primary_keys.contains(&column.name().value) {
-                column_schema.insert_inverted_index_placeholder();
-            }
-        } else if inverted_index_cols.contains(&column.name().value) {
-            column_schema.set_inverted_index(true);
-        }
-    }
 
     if let Some(ColumnOption::Comment(c)) = column.options().iter().find_map(|o| {
         if matches!(o.option, ColumnOption::Comment(_)) {
@@ -523,6 +507,10 @@ pub fn column_to_schema(
         column_schema = column_schema
             .with_skipping_options(options)
             .context(SetSkippingIndexOptionSnafu)?;
+    }
+
+    if column.extensions.inverted_index_options.is_some() {
+        column_schema.set_inverted_index(true);
     }
 
     Ok(column_schema)
@@ -1382,7 +1370,7 @@ mod tests {
             extensions: ColumnExtensions::default(),
         };
 
-        let column_schema = column_to_schema(&column_def, "ts", &None, &[], None).unwrap();
+        let column_schema = column_to_schema(&column_def, "ts", None).unwrap();
 
         assert_eq!("col", column_schema.name);
         assert_eq!(
@@ -1392,7 +1380,7 @@ mod tests {
         assert!(column_schema.is_nullable());
         assert!(!column_schema.is_time_index());
 
-        let column_schema = column_to_schema(&column_def, "col", &None, &[], None).unwrap();
+        let column_schema = column_to_schema(&column_def, "col", None).unwrap();
 
         assert_eq!("col", column_schema.name);
         assert_eq!(
@@ -1421,7 +1409,7 @@ mod tests {
             extensions: ColumnExtensions::default(),
         };
 
-        let column_schema = column_to_schema(&column_def, "ts", &None, &[], None).unwrap();
+        let column_schema = column_to_schema(&column_def, "ts", None).unwrap();
 
         assert_eq!("col2", column_schema.name);
         assert_eq!(ConcreteDataType::string_datatype(), column_schema.data_type);
@@ -1456,8 +1444,6 @@ mod tests {
         let column_schema = column_to_schema(
             &column,
             "ts",
-            &None,
-            &[],
             Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap()),
         )
         .unwrap();
@@ -1476,7 +1462,7 @@ mod tests {
         );
 
         // without timezone
-        let column_schema = column_to_schema(&column, "ts", &None, &[], None).unwrap();
+        let column_schema = column_to_schema(&column, "ts", None).unwrap();
 
         assert_eq!("col", column_schema.name);
         assert_eq!(
@@ -1521,7 +1507,7 @@ mod tests {
             },
         };
 
-        let column_schema = column_to_schema(&column, "ts", &None, &[], None).unwrap();
+        let column_schema = column_to_schema(&column, "ts", None).unwrap();
         assert_eq!("col", column_schema.name);
         assert_eq!(ConcreteDataType::string_datatype(), column_schema.data_type);
         let fulltext_options = column_schema.fulltext_options().unwrap().unwrap();
