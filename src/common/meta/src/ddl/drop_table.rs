@@ -15,6 +15,8 @@
 pub(crate) mod executor;
 mod metadata;
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_procedure::error::{ExternalSnafu, FromJsonSnafu, ToJsonSnafu};
@@ -24,8 +26,10 @@ use common_procedure::{
 };
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
+use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::RegionNumber;
 use strum::AsRefStr;
 use table::metadata::TableId;
 use table::table_reference::TableReference;
@@ -131,7 +135,11 @@ impl DropTableProcedure {
         );
         // Deletes table metadata logically.
         self.executor
-            .on_delete_metadata(&self.context, table_route_value)
+            .on_delete_metadata(
+                &self.context,
+                table_route_value,
+                &self.data.region_wal_options,
+            )
             .await?;
         info!("Deleted table metadata for table {table_id}");
         self.data.state = DropTableState::InvalidateTableCache;
@@ -163,7 +171,11 @@ impl DropTableProcedure {
             self.data.physical_region_routes.clone(),
         );
         self.executor
-            .on_delete_metadata_tombstone(&self.context, table_route_value)
+            .on_delete_metadata_tombstone(
+                &self.context,
+                table_route_value,
+                &self.data.region_wal_options,
+            )
             .await?;
 
         self.dropping_regions.clear();
@@ -243,7 +255,11 @@ impl Procedure for DropTableProcedure {
             self.data.physical_region_routes.clone(),
         );
         self.executor
-            .on_restore_metadata(&self.context, table_route_value)
+            .on_restore_metadata(
+                &self.context,
+                table_route_value,
+                &self.data.region_wal_options,
+            )
             .await
             .map_err(ProcedureError::external)
     }
@@ -257,6 +273,8 @@ pub struct DropTableData {
     pub physical_region_routes: Vec<RegionRoute>,
     pub physical_table_id: Option<TableId>,
     #[serde(default)]
+    pub region_wal_options: HashMap<RegionNumber, WalOptions>,
+    #[serde(default)]
     pub allow_rollback: bool,
 }
 
@@ -268,6 +286,7 @@ impl DropTableData {
             task,
             physical_region_routes: vec![],
             physical_table_id: None,
+            region_wal_options: HashMap::new(),
             allow_rollback: false,
         }
     }

@@ -21,6 +21,7 @@ use snafu::OptionExt;
 use store_api::storage::RegionNumber;
 use table::metadata::TableId;
 
+use super::table_route::PhysicalTableRouteValue;
 use super::MetadataKey;
 use crate::error::{DatanodeTableInfoNotFoundSnafu, InvalidMetadataSnafu, Result};
 use crate::key::{
@@ -29,7 +30,8 @@ use crate::key::{
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
-use crate::rpc::store::RangeRequest;
+use crate::rpc::router::region_distribution;
+use crate::rpc::store::{BatchGetRequest, RangeRequest};
 use crate::rpc::KeyValue;
 use crate::DatanodeId;
 
@@ -170,6 +172,26 @@ impl DatanodeTableManager {
         .into_stream();
 
         Box::pin(stream)
+    }
+
+    /// Find the [DatanodeTableValue]s for the given [TableId] and [PhysicalTableRouteValue].
+    pub async fn regions(
+        &self,
+        table_id: TableId,
+        table_routes: &PhysicalTableRouteValue,
+    ) -> Result<Vec<DatanodeTableValue>> {
+        let keys = region_distribution(&table_routes.region_routes)
+            .into_keys()
+            .map(|datanode_id| DatanodeTableKey::new(datanode_id, table_id))
+            .collect::<Vec<_>>();
+        let req = BatchGetRequest {
+            keys: keys.iter().map(|k| k.to_bytes()).collect(),
+        };
+        let resp = self.kv_backend.batch_get(req).await?;
+        resp.kvs
+            .into_iter()
+            .map(datanode_table_value_decoder)
+            .collect()
     }
 
     /// Builds the create datanode table transactions. It only executes while the primary keys comparing successes.

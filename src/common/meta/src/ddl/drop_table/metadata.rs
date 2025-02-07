@@ -17,6 +17,7 @@ use snafu::OptionExt;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 
 use crate::ddl::drop_table::DropTableProcedure;
+use crate::ddl::utils::extract_region_wal_options;
 use crate::error::{self, Result};
 
 impl DropTableProcedure {
@@ -29,9 +30,6 @@ impl DropTableProcedure {
             .table_route_manager()
             .get_physical_table_route(task.table_id)
             .await?;
-
-        self.data.physical_region_routes = physical_table_route_value.region_routes;
-        self.data.physical_table_id = Some(physical_table_id);
 
         if physical_table_id == self.data.table_id() {
             let table_info_value = self
@@ -47,8 +45,20 @@ impl DropTableProcedure {
 
             let engine = table_info_value.table_info.meta.engine;
             // rollback only if dropping the metric physical table fails
-            self.data.allow_rollback = engine.as_str() == METRIC_ENGINE_NAME
+            self.data.allow_rollback = engine.as_str() == METRIC_ENGINE_NAME;
+
+            // Deletes topic-region mapping if dropping physical table
+            let datanode_table_values = self
+                .context
+                .table_metadata_manager
+                .datanode_table_manager()
+                .regions(physical_table_id, &physical_table_route_value)
+                .await?;
+            self.data.region_wal_options = extract_region_wal_options(&datanode_table_values)?;
         }
+
+        self.data.physical_region_routes = physical_table_route_value.region_routes;
+        self.data.physical_table_id = Some(physical_table_id);
 
         Ok(())
     }

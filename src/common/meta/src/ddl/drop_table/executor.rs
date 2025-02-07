@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::v1::region::{
     region_request, DropRequest as PbDropRegionRequest, RegionRequest, RegionRequestHeader,
 };
@@ -19,9 +21,10 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_telemetry::debug;
 use common_telemetry::tracing_context::TracingContext;
+use common_wal::options::WalOptions;
 use futures::future::join_all;
 use snafu::ensure;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 use table::table_name::TableName;
 
@@ -113,9 +116,15 @@ impl DropTableExecutor {
         &self,
         ctx: &DdlContext,
         table_route_value: &TableRouteValue,
+        region_wal_options: &HashMap<RegionNumber, WalOptions>,
     ) -> Result<()> {
         ctx.table_metadata_manager
-            .delete_table_metadata(self.table_id, &self.table, table_route_value)
+            .delete_table_metadata(
+                self.table_id,
+                &self.table,
+                table_route_value,
+                region_wal_options,
+            )
             .await
     }
 
@@ -124,9 +133,15 @@ impl DropTableExecutor {
         &self,
         ctx: &DdlContext,
         table_route_value: &TableRouteValue,
+        region_wal_options: &HashMap<u32, WalOptions>,
     ) -> Result<()> {
         ctx.table_metadata_manager
-            .delete_table_metadata_tombstone(self.table_id, &self.table, table_route_value)
+            .delete_table_metadata_tombstone(
+                self.table_id,
+                &self.table,
+                table_route_value,
+                region_wal_options,
+            )
             .await
     }
 
@@ -135,9 +150,15 @@ impl DropTableExecutor {
         &self,
         ctx: &DdlContext,
         table_route_value: &TableRouteValue,
+        region_wal_options: &HashMap<u32, WalOptions>,
     ) -> Result<()> {
         ctx.table_metadata_manager
-            .destroy_table_metadata(self.table_id, &self.table, table_route_value)
+            .destroy_table_metadata(
+                self.table_id,
+                &self.table,
+                table_route_value,
+                region_wal_options,
+            )
             .await?;
 
         let detecting_regions = if table_route_value.is_physical() {
@@ -156,9 +177,15 @@ impl DropTableExecutor {
         &self,
         ctx: &DdlContext,
         table_route_value: &TableRouteValue,
+        region_wal_options: &HashMap<u32, WalOptions>,
     ) -> Result<()> {
         ctx.table_metadata_manager
-            .restore_table_metadata(self.table_id, &self.table, table_route_value)
+            .restore_table_metadata(
+                self.table_id,
+                &self.table,
+                table_route_value,
+                region_wal_options,
+            )
             .await
     }
 
