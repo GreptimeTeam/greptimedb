@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use common_catalog::consts::default_engine;
 use datafusion_common::ScalarValue;
@@ -460,6 +460,66 @@ impl<'a> ParserContext<'a> {
             }
         }
 
+        // merge duplicate constraints like indexes into column options
+        for constraint in &constraints {
+            match constraint {
+                TableConstraint::SkippingIndex {
+                    columns: column_list,
+                    options,
+                } => {
+                    let column_set = column_list.iter().collect::<HashSet<_>>();
+                    for column in &mut columns {
+                        if column_set.contains(column.name()) {
+                            ensure!(
+                                column.extensions.skipping_index_options.is_none(),
+                                InvalidColumnOptionSnafu {
+                                    name: column.name().to_string(),
+                                    msg: "duplicated skipping index",
+                                }
+                            );
+                            column.extensions.skipping_index_options = Some(options.clone());
+                        }
+                    }
+                }
+                TableConstraint::FulltextIndex {
+                    columns: column_list,
+                    options,
+                } => {
+                    let column_set = column_list.iter().collect::<HashSet<_>>();
+                    for column in &mut columns {
+                        if column_set.contains(column.name()) {
+                            ensure!(
+                                column.extensions.fulltext_index_options.is_none(),
+                                InvalidColumnOptionSnafu {
+                                    name: column.name().to_string(),
+                                    msg: "duplicated fulltext index",
+                                }
+                            );
+                            column.extensions.fulltext_index_options = Some(options.clone());
+                        }
+                    }
+                }
+                TableConstraint::InvertedIndex {
+                    columns: column_list,
+                } => {
+                    let column_set = column_list.iter().collect::<HashSet<_>>();
+                    for column in &mut columns {
+                        if column_set.contains(column.name()) {
+                            ensure!(
+                                column.extensions.inverted_index_options.is_none(),
+                                InvalidColumnOptionSnafu {
+                                    name: column.name().to_string(),
+                                    msg: "duplicated inverted index",
+                                }
+                            );
+                            column.extensions.inverted_index_options = Some(OptionMap::default());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
         Ok((columns, constraints))
     }
 
@@ -666,6 +726,11 @@ impl<'a> ParserContext<'a> {
         }
     }
 
+    /// Parse a column option extensions.
+    ///
+    /// This function will handle:
+    /// - Vector type
+    /// - Indexes
     fn parse_column_extensions(
         parser: &mut Parser<'_>,
         column_name: &Ident,
@@ -733,7 +798,7 @@ impl<'a> ParserContext<'a> {
                     validate_column_skipping_index_create_option(key),
                     InvalidColumnOptionSnafu {
                         name: column_name.to_string(),
-                        msg: format!("invalid SKIP option: {key}"),
+                        msg: format!("invalid SKIPPING INDEX option: {key}"),
                     }
                 );
             }
@@ -783,7 +848,7 @@ impl<'a> ParserContext<'a> {
                     validate_column_fulltext_create_option(key),
                     InvalidColumnOptionSnafu {
                         name: column_name.to_string(),
-                        msg: format!("invalid FULLTEXT option: {key}"),
+                        msg: format!("invalid FULLTEXT INDEX option: {key}"),
                     }
                 );
             }
@@ -911,6 +976,96 @@ impl<'a> ParserContext<'a> {
                     .map(Self::canonicalize_identifier)
                     .collect::<Vec<_>>();
                 Ok(Some(TableConstraint::InvertedIndex { columns }))
+            }
+            TokenWithLocation {
+                token: Token::Word(w),
+                ..
+            } if w.value.eq_ignore_ascii_case(SKIPPING) => {
+                self.parser
+                    .expect_keyword(Keyword::INDEX)
+                    .context(error::UnexpectedSnafu {
+                        expected: "INDEX",
+                        actual: self.peek_token_as_string(),
+                    })?;
+
+                let raw_columns = self
+                    .parser
+                    .parse_parenthesized_column_list(Mandatory, false)
+                    .context(error::SyntaxSnafu)?;
+                let columns = raw_columns
+                    .into_iter()
+                    .map(Self::canonicalize_identifier)
+                    .collect::<Vec<_>>();
+
+                let options = self
+                    .parser
+                    .parse_options(Keyword::WITH)
+                    .context(error::SyntaxSnafu)?
+                    .into_iter()
+                    .map(parse_option_string)
+                    .collect::<Result<HashMap<String, String>>>()?;
+
+                for key in options.keys() {
+                    ensure!(
+                        validate_column_skipping_index_create_option(key),
+                        InvalidColumnOptionSnafu {
+                            name: columns
+                                .iter()
+                                .map(|c| c.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            msg: format!("invalid SKIPPING INDEX option: {key}"),
+                        }
+                    );
+                }
+
+                Ok(Some(TableConstraint::SkippingIndex {
+                    columns,
+                    options: options.into(),
+                }))
+            }
+            TokenWithLocation {
+                token: Token::Word(w),
+                ..
+            } if w.keyword == Keyword::FULLTEXT => {
+                self.parser
+                    .expect_keyword(Keyword::INDEX)
+                    .context(error::UnexpectedSnafu {
+                        expected: "INDEX",
+                        actual: self.peek_token_as_string(),
+                    })?;
+
+                let raw_columns = self
+                    .parser
+                    .parse_parenthesized_column_list(Mandatory, false)
+                    .context(error::SyntaxSnafu)?;
+                let columns = raw_columns
+                    .into_iter()
+                    .map(Self::canonicalize_identifier)
+                    .collect::<Vec<_>>();
+
+                let options = self
+                    .parser
+                    .parse_options(Keyword::WITH)
+                    .context(error::SyntaxSnafu)?
+                    .into_iter()
+                    .map(parse_option_string)
+                    .collect::<Result<HashMap<String, String>>>()?;
+
+                for key in options.keys() {
+                    ensure!(
+                        validate_column_fulltext_create_option(key),
+                        InvalidColumnOptionSnafu {
+                            name: columns.iter().map(|c| c.to_string()).join(", "),
+                            msg: format!("invalid FULLTEXT INDEX option: {key}"),
+                        }
+                    );
+                }
+
+                Ok(Some(TableConstraint::FulltextIndex {
+                    columns,
+                    options: options.into(),
+                }))
             }
             _ => {
                 self.parser.prev_token();
@@ -2529,5 +2684,139 @@ CREATE TABLE log (
             assert!(extensions.skipping_index_options.is_some());
             assert!(extensions.fulltext_index_options.is_some());
         }
+    }
+
+    #[test]
+    fn test_merge_duplicate_index_constraints() {
+        // Test merging skipping index constraints
+        let sql = r"
+        CREATE TABLE test (
+            ts TIMESTAMP TIME INDEX,
+            col1 INT,
+            col2 INT,
+            SKIPPING INDEX (col1, col2) WITH (granularity='8192', type='bloom')
+        )";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+
+        if let Statement::CreateTable(c) = &result[0] {
+            // Verify col1's skipping index options are overwritten
+            let col1 = c
+                .columns
+                .iter()
+                .find(|col| col.name().value == "col1")
+                .unwrap();
+            let options = col1.extensions.skipping_index_options.as_ref().unwrap();
+            assert_eq!(options.get("granularity").unwrap(), "8192");
+            assert_eq!(options.get("type").unwrap(), "bloom");
+
+            // Verify col2's skipping index options are set
+            let col2 = c
+                .columns
+                .iter()
+                .find(|col| col.name().value == "col2")
+                .unwrap();
+            let options = col2.extensions.skipping_index_options.as_ref().unwrap();
+            assert_eq!(options.get("granularity").unwrap(), "8192");
+            assert_eq!(options.get("type").unwrap(), "bloom");
+        } else {
+            panic!("should be create table statement");
+        }
+
+        // Test merging duplicated fulltext index constraints
+        let sql = r"
+        CREATE TABLE test (
+            ts TIMESTAMP TIME INDEX,
+            col1 STRING FULLTEXT INDEX WITH (analyzer='English'),
+            col2 STRING,
+            FULLTEXT INDEX (col1, col2) WITH (analyzer='English', case_sensitive='true')
+        )";
+        let err =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(err.is_err());
+        let err = err.unwrap_err().to_string();
+        assert!(err.contains("duplicated fulltext index"), "{err}");
+
+        // Test merging inverted index and skipping index constraints
+        let sql = r"
+        CREATE TABLE test (
+            ts TIMESTAMP TIME INDEX,
+            col1 STRING SKIPPING INDEX,
+            col2 STRING,
+            INVERTED INDEX (col1, col2)
+        )";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+
+        if let Statement::CreateTable(c) = &result[0] {
+            // Verify col1's inverted index options are overwritten
+            let col1 = c
+                .columns
+                .iter()
+                .find(|col| col.name().value == "col1")
+                .unwrap();
+            assert!(col1.extensions.inverted_index_options.is_some());
+            assert!(col1.extensions.skipping_index_options.is_some());
+
+            // Verify col2's inverted index options are set
+            let col2 = c
+                .columns
+                .iter()
+                .find(|col| col.name().value == "col2")
+                .unwrap();
+            assert!(col2.extensions.inverted_index_options.is_some());
+        } else {
+            panic!("should be create table statement");
+        }
+
+        // Test error on duplicate skipping index
+        let sql = r"
+        CREATE TABLE test (
+            ts TIMESTAMP TIME INDEX,
+            col1 INT SKIPPING INDEX,
+            SKIPPING INDEX (col1) WITH (granularity='8192'),
+            SKIPPING INDEX (col1) WITH (granularity='4096')
+        )";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("duplicated skipping index"));
+
+        // Test error on duplicate fulltext index
+        let sql = r"
+        CREATE TABLE test (
+            ts TIMESTAMP TIME INDEX,
+            col1 STRING FULLTEXT INDEX,
+            FULLTEXT INDEX (col1) WITH (analyzer='English'),
+            FULLTEXT INDEX (col1) WITH (analyzer='Simple')
+        )";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("duplicated fulltext index"));
+
+        // Test error on duplicate inverted index
+        let sql = r"
+        CREATE TABLE test (
+            ts TIMESTAMP TIME INDEX,
+            col1 STRING INVERTED INDEX,
+            INVERTED INDEX (col1),
+            INVERTED INDEX (col1)
+        )";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("duplicated inverted index"));
     }
 }
