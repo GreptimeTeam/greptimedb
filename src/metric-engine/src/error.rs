@@ -125,6 +125,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("Mito delete operation fails"))]
+    MitoDeleteOperation {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Mito catchup operation fails"))]
     MitoCatchupOperation {
@@ -288,7 +294,8 @@ impl ErrorExt for Error {
             | MitoReadOperation { source, .. }
             | MitoWriteOperation { source, .. }
             | MitoCatchupOperation { source, .. }
-            | MitoFlushOperation { source, .. } => source.status_code(),
+            | MitoFlushOperation { source, .. }
+            | MitoDeleteOperation { source, .. } => source.status_code(),
 
             EncodePrimaryKey { source, .. } => source.status_code(),
 
