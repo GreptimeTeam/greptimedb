@@ -387,6 +387,43 @@ impl Decimal128VectorBuilder {
 
 vectors::impl_try_from_arrow_array_for_vector!(Decimal128Array, Decimal128Vector);
 
+pub(crate) fn replicate_decimal128(
+    vector: &Decimal128Vector,
+    offsets: &[usize],
+) -> Decimal128Vector {
+    assert_eq!(offsets.len(), vector.len());
+
+    if offsets.is_empty() {
+        return vector.get_slice(0, 0);
+    }
+
+    // Safety: safe to unwrap because we the vector ensures precision and scale are valid.
+    let mut builder = Decimal128VectorBuilder::with_capacity(*offsets.last().unwrap())
+        .with_precision_and_scale(vector.precision(), vector.scale())
+        .unwrap();
+
+    let mut previous_offset = 0;
+
+    for (offset, value) in offsets.iter().zip(vector.array.iter()) {
+        let repeat_times = *offset - previous_offset;
+        match value {
+            Some(data) => {
+                unsafe {
+                    // Safety: std::iter::Repeat and std::iter::Take implement TrustedLen.
+                    builder
+                        .mutable_array
+                        .append_trusted_len_iter(std::iter::repeat(data).take(repeat_times));
+                }
+            }
+            None => {
+                builder.mutable_array.append_nulls(repeat_times);
+            }
+        }
+        previous_offset = *offset;
+    }
+    builder.finish()
+}
+
 #[cfg(test)]
 pub mod tests {
     use arrow_array::Decimal128Array;

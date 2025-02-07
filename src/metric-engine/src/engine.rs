@@ -163,8 +163,18 @@ impl RegionEngine for MetricEngine {
                 }
             }
             RegionRequest::Flush(req) => self.inner.flush_region(region_id, req).await,
-            RegionRequest::Delete(_) | RegionRequest::Truncate(_) => {
-                UnsupportedRegionRequestSnafu { request }.fail()
+            RegionRequest::Truncate(_) => UnsupportedRegionRequestSnafu { request }.fail(),
+            RegionRequest::Delete(_) => {
+                if self.inner.is_physical_region(region_id) {
+                    self.inner
+                        .mito
+                        .handle_request(region_id, request)
+                        .await
+                        .context(error::MitoDeleteOperationSnafu)
+                        .map(|response| response.affected_rows)
+                } else {
+                    UnsupportedRegionRequestSnafu { request }.fail()
+                }
             }
             RegionRequest::Catchup(req) => self.inner.catchup_region(region_id, req).await,
         };

@@ -49,7 +49,7 @@ cors_allowed_origins = ["https://example.com"]
 ## The gRPC server options.
 [grpc]
 ## The address to bind the gRPC server.
-addr = "127.0.0.1:4001"
+bind_addr = "127.0.0.1:4001"
 ## The number of server worker threads.
 runtime_size = 8
 
@@ -159,11 +159,11 @@ dir = "/tmp/greptimedb/wal"
 ## **It's only used when the provider is `raft_engine`**.
 file_size = "128MB"
 
-## The threshold of the WAL size to trigger a flush.
+## The threshold of the WAL size to trigger a purge.
 ## **It's only used when the provider is `raft_engine`**.
 purge_threshold = "1GB"
 
-## The interval to trigger a flush.
+## The interval to trigger a purge.
 ## **It's only used when the provider is `raft_engine`**.
 purge_interval = "1m"
 
@@ -278,10 +278,12 @@ overwrite_entry_start_id = false
 
 ## Metadata storage options.
 [metadata_store]
-## Kv file size in bytes.
-file_size = "256MB"
-## Kv purge threshold.
-purge_threshold = "4GB"
+## The size of the metadata store log file.
+file_size = "64MB"
+## The threshold of the metadata store size to trigger a purge.
+purge_threshold = "256MB"
+## The interval of the metadata store to trigger a purge.
+purge_interval = "1m"
 
 ## Procedure storage options.
 [procedure]

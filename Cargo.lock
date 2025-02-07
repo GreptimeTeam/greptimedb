@@ -1967,10 +1967,12 @@ dependencies = [
  "common-wal",
  "config",
  "datanode",
+ "humantime-serde",
  "meta-client",
  "num_cpus",
  "serde",
  "serde_json",
+ "serde_with",
  "snafu 0.8.5",
  "sysinfo",
  "temp-env",
@@ -4340,7 +4342,6 @@ dependencies = [
  "promql-parser",
  "prost 0.13.3",
  "query",
- "raft-engine",
  "serde",
  "serde_json",
  "servers",
@@ -6230,6 +6231,7 @@ dependencies = [
  "bytes",
  "chrono",
  "common-base",
+ "common-config",
  "common-error",
  "common-macro",
  "common-meta",
@@ -6610,17 +6612,18 @@ dependencies = [
 [[package]]
 name = "meter-core"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=a10facb353b41460eeb98578868ebf19c2084fac#a10facb353b41460eeb98578868ebf19c2084fac"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=5618e779cf2bb4755b499c630fba4c35e91898cb#5618e779cf2bb4755b499c630fba4c35e91898cb"
 dependencies = [
  "anymap2",
  "once_cell",
  "parking_lot 0.12.3",
+ "tracing",
 ]
 
 [[package]]
 name = "meter-macros"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=a10facb353b41460eeb98578868ebf19c2084fac#a10facb353b41460eeb98578868ebf19c2084fac"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=5618e779cf2bb4755b499c630fba4c35e91898cb#5618e779cf2bb4755b499c630fba4c35e91898cb"
 dependencies = [
  "meter-core",
 ]

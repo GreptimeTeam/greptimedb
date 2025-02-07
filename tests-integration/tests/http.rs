@@ -906,8 +906,8 @@ cors_allowed_origins = []
 enable_cors = true
 
 [grpc]
-addr = "127.0.0.1:4001"
-hostname = "127.0.0.1:4001"
+bind_addr = "127.0.0.1:4001"
+server_addr = "127.0.0.1:4001"
 max_recv_message_size = "512MiB"
 max_send_message_size = "512MiB"
 runtime_size = 8
@@ -963,8 +963,9 @@ prefill_log_files = false
 {storage}
 
 [metadata_store]
-file_size = "256MiB"
-purge_threshold = "4GiB"
+file_size = "64MiB"
+purge_threshold = "256MiB"
+purge_interval = "1m"
 
 [procedure]
 max_retry_times = 3
@@ -1904,7 +1905,7 @@ pub async fn test_otlp_logs(store_type: StorageType) {
 
     let client = TestClient::new(app).await;
     let content = r#"
-{"resourceLogs":[{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeLogs":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"logRecords":[{"timeUnixNano":"1736413568497632000","observedTimeUnixNano":"0","severityNumber":9,"severityText":"Info","body":{"stringValue":"the message line one"},"attributes":[{"key":"app","value":{"stringValue":"server"}}],"droppedAttributesCount":0,"flags":0,"traceId":"f665100a612542b69cc362fe2ae9d3bf","spanId":"e58f01c4c69f4488"}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.4.0"},{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeLogs":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"logRecords":[{"timeUnixNano":"1736413568538897000","observedTimeUnixNano":"0","severityNumber":9,"severityText":"Info","body":{"stringValue":"the message line two"},"attributes":[{"key":"app","value":{"stringValue":"server"}}],"droppedAttributesCount":0,"flags":0,"traceId":"f665100a612542b69cc362fe2ae9d3bf","spanId":"e58f01c4c69f4488"}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.4.0"}]}
+{"resourceLogs":[{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeLogs":[{"scope":{"name":"","version":"","attributes":[{"key":"instance_num","value":{"stringValue":"10"}}],"droppedAttributesCount":0},"logRecords":[{"timeUnixNano":"1736413568497632000","observedTimeUnixNano":"0","severityNumber":9,"severityText":"Info","body":{"stringValue":"the message line one"},"attributes":[{"key":"app","value":{"stringValue":"server1"}}],"droppedAttributesCount":0,"flags":0,"traceId":"f665100a612542b69cc362fe2ae9d3bf","spanId":"e58f01c4c69f4488"}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.4.0"},{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeLogs":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"logRecords":[{"timeUnixNano":"1736413568538897000","observedTimeUnixNano":"0","severityNumber":9,"severityText":"Info","body":{"stringValue":"the message line two"},"attributes":[{"key":"app","value":{"stringValue":"server2"}}],"droppedAttributesCount":0,"flags":0,"traceId":"f665100a612542b69cc362fe2ae9d3bf","spanId":"e58f01c4c69f4488"}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.4.0"}]}
 "#;
 
     let req: ExportLogsServiceRequest = serde_json::from_str(content).unwrap();
@@ -1914,24 +1915,24 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         // write log data
         let res = send_req(
             &client,
-            vec![
-                (
-                    HeaderName::from_static("content-type"),
-                    HeaderValue::from_static("application/x-protobuf"),
-                ),
-                (
-                    HeaderName::from_static("x-greptime-log-table-name"),
-                    HeaderValue::from_static("logs1"),
-                ),
-            ],
+            vec![(
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            )],
             "/v1/otlp/v1/logs?db=public",
             body.clone(),
             false,
         )
         .await;
         assert_eq!(StatusCode::OK, res.status());
-        let expected = "[[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server\"},0,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\"],[1736413568538897000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line two\",{\"app\":\"server\"},0,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\"]]";
-        validate_data("otlp_logs", &client, "select * from logs1;", expected).await;
+        let expected = "[[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server1\"},0,\"\",\"\",{\"instance_num\":\"10\"},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\"],[1736413568538897000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line two\",{\"app\":\"server2\"},0,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\"]]";
+        validate_data(
+            "otlp_logs",
+            &client,
+            "select * from opentelemetry_logs;",
+            expected,
+        )
+        .await;
     }
 
     {
@@ -1945,7 +1946,7 @@ pub async fn test_otlp_logs(store_type: StorageType) {
                 ),
                 (
                     HeaderName::from_static("x-greptime-log-table-name"),
-                    HeaderValue::from_static("logs"),
+                    HeaderValue::from_static("cus_logs"),
                 ),
                 (
                     HeaderName::from_static("x-greptime-log-extract-keys"),
@@ -1959,11 +1960,51 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         .await;
         assert_eq!(StatusCode::OK, res.status());
 
-        let expected = "[[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server\"},0,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",\"server\"],[1736413568538897000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line two\",{\"app\":\"server\"},0,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",\"server\"]]";
+        let expected = "[[1736413568538897000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line two\",{\"app\":\"server2\"},0,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",null,\"server2\"],[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server1\"},0,\"\",\"\",{\"instance_num\":\"10\"},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",\"10\",\"server1\"]]";
         validate_data(
             "otlp_logs_with_selector",
             &client,
-            "select * from logs;",
+            "select * from cus_logs;",
+            expected,
+        )
+        .await;
+    }
+
+    {
+        // test same selector with multiple value
+        let content = r#"
+        {"resourceLogs":[{"resource":{"attributes":[{"key":"fromwhere","value":{"stringValue":"resource"}}],"droppedAttributesCount":0},"scopeLogs":[{"scope":{"name":"","version":"","attributes":[{"key":"fromwhere","value":{"stringValue":"scope"}}],"droppedAttributesCount":0},"logRecords":[{"timeUnixNano":"1736413568497632000","observedTimeUnixNano":"0","severityNumber":9,"severityText":"Info","body":{"stringValue":"the message line one"},"attributes":[{"key":"app","value":{"stringValue":"server"}},{"key":"fromwhere","value":{"stringValue":"log_attr"}}],"droppedAttributesCount":0,"flags":0,"traceId":"f665100a612542b69cc362fe2ae9d3bf","spanId":"e58f01c4c69f4488"}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.4.0"}]}
+        "#;
+        let req: ExportLogsServiceRequest = serde_json::from_str(content).unwrap();
+        let body = req.encode_to_vec();
+        let res = send_req(
+            &client,
+            vec![
+                (
+                    HeaderName::from_static("content-type"),
+                    HeaderValue::from_static("application/x-protobuf"),
+                ),
+                (
+                    HeaderName::from_static("x-greptime-log-table-name"),
+                    HeaderValue::from_static("logs2"),
+                ),
+                (
+                    HeaderName::from_static("x-greptime-log-extract-keys"),
+                    HeaderValue::from_static("fromwhere"),
+                ),
+            ],
+            "/v1/otlp/v1/logs?db=public",
+            body.clone(),
+            false,
+        )
+        .await;
+        assert_eq!(StatusCode::OK, res.status());
+
+        let expected = "[[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server\",\"fromwhere\":\"log_attr\"},0,\"\",\"\",{\"fromwhere\":\"scope\"},\"\",{\"fromwhere\":\"resource\"},\"https://opentelemetry.io/schemas/1.4.0\",\"log_attr\"]]";
+        validate_data(
+            "otlp_logs_with_selector_overlapping",
+            &client,
+            "select * from logs2;",
             expected,
         )
         .await;

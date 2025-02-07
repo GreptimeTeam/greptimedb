@@ -282,8 +282,8 @@ impl GreptimeDbStandaloneBuilder {
         let procedure_config = ProcedureConfig::default();
         let (kv_backend, procedure_manager) = Instance::try_build_standalone_components(
             format!("{}/kv", &opts.storage.data_home),
-            kv_backend_config.clone(),
-            procedure_config.clone(),
+            kv_backend_config,
+            procedure_config,
         )
         .await
         .unwrap();
@@ -293,7 +293,7 @@ impl GreptimeDbStandaloneBuilder {
             procedure: procedure_config,
             metadata_store: kv_backend_config,
             wal: self.metasrv_wal_config.clone().into(),
-            grpc: GrpcOptions::default().with_hostname("127.0.0.1:4001"),
+            grpc: GrpcOptions::default().with_server_addr("127.0.0.1:4001"),
             ..StandaloneOptions::default()
         };
 

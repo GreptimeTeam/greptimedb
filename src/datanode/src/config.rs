@@ -394,7 +394,7 @@ impl Default for DatanodeOptions {
             require_lease_before_startup: false,
             init_regions_in_background: false,
             init_regions_parallelism: 16,
-            grpc: GrpcOptions::default().with_addr("127.0.0.1:3001"),
+            grpc: GrpcOptions::default().with_bind_addr("127.0.0.1:3001"),
             http: HttpOptions::default(),
             meta_client: None,
             wal: DatanodeWalConfig::default(),

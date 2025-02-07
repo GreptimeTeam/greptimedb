@@ -50,7 +50,7 @@ pub struct RaftEngineLogStore {
 }
 
 pub struct PurgeExpiredFilesFunction {
-    engine: Arc<Engine>,
+    pub engine: Arc<Engine>,
 }
 
 #[async_trait::async_trait]
