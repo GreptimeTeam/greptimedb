@@ -1306,7 +1306,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
 
         // create flow without `OR REPLACE`, `IF NOT EXISTS`, `EXPIRE AFTER` and `COMMENT`
         let sql = r"
-CREATE FLOW task_2
+CREATE FLOW `task_2`
 SINK TO schema_1.table_1
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;";
@@ -1322,6 +1322,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         assert!(!create_task.if_not_exists);
         assert!(create_task.expire_after.is_none());
         assert!(create_task.comment.is_none());
+        assert_eq!(create_task.flow_name.to_string(), "`task_2`");
     }
 
     #[test]

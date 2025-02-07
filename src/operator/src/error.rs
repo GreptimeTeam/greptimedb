@@ -704,6 +704,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid flow name: {name}"))]
+    InvalidFlowName {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Empty {} expr", name))]
     EmptyDdlExpr {
         name: String,
@@ -821,6 +828,7 @@ impl ErrorExt for Error {
             | Error::UnsupportedRegionRequest { .. }
             | Error::InvalidTableName { .. }
             | Error::InvalidViewName { .. }
+            | Error::InvalidFlowName { .. }
             | Error::InvalidView { .. }
             | Error::InvalidExpr { .. }
             | Error::AdminFunctionNotFound { .. }
