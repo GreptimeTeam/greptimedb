@@ -18,13 +18,12 @@ use tonic::metadata::MetadataMap;
 // For the given format: `x-greptime-hints: auto_create_table=true, ttl=7d`
 pub const HINTS_KEY: &str = "x-greptime-hints";
 
-pub const HINT_KEYS: [&str; 6] = [
+pub const HINT_KEYS: [&str; 5] = [
     "x-greptime-hint-auto_create_table",
     "x-greptime-hint-ttl",
     "x-greptime-hint-append_mode",
     "x-greptime-hint-merge_mode",
     "x-greptime-hint-physical_table",
-    "x-greptime-hint-snapshot_read",
 ];
 
 pub(crate) fn extract_hints<T: ToHeaderMap>(headers: &T) -> Vec<(String, String)> {
