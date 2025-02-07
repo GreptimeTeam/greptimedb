@@ -24,7 +24,7 @@ use common_telemetry::tracing_context::TracingContext;
 use common_wal::options::WalOptions;
 use futures::future::join_all;
 use snafu::ensure;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 use table::table_name::TableName;
 
