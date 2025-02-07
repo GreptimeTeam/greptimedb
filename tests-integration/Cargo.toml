@@ -47,7 +47,7 @@ futures.workspace = true
 futures-util.workspace = true
 hyper-util = { workspace = true, features = ["tokio"] }
 log-query = { workspace = true }
-loki-api.workspace = true
+loki-proto.workspace = true
 meta-client.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
 moka.workspace = true

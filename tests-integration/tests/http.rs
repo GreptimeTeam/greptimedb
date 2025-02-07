@@ -23,8 +23,8 @@ use common_error::status_code::StatusCode as ErrorCode;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use log_query::{Context, Limit, LogQuery, TimeFilter};
-use loki_api::logproto::{EntryAdapter, PushRequest, StreamAdapter};
-use loki_api::prost_types::Timestamp;
+use loki_proto::logproto::{EntryAdapter, PushRequest, StreamAdapter};
+use loki_proto::prost_types::Timestamp;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
@@ -2027,10 +2027,14 @@ pub async fn test_loki_pb_logs(store_type: StorageType) {
                 EntryAdapter {
                     timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
                     line: "this is a log message".to_string(),
+                    structured_metadata: vec![],
+                    parsed: vec![],
                 },
                 EntryAdapter {
                     timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
                     line: "this is a log message".to_string(),
+                    structured_metadata: vec![],
+                    parsed: vec![],
                 },
             ],
             hash: rand::random(),
