@@ -43,8 +43,8 @@ dotenv.workspace = true
 flate2 = "1.0"
 flow.workspace = true
 frontend = { workspace = true, features = ["testing"] }
-futures-util.workspace = true
 futures.workspace = true
+futures-util.workspace = true
 hyper-util = { workspace = true, features = ["tokio"] }
 log-query = { workspace = true }
 loki-proto.workspace = true
@@ -76,16 +76,16 @@ substrait.workspace = true
 table.workspace = true
 tempfile.workspace = true
 time = "0.3"
-tokio-stream = { workspace = true, features = ["net"] }
 tokio.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }
 tonic.workspace = true
 tower.workspace = true
 uuid.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
-datafusion-expr.workspace = true
 datafusion.workspace = true
+datafusion-expr.workspace = true
 hex.workspace = true
 http.workspace = true
 itertools.workspace = true

@@ -20,10 +20,10 @@ local-ip-address.workspace = true
 [dependencies]
 ahash = "0.8"
 api.workspace = true
+arrow.workspace = true
 arrow-flight.workspace = true
 arrow-ipc.workspace = true
 arrow-schema.workspace = true
-arrow.workspace = true
 async-trait = "0.1"
 auth.workspace = true
 axum = { workspace = true, features = ["multipart"] }
@@ -50,9 +50,9 @@ common-telemetry.workspace = true
 common-time.workspace = true
 common-version = { workspace = true, features = ["codec"] }
 dashmap.workspace = true
+datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
-datafusion.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 futures = "0.3"
@@ -60,10 +60,10 @@ futures-util.workspace = true
 hashbrown = "0.15"
 headers = "0.4"
 hostname = "0.3"
-http-body = "1"
 http.workspace = true
-humantime-serde.workspace = true
+http-body = "1"
 humantime.workspace = true
+humantime-serde.workspace = true
 hyper = { workspace = true, features = ["full"] }
 influxdb_line_protocol = { git = "https://github.com/evenyag/influxdb_iox", branch = "feat/line-protocol" }
 itertools.workspace = true
@@ -106,12 +106,12 @@ sql.workspace = true
 store-api.workspace = true
 strum.workspace = true
 table.workspace = true
+tokio.workspace = true
 tokio-rustls.workspace = true
 tokio-stream = { workspace = true, features = ["net"] }
 tokio-util.workspace = true
-tokio.workspace = true
-tonic-reflection = "0.12"
 tonic.workspace = true
+tonic-reflection = "0.12"
 tower = { workspace = true, features = ["full"] }
 tower-http = { version = "0.6", features = ["full"] }
 urlencoding = "2.1"
