@@ -24,8 +24,11 @@ use common_telemetry::{debug, tracing, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use session::context::{Channel, QueryContext, QueryContextRef};
+use snafu::OptionExt;
 
-use crate::error::{FailedToExecuteJaegerQuerySnafu, InvalidJaegerQuerySnafu, Result};
+use crate::error::{
+    status_code_to_http_status, FailedToExecuteJaegerQuerySnafu, InvalidJaegerQuerySnafu, Result,
+};
 use crate::http::{handler, ApiState, GreptimeQueryOutput, HttpRecordsOutput};
 use crate::metrics::METRIC_JAEGER_QUERY_ELAPSED;
 use crate::otlp::trace::TRACE_TABLE_NAME;
@@ -206,34 +209,24 @@ pub struct JaegerQueryParams {
 }
 
 impl QueryTraceParams {
-    fn from_jaeger_query_params(query_params: JaegerQueryParams) -> Result<Self> {
+    fn from_jaeger_query_params(db: &str, query_params: JaegerQueryParams) -> Result<Self> {
         let mut internal_query_params: QueryTraceParams = QueryTraceParams {
-            db: query_params.db.unwrap_or("public".to_string()),
+            db: db.to_string(),
             ..Default::default()
         };
 
-        if let Some(service_name) = query_params.service_name {
-            internal_query_params.service_name = service_name;
-        } else {
-            return InvalidJaegerQuerySnafu {
+        internal_query_params.service_name =
+            query_params.service_name.context(InvalidJaegerQuerySnafu {
                 reason: "service_name is required".to_string(),
-            }
-            .fail();
-        }
+            })?;
 
-        if let Some(operation_name) = query_params.operation_name {
-            internal_query_params.operation_name = Some(operation_name);
-        }
+        internal_query_params.operation_name = query_params.operation_name;
 
-        if let Some(start) = query_params.start {
-            // Convert start time from microseconds to nanoseconds.
-            internal_query_params.start_time = Some(start * 1000);
-        }
+        // Convert start time from microseconds to nanoseconds.
+        internal_query_params.start_time = query_params.start.map(|start| start * 1000);
 
-        if let Some(end) = query_params.end {
-            // Convert end time from microseconds to nanoseconds.
-            internal_query_params.end_time = Some(end * 1000);
-        }
+        // Convert end time from microseconds to nanoseconds.
+        internal_query_params.end_time = query_params.end.map(|end| end * 1000);
 
         if let Some(max_duration) = query_params.max_duration {
             let duration = humantime::parse_duration(&max_duration).map_err(|e| {
@@ -275,12 +268,8 @@ impl QueryTraceParams {
             internal_query_params.tags = Some(tags_map);
         }
 
-        if let Some(limit) = query_params.limit {
-            internal_query_params.limit = Some(limit);
-        } else {
-            // Default limit is 100.
-            internal_query_params.limit = Some(100);
-        }
+        // Default limit is 100.
+        internal_query_params.limit = Some(query_params.limit.unwrap_or(100));
 
         Ok(internal_query_params)
     }
@@ -295,7 +284,7 @@ struct QueryTraceParams {
     // The limit of the number of traces to return.
     limit: Option<i32>,
 
-    // FIXME(zyy17): Support tags query in the future.
+    // Select the traces with the given tags(span attributes).
     tags: Option<HashMap<String, JsonValue>>,
 
     // The unit of the following time related parameters is nanoseconds.
@@ -314,13 +303,13 @@ pub async fn handle_get_services(
     Extension(mut query_ctx): Extension<QueryContext>,
 ) -> impl IntoResponse {
     debug!(
-        "Received Jaeger '/api/services' request, query_params: {:?}",
-        query_params
+        "Received Jaeger '/api/services' request, query_params: {:?}, query_ctx: {:?}",
+        query_params, query_ctx
     );
     query_ctx.set_channel(Channel::Jaeger);
     let query_ctx = Arc::new(query_ctx);
+    let db = query_ctx.get_db_string();
 
-    let db = query_params.db.unwrap_or("public".to_string());
     // Record the query time histogram.
     let _timer = METRIC_JAEGER_QUERY_ELAPSED
         .with_label_values(&[&db, "/api/services"])
@@ -351,7 +340,7 @@ pub async fn handle_get_services(
         }
         Ok(None) => (StatusCode::OK, axum::Json(JaegerAPIResponse::default())),
         Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            status_code_to_http_status(&err.status_code()),
             axum::Json(JaegerAPIResponse {
                 errors: Some(vec![JaegerAPIError {
                     code: err.status_code() as i32,
@@ -373,18 +362,19 @@ pub async fn handle_get_traces(
     Extension(mut query_ctx): Extension<QueryContext>,
 ) -> impl IntoResponse {
     debug!(
-        "Received Jaeger '/api/traces' request, query_params: {:?}",
-        query_params
+        "Received Jaeger '/api/traces' request, query_params: {:?}, query_ctx: {:?}",
+        query_params, query_ctx
     );
     query_ctx.set_channel(Channel::Jaeger);
     let query_ctx = Arc::new(query_ctx);
-    let db = query_params.db.clone().unwrap_or("public".to_string());
+    let db = query_ctx.get_db_string();
+
     // Record the query time histogram.
     let _timer = METRIC_JAEGER_QUERY_ELAPSED
         .with_label_values(&[&db, "/api/traces"])
         .start_timer();
 
-    match QueryTraceParams::from_jaeger_query_params(query_params) {
+    match QueryTraceParams::from_jaeger_query_params(&db, query_params) {
         Ok(query_params) => {
             let sql = query_trace_sql(TRACE_TABLE_NAME, query_params);
             let records = get_records(state.sql_handler, query_ctx, &sql).await;
@@ -401,7 +391,7 @@ pub async fn handle_get_traces(
                 }
                 Ok(None) => (StatusCode::OK, axum::Json(JaegerAPIResponse::default())),
                 Err(err) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
+                    status_code_to_http_status(&err.status_code()),
                     axum::Json(JaegerAPIResponse {
                         errors: Some(vec![JaegerAPIError {
                             code: err.status_code() as i32,
@@ -415,7 +405,7 @@ pub async fn handle_get_traces(
         }
         Err(e) => {
             return (
-                StatusCode::BAD_REQUEST,
+                status_code_to_http_status(&e.status_code()),
                 axum::Json(JaegerAPIResponse {
                     errors: Some(vec![JaegerAPIError {
                         code: 400,
@@ -442,13 +432,13 @@ pub async fn handle_get_trace_by_id(
     Extension(mut query_ctx): Extension<QueryContext>,
 ) -> impl IntoResponse {
     debug!(
-        "Received Jaeger '/api/traces/{}' request, query_params: {:?}",
-        trace_id, query_params
+        "Received Jaeger '/api/traces/{}' request, query_params: {:?}, query_ctx: {:?}",
+        trace_id, query_params, query_ctx
     );
     query_ctx.set_channel(Channel::Jaeger);
     let query_ctx = Arc::new(query_ctx);
+    let db = query_ctx.get_db_string();
 
-    let db = query_params.db.unwrap_or("public".to_string());
     // Record the query time histogram.
     let _timer = METRIC_JAEGER_QUERY_ELAPSED
         .with_label_values(&[&db, "/api/traces"])
@@ -470,7 +460,7 @@ pub async fn handle_get_trace_by_id(
         }
         Ok(None) => (StatusCode::OK, axum::Json(JaegerAPIResponse::default())),
         Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            status_code_to_http_status(&err.status_code()),
             axum::Json(JaegerAPIResponse {
                 errors: Some(vec![JaegerAPIError {
                     code: err.status_code() as i32,
@@ -492,14 +482,14 @@ pub async fn handle_get_operations(
     Extension(mut query_ctx): Extension<QueryContext>,
 ) -> impl IntoResponse {
     debug!(
-        "Received Jaeger '/api/operations' request, query_params: {:?}",
-        query_params
+        "Received Jaeger '/api/operations' request, query_params: {:?}, query_ctx: {:?}",
+        query_params, query_ctx
     );
     if let Some(service_name) = query_params.service_name {
         query_ctx.set_channel(Channel::Jaeger);
         let query_ctx = Arc::new(query_ctx);
+        let db = query_ctx.get_db_string();
 
-        let db = query_params.db.unwrap_or("public".to_string());
         // Record the query time histogram.
         let _timer = METRIC_JAEGER_QUERY_ELAPSED
             .with_label_values(&[&db, "/api/operations"])
@@ -529,7 +519,7 @@ pub async fn handle_get_operations(
             }
             Ok(None) => (StatusCode::OK, axum::Json(JaegerAPIResponse::default())),
             Err(err) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                status_code_to_http_status(&err.status_code()),
                 axum::Json(JaegerAPIResponse {
                     errors: Some(vec![JaegerAPIError {
                         code: err.status_code() as i32,
@@ -568,13 +558,13 @@ pub async fn handle_get_operations_by_service(
     Extension(mut query_ctx): Extension<QueryContext>,
 ) -> impl IntoResponse {
     debug!(
-        "Received Jaeger '/api/services/{}/operations' request, query_params: {:?}",
-        service_name, query_params
+        "Received Jaeger '/api/services/{}/operations' request, query_params: {:?}, query_ctx: {:?}",
+        service_name, query_params, query_ctx
     );
     query_ctx.set_channel(Channel::Jaeger);
     let query_ctx = Arc::new(query_ctx);
+    let db = query_ctx.get_db_string();
 
-    let db = query_params.db.unwrap_or("public".to_string());
     // Record the query time histogram.
     let _timer = METRIC_JAEGER_QUERY_ELAPSED
         .with_label_values(&[&db, "/api/services"])
@@ -921,6 +911,7 @@ fn convert_string_to_boolean(input: &serde_json::Value) -> Option<serde_json::Va
 
 #[cfg(test)]
 mod tests {
+    use common_catalog::consts::DEFAULT_SCHEMA_NAME;
     use serde_json::{json, Number, Value as JsonValue};
 
     use super::*;
@@ -1155,7 +1146,7 @@ mod tests {
                     ..Default::default()
                 },
                 QueryTraceParams {
-                    db: "public".to_string(),
+                    db: DEFAULT_SCHEMA_NAME.to_string(),
                     service_name: "test-service-0".to_string(),
                     limit: Some(100),
                     ..Default::default()
@@ -1174,7 +1165,7 @@ mod tests {
                     ..Default::default()
                 },
                 QueryTraceParams {
-                    db: "public".to_string(),
+                    db: DEFAULT_SCHEMA_NAME.to_string(),
                     service_name: "test-service-0".to_string(),
                     operation_name: Some("access-mysql".to_string()),
                     start_time: Some(1738726754492422000),
@@ -1194,7 +1185,9 @@ mod tests {
         ];
 
         for (query_params, expected) in tests {
-            let query_params = QueryTraceParams::from_jaeger_query_params(query_params).unwrap();
+            let query_params =
+                QueryTraceParams::from_jaeger_query_params(DEFAULT_SCHEMA_NAME, query_params)
+                    .unwrap();
             assert_eq!(query_params, expected);
         }
     }
@@ -1205,19 +1198,19 @@ mod tests {
         let tests = vec![
             (
                 QueryTraceParams {
-                    db: "public".to_string(),
+                    db: DEFAULT_SCHEMA_NAME.to_string(),
                     service_name: "test-service-0".to_string(),
                     limit: Some(100),
                     ..Default::default()
                 },
                 format!(
-                    "SELECT trace_id, timestamp, duration_nano, service_name, span_name, span_id, span_attributes FROM public.{} WHERE service_name = 'test-service-0' LIMIT 100",
-                    TRACE_TABLE_NAME
+                    "SELECT trace_id, timestamp, duration_nano, service_name, span_name, span_id, span_attributes FROM {}.{} WHERE service_name = 'test-service-0' LIMIT 100",
+                    DEFAULT_SCHEMA_NAME, TRACE_TABLE_NAME
                 ),
             ),
             (
                 QueryTraceParams {
-                    db: "public".to_string(),
+                    db: DEFAULT_SCHEMA_NAME.to_string(),
                     service_name: "test-service-0".to_string(),
                     operation_name: Some("access-mysql".to_string()),
                     start_time: Some(1738726754492422000),
@@ -1230,8 +1223,8 @@ mod tests {
                     ])),
                 },
                 format!(
-                    "SELECT trace_id, timestamp, duration_nano, service_name, span_name, span_id, span_attributes FROM public.{} WHERE service_name = 'test-service-0' AND span_name = 'access-mysql' AND timestamp >= 1738726754492422000 AND timestamp <= 1738726754642422000 AND duration_nano >= 50000000 AND duration_nano <= 100000000 AND json_get_int(span_attributes, '[\"http.status_code\"]') = 200 LIMIT 10",
-                    TRACE_TABLE_NAME
+                    "SELECT trace_id, timestamp, duration_nano, service_name, span_name, span_id, span_attributes FROM {}.{} WHERE service_name = 'test-service-0' AND span_name = 'access-mysql' AND timestamp >= 1738726754492422000 AND timestamp <= 1738726754642422000 AND duration_nano >= 50000000 AND duration_nano <= 100000000 AND json_get_int(span_attributes, '[\"http.status_code\"]') = 200 LIMIT 10",
+                    DEFAULT_SCHEMA_NAME, TRACE_TABLE_NAME
                 ),
             ),
         ];
