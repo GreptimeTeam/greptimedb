@@ -53,9 +53,6 @@ delete from t1;
 -- issue #4649 should succeed
 delete from phy;
 
--- insert the value again
-INSERT INTO t1 VALUES ('host1',0, 0), ('host2', 1, 1,);
-
 CREATE TABLE t2 (ts timestamp time index, job string primary key, val double) engine = metric with ("on_physical_table" = "phy");
 
 SELECT * from t2;

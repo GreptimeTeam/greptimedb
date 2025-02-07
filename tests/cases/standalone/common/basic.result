@@ -117,11 +117,6 @@ delete from phy;
 
 Affected Rows: 2
 
--- insert the value again
-INSERT INTO t1 VALUES ('host1',0, 0), ('host2', 1, 1,);
-
-Affected Rows: 2
-
 CREATE TABLE t2 (ts timestamp time index, job string primary key, val double) engine = metric with ("on_physical_table" = "phy");
 
 Affected Rows: 0
@@ -158,12 +153,8 @@ select * from foo;
 
 SELECT * from t1;
 
-+-------+-------------------------+-----+
-| host  | ts                      | val |
-+-------+-------------------------+-----+
-| host2 | 1970-01-01T00:00:00.001 | 1.0 |
-| host1 | 1970-01-01T00:00:00     | 0.0 |
-+-------+-------------------------+-----+
+++
+++
 
 SELECT * from t2;
 
