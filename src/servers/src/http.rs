@@ -922,7 +922,7 @@ impl HttpServer {
 
     fn route_pipelines<S>(log_state: LogState) -> Router<S> {
         Router::new()
-            .route("/pipelines/ingest", routing::post(event::log_ingester))
+            .route("ingest", routing::post(event::log_ingester))
             .route(
                 "/pipelines/{pipeline_name}",
                 routing::post(event::add_pipeline),
@@ -931,7 +931,7 @@ impl HttpServer {
                 "/pipelines/{pipeline_name}",
                 routing::delete(event::delete_pipeline),
             )
-            .route("/pipelines/dryrun", routing::post(event::pipeline_dryrun))
+            .route("/pipelines/_dryrun", routing::post(event::pipeline_dryrun))
             .layer(
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
