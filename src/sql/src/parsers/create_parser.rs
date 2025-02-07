@@ -1399,6 +1399,7 @@ mod tests {
                 assert_column_def(&columns[1].column_def, "ts", "TIMESTAMP");
                 assert_column_def(&columns[2].column_def, "cpu", "FLOAT");
                 assert_column_def(&columns[3].column_def, "memory", "DOUBLE");
+                assert!(columns[0].extensions.inverted_index_options.is_some());
 
                 let constraints = &c.constraints;
                 assert_eq!(
@@ -1413,12 +1414,7 @@ mod tests {
                         columns: vec![Ident::new("ts"), Ident::new("host")]
                     }
                 );
-                assert_eq!(
-                    &constraints[2],
-                    &TableConstraint::InvertedIndex {
-                        columns: vec![Ident::new("host")]
-                    }
-                );
+                // inverted index is merged into column options
             }
             _ => unreachable!(),
         }
@@ -2055,6 +2051,7 @@ ENGINE=mito";
                 assert_column_def(&columns[1].column_def, "ts", "TIMESTAMP");
                 assert_column_def(&columns[2].column_def, "cpu", "FLOAT");
                 assert_column_def(&columns[3].column_def, "memory", "DOUBLE");
+                assert!(columns[0].extensions.inverted_index_options.is_some());
 
                 let constraints = &c.constraints;
                 assert_eq!(
@@ -2069,12 +2066,7 @@ ENGINE=mito";
                         columns: vec![Ident::new("ts"), Ident::new("host")]
                     }
                 );
-                assert_eq!(
-                    &constraints[2],
-                    &TableConstraint::InvertedIndex {
-                        columns: vec![Ident::new("host")]
-                    }
-                );
+                // inverted index is merged into column options
                 assert_eq!(1, c.options.len());
                 assert_eq!(
                     [("ttl", "10s")].into_iter().collect::<HashMap<_, _>>(),
@@ -2148,12 +2140,11 @@ ENGINE=mito";
                 .unwrap();
 
         if let Statement::CreateTable(c) = &result[0] {
-            let tc = &c
+            assert!(&c
                 .constraints
                 .iter()
                 .find(|c| matches!(c, TableConstraint::InvertedIndex { .. }))
-                .unwrap();
-            assert_eq!(*tc, &TableConstraint::InvertedIndex { columns: vec![] });
+                .is_none());
         } else {
             unreachable!("should be create table statement");
         }

@@ -121,23 +121,22 @@ Affected Rows: 0
 
 show create table phy;
 
-+-------+------------------------------------+
-| Table | Create Table                       |
-+-------+------------------------------------+
-| phy   | CREATE TABLE IF NOT EXISTS "phy" ( |
-|       |   "ts" TIMESTAMP(3) NOT NULL,      |
-|       |   "val" DOUBLE NULL,               |
-|       |   "host" STRING NULL,              |
-|       |   TIME INDEX ("ts"),               |
-|       |   PRIMARY KEY ("host"),            |
-|       |   INVERTED INDEX ("host")          |
-|       | )                                  |
-|       |                                    |
-|       | ENGINE=metric                      |
-|       | WITH(                              |
-|       |   physical_metric_table = ''       |
-|       | )                                  |
-+-------+------------------------------------+
++-------+--------------------------------------+
+| Table | Create Table                         |
++-------+--------------------------------------+
+| phy   | CREATE TABLE IF NOT EXISTS "phy" (   |
+|       |   "ts" TIMESTAMP(3) NOT NULL,        |
+|       |   "val" DOUBLE NULL,                 |
+|       |   "host" STRING NULL INVERTED INDEX, |
+|       |   TIME INDEX ("ts"),                 |
+|       |   PRIMARY KEY ("host")               |
+|       | )                                    |
+|       |                                      |
+|       | ENGINE=metric                        |
+|       | WITH(                                |
+|       |   physical_metric_table = ''         |
+|       | )                                    |
++-------+--------------------------------------+
 
 show create table t1;
 
@@ -319,10 +318,9 @@ show create table specify_invereted_index_cols;
 |                              |   "ts" TIMESTAMP(3) NOT NULL,                               |
 |                              |   "val" DOUBLE NULL,                                        |
 |                              |   "host" STRING NULL,                                       |
-|                              |   "job" STRING NULL,                                        |
+|                              |   "job" STRING NULL INVERTED INDEX,                         |
 |                              |   TIME INDEX ("ts"),                                        |
-|                              |   PRIMARY KEY ("host", "job"),                              |
-|                              |   INVERTED INDEX ("job")                                    |
+|                              |   PRIMARY KEY ("host", "job")                               |
 |                              | )                                                           |
 |                              |                                                             |
 |                              | ENGINE=mito                                                 |
@@ -364,6 +362,69 @@ show create table specify_empty_invereted_index_cols;
 +------------------------------------+-------------------------------------------------------------------+
 
 drop table specify_empty_invereted_index_cols;
+
+Affected Rows: 0
+
+CREATE TABLE test_table_constrain_composite_indexes (
+  `id` INT,
+  host STRING,
+  ts TIMESTAMP,
+  PRIMARY KEY (`id`, host),
+  INVERTED INDEX (host),
+  FULLTEXT INDEX (host) WITH (analyzer='English', case_sensitive='true'),
+  SKIPPING INDEX (host, `id`),
+  TIME INDEX (ts)
+);
+
+Affected Rows: 0
+
+show create table test_table_constrain_composite_indexes;
+
++----------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table                                  | Create Table                                                                                                                                                 |
++----------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| test_table_constrain_composite_indexes | CREATE TABLE IF NOT EXISTS "test_table_constrain_composite_indexes" (                                                                                        |
+|                                        |   "id" INT NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM'),                                                                                  |
+|                                        |   "host" STRING NULL FULLTEXT WITH(analyzer = 'English', case_sensitive = 'true') SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM') INVERTED INDEX, |
+|                                        |   "ts" TIMESTAMP(3) NOT NULL,                                                                                                                                |
+|                                        |   TIME INDEX ("ts"),                                                                                                                                         |
+|                                        |   PRIMARY KEY ("id", "host")                                                                                                                                 |
+|                                        | )                                                                                                                                                            |
+|                                        |                                                                                                                                                              |
+|                                        | ENGINE=mito                                                                                                                                                  |
+|                                        |                                                                                                                                                              |
++----------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+drop table test_table_constrain_composite_indexes;
+
+Affected Rows: 0
+
+CREATE TABLE test_column_constrain_composite_indexes (
+  `id` INT SKIPPING INDEX INVERTED INDEX,
+  host STRING PRIMARY KEY SKIPPING INDEX FULLTEXT INDEX INVERTED INDEX,
+  ts TIMESTAMP TIME INDEX,
+);
+
+Affected Rows: 0
+
+show create table test_column_constrain_composite_indexes;
+
++-----------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table                                   | Create Table                                                                                                                                                  |
++-----------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| test_column_constrain_composite_indexes | CREATE TABLE IF NOT EXISTS "test_column_constrain_composite_indexes" (                                                                                        |
+|                                         |   "id" INT NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM') INVERTED INDEX,                                                                    |
+|                                         |   "host" STRING NULL FULLTEXT WITH(analyzer = 'English', case_sensitive = 'false') SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM') INVERTED INDEX, |
+|                                         |   "ts" TIMESTAMP(3) NOT NULL,                                                                                                                                 |
+|                                         |   TIME INDEX ("ts"),                                                                                                                                          |
+|                                         |   PRIMARY KEY ("host")                                                                                                                                        |
+|                                         | )                                                                                                                                                             |
+|                                         |                                                                                                                                                               |
+|                                         | ENGINE=mito                                                                                                                                                   |
+|                                         |                                                                                                                                                               |
++-----------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+drop table test_column_constrain_composite_indexes;
 
 Affected Rows: 0
 

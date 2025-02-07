@@ -181,6 +181,7 @@ impl Display for Column {
         }
 
         write!(f, "{}", self.column_def)?;
+
         if let Some(fulltext_options) = &self.extensions.fulltext_index_options {
             if !fulltext_options.is_empty() {
                 let options = fulltext_options.kv_pairs();
@@ -196,6 +197,15 @@ impl Display for Column {
                 write!(f, " SKIPPING INDEX WITH({})", format_list_comma!(options))?;
             } else {
                 write!(f, " SKIPPING INDEX")?;
+            }
+        }
+
+        if let Some(inverted_index_options) = &self.extensions.inverted_index_options {
+            if !inverted_index_options.is_empty() {
+                let options = inverted_index_options.kv_pairs();
+                write!(f, " INVERTED INDEX WITH({})", format_list_comma!(options))?;
+            } else {
+                write!(f, " INVERTED INDEX")?;
             }
         }
         Ok(())

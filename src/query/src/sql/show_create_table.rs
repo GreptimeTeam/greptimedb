@@ -134,6 +134,10 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
         extensions.skipping_index_options = Some(map.into());
     }
 
+    if column_schema.is_inverted_indexed() {
+        extensions.inverted_index_options = Some(HashMap::new().into());
+    }
+
     Ok(Column {
         column_def: ColumnDef {
             name: Ident::with_quote(quote_style, name),
@@ -146,25 +150,6 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
         },
         extensions,
     })
-}
-
-/// Returns the column schemas for `SHOW CREATE TABLE` statement.
-///
-/// For metric engine, it will only return the column schemas that are not internal columns.
-fn column_schemas_for_show_create<'a>(
-    schema: &'a SchemaRef,
-    engine: &str,
-) -> Vec<&'a ColumnSchema> {
-    let is_metric_engine = is_metric_engine(engine);
-    if is_metric_engine {
-        schema
-            .column_schemas()
-            .iter()
-            .filter(|c| !is_metric_engine_internal_column(&c.name))
-            .collect()
-    } else {
-        schema.column_schemas().iter().collect()
-    }
 }
 
 /// Returns the primary key columns for `SHOW CREATE TABLE` statement.
@@ -204,20 +189,6 @@ fn create_table_constraints(
             .map(|name| Ident::with_quote(quote_style, name))
             .collect();
         constraints.push(TableConstraint::PrimaryKey { columns });
-    }
-
-    let column_schemas = column_schemas_for_show_create(schema, engine);
-    let inverted_index_set = column_schemas.iter().any(|c| c.has_inverted_index_key());
-    if inverted_index_set {
-        let inverted_index_cols = column_schemas
-            .iter()
-            .filter(|c| c.is_inverted_indexed())
-            .map(|c| Ident::with_quote(quote_style, &c.name))
-            .collect::<Vec<_>>();
-
-        constraints.push(TableConstraint::InvertedIndex {
-            columns: inverted_index_cols,
-        });
     }
 
     constraints
@@ -353,14 +324,13 @@ mod tests {
             r#"
 CREATE TABLE IF NOT EXISTS "system_metrics" (
   "id" INT UNSIGNED NULL SKIPPING INDEX WITH(granularity = '4096', type = 'BLOOM'),
-  "host" STRING NULL,
+  "host" STRING NULL INVERTED INDEX,
   "cpu" DOUBLE NULL,
   "disk" FLOAT NULL,
   "msg" STRING NULL FULLTEXT WITH(analyzer = 'English', case_sensitive = 'false'),
   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(),
   TIME INDEX ("ts"),
-  PRIMARY KEY ("id", "host"),
-  INVERTED INDEX ("host")
+  PRIMARY KEY ("id", "host")
 )
 ENGINE=mito
 WITH(

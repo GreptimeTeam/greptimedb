@@ -1502,6 +1502,8 @@ mod test {
 
     #[test]
     fn test_add_column_with_inverted_index() {
+        // only set inverted index to true explicitly will this column be inverted indexed
+
         // a (tag), b (field), c (ts)
         let metadata = build_test_region_metadata();
         let mut builder = RegionMetadataBuilder::from_existing(metadata);
@@ -1526,7 +1528,7 @@ mod test {
         check_columns(&metadata, &["a", "b", "c", "d", "e"]);
         assert_eq!([1, 4, 5], &metadata.primary_key[..]);
         let column_metadata = metadata.column_by_name("a").unwrap();
-        assert!(column_metadata.column_schema.is_inverted_indexed());
+        assert!(!column_metadata.column_schema.is_inverted_indexed());
         let column_metadata = metadata.column_by_name("b").unwrap();
         assert!(!column_metadata.column_schema.is_inverted_indexed());
         let column_metadata = metadata.column_by_name("c").unwrap();
