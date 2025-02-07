@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
-
 use api::v1::value::ValueData;
 use api::v1::ColumnDataType;
 use itertools::Itertools;
@@ -47,18 +45,19 @@ pub fn any_value_to_jsonb(value: any_value::Value) -> JsonbValue<'static> {
 }
 
 pub fn key_value_to_jsonb(key_values: Vec<KeyValue>) -> JsonbValue<'static> {
-    let mut map = BTreeMap::new();
-    for kv in key_values {
-        let value = match kv.value {
-            Some(value) => match value.value {
-                Some(value) => any_value_to_jsonb(value),
-                None => JsonbValue::Null,
-            },
-            None => JsonbValue::Null,
-        };
-        map.insert(kv.key.clone(), value);
-    }
-    JsonbValue::Object(map)
+    JsonbValue::Object(
+        key_values
+            .into_iter()
+            .map(|kv| {
+                (
+                    kv.key,
+                    kv.value
+                        .and_then(|v| v.value)
+                        .map_or(JsonbValue::Null, any_value_to_jsonb),
+                )
+            })
+            .collect(),
+    )
 }
 
 #[inline]

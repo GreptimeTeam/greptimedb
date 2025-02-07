@@ -38,6 +38,7 @@ use snafu::prelude::*;
 use super::header::{write_cost_header_map, CONTENT_TYPE_PROTOBUF};
 use crate::error::{self, PipelineSnafu, Result};
 use crate::http::extractor::{LogTableName, PipelineInfo, SelectInfoWrapper, TraceTableName};
+use crate::metrics::METRIC_HTTP_OPENTELEMETRY_LOGS_ELAPSED;
 use crate::otlp::trace::TRACE_TABLE_NAME;
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 
@@ -112,7 +113,7 @@ pub async fn logs(
     let db = query_ctx.get_db_string();
     query_ctx.set_channel(Channel::Otlp);
     let query_ctx = Arc::new(query_ctx);
-    let _timer = crate::metrics::METRIC_HTTP_OPENTELEMETRY_LOGS_ELAPSED
+    let _timer = METRIC_HTTP_OPENTELEMETRY_LOGS_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
     let request = ExportLogsServiceRequest::decode(bytes).context(error::DecodeOtlpRequestSnafu)?;
