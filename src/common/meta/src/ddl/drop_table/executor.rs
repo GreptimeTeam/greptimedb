@@ -116,7 +116,7 @@ impl DropTableExecutor {
         &self,
         ctx: &DdlContext,
         table_route_value: &TableRouteValue,
-        region_wal_options: &HashMap<u32, WalOptions>,
+        region_wal_options: &HashMap<RegionNumber, WalOptions>,
     ) -> Result<()> {
         ctx.table_metadata_manager
             .delete_table_metadata(

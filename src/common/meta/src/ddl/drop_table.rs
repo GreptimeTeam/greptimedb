@@ -272,7 +272,7 @@ pub struct DropTableData {
     pub physical_region_routes: Vec<RegionRoute>,
     pub physical_table_id: Option<TableId>,
     #[serde(default)]
-    pub region_wal_options: HashMap<u32, WalOptions>,
+    pub region_wal_options: HashMap<RegionNumber, WalOptions>,
     #[serde(default)]
     pub allow_rollback: bool,
 }
