@@ -34,36 +34,34 @@ SELECT fox FROM fox WHERE MATCHES(fox, '"fox jumps"') ORDER BY ts;
 
 SHOW CREATE TABLE fox;
 
-+-------+------------------------------------+
-| Table | Create Table                       |
-+-------+------------------------------------+
-| fox   | CREATE TABLE IF NOT EXISTS "fox" ( |
-|       |   "ts" TIMESTAMP(3) NOT NULL,      |
-|       |   "fox" STRING NULL,               |
-|       |   TIME INDEX ("ts"),               |
-|       |   INVERTED INDEX ("fox")           |
-|       | )                                  |
-|       |                                    |
-|       | ENGINE=mito                        |
-|       |                                    |
-+-------+------------------------------------+
++-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| fox   | CREATE TABLE IF NOT EXISTS "fox" (  |
+|       |   "ts" TIMESTAMP(3) NOT NULL,       |
+|       |   "fox" STRING NULL INVERTED INDEX, |
+|       |   TIME INDEX ("ts")                 |
+|       | )                                   |
+|       |                                     |
+|       | ENGINE=mito                         |
+|       |                                     |
++-------+-------------------------------------+
 
 -- SQLNESS ARG restart=true
 SHOW CREATE TABLE fox;
 
-+-------+------------------------------------+
-| Table | Create Table                       |
-+-------+------------------------------------+
-| fox   | CREATE TABLE IF NOT EXISTS "fox" ( |
-|       |   "ts" TIMESTAMP(3) NOT NULL,      |
-|       |   "fox" STRING NULL,               |
-|       |   TIME INDEX ("ts"),               |
-|       |   INVERTED INDEX ("fox")           |
-|       | )                                  |
-|       |                                    |
-|       | ENGINE=mito                        |
-|       |                                    |
-+-------+------------------------------------+
++-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| fox   | CREATE TABLE IF NOT EXISTS "fox" (  |
+|       |   "ts" TIMESTAMP(3) NOT NULL,       |
+|       |   "fox" STRING NULL INVERTED INDEX, |
+|       |   TIME INDEX ("ts")                 |
+|       | )                                   |
+|       |                                     |
+|       | ENGINE=mito                         |
+|       |                                     |
++-------+-------------------------------------+
 
 SHOW INDEX FROM fox;
 
@@ -127,13 +125,13 @@ Affected Rows: 0
 
 SHOW INDEX FROM test_pk;
 
-+---------+------------+-------------------------+--------------+-------------+-----------+-------------+----------+--------+------+-----------------------------------------------------+---------+---------------+---------+------------+
-| Table   | Non_unique | Key_name                | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                                          | Comment | Index_comment | Visible | Expression |
-+---------+------------+-------------------------+--------------+-------------+-----------+-------------+----------+--------+------+-----------------------------------------------------+---------+---------------+---------+------------+
-| test_pk | 1          | PRIMARY, INVERTED INDEX | 3            | bar         | A         |             |          |        | YES  | greptime-primary-key-v1, greptime-inverted-index-v1 |         |               | YES     |            |
-| test_pk | 1          | PRIMARY, INVERTED INDEX | 2            | foo         | A         |             |          |        | YES  | greptime-primary-key-v1, greptime-inverted-index-v1 |         |               | YES     |            |
-| test_pk | 1          | TIME INDEX              | 1            | ts          | A         |             |          |        | NO   |                                                     |         |               | YES     |            |
-+---------+------------+-------------------------+--------------+-------------+-----------+-------------+----------+--------+------+-----------------------------------------------------+---------+---------------+---------+------------+
++---------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------+---------+---------------+---------+------------+
+| Table   | Non_unique | Key_name   | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type              | Comment | Index_comment | Visible | Expression |
++---------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------+---------+---------------+---------+------------+
+| test_pk | 1          | PRIMARY    | 3            | bar         | A         |             |          |        | YES  | greptime-primary-key-v1 |         |               | YES     |            |
+| test_pk | 1          | PRIMARY    | 2            | foo         | A         |             |          |        | YES  | greptime-primary-key-v1 |         |               | YES     |            |
+| test_pk | 1          | TIME INDEX | 1            | ts          | A         |             |          |        | NO   |                         |         |               | YES     |            |
++---------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------+---------+---------------+---------+------------+
 
 ALTER TABLE test_pk MODIFY COLUMN foo UNSET INVERTED INDEX;
 
@@ -141,13 +139,13 @@ Affected Rows: 0
 
 SHOW INDEX FROM test_pk;
 
-+---------+------------+-------------------------+--------------+-------------+-----------+-------------+----------+--------+------+-----------------------------------------------------+---------+---------------+---------+------------+
-| Table   | Non_unique | Key_name                | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                                          | Comment | Index_comment | Visible | Expression |
-+---------+------------+-------------------------+--------------+-------------+-----------+-------------+----------+--------+------+-----------------------------------------------------+---------+---------------+---------+------------+
-| test_pk | 1          | PRIMARY, INVERTED INDEX | 3            | bar         | A         |             |          |        | YES  | greptime-primary-key-v1, greptime-inverted-index-v1 |         |               | YES     |            |
-| test_pk | 1          | PRIMARY                 | 2            | foo         | A         |             |          |        | YES  | greptime-primary-key-v1                             |         |               | YES     |            |
-| test_pk | 1          | TIME INDEX              | 1            | ts          | A         |             |          |        | NO   |                                                     |         |               | YES     |            |
-+---------+------------+-------------------------+--------------+-------------+-----------+-------------+----------+--------+------+-----------------------------------------------------+---------+---------------+---------+------------+
++---------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------+---------+---------------+---------+------------+
+| Table   | Non_unique | Key_name   | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type              | Comment | Index_comment | Visible | Expression |
++---------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------+---------+---------------+---------+------------+
+| test_pk | 1          | PRIMARY    | 3            | bar         | A         |             |          |        | YES  | greptime-primary-key-v1 |         |               | YES     |            |
+| test_pk | 1          | PRIMARY    | 2            | foo         | A         |             |          |        | YES  | greptime-primary-key-v1 |         |               | YES     |            |
+| test_pk | 1          | TIME INDEX | 1            | ts          | A         |             |          |        | NO   |                         |         |               | YES     |            |
++---------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------+---------+---------------+---------+------------+
 
 ALTER TABLE test_pk MODIFY COLUMN bar UNSET INVERTED INDEX;
 
