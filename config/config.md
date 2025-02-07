@@ -376,9 +376,6 @@
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
 | `init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |
 | `max_concurrent_queries` | Integer | `0` | The maximum current queries allowed to be executed. Zero means unlimited. |
-| `rpc_runtime_size` | Integer | Unset | Deprecated, use `grpc.runtime_size` instead. |
-| `rpc_max_recv_message_size` | String | Unset | Deprecated, use `grpc.rpc_max_recv_message_size` instead. |
-| `rpc_max_send_message_size` | String | Unset | Deprecated, use `grpc.rpc_max_send_message_size` instead. |
 | `enable_telemetry` | Bool | `true` | Enable telemetry to collect anonymous usage data. Enabled by default. |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
