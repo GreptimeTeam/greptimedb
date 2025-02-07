@@ -45,7 +45,8 @@ pub struct QueryContext {
     current_catalog: String,
     /// mapping of RegionId to SequenceNumber, for snapshot read, meaning that the read should only
     /// container data that was committed before(and include) the given sequence number
-    snapshot_seqs: Option<HashMap<u64, u64>>,
+    /// this field will only be filled if extensions contains a pair of "snapshot_read" and "true"
+    snapshot_seqs: Arc<RwLock<Option<HashMap<u64, u64>>>>,
     // we use Arc<RwLock>> for modifiable fields
     #[builder(default)]
     mutable_session_data: Arc<RwLock<MutableInner>>,
@@ -120,7 +121,9 @@ impl From<&RegionRequestHeader> for QueryContext {
                 .timezone(parse_timezone(Some(&ctx.timezone)))
                 .extensions(ctx.extensions.clone())
                 .channel(ctx.channel.into())
-                .snapshot_seqs(ctx.snapshot_seqs.as_ref().map(|s| s.snapshot_seqs.clone()));
+                .snapshot_seqs(Arc::new(RwLock::new(
+                    ctx.snapshot_seqs.as_ref().map(|s| s.snapshot_seqs.clone()),
+                )));
         }
         builder.build()
     }
@@ -134,7 +137,9 @@ impl From<api::v1::QueryContext> for QueryContext {
             .timezone(parse_timezone(Some(&ctx.timezone)))
             .extensions(ctx.extensions)
             .channel(ctx.channel.into())
-            .snapshot_seqs(ctx.snapshot_seqs.map(|s| s.snapshot_seqs))
+            .snapshot_seqs(Arc::new(RwLock::new(
+                ctx.snapshot_seqs.map(|s| s.snapshot_seqs),
+            )))
             .build()
     }
 }
@@ -157,7 +162,13 @@ impl From<QueryContext> for api::v1::QueryContext {
             timezone: mutable_inner.timezone.to_string(),
             extensions,
             channel: channel as u32,
-            snapshot_seqs: snapshot_seqs.map(|s| api::v1::SnapshotSequences { snapshot_seqs: s }),
+            snapshot_seqs: snapshot_seqs
+                .read()
+                .expect("lock poisoned")
+                .as_ref()
+                .map(|s| api::v1::SnapshotSequences {
+                    snapshot_seqs: s.clone(),
+                }),
         }
     }
 }
@@ -332,12 +343,17 @@ impl QueryContext {
         rb.cloned()
     }
 
-    pub fn snapshots(&self) -> &Option<HashMap<u64, u64>> {
-        &self.snapshot_seqs
+    pub fn snapshots(&self) -> Option<HashMap<u64, u64>> {
+        self.snapshot_seqs.read().expect("lock poisoned").clone()
     }
 
     pub fn get_snapshot(&self, region_id: u64) -> Option<u64> {
-        self.snapshot_seqs.as_ref()?.get(&region_id).cloned()
+        self.snapshot_seqs
+            .read()
+            .expect("lock poisoned")
+            .as_ref()?
+            .get(&region_id)
+            .cloned()
     }
 }
 
