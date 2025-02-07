@@ -822,7 +822,7 @@ impl<'a> ParserContext<'a> {
                 column_extensions.fulltext_index_options.is_none(),
                 InvalidColumnOptionSnafu {
                     name: column_name.to_string(),
-                    msg: "duplicated FULLTEXT option",
+                    msg: "duplicated FULLTEXT INDEX option",
                 }
             );
 
@@ -2229,7 +2229,7 @@ non TIMESTAMP(6) TIME INDEX,
         let sql1 = r"
 CREATE TABLE log (
     ts TIMESTAMP TIME INDEX,
-    msg TEXT FULLTEXT,
+    msg TEXT FULLTEXT INDEX,
 )";
         let result1 = ParserContext::create_with_dialect(
             sql1,
@@ -2256,7 +2256,7 @@ CREATE TABLE log (
         let sql2 = r"
 CREATE TABLE log (
     ts TIMESTAMP TIME INDEX,
-    msg STRING FULLTEXT WITH (analyzer='English', case_sensitive='false')
+    msg STRING FULLTEXT INDEX WITH (analyzer='English', case_sensitive='false')
 )";
         let result2 = ParserContext::create_with_dialect(
             sql2,
@@ -2281,8 +2281,8 @@ CREATE TABLE log (
         let sql3 = r"
 CREATE TABLE log (
     ts TIMESTAMP TIME INDEX,
-    msg1 TINYTEXT FULLTEXT WITH (analyzer='English', case_sensitive='false'),
-    msg2 CHAR(20) FULLTEXT WITH (analyzer='Chinese', case_sensitive='true')
+    msg1 TINYTEXT FULLTEXT INDEX WITH (analyzer='English', case_sensitive='false'),
+    msg2 CHAR(20) FULLTEXT INDEX WITH (analyzer='Chinese', case_sensitive='true')
 )";
         let result3 = ParserContext::create_with_dialect(
             sql3,
@@ -2315,7 +2315,7 @@ CREATE TABLE log (
         let sql = r"
 CREATE TABLE log (
     ts TIMESTAMP TIME INDEX,
-    msg INT FULLTEXT,
+    msg INT FULLTEXT INDEX,
 )";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
@@ -2331,7 +2331,7 @@ CREATE TABLE log (
         let sql = r"
 CREATE TABLE log (
     ts TIMESTAMP TIME INDEX,
-    msg STRING FULLTEXT WITH (analyzer='English', analyzer='Chinese') FULLTEXT WITH (case_sensitive='false')
+    msg STRING FULLTEXT INDEX WITH (analyzer='English', analyzer='Chinese') FULLTEXT INDEX WITH (case_sensitive='false')
 )";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
@@ -2339,7 +2339,7 @@ CREATE TABLE log (
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("duplicated FULLTEXT option"));
+            .contains("duplicated FULLTEXT INDEX option"));
     }
 
     #[test]
@@ -2347,7 +2347,7 @@ CREATE TABLE log (
         let sql = r"
 CREATE TABLE log (
     ts TIMESTAMP TIME INDEX,
-    msg STRING FULLTEXT WITH (analyzer='English', invalid_option='Chinese')
+    msg STRING FULLTEXT INDEX WITH (analyzer='English', invalid_option='Chinese')
 )";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
@@ -2355,7 +2355,7 @@ CREATE TABLE log (
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("invalid FULLTEXT option"));
+            .contains("invalid FULLTEXT INDEX option"));
     }
 
     #[test]
