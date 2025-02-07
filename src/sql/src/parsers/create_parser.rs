@@ -430,6 +430,10 @@ impl<'a> ParserContext<'a> {
         Ok(values)
     }
 
+    /// Parse the columns and constraints.
+    ///
+    /// This method will also merge duplicate constraints like indexes into column options.
+    /// Those merged table constraints will be removed from the returned constraints.
     fn parse_columns(&mut self) -> Result<(Vec<Column>, Vec<TableConstraint>)> {
         let mut columns = vec![];
         let mut constraints = vec![];
@@ -461,7 +465,18 @@ impl<'a> ParserContext<'a> {
         }
 
         // merge duplicate constraints like indexes into column options
-        for constraint in &constraints {
+        // and remove those merged table constraints from the returned constraints
+        let (index_constrains, other_constrains) =
+            constraints.into_iter().partition(|constraint| {
+                matches!(
+                    constraint,
+                    TableConstraint::SkippingIndex { .. }
+                        | TableConstraint::FulltextIndex { .. }
+                        | TableConstraint::InvertedIndex { .. }
+                )
+            });
+
+        for constraint in index_constrains {
             match constraint {
                 TableConstraint::SkippingIndex {
                     columns: column_list,
@@ -520,7 +535,7 @@ impl<'a> ParserContext<'a> {
             }
         }
 
-        Ok((columns, constraints))
+        Ok((columns, other_constrains))
     }
 
     fn parse_column(

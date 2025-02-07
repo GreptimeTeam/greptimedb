@@ -356,8 +356,7 @@ show create table specify_empty_invereted_index_cols;
 |                                    |   "host" STRING NULL,                                             |
 |                                    |   "job" STRING NULL,                                              |
 |                                    |   TIME INDEX ("ts"),                                              |
-|                                    |   PRIMARY KEY ("host", "job"),                                    |
-|                                    |   INVERTED INDEX ()                                               |
+|                                    |   PRIMARY KEY ("host", "job")                                     |
 |                                    | )                                                                 |
 |                                    |                                                                   |
 |                                    | ENGINE=mito                                                       |
