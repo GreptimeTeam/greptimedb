@@ -57,7 +57,7 @@
 //!     - This key is mainly used in constructing the view in Datanode and Frontend.
 //!
 //! 12. Kafka topic key: `__topic_name/kafka/{topic_name}`
-//！    - The key is used to mark existing topics in kafka for WAL.
+//!     - The key is used to mark existing topics in kafka for WAL.
 //!
 //! 13. Topic name to region map key `__topic_region/{topic_name}/{region_id}`
 //!     - Mapping {topic_name} to {region_id}
@@ -818,10 +818,10 @@ impl TableMetadataManager {
             .collect::<HashSet<_>>();
         let topic_region_map = self
             .topic_region_manager
-            .topic_region_map_inner(table_id, region_wal_options);
+            .get_topic_region_mapping(table_id, region_wal_options);
         let topic_region_keys = topic_region_map
             .iter()
-            .map(|(topic, region_id)| TopicRegionKey::new(*topic, region_id))
+            .map(|(region_id, topic)| TopicRegionKey::new(*region_id, topic))
             .collect::<Vec<_>>();
         keys.push(table_name.to_bytes());
         keys.push(table_info_key.to_bytes());
@@ -829,7 +829,7 @@ impl TableMetadataManager {
         for key in &datanode_table_keys {
             keys.push(key.to_bytes());
         }
-        for key in &topic_region_keys {
+        for key in topic_region_keys {
             keys.push(key.to_bytes());
         }
         Ok(keys)
@@ -1738,6 +1738,12 @@ mod tests {
         let regions = table_metadata_manager
             .topic_region_manager
             .regions("greptimedb_topic0")
+            .await
+            .unwrap();
+        assert_eq!(regions.len(), 0);
+        let regions = table_metadata_manager
+            .topic_region_manager
+            .regions("greptimedb_topic1")
             .await
             .unwrap();
         assert_eq!(regions.len(), 0);

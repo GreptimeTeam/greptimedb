@@ -162,7 +162,7 @@ pub fn convert_region_routes_to_detecting_regions(
 pub fn parse_region_wal_options(
     serialized_options: &HashMap<RegionNumber, String>,
 ) -> Result<HashMap<RegionNumber, WalOptions>> {
-    let mut region_wal_options = HashMap::new();
+    let mut region_wal_options = HashMap::with_capacity(serialized_options.len());
     for (region_number, wal_options) in serialized_options {
         let wal_option = serde_json::from_str::<WalOptions>(wal_options)
             .context(ParseWalOptionsSnafu { wal_options })?;

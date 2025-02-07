@@ -31,17 +31,20 @@ use std::fmt::{self, Display};
 
 use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::OptionExt;
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
-use crate::error::{Error, InvalidMetadataSnafu, ParseWalOptionsSnafu, Result};
+use crate::ddl::utils::parse_region_wal_options;
+use crate::error::{Error, InvalidMetadataSnafu, Result};
 use crate::key::{MetadataKey, TOPIC_REGION_PATTERN, TOPIC_REGION_PREFIX};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::{BatchDeleteRequest, BatchPutRequest, PutRequest, RangeRequest};
 use crate::rpc::KeyValue;
 
+// The TopicRegionKey is a key for the topic-region mapping in the kvbackend.
+// The layout of the key is `__topic_region/{topic_name}/{region_id}`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TopicRegionKey<'a> {
     pub region_id: RegionId,
@@ -160,8 +163,9 @@ impl TopicRegionManager {
         table_id: TableId,
         region_wal_options: &HashMap<RegionNumber, String>,
     ) -> Result<Txn> {
-        let topic_region_map = self.topic_region_map(table_id, region_wal_options)?;
-        let topic_region_keys = topic_region_map
+        let region_wal_options = parse_region_wal_options(region_wal_options)?;
+        let topic_region_mapping = self.get_topic_region_mapping(table_id, &region_wal_options);
+        let topic_region_keys = topic_region_mapping
             .iter()
             .map(|(topic, region_id)| TopicRegionKey::new(*topic, region_id))
             .collect::<Vec<_>>();
@@ -201,45 +205,29 @@ impl TopicRegionManager {
         Ok(())
     }
 
-    pub fn topic_region_map(
+    /// Retrieves a mapping of [`RegionId`]s to their corresponding topics name
+    /// based on the provided table ID and WAL options.
+    ///
+    /// # Returns
+    /// A vector of tuples, where each tuple contains a [`RegionId`] and its corresponding topic name.
+    pub fn get_topic_region_mapping<'a>(
         &self,
         table_id: TableId,
-        region_wal_options: &HashMap<RegionNumber, String>,
-    ) -> Result<Vec<(RegionId, String)>> {
-        let region_wal_options = region_wal_options
-            .iter()
-            .map(|(region_number, wal_options)| {
-                match serde_json::from_str::<WalOptions>(wal_options)
-                    .context(ParseWalOptionsSnafu { wal_options })
-                {
-                    Ok(options) => Ok((*region_number, options)),
-                    Err(e) => Err(e),
-                }
-            })
-            .collect::<Result<HashMap<_, _>>>()?;
-        Ok(self.topic_region_map_inner(table_id, &region_wal_options))
-    }
-
-    pub fn topic_region_map_inner(
-        &self,
-        table_id: TableId,
-        region_wal_options: &HashMap<RegionNumber, WalOptions>,
-    ) -> Vec<(RegionId, String)> {
-        let region_ids = region_wal_options
+        region_wal_options: &'a HashMap<RegionNumber, WalOptions>,
+    ) -> Vec<(RegionId, &'a str)> {
+        region_wal_options
             .keys()
-            .map(|region_number| RegionId::new(table_id, *region_number))
-            .collect::<Vec<_>>();
-        let keys = region_ids
-            .into_iter()
             .filter_map(
-                |region_id| match region_wal_options.get(&region_id.region_number()) {
-                    Some(WalOptions::Kafka(kafka)) => Some((region_id, kafka.topic.clone())),
+                |region_number| match region_wal_options.get(region_number) {
+                    Some(WalOptions::Kafka(kafka)) => {
+                        let region_id = RegionId::new(table_id, *region_number);
+                        Some((region_id, kafka.topic.as_str()))
+                    }
                     Some(WalOptions::RaftEngine) => None,
                     None => None,
                 },
             )
-            .collect::<Vec<_>>();
-        keys
+            .collect::<Vec<_>>()
     }
 }
 
@@ -315,9 +303,9 @@ mod tests {
             })
             .collect::<HashMap<_, _>>();
 
-        let mut topic_region_map = manager
-            .topic_region_map(table_id, &region_wal_options)
-            .unwrap();
+        let region_wal_options = parse_region_wal_options(&region_wal_options).unwrap();
+        let mut topic_region_mapping =
+            manager.get_topic_region_mapping(table_id, &region_wal_options);
         let mut expected = (0..64)
             .filter_map(|i| {
                 if i % 2 == 0 {
@@ -327,7 +315,11 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        topic_region_map.sort_by_key(|(region_id, _)| region_id.as_u64());
+        topic_region_mapping.sort_by_key(|(region_id, _)| region_id.as_u64());
+        let topic_region_map = topic_region_mapping
+            .iter()
+            .map(|(region_id, topic)| (*region_id, topic.to_string()))
+            .collect::<Vec<_>>();
         expected.sort_by_key(|(region_id, _)| region_id.as_u64());
         assert_eq!(topic_region_map, expected);
     }
