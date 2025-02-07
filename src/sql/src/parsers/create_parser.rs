@@ -2140,11 +2140,10 @@ ENGINE=mito";
                 .unwrap();
 
         if let Statement::CreateTable(c) = &result[0] {
-            assert!(&c
+            assert!(!c
                 .constraints
                 .iter()
-                .find(|c| matches!(c, TableConstraint::InvertedIndex { .. }))
-                .is_none());
+                .any(|c| matches!(c, TableConstraint::InvertedIndex { .. })));
         } else {
             unreachable!("should be create table statement");
         }
