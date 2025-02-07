@@ -2263,7 +2263,7 @@ version = "0.12.0"
 dependencies = [
  "common-error",
  "common-macro",
- "pprof 0.14.0",
+ "pprof",
  "prost 0.13.3",
  "snafu 0.8.5",
  "tokio",
@@ -8423,27 +8423,6 @@ checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
 name = "pprof"
-version = "0.13.0"
-source = "git+https://github.com/GreptimeTeam/pprof-rs?rev=1bd1e21#1bd1e210d8626da3d1e5aff976e6feee994f576d"
-dependencies = [
- "backtrace",
- "cfg-if",
- "criterion 0.5.1",
- "findshlibs",
- "inferno",
- "libc",
- "log",
- "nix 0.26.4",
- "once_cell",
- "parking_lot 0.12.3",
- "smallvec",
- "symbolic-demangle",
- "tempfile",
- "thiserror 1.0.64",
-]
-
-[[package]]
-name = "pprof"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebbe2f8898beba44815fdc9e5a4ae9c929e21c5dc29b0c774a15555f7f58d6d0"
@@ -8451,6 +8430,7 @@ dependencies = [
  "aligned-vec",
  "backtrace",
  "cfg-if",
+ "criterion 0.5.1",
  "findshlibs",
  "inferno",
  "libc",
@@ -10414,7 +10394,7 @@ dependencies = [
  "pin-project",
  "pipeline",
  "postgres-types",
- "pprof 0.13.0",
+ "pprof",
  "prometheus",
  "promql-parser",
  "prost 0.13.3",
