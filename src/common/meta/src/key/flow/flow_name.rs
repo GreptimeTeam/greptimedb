@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_telemetry::warn;
 use futures::stream::BoxStream;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -35,6 +36,12 @@ const FLOW_NAME_KEY_PREFIX: &str = "name";
 lazy_static! {
     static ref FLOW_NAME_KEY_PATTERN: Regex = Regex::new(&format!(
         "^{FLOW_NAME_KEY_PREFIX}/({NAME_PATTERN})/({NAME_PATTERN})$"
+    ))
+    .unwrap();
+
+    /// for compatibility with older flow name with less strict name pattern
+    static ref COMPAT_FLOW_NAME_KEY_PATTERN: Regex = Regex::new(&format!(
+        "^{FLOW_NAME_KEY_PREFIX}/({NAME_PATTERN})/(.*)$"
     ))
     .unwrap();
 }
@@ -114,12 +121,18 @@ impl<'a> MetadataKey<'a, FlowNameKeyInner<'a>> for FlowNameKeyInner<'_> {
             }
             .build()
         })?;
-        let captures =
-            FLOW_NAME_KEY_PATTERN
-                .captures(key)
-                .context(error::InvalidMetadataSnafu {
-                    err_msg: format!("Invalid FlowNameKeyInner '{key}'"),
-                })?;
+        let captures = FLOW_NAME_KEY_PATTERN
+            .captures(key)
+            .or_else(|| {
+                warn!(
+                    "FlowNameKeyInner '{}' is not a valid flow name in newer version.",
+                    key
+                );
+                COMPAT_FLOW_NAME_KEY_PATTERN.captures(key)
+            })
+            .context(error::InvalidMetadataSnafu {
+                err_msg: format!("Invalid FlowNameKeyInner '{key}'"),
+            })?;
         // Safety: pass the regex check above
         let catalog_name = captures.get(1).unwrap().as_str();
         let flow_name = captures.get(2).unwrap().as_str();
@@ -284,6 +297,12 @@ mod tests {
         let key = FlowNameKey::from_bytes(&bytes).unwrap();
         assert_eq!(key.catalog(), "my_catalog");
         assert_eq!(key.flow_name(), "my_task");
+
+        // compatibility with older version
+        let bytes = b"__flow/name/my_catalog/a/`b`".to_vec();
+        let key = FlowNameKey::from_bytes(&bytes).unwrap();
+        assert_eq!(key.catalog(), "my_catalog");
+        assert_eq!(key.flow_name(), "a/`b`");
     }
     #[test]
     fn test_key_start_range() {

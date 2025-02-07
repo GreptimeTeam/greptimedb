@@ -745,17 +745,15 @@ pub fn to_create_flow_task_expr(
 }
 
 /// sanitize the flow name, remove possible quotes
-fn sanitize_flow_name(flow_name: ObjectName) -> Result<String> {
-    if flow_name.0.len() != 1 {
-        return InvalidFlowNameSnafu {
+fn sanitize_flow_name(mut flow_name: ObjectName) -> Result<String> {
+    ensure!(
+        flow_name.0.len() == 1,
+        InvalidFlowNameSnafu {
             name: flow_name.to_string(),
         }
-        .fail();
-    }
-    let ident = flow_name.0.first().context(InvalidFlowNameSnafu {
-        name: flow_name.to_string(),
-    })?;
-    Ok(ident.value.clone())
+    );
+    // safety: we've checked flow_name.0 has exactly one element.
+    Ok(flow_name.0.swap_remove(0).value)
 }
 
 #[cfg(test)]
