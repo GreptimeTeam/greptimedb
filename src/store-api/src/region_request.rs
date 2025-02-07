@@ -1123,7 +1123,7 @@ impl fmt::Display for RegionRequest {
             RegionRequest::Compact(_) => write!(f, "Compact"),
             RegionRequest::Truncate(_) => write!(f, "Truncate"),
             RegionRequest::Catchup(_) => write!(f, "Catchup"),
-            RegionRequest::Sequences(_) => write!(f, "GetSequence"),
+            RegionRequest::Sequences(_) => write!(f, "Sequences"),
         }
     }
 }
