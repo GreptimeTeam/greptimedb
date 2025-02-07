@@ -6266,7 +6266,7 @@ dependencies = [
 [[package]]
 name = "loki-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/loki-proto.git?branch=main#1434ecf23a2654025d86188fb5205e7a74b225d3"
+source = "git+https://github.com/GreptimeTeam/loki-proto.git?rev=1434ecf23a2654025d86188fb5205e7a74b225d3#1434ecf23a2654025d86188fb5205e7a74b225d3"
 dependencies = [
  "prost 0.13.3",
  "prost-types 0.13.3",
