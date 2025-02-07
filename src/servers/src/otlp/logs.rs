@@ -393,7 +393,7 @@ fn extract_field_from_attr_and_combine_schema(
             ensure!(
                 column_schema.datatype == schema.datatype,
                 IncompatibleSchemaSnafu {
-                    column_name: key.clone(),
+                    column_name: key,
                     datatype: column_schema.datatype().as_str_name(),
                     expected: column_schema.datatype,
                     actual: schema.datatype,
@@ -401,11 +401,10 @@ fn extract_field_from_attr_and_combine_schema(
             );
             extracted_values[*index] = value;
         } else {
-            let key = key.clone();
             select_schema.schema.push(schema);
             select_schema
                 .index
-                .insert(key, select_schema.schema.len() - 1);
+                .insert(key.clone(), select_schema.schema.len() - 1);
             extracted_values.push(value);
         }
     }
