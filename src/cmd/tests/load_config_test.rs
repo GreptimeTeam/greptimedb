@@ -17,9 +17,6 @@ use std::time::Duration;
 use cmd::options::GreptimeOptions;
 use cmd::standalone::StandaloneOptions;
 use common_config::Configurable;
-use common_grpc::channel_manager::{
-    DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
-};
 use common_options::datanode::{ClientOptions, DatanodeClientOptions};
 use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, DEFAULT_OTLP_ENDPOINT};
 use common_wal::config::raft_engine::RaftEngineConfig;
@@ -93,9 +90,6 @@ fn test_load_datanode_example_config() {
             grpc: GrpcOptions::default()
                 .with_bind_addr("127.0.0.1:3001")
                 .with_server_addr("127.0.0.1:3001"),
-            rpc_runtime_size: Some(8),
-            rpc_max_recv_message_size: Some(DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE),
-            rpc_max_send_message_size: Some(DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE),
             ..Default::default()
         },
         ..Default::default()

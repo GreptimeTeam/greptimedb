@@ -116,7 +116,7 @@ docker run -p 127.0.0.1:4000-4003:4000-4003 \
   --name greptime --rm \
   greptime/greptimedb:latest standalone start \
   --http-addr 0.0.0.0:4000 \
-  --rpc-addr 0.0.0.0:4001 \
+  --rpc-bind-addr 0.0.0.0:4001 \
   --mysql-addr 0.0.0.0:4002 \
   --postgres-addr 0.0.0.0:4003
 ```

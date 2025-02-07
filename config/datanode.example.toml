@@ -19,18 +19,6 @@ init_regions_parallelism = 16
 ## The maximum current queries allowed to be executed. Zero means unlimited.
 max_concurrent_queries = 0
 
-## Deprecated, use `grpc.runtime_size` instead.
-## @toml2docs:none-default
-rpc_runtime_size = 8
-
-## Deprecated, use `grpc.rpc_max_recv_message_size` instead.
-## @toml2docs:none-default
-rpc_max_recv_message_size = "512MB"
-
-## Deprecated, use `grpc.rpc_max_send_message_size` instead.
-## @toml2docs:none-default
-rpc_max_send_message_size = "512MB"
-
 ## Enable telemetry to collect anonymous usage data. Enabled by default.
 #+ enable_telemetry = true
 
