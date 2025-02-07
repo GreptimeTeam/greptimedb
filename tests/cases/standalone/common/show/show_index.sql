@@ -1,12 +1,12 @@
 CREATE TABLE IF NOT EXISTS system_metrics (
     host STRING,
-    idc STRING FULLTEXT,
+    idc STRING FULLTEXT INDEX,
     cpu_util DOUBLE,
     memory_util DOUBLE,
     disk_util DOUBLE,
     desc1 STRING,
-    desc2 STRING FULLTEXT,
-    desc3 STRING FULLTEXT,
+    desc2 STRING FULLTEXT INDEX,
+    desc3 STRING FULLTEXT INDEX,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(host, idc),
     INVERTED INDEX(idc, desc1, desc2),
@@ -28,9 +28,10 @@ CREATE TABLE IF NOT EXISTS test_no_inverted_index (
     c DOUBLE,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(a, b),
-    INVERTED INDEX(),
     TIME INDEX(ts)
 );
+
+show create table test_no_inverted_index;
 
 SHOW INDEX;
 

@@ -1,12 +1,12 @@
 CREATE TABLE IF NOT EXISTS system_metrics (
     host STRING,
-    idc STRING FULLTEXT,
+    idc STRING FULLTEXT INDEX,
     cpu_util DOUBLE,
     memory_util DOUBLE,
     disk_util DOUBLE,
     desc1 STRING,
-    desc2 STRING FULLTEXT,
-    desc3 STRING FULLTEXT,
+    desc2 STRING FULLTEXT INDEX,
+    desc3 STRING FULLTEXT INDEX,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(host, idc),
     INVERTED INDEX(idc, desc1, desc2),
@@ -32,11 +32,28 @@ CREATE TABLE IF NOT EXISTS test_no_inverted_index (
     c DOUBLE,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(a, b),
-    INVERTED INDEX(),
     TIME INDEX(ts)
 );
 
 Affected Rows: 0
+
+show create table test_no_inverted_index;
+
++------------------------+-------------------------------------------------------------------------------+
+| Table                  | Create Table                                                                  |
++------------------------+-------------------------------------------------------------------------------+
+| test_no_inverted_index | CREATE TABLE IF NOT EXISTS "test_no_inverted_index" (                         |
+|                        |   "a" STRING NULL,                                                            |
+|                        |   "b" STRING NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM'), |
+|                        |   "c" DOUBLE NULL,                                                            |
+|                        |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(),                     |
+|                        |   TIME INDEX ("ts"),                                                          |
+|                        |   PRIMARY KEY ("a", "b")                                                      |
+|                        | )                                                                             |
+|                        |                                                                               |
+|                        | ENGINE=mito                                                                   |
+|                        |                                                                               |
++------------------------+-------------------------------------------------------------------------------+
 
 SHOW INDEX;
 
@@ -44,13 +61,13 @@ Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement, expect
 
 SHOW INDEX FROM test;
 
-+-------+------------+-----------------------------------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------------------------------------------------------+---------+---------------+---------+------------+
-| Table | Non_unique | Key_name                                | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                                                                    | Comment | Index_comment | Visible | Expression |
-+-------+------------+-----------------------------------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------------------------------------------------------+---------+---------------+---------+------------+
-| test  | 1          | PRIMARY, INVERTED INDEX                 | 1            | a           | A         |             |          |        | YES  | greptime-primary-key-v1, greptime-inverted-index-v1                           |         |               | YES     |            |
-| test  | 1          | PRIMARY, INVERTED INDEX, SKIPPING INDEX | 2            | b           | A         |             |          |        | YES  | greptime-primary-key-v1, greptime-inverted-index-v1, greptime-bloom-filter-v1 |         |               | YES     |            |
-| test  | 1          | TIME INDEX                              | 1            | ts          | A         |             |          |        | NO   |                                                                               |         |               | YES     |            |
-+-------+------------+-----------------------------------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------------------------------------------------------+---------+---------------+---------+------------+
++-------+------------+-------------------------+--------------+-------------+-----------+-------------+----------+--------+------+---------------------------------------------------+---------+---------------+---------+------------+
+| Table | Non_unique | Key_name                | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                                        | Comment | Index_comment | Visible | Expression |
++-------+------------+-------------------------+--------------+-------------+-----------+-------------+----------+--------+------+---------------------------------------------------+---------+---------------+---------+------------+
+| test  | 1          | PRIMARY                 | 1            | a           | A         |             |          |        | YES  | greptime-primary-key-v1                           |         |               | YES     |            |
+| test  | 1          | PRIMARY, SKIPPING INDEX | 2            | b           | A         |             |          |        | YES  | greptime-primary-key-v1, greptime-bloom-filter-v1 |         |               | YES     |            |
+| test  | 1          | TIME INDEX              | 1            | ts          | A         |             |          |        | NO   |                                                   |         |               | YES     |            |
++-------+------------+-------------------------+--------------+-------------+-----------+-------------+----------+--------+------+---------------------------------------------------+---------+---------------+---------+------------+
 
 SHOW INDEX FROM test_no_inverted_index;
 

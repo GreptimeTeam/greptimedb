@@ -511,6 +511,8 @@ pub fn column_to_schema(
 
     if column.extensions.inverted_index_options.is_some() {
         column_schema.set_inverted_index(true);
+    } else {
+        column_schema.set_inverted_index(false);
     }
 
     Ok(column_schema)

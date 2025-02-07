@@ -283,34 +283,10 @@ impl TableMeta {
         let mut columns: Vec<ColumnSchema> =
             Vec::with_capacity(table_schema.column_schemas().len());
 
-        // When we are setting inverted index for the first time
-        // (schemas.all(!has_inverted_index_key)).
-        // We need to make sure the table's primary index's inverted index
-        // property is set to true.
-        let pk_as_inverted_index = !self
-            .schema
-            .column_schemas()
-            .iter()
-            .any(|c| c.has_inverted_index_key());
-
-        for (i, column_schema) in table_schema.column_schemas().iter().enumerate() {
+        for column_schema in table_schema.column_schemas().iter() {
             if column_schema.name == column_name {
-                // If user explicitly unset an inverted index in primary keys.
-                // We should invalidate the primary key as inverted index
-                // on the condition of schemas.all(!has_inverted_index_key).
-                if !value && self.primary_key_indices.contains(&i) {
-                    let mut new_column_schema = column_schema.clone();
-                    new_column_schema.insert_inverted_index_placeholder();
-                    columns.push(new_column_schema);
-                } else {
-                    let mut new_column_schema = column_schema.clone();
-                    new_column_schema.set_inverted_index(value);
-                    columns.push(new_column_schema);
-                }
-            } else if pk_as_inverted_index && self.primary_key_indices.contains(&i) {
-                // Need to set inverted_indexed=true for all other columns in primary key.
                 let mut new_column_schema = column_schema.clone();
-                new_column_schema.set_inverted_index(true);
+                new_column_schema.set_inverted_index(value);
                 columns.push(new_column_schema);
             } else {
                 columns.push(column_schema.clone());
