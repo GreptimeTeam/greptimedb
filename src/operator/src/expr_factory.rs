@@ -746,6 +746,12 @@ pub fn to_create_flow_task_expr(
 
 /// sanitize the flow name, remove possible quotes
 fn sanitize_flow_name(flow_name: ObjectName) -> Result<String> {
+    if flow_name.0.len() != 1 {
+        return InvalidFlowNameSnafu {
+            name: flow_name.to_string(),
+        }
+        .fail();
+    }
     let ident = flow_name.0.first().context(InvalidFlowNameSnafu {
         name: flow_name.to_string(),
     })?;
@@ -796,6 +802,28 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             to_dot_sep(expr.source_table_names[0].clone())
         );
         assert_eq!("SELECT max(c1), min(c2) FROM schema_2.table_2", expr.sql);
+
+        let sql = r"
+CREATE FLOW abc.`task_2`
+SINK TO schema_1.table_1
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::CreateFlow(create_flow) = stmt else {
+            unreachable!()
+        };
+        let res = to_create_flow_task_expr(create_flow, &QueryContext::arc());
+
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid flow name: abc.`task_2`"));
     }
 
     #[test]
