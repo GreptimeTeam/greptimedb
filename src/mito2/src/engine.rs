@@ -430,12 +430,8 @@ impl EngineInner {
             .workers
             .get_region(region_id)
             .context(RegionNotFoundSnafu { region_id })?;
-        let version = region.version();
-        let seq = version
-            .memtables
-            .list_memtables()
-            .last()
-            .map(|m| m.stats().max_sequence());
+        let version_ctrl = &region.version_control;
+        let seq = Some(version_ctrl.committed_sequence());
         Ok(seq)
     }
 

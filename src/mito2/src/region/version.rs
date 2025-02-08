@@ -78,6 +78,14 @@ impl VersionControl {
         data.last_entry_id = entry_id;
     }
 
+    /// Sequence number of last committed data.
+    pub(crate) fn committed_sequence(&self) -> SequenceNumber {
+        self.data
+            .read()
+            .expect("lock is already held by the current thread")
+            .committed_sequence
+    }
+
     /// Freezes the mutable memtable if it is not empty.
     pub(crate) fn freeze_mutable(&self) -> Result<()> {
         let version = self.current().version;
