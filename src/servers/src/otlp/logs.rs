@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashMap as StdHashMap};
+use std::collections::HashMap as StdHashMap;
 
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
