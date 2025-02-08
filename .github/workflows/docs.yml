@@ -34,6 +34,8 @@ jobs:
     runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: crate-ci/typos@master
 
   license-header-check:
@@ -41,6 +43,8 @@ jobs:
     name: Check License Header
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: korandoru/hawkeye@v5
 
   check:

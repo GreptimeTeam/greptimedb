@@ -70,9 +70,6 @@ env:
   # The DockerHub image will be greptime/greptimedb-nightly.
   IMAGE_NAME: greptimedb-nightly
 
-permissions:
-  issues: write
-
 jobs:
   allocate-runners:
     name: Allocate runners
@@ -95,6 +92,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Create version
         id: create-version
@@ -147,6 +145,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: ./.github/actions/build-linux-artifacts
         with:
@@ -168,6 +167,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: ./.github/actions/build-linux-artifacts
         with:
@@ -193,6 +193,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Build and push images to dockerhub
         uses: ./.github/actions/build-images
@@ -226,6 +227,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Release artifacts to CN region
         uses: ./.github/actions/release-cn-artifacts
@@ -260,6 +262,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Stop EC2 runner
         uses: ./.github/actions/stop-runner
@@ -285,6 +288,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Stop EC2 runner
         uses: ./.github/actions/stop-runner
@@ -303,10 +307,14 @@ jobs:
       release-images-to-dockerhub
     ]
     runs-on: ubuntu-20.04
+    permissions:
+      issues: write
     env:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/setup-cyborg
       - name: Report CI status
         id: report-ci-status
