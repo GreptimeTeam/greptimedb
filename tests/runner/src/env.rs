@@ -46,6 +46,7 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio_postgres::{Client as PgClient, SimpleQueryMessage as PgRow};
 
 use crate::protocol_interceptor::{MYSQL, PROTOCOL_KEY};
+use crate::server_mode::ServerMode;
 use crate::util::{get_workspace_root, maybe_pull_binary, PROGRAM};
 use crate::{util, ServerAddr};
 
@@ -95,10 +96,14 @@ pub struct Env {
 impl EnvController for Env {
     type DB = GreptimeDB;
 
-    async fn start(&self, mode: &str, _config: Option<&Path>) -> Self::DB {
+    async fn start(&self, mode: &str, id: usize, _config: Option<&Path>) -> Self::DB {
+        if self.server_addrs.server_addr.is_some() && id > 0 {
+            panic!("Parallel test mode is not supported when server address is already set.");
+        }
+
         std::env::set_var("SQLNESS_HOME", self.sqlness_home.display().to_string());
         match mode {
-            "standalone" => self.start_standalone().await,
+            "standalone" => self.start_standalone(id).await,
             "distributed" => self.start_distributed().await,
             _ => panic!("Unexpected mode: {mode}"),
         }
@@ -133,7 +138,7 @@ impl Env {
         }
     }
 
-    async fn start_standalone(&self) -> GreptimeDB {
+    async fn start_standalone(&self, id: usize) -> GreptimeDB {
         if self.server_addrs.server_addr.is_some() {
             self.connect_db(&self.server_addrs).await
         } else {
@@ -142,7 +147,8 @@ impl Env {
 
             let db_ctx = GreptimeDBContext::new(self.wal.clone(), self.store_config.clone());
 
-            let server_process = self.start_server("standalone", &db_ctx, true).await;
+            let server_mode = ServerMode::random_standalone();
+            let server_process = self.start_server(server_mode, &db_ctx, true).await;
 
             let mut greptimedb = self.connect_db(&Default::default()).await;
             greptimedb.server_processes = Some(Arc::new(Mutex::new(vec![server_process])));

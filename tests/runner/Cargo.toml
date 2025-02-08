@@ -24,7 +24,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
-sqlness = "0.6.1"                                                                              # sqlness 0.6.0 have a bug causing `cargo sqlness` to fail(see https://github.com/CeresDB/sqlness/issues/68) which is fixed in 0.6.1
+# sqlness = "0.6.1"
+sqlness = { path = "../../../sqlness/sqlness" }
 tar = "0.4"
 tempfile.workspace = true
 tinytemplate = "1.2"

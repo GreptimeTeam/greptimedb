@@ -10784,13 +10784,13 @@ dependencies = [
 [[package]]
 name = "sqlness"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "308a7338f2211813d6e9da117e9b9b7aee5d072872d11a934002fd2bd4ab5276"
 dependencies = [
  "async-trait",
  "derive_builder 0.11.2",
  "duration-str",
+ "futures",
  "minijinja",
+ "num_cpus",
  "prettydiff",
  "regex",
  "serde_json",
