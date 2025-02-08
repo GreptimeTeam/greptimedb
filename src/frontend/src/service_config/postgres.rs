@@ -22,6 +22,11 @@ pub struct PostgresOptions {
     pub runtime_size: usize,
     #[serde(default = "Default::default")]
     pub tls: TlsOption,
+    /// Server-side keep-alive time in seconds.
+    ///
+    /// Set to 0 (default) to disable.
+    #[serde(default = "Default::default")]
+    pub keep_alive_secs: u64,
 }
 
 impl Default for PostgresOptions {
@@ -31,6 +36,7 @@ impl Default for PostgresOptions {
             addr: "127.0.0.1:4003".to_string(),
             runtime_size: 2,
             tls: Default::default(),
+            keep_alive_secs: 0,
         }
     }
 }

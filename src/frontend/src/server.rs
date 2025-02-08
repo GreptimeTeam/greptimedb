@@ -227,6 +227,7 @@ where
                 Arc::new(MysqlSpawnConfig::new(
                     opts.tls.should_force_tls(),
                     tls_server_config,
+                    opts.keep_alive_secs,
                     opts.reject_no_database.unwrap_or(false),
                 )),
             );
@@ -248,6 +249,7 @@ where
                 ServerSqlQueryHandlerAdapter::arc(instance.clone()),
                 opts.tls.should_force_tls(),
                 tls_server_config,
+                opts.keep_alive_secs,
                 common_runtime::global_runtime(),
                 user_provider.clone(),
             )) as Box<dyn Server>;

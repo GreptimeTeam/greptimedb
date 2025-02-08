@@ -76,6 +76,7 @@ notify.workspace = true
 object-pool = "0.5"
 once_cell.workspace = true
 openmetrics-parser = "0.4"
+socket2.workspace = true
 # use crates.io version after current revision is merged in next release
 # opensrv-mysql = "0.7.0"
 opensrv-mysql = { git = "https://github.com/datafuselabs/opensrv", rev = "6bbc3b65e6b19212c4f7fc4f40c20daf6f452deb" }
