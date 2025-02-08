@@ -10790,7 +10790,6 @@ dependencies = [
  "duration-str",
  "futures",
  "minijinja",
- "num_cpus",
  "prettydiff",
  "regex",
  "serde_json",

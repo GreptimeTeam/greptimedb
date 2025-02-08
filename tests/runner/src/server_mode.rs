@@ -15,7 +15,7 @@
 use std::path::Path;
 
 use crate::env::{Env, GreptimeDBContext};
-use crate::util;
+use crate::{util, ServerAddr};
 
 const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
 
@@ -139,9 +139,15 @@ impl ServerMode {
                 rpc_addr,
                 mysql_addr,
                 postgres_addr,
+                http_addr,
                 ..
             } => {
-                vec![rpc_addr.clone(), mysql_addr.clone(), postgres_addr.clone()]
+                vec![
+                    rpc_addr.clone(),
+                    mysql_addr.clone(),
+                    postgres_addr.clone(),
+                    http_addr.clone(),
+                ]
             }
             ServerMode::Frontend {
                 rpc_addr,
@@ -160,6 +166,33 @@ impl ServerMode {
             ServerMode::Flownode { rpc_addr, .. } => {
                 vec![rpc_addr.clone()]
             }
+        }
+    }
+
+    /// Returns the server addresses to connect. Only standalone and frontend mode have this.
+    pub fn server_addr(&self) -> Option<ServerAddr> {
+        match self {
+            ServerMode::Standalone {
+                rpc_addr,
+                mysql_addr,
+                postgres_addr,
+                ..
+            } => Some(ServerAddr {
+                server_addr: Some(rpc_addr.clone()),
+                pg_server_addr: Some(postgres_addr.clone()),
+                mysql_server_addr: Some(mysql_addr.clone()),
+            }),
+            ServerMode::Frontend {
+                rpc_addr,
+                mysql_addr,
+                postgres_addr,
+                ..
+            } => Some(ServerAddr {
+                server_addr: Some(rpc_addr.clone()),
+                pg_server_addr: Some(postgres_addr.clone()),
+                mysql_server_addr: Some(mysql_addr.clone()),
+            }),
+            _ => None,
         }
     }
 
@@ -188,7 +221,14 @@ impl ServerMode {
                         sqlness_home.display()
                     ),
                     "-c".to_string(),
-                    env.generate_config_file(self.name(), db_ctx),
+                    env.generate_config_file(
+                        self.name(),
+                        db_ctx,
+                        String::new(),
+                        rpc_addr.to_string(),
+                        mysql_addr.to_string(),
+                        postgres_addr.to_string(),
+                    ),
                     format!("--http-addr={http_addr}"),
                     format!("--rpc-addr={rpc_addr}"),
                     format!("--mysql-addr={mysql_addr}"),
@@ -213,7 +253,14 @@ impl ServerMode {
                         sqlness_home.display()
                     ),
                     "-c".to_string(),
-                    env.generate_config_file(self.name(), db_ctx),
+                    env.generate_config_file(
+                        self.name(),
+                        db_ctx,
+                        String::new(),
+                        rpc_addr.to_string(),
+                        mysql_addr.to_string(),
+                        postgres_addr.to_string(),
+                    ),
                 ]);
             }
             ServerMode::Metasrv {
@@ -234,7 +281,14 @@ impl ServerMode {
                         sqlness_home.display()
                     ),
                     "-c".to_string(),
-                    env.generate_config_file(self.name(), db_ctx),
+                    env.generate_config_file(
+                        self.name(),
+                        db_ctx,
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                    ),
                 ]);
 
                 if db_ctx.store_config().setup_pg {
@@ -272,7 +326,14 @@ impl ServerMode {
                     format!("--log-dir={}/logs", data_home.display()),
                     format!("--node-id={node_id}"),
                     "-c".to_string(),
-                    env.generate_config_file(self.name(), db_ctx),
+                    env.generate_config_file(
+                        self.name(),
+                        db_ctx,
+                        metasrv_addr.to_string(),
+                        rpc_addr.to_string(),
+                        String::new(),
+                        String::new(),
+                    ),
                     format!("--metasrv-addrs={metasrv_addr}"),
                 ]);
             }
