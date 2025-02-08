@@ -434,7 +434,7 @@ impl RefillTask {
                 .build(),
         );
 
-        let output_data = invoker.exec_sql(&sql, query_ctx.clone()).await?;
+        let output_data = invoker.exec_sql(sql, query_ctx.clone()).await?;
 
         let output_stream = QueryStream::try_from(output_data)?;
         let output_stream = output_stream.try_into_stream()?;
