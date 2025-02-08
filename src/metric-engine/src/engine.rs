@@ -42,7 +42,7 @@ use store_api::region_engine::{
     RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetRegionRoleStateResponse,
     SettableRegionRoleState,
 };
-use store_api::region_request::RegionRequest;
+use store_api::region_request::{RegionCreateRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 
 use self::state::MetricEngineState;
@@ -125,6 +125,23 @@ impl RegionEngine for MetricEngine {
     /// Name of this engine
     fn name(&self) -> &str {
         METRIC_ENGINE_NAME
+    }
+
+    async fn handle_batch_create_requests(
+        &self,
+        requests: Vec<(RegionId, RegionCreateRequest)>,
+    ) -> Result<RegionResponse, BoxedError> {
+        let mut extension_return_value = HashMap::new();
+        let result = self
+            .inner
+            .create_regions(requests, &mut extension_return_value)
+            .await
+            .map_err(BoxedError::new);
+
+        result.map(|rows| RegionResponse {
+            affected_rows: rows,
+            extensions: extension_return_value,
+        })
     }
 
     /// Handles non-query request to the region. Returns the count of affected rows.

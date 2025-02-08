@@ -60,7 +60,7 @@ use store_api::region_engine::{
 };
 use store_api::region_request::{
     convert_body_to_requests, AffectedRows, BatchRegionRequest, RegionCloseRequest,
-    RegionOpenRequest, RegionRequest, RegionRequestBundle,
+    RegionCreateRequest, RegionOpenRequest, RegionRequest, RegionRequestBundle,
 };
 use store_api::storage::RegionId;
 use tokio::sync::{Semaphore, SemaphorePermit};
@@ -157,6 +157,13 @@ impl RegionServer {
         request: RegionRequest,
     ) -> Result<RegionResponse> {
         self.inner.handle_request(region_id, request).await
+    }
+
+    pub async fn handle_create_request(
+        &self,
+        requests: Vec<(RegionId, RegionCreateRequest)>,
+    ) -> Result<RegionResponse> {
+        self.inner.handle_batch_create_requests(requests).await
     }
 
     async fn table_provider(&self, region_id: RegionId) -> Result<Arc<dyn TableProvider>> {
@@ -419,16 +426,7 @@ impl RegionServer {
 
     async fn handle_batch_request(&self, batch: BatchRegionRequest) -> Result<RegionResponse> {
         match batch {
-            BatchRegionRequest::Create(creates) => {
-                // FIXME(jeremy, ruihang, wenkang): Once the engine supports merged calls, we should immediately
-                // modify this part to avoid inefficient serial loop calls.
-                self.handle_requests(
-                    creates
-                        .into_iter()
-                        .map(|(region_id, req)| (region_id, RegionRequest::Create(req))),
-                )
-                .await
-            }
+            BatchRegionRequest::Create(creates) => self.handle_create_request(creates).await,
             BatchRegionRequest::Drop(drops) => {
                 // FIXME(jeremy, ruihang, wenkang): Once the engine supports merged calls, we should immediately
                 // modify this part to avoid inefficient serial loop calls.
@@ -809,6 +807,61 @@ impl RegionServerInner {
             .into_iter()
             .flatten()
             .collect::<Vec<_>>())
+    }
+
+    // Handle create requests in batch.
+    //
+    // limitiation: all create requests must be in the same engine.
+    pub async fn handle_batch_create_requests(
+        &self,
+        requests: Vec<(RegionId, RegionCreateRequest)>,
+    ) -> Result<RegionResponse> {
+        let region_changes = requests
+            .iter()
+            .map(|(region_id, create)| {
+                let attribute = parse_region_attribute(&create.engine, &create.options)?;
+                Ok((*region_id, RegionChange::Register(attribute)))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let (first_region_id, first_region_change) = region_changes.first().unwrap();
+        let engine = match self.get_engine(*first_region_id, first_region_change)? {
+            CurrentEngine::Engine(engine) => engine,
+            CurrentEngine::EarlyReturn(rows) => return Ok(RegionResponse::new(rows)),
+        };
+
+        for (region_id, region_change) in region_changes.iter() {
+            self.set_region_status_not_ready(*region_id, &engine, region_change);
+        }
+
+        let result =
+            engine
+                .handle_batch_create_requests(requests)
+                .await
+                .context(HandleRegionRequestSnafu {
+                    region_id: *first_region_id,
+                });
+
+        match result {
+            Ok(result) => {
+                for (region_id, region_change) in region_changes {
+                    self.set_region_status_ready(region_id, engine.clone(), region_change)
+                        .await?;
+                }
+
+                Ok(RegionResponse {
+                    affected_rows: result.affected_rows,
+                    extensions: result.extensions,
+                })
+            }
+            Err(err) => {
+                for (region_id, region_change) in region_changes {
+                    self.unset_region_status(region_id, region_change);
+                }
+
+                Err(err)
+            }
+        }
     }
 
     pub async fn handle_request(
