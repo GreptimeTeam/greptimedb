@@ -50,12 +50,6 @@ use crate::server_mode::ServerMode;
 use crate::util::{get_workspace_root, maybe_pull_binary, PROGRAM};
 use crate::{util, ServerAddr};
 
-const METASRV_ADDR: &str = "127.0.0.1:29302";
-const GRPC_SERVER_ADDR: &str = "127.0.0.1:29401";
-const MYSQL_SERVER_ADDR: &str = "127.0.0.1:29402";
-const POSTGRES_SERVER_ADDR: &str = "127.0.0.1:29403";
-const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
-
 // standalone mode
 const SERVER_MODE_STANDALONE_IDX: usize = 0;
 // distributed mode
@@ -595,20 +589,6 @@ impl Env {
         conf_file
     }
 
-    fn pg_server_addr(&self) -> String {
-        self.server_addrs
-            .pg_server_addr
-            .clone()
-            .unwrap_or(POSTGRES_SERVER_ADDR.to_owned())
-    }
-
-    fn mysql_server_addr(&self) -> String {
-        self.server_addrs
-            .mysql_server_addr
-            .clone()
-            .unwrap_or(MYSQL_SERVER_ADDR.to_owned())
-    }
-
     /// Build the DB with `cargo build --bin greptime`
     fn build_db(&self) {
         if self.bins_dir.lock().unwrap().is_some() {
@@ -888,10 +868,6 @@ impl GreptimeDBContext {
 
     fn incr_datanode_id(&self) {
         let _ = self.datanode_id.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn datanode_id(&self) -> u32 {
-        self.datanode_id.load(Ordering::Relaxed)
     }
 
     fn reset_datanode_id(&self) {
