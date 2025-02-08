@@ -14,7 +14,7 @@
 
 pub mod coerce;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use ahash::{HashMap, HashMapExt};
@@ -25,7 +25,7 @@ use api::v1::{ColumnDataType, ColumnDataTypeExtension, JsonTypeExtension, Semant
 use coerce::{coerce_columns, coerce_value};
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
-use serde_json::{Map, Number, Value as JsonValue};
+use serde_json::Number;
 
 use crate::etl::error::{
     IdentifyPipelineColumnTypeMismatchSnafu, ReachedMaxNestedLevelsSnafu, Result,
@@ -33,13 +33,11 @@ use crate::etl::error::{
     TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu,
     UnsupportedNumberTypeSnafu,
 };
-use crate::etl::field::{InputFieldInfo, OneInputOneOutputField};
+use crate::etl::field::{Field, Fields};
+use crate::etl::processor::IntermediateStatus;
 use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transformer, Transforms};
 use crate::etl::value::{Timestamp, Value};
-
-/// The header key that contains the pipeline params.
-pub const GREPTIME_PIPELINE_PARAMS_HEADER: &str = "x-greptime-pipeline-params";
 
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
@@ -91,30 +89,15 @@ impl GreptimeTransformer {
         let default = Some(type_.clone());
 
         let transform = Transform {
-            real_fields: vec![OneInputOneOutputField::new(
-                InputFieldInfo {
-                    name: DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(),
-                    index: usize::MAX,
-                },
-                (
-                    DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(),
-                    transforms
-                        .transforms
-                        .iter()
-                        .map(|x| x.real_fields.len())
-                        .sum(),
-                ),
-            )],
+            fields: Fields::one(Field::new(
+                DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(),
+                None,
+            )),
             type_,
             default,
             index: Some(Index::Time),
             on_failure: Some(crate::etl::transform::OnFailure::Default),
         };
-        let required_keys = transforms.required_keys_mut();
-        required_keys.push(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string());
-
-        let output_keys = transforms.output_keys_mut();
-        output_keys.push(DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string());
         transforms.push(transform);
     }
 
@@ -142,9 +125,9 @@ impl Transformer for GreptimeTransformer {
 
         for transform in transforms.iter() {
             let target_fields_set = transform
-                .real_fields
+                .fields
                 .iter()
-                .map(|f| f.output_name())
+                .map(|f| f.target_or_input_field())
                 .collect::<HashSet<_>>();
 
             let intersections: Vec<_> = column_names_set.intersection(&target_fields_set).collect();
@@ -157,16 +140,17 @@ impl Transformer for GreptimeTransformer {
 
             if let Some(idx) = transform.index {
                 if idx == Index::Time {
-                    match transform.real_fields.len() {
+                    match transform.fields.len() {
                         //Safety unwrap is fine here because we have checked the length of real_fields
-                        1 => timestamp_columns
-                            .push(transform.real_fields.first().unwrap().input_name()),
+                        1 => {
+                            timestamp_columns.push(transform.fields.first().unwrap().input_field())
+                        }
                         _ => {
                             return TransformMultipleTimestampIndexSnafu {
                                 columns: transform
-                                    .real_fields
+                                    .fields
                                     .iter()
-                                    .map(|x| x.input_name())
+                                    .map(|x| x.input_field())
                                     .join(", "),
                             }
                             .fail();
@@ -195,12 +179,12 @@ impl Transformer for GreptimeTransformer {
         }
     }
 
-    fn transform_mut(&self, val: &mut Vec<Value>) -> Result<Self::VecOutput> {
+    fn transform_mut(&self, val: &mut IntermediateStatus) -> Result<Self::VecOutput> {
         let mut values = vec![GreptimeValue { value_data: None }; self.schema.len()];
+        let mut output_index = 0;
         for transform in self.transforms.iter() {
-            for field in transform.real_fields.iter() {
-                let index = field.input_index();
-                let output_index = field.output_index();
+            for field in transform.fields.iter() {
+                let index = field.input_field();
                 match val.get(index) {
                     Some(v) => {
                         let value_data = coerce_value(v, transform)?;
@@ -216,6 +200,7 @@ impl Transformer for GreptimeTransformer {
                         values[output_index] = GreptimeValue { value_data };
                     }
                 }
+                output_index += 1;
             }
         }
         Ok(Row { values })
@@ -335,30 +320,31 @@ fn resolve_number_schema(
     )
 }
 
-fn json_value_to_row(
-    schema_info: &mut SchemaInfo,
-    map: Map<String, serde_json::Value>,
-) -> Result<Row> {
+fn values_to_row(schema_info: &mut SchemaInfo, values: BTreeMap<String, Value>) -> Result<Row> {
     let mut row: Vec<GreptimeValue> = Vec::with_capacity(schema_info.schema.len());
     for _ in 0..schema_info.schema.len() {
         row.push(GreptimeValue { value_data: None });
     }
-    for (column_name, value) in map {
+
+    for (column_name, value) in values.into_iter() {
         if column_name == DEFAULT_GREPTIME_TIMESTAMP_COLUMN {
             continue;
         }
+
         let index = schema_info.index.get(&column_name).copied();
+
         match value {
-            serde_json::Value::Null => {
-                // do nothing
-            }
-            serde_json::Value::String(s) => {
+            Value::Null => {}
+
+            Value::Int8(_) | Value::Int16(_) | Value::Int32(_) | Value::Int64(_) => {
+                // safe unwrap after type matched
+                let v = value.as_i64().unwrap();
                 resolve_schema(
                     index,
-                    ValueData::StringValue(s),
+                    ValueData::I64Value(v),
                     ColumnSchema {
                         column_name,
-                        datatype: ColumnDataType::String as i32,
+                        datatype: ColumnDataType::Int64 as i32,
                         semantic_type: SemanticType::Field as i32,
                         datatype_extension: None,
                         options: None,
@@ -367,10 +353,47 @@ fn json_value_to_row(
                     schema_info,
                 )?;
             }
-            serde_json::Value::Bool(b) => {
+
+            Value::Uint8(_) | Value::Uint16(_) | Value::Uint32(_) | Value::Uint64(_) => {
+                // safe unwrap after type matched
+                let v = value.as_u64().unwrap();
                 resolve_schema(
                     index,
-                    ValueData::BoolValue(b),
+                    ValueData::U64Value(v),
+                    ColumnSchema {
+                        column_name,
+                        datatype: ColumnDataType::Uint64 as i32,
+                        semantic_type: SemanticType::Field as i32,
+                        datatype_extension: None,
+                        options: None,
+                    },
+                    &mut row,
+                    schema_info,
+                )?;
+            }
+
+            Value::Float32(_) | Value::Float64(_) => {
+                // safe unwrap after type matched
+                let v = value.as_f64().unwrap();
+                resolve_schema(
+                    index,
+                    ValueData::F64Value(v),
+                    ColumnSchema {
+                        column_name,
+                        datatype: ColumnDataType::Float64 as i32,
+                        semantic_type: SemanticType::Field as i32,
+                        datatype_extension: None,
+                        options: None,
+                    },
+                    &mut row,
+                    schema_info,
+                )?;
+            }
+
+            Value::Boolean(v) => {
+                resolve_schema(
+                    index,
+                    ValueData::BoolValue(v),
                     ColumnSchema {
                         column_name,
                         datatype: ColumnDataType::Boolean as i32,
@@ -382,13 +405,88 @@ fn json_value_to_row(
                     schema_info,
                 )?;
             }
-            serde_json::Value::Number(n) => {
-                resolve_number_schema(n, column_name, index, &mut row, schema_info)?;
-            }
-            serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            Value::String(v) => {
                 resolve_schema(
                     index,
-                    ValueData::BinaryValue(jsonb::Value::from(value).to_vec()),
+                    ValueData::StringValue(v),
+                    ColumnSchema {
+                        column_name,
+                        datatype: ColumnDataType::String as i32,
+                        semantic_type: SemanticType::Field as i32,
+                        datatype_extension: None,
+                        options: None,
+                    },
+                    &mut row,
+                    schema_info,
+                )?;
+            }
+
+            Value::Timestamp(Timestamp::Nanosecond(ns)) => {
+                resolve_schema(
+                    index,
+                    ValueData::TimestampNanosecondValue(ns),
+                    ColumnSchema {
+                        column_name,
+                        datatype: ColumnDataType::TimestampNanosecond as i32,
+                        semantic_type: SemanticType::Field as i32,
+                        datatype_extension: None,
+                        options: None,
+                    },
+                    &mut row,
+                    schema_info,
+                )?;
+            }
+            Value::Timestamp(Timestamp::Microsecond(us)) => {
+                resolve_schema(
+                    index,
+                    ValueData::TimestampMicrosecondValue(us),
+                    ColumnSchema {
+                        column_name,
+                        datatype: ColumnDataType::TimestampMicrosecond as i32,
+                        semantic_type: SemanticType::Field as i32,
+                        datatype_extension: None,
+                        options: None,
+                    },
+                    &mut row,
+                    schema_info,
+                )?;
+            }
+            Value::Timestamp(Timestamp::Millisecond(ms)) => {
+                resolve_schema(
+                    index,
+                    ValueData::TimestampMillisecondValue(ms),
+                    ColumnSchema {
+                        column_name,
+                        datatype: ColumnDataType::TimestampMillisecond as i32,
+                        semantic_type: SemanticType::Field as i32,
+                        datatype_extension: None,
+                        options: None,
+                    },
+                    &mut row,
+                    schema_info,
+                )?;
+            }
+            Value::Timestamp(Timestamp::Second(s)) => {
+                resolve_schema(
+                    index,
+                    ValueData::TimestampSecondValue(s),
+                    ColumnSchema {
+                        column_name,
+                        datatype: ColumnDataType::TimestampSecond as i32,
+                        semantic_type: SemanticType::Field as i32,
+                        datatype_extension: None,
+                        options: None,
+                    },
+                    &mut row,
+                    schema_info,
+                )?;
+            }
+
+            Value::Array(_) | Value::Map(_) => {
+                let data: jsonb::Value = value.into();
+                resolve_schema(
+                    index,
+                    ValueData::BinaryValue(data.to_vec()),
                     ColumnSchema {
                         column_name,
                         datatype: ColumnDataType::Binary as i32,
@@ -408,23 +506,18 @@ fn json_value_to_row(
 }
 
 fn identity_pipeline_inner<'a>(
-    array: Vec<serde_json::Value>,
+    array: Vec<BTreeMap<String, Value>>,
     tag_column_names: Option<impl Iterator<Item = &'a String>>,
-    params: &GreptimePipelineParams,
+    _params: &GreptimePipelineParams,
 ) -> Result<Rows> {
     let mut rows = Vec::with_capacity(array.len());
     let mut schema_info = SchemaInfo::default();
-    for value in array {
-        if let serde_json::Value::Object(map) = value {
-            let object = if params.flatten_json_object() {
-                flatten_json_object(map, DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING)?
-            } else {
-                map
-            };
-            let row = json_value_to_row(&mut schema_info, object)?;
-            rows.push(row);
-        }
+
+    for values in array {
+        let row = values_to_row(&mut schema_info, values)?;
+        rows.push(row);
     }
+
     let greptime_timestamp_schema = ColumnSchema {
         column_name: DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string(),
         datatype: ColumnDataType::TimestampNanosecond as i32,
@@ -469,17 +562,26 @@ fn identity_pipeline_inner<'a>(
 /// 4. The pipeline will return an error if the same column datatype is mismatched
 /// 5. The pipeline will analyze the schema of each json record and merge them to get the final schema.
 pub fn identity_pipeline(
-    array: Vec<serde_json::Value>,
+    array: Vec<BTreeMap<String, Value>>,
     table: Option<Arc<table::Table>>,
     params: &GreptimePipelineParams,
 ) -> Result<Rows> {
+    let input = if params.flatten_json_object() {
+        array
+            .into_iter()
+            .map(|item| flatten_object(item, DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING))
+            .collect::<Result<Vec<BTreeMap<String, Value>>>>()?
+    } else {
+        array
+    };
+
     match table {
         Some(table) => {
             let table_info = table.table_info();
             let tag_column_names = table_info.meta.row_key_column_names();
-            identity_pipeline_inner(array, Some(tag_column_names), params)
+            identity_pipeline_inner(input, Some(tag_column_names), params)
         }
-        None => identity_pipeline_inner(array, None::<std::iter::Empty<&String>>, params),
+        None => identity_pipeline_inner(input, None::<std::iter::Empty<&String>>, params),
     }
 }
 
@@ -487,24 +589,24 @@ pub fn identity_pipeline(
 ///
 /// The `max_nested_levels` parameter is used to limit the nested levels of the JSON object.
 /// The error will be returned if the nested levels is greater than the `max_nested_levels`.
-pub fn flatten_json_object(
-    object: Map<String, JsonValue>,
+pub fn flatten_object(
+    object: BTreeMap<String, Value>,
     max_nested_levels: usize,
-) -> Result<Map<String, JsonValue>> {
-    let mut flattened = Map::new();
+) -> Result<BTreeMap<String, Value>> {
+    let mut flattened = BTreeMap::new();
 
     if !object.is_empty() {
         // it will use recursion to flatten the object.
-        do_flatten_json_object(&mut flattened, None, object, 1, max_nested_levels)?;
+        do_flatten_object(&mut flattened, None, object, 1, max_nested_levels)?;
     }
 
     Ok(flattened)
 }
 
-fn do_flatten_json_object(
-    dest: &mut Map<String, JsonValue>,
+fn do_flatten_object(
+    dest: &mut BTreeMap<String, Value>,
     base: Option<&str>,
-    object: Map<String, JsonValue>,
+    object: BTreeMap<String, Value>,
     current_level: usize,
     max_nested_levels: usize,
 ) -> Result<()> {
@@ -517,11 +619,11 @@ fn do_flatten_json_object(
         let new_key = base.map_or_else(|| key.clone(), |base_key| format!("{base_key}.{key}"));
 
         match value {
-            JsonValue::Object(object) => {
-                do_flatten_json_object(
+            Value::Map(object) => {
+                do_flatten_object(
                     dest,
                     Some(&new_key),
-                    object,
+                    object.values,
                     current_level + 1,
                     max_nested_levels,
                 )?;
@@ -540,9 +642,8 @@ fn do_flatten_json_object(
 mod tests {
     use api::v1::SemanticType;
 
-    use crate::etl::transform::transformer::greptime::{
-        flatten_json_object, identity_pipeline_inner, GreptimePipelineParams,
-    };
+    use super::*;
+    use crate::etl::{json_array_to_intermediate_state, json_to_intermediate_state};
     use crate::identity_pipeline;
 
     #[test]
@@ -568,6 +669,7 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
+            let array = json_array_to_intermediate_state(array).unwrap();
             let rows = identity_pipeline(array, None, &GreptimePipelineParams::default());
             assert!(rows.is_err());
             assert_eq!(
@@ -596,7 +698,11 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let rows = identity_pipeline(array, None, &GreptimePipelineParams::default());
+            let rows = identity_pipeline(
+                json_array_to_intermediate_state(array).unwrap(),
+                None,
+                &GreptimePipelineParams::default(),
+            );
             assert!(rows.is_err());
             assert_eq!(
                 rows.err().unwrap().to_string(),
@@ -624,7 +730,11 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let rows = identity_pipeline(array, None, &GreptimePipelineParams::default());
+            let rows = identity_pipeline(
+                json_array_to_intermediate_state(array).unwrap(),
+                None,
+                &GreptimePipelineParams::default(),
+            );
             assert!(rows.is_ok());
             let rows = rows.unwrap();
             assert_eq!(rows.schema.len(), 8);
@@ -655,7 +765,7 @@ mod tests {
             ];
             let tag_column_names = ["name".to_string(), "address".to_string()];
             let rows = identity_pipeline_inner(
-                array,
+                json_array_to_intermediate_state(array).unwrap(),
                 Some(tag_column_names.iter()),
                 &GreptimePipelineParams::default(),
             );
@@ -754,14 +864,11 @@ mod tests {
         ];
 
         for (input, max_depth, expected) in test_cases {
-            let flattened_object =
-                flatten_json_object(input.as_object().unwrap().clone(), max_depth);
-            match flattened_object {
-                Ok(flattened_object) => {
-                    assert_eq!(&flattened_object, expected.unwrap().as_object().unwrap())
-                }
-                Err(_) => assert_eq!(None, expected),
-            }
+            let input = json_to_intermediate_state(input).unwrap();
+            let expected = expected.map(|e| json_to_intermediate_state(e).unwrap());
+
+            let flattened_object = flatten_object(input, max_depth).ok();
+            assert_eq!(flattened_object, expected);
         }
     }
 

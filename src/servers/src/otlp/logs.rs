@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashMap as StdHashMap};
+use std::collections::HashMap as StdHashMap;
 
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
@@ -24,14 +24,18 @@ use jsonb::{Number as JsonbNumber, Value as JsonbValue};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue};
 use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
-use pipeline::{Array, Map, PipelineWay, SchemaInfo, SelectInfo, Value as PipelineValue};
+use pipeline::{GreptimePipelineParams, PipelineWay, SchemaInfo, SelectInfo};
+use serde_json::{Map, Value};
+use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
 
 use super::trace::attributes::OtlpAnyValue;
 use super::utils::{bytes_to_hex_string, key_value_to_jsonb};
 use crate::error::{
-    IncompatibleSchemaSnafu, OpenTelemetryLogSnafu, Result, UnsupportedJsonDataTypeForTagSnafu,
+    IncompatibleSchemaSnafu, PipelineTransformSnafu, Result, UnsupportedJsonDataTypeForTagSnafu,
 };
+use crate::pipeline::run_pipeline;
+use crate::query_handler::PipelineHandlerRef;
 
 pub const LOG_TABLE_NAME: &str = "opentelemetry_logs";
 
@@ -42,13 +46,16 @@ pub const LOG_TABLE_NAME: &str = "opentelemetry_logs";
 /// for data structure of OTLP metrics.
 ///
 /// Returns `InsertRequests` and total number of rows to ingest
-pub fn to_grpc_insert_requests(
+pub async fn to_grpc_insert_requests(
     request: ExportLogsServiceRequest,
     pipeline: PipelineWay,
+    pipeline_params: GreptimePipelineParams,
     table_name: String,
+    query_ctx: &QueryContextRef,
+    pipeline_handler: PipelineHandlerRef,
 ) -> Result<(RowInsertRequests, usize)> {
     match pipeline {
-        PipelineWay::OtlpLog(select_info) => {
+        PipelineWay::OtlpLogDirect(select_info) => {
             let rows = parse_export_logs_service_request_to_rows(request, select_info)?;
             let len = rows.rows.len();
             let insert_request = RowInsertRequest {
@@ -62,53 +69,48 @@ pub fn to_grpc_insert_requests(
                 len,
             ))
         }
-        PipelineWay::Custom(p) => {
-            let request = parse_export_logs_service_request(request);
-            let mut result = Vec::new();
-            let mut intermediate_state = p.init_intermediate_state();
-            for v in request {
-                p.prepare_pipeline_value(v, &mut intermediate_state)
-                    .context(OpenTelemetryLogSnafu)?;
-                let r = p
-                    .exec_mut(&mut intermediate_state)
-                    .context(OpenTelemetryLogSnafu)?;
-                result.push(r);
-            }
-            let len = result.len();
-            let rows = Rows {
-                schema: p.schemas().clone(),
-                rows: result,
-            };
-            let insert_request = RowInsertRequest {
-                rows: Some(rows),
+        PipelineWay::Pipeline(pipeline_def) => {
+            let data = parse_export_logs_service_request(request);
+            let array =
+                pipeline::json_array_to_intermediate_state(data).context(PipelineTransformSnafu)?;
+
+            let inserts = run_pipeline(
+                &pipeline_handler,
+                pipeline_def,
+                &pipeline_params,
+                array,
                 table_name,
-            };
-            let insert_requests = RowInsertRequests {
-                inserts: vec![insert_request],
-            };
+                query_ctx,
+                true,
+            )
+            .await?;
+            let len = inserts
+                .iter()
+                .map(|insert| {
+                    insert
+                        .rows
+                        .as_ref()
+                        .map(|rows| rows.rows.len())
+                        .unwrap_or(0)
+                })
+                .sum();
+
+            let insert_requests = RowInsertRequests { inserts };
             Ok((insert_requests, len))
         }
     }
 }
 
-fn scope_to_pipeline_value(
-    scope: Option<InstrumentationScope>,
-) -> (PipelineValue, PipelineValue, PipelineValue) {
+fn scope_to_pipeline_value(scope: Option<InstrumentationScope>) -> (Value, Value, Value) {
     scope
         .map(|x| {
             (
-                PipelineValue::Map(Map {
-                    values: key_value_to_map(x.attributes),
-                }),
-                PipelineValue::String(x.version),
-                PipelineValue::String(x.name),
+                Value::Object(key_value_to_map(x.attributes)),
+                Value::String(x.version),
+                Value::String(x.name),
             )
         })
-        .unwrap_or((
-            PipelineValue::Null,
-            PipelineValue::Null,
-            PipelineValue::Null,
-        ))
+        .unwrap_or((Value::Null, Value::Null, Value::Null))
 }
 
 fn scope_to_jsonb(
@@ -127,51 +129,43 @@ fn scope_to_jsonb(
 
 fn log_to_pipeline_value(
     log: LogRecord,
-    resource_schema_url: PipelineValue,
-    resource_attr: PipelineValue,
-    scope_schema_url: PipelineValue,
-    scope_name: PipelineValue,
-    scope_version: PipelineValue,
-    scope_attrs: PipelineValue,
-) -> PipelineValue {
-    let log_attrs = PipelineValue::Map(Map {
-        values: key_value_to_map(log.attributes),
-    });
-    let mut map = BTreeMap::new();
-    map.insert(
-        "Timestamp".to_string(),
-        PipelineValue::Uint64(log.time_unix_nano),
-    );
+    resource_schema_url: Value,
+    resource_attr: Value,
+    scope_schema_url: Value,
+    scope_name: Value,
+    scope_version: Value,
+    scope_attrs: Value,
+) -> Value {
+    let log_attrs = Value::Object(key_value_to_map(log.attributes));
+    let mut map = Map::new();
+    map.insert("Timestamp".to_string(), Value::from(log.time_unix_nano));
     map.insert(
         "ObservedTimestamp".to_string(),
-        PipelineValue::Uint64(log.observed_time_unix_nano),
+        Value::from(log.observed_time_unix_nano),
     );
 
     // need to be convert to string
     map.insert(
         "TraceId".to_string(),
-        PipelineValue::String(bytes_to_hex_string(&log.trace_id)),
+        Value::String(bytes_to_hex_string(&log.trace_id)),
     );
     map.insert(
         "SpanId".to_string(),
-        PipelineValue::String(bytes_to_hex_string(&log.span_id)),
+        Value::String(bytes_to_hex_string(&log.span_id)),
     );
-    map.insert("TraceFlags".to_string(), PipelineValue::Uint32(log.flags));
-    map.insert(
-        "SeverityText".to_string(),
-        PipelineValue::String(log.severity_text),
-    );
+    map.insert("TraceFlags".to_string(), Value::from(log.flags));
+    map.insert("SeverityText".to_string(), Value::String(log.severity_text));
     map.insert(
         "SeverityNumber".to_string(),
-        PipelineValue::Int32(log.severity_number),
+        Value::from(log.severity_number),
     );
     // need to be convert to string
     map.insert(
         "Body".to_string(),
         log.body
             .as_ref()
-            .map(|x| PipelineValue::String(log_body_to_string(x)))
-            .unwrap_or(PipelineValue::Null),
+            .map(|x| Value::String(log_body_to_string(x)))
+            .unwrap_or(Value::Null),
     );
     map.insert("ResourceSchemaUrl".to_string(), resource_schema_url);
 
@@ -181,7 +175,7 @@ fn log_to_pipeline_value(
     map.insert("ScopeVersion".to_string(), scope_version);
     map.insert("ScopeAttributes".to_string(), scope_attrs);
     map.insert("LogAttributes".to_string(), log_attrs);
-    PipelineValue::Map(Map { values: map })
+    Value::Object(map)
 }
 
 fn build_otlp_logs_identity_schema() -> Vec<ColumnSchema> {
@@ -636,22 +630,18 @@ fn merge_values(
 
 /// transform otlp logs request to pipeline value
 /// https://opentelemetry.io/docs/concepts/signals/logs/
-fn parse_export_logs_service_request(request: ExportLogsServiceRequest) -> Vec<PipelineValue> {
+fn parse_export_logs_service_request(request: ExportLogsServiceRequest) -> Vec<Value> {
     let mut result = Vec::new();
     for r in request.resource_logs {
         let resource_attr = r
             .resource
-            .map(|x| {
-                PipelineValue::Map(Map {
-                    values: key_value_to_map(x.attributes),
-                })
-            })
-            .unwrap_or(PipelineValue::Null);
-        let resource_schema_url = PipelineValue::String(r.schema_url);
+            .map(|x| Value::Object(key_value_to_map(x.attributes)))
+            .unwrap_or(Value::Null);
+        let resource_schema_url = Value::String(r.schema_url);
         for scope_logs in r.scope_logs {
             let (scope_attrs, scope_version, scope_name) =
                 scope_to_pipeline_value(scope_logs.scope);
-            let scope_schema_url = PipelineValue::String(scope_logs.schema_url);
+            let scope_schema_url = Value::String(scope_logs.schema_url);
             for log in scope_logs.log_records {
                 let value = log_to_pipeline_value(
                     log,
@@ -670,41 +660,41 @@ fn parse_export_logs_service_request(request: ExportLogsServiceRequest) -> Vec<P
 }
 
 // convert AnyValue to pipeline value
-fn any_value_to_pipeline_value(value: any_value::Value) -> PipelineValue {
+fn any_value_to_pipeline_value(value: any_value::Value) -> Value {
     match value {
-        any_value::Value::StringValue(s) => PipelineValue::String(s),
-        any_value::Value::IntValue(i) => PipelineValue::Int64(i),
-        any_value::Value::DoubleValue(d) => PipelineValue::Float64(d),
-        any_value::Value::BoolValue(b) => PipelineValue::Boolean(b),
+        any_value::Value::StringValue(s) => Value::String(s),
+        any_value::Value::IntValue(i) => Value::from(i),
+        any_value::Value::DoubleValue(d) => Value::from(d),
+        any_value::Value::BoolValue(b) => Value::Bool(b),
         any_value::Value::ArrayValue(a) => {
             let values = a
                 .values
                 .into_iter()
                 .map(|v| match v.value {
                     Some(value) => any_value_to_pipeline_value(value),
-                    None => PipelineValue::Null,
+                    None => Value::Null,
                 })
                 .collect();
-            PipelineValue::Array(Array { values })
+            Value::Array(values)
         }
         any_value::Value::KvlistValue(kv) => {
             let value = key_value_to_map(kv.values);
-            PipelineValue::Map(Map { values: value })
+            Value::Object(value)
         }
-        any_value::Value::BytesValue(b) => PipelineValue::String(bytes_to_hex_string(&b)),
+        any_value::Value::BytesValue(b) => Value::String(bytes_to_hex_string(&b)),
     }
 }
 
 // convert otlp keyValue vec to map
-fn key_value_to_map(key_values: Vec<KeyValue>) -> BTreeMap<String, PipelineValue> {
-    let mut map = BTreeMap::new();
+fn key_value_to_map(key_values: Vec<KeyValue>) -> Map<String, Value> {
+    let mut map = Map::new();
     for kv in key_values {
         let value = match kv.value {
             Some(value) => match value.value {
                 Some(value) => any_value_to_pipeline_value(value),
-                None => PipelineValue::Null,
+                None => Value::Null,
             },
-            None => PipelineValue::Null,
+            None => Value::Null,
         };
         map.insert(kv.key.clone(), value);
     }

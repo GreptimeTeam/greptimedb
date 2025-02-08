@@ -249,6 +249,29 @@ impl Value {
         }
     }
 
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Value::Uint32(v) => Some(*v as i64),
+            Value::Uint16(v) => Some(*v as i64),
+            Value::Uint8(v) => Some(*v as i64),
+            Value::Int64(v) => Some(*v),
+            Value::Int32(v) => Some(*v as i64),
+            Value::Int16(v) => Some(*v as i64),
+            Value::Int8(v) => Some(*v as i64),
+            _ => None,
+        }
+    }
+
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Value::Uint64(v) => Some(*v),
+            Value::Uint32(v) => Some(*v as u64),
+            Value::Uint16(v) => Some(*v as u64),
+            Value::Uint8(v) => Some(*v as u64),
+            _ => None,
+        }
+    }
+
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             Value::Float32(v) => Some(*v as f64),

@@ -93,6 +93,7 @@ macro_rules! http_tests {
                 test_plain_text_ingestion,
                 test_identify_pipeline,
                 test_identify_pipeline_with_flatten,
+                test_pipeline_dispatcher,
 
                 test_otlp_metrics,
                 test_otlp_traces,
@@ -1383,6 +1384,197 @@ pub async fn test_identify_pipeline(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_pipeline_dispatcher(storage_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(storage_type, "test_pipeline_dispatcher").await;
+
+    // handshake
+    let client = TestClient::new(app).await;
+
+    let root_pipeline = r#"
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+      ignore_missing: true
+
+dispatcher:
+  field: type
+  rules:
+    - value: http
+      table_suffix: http
+      pipeline: http
+    - value: db
+      table_suffix: db
+    - value: not_found
+      table_suffix: not_found
+      pipeline: not_found
+
+transform:
+  - fields:
+      - id1, id1_root
+      - id2, id2_root
+    type: int32
+  - fields:
+      - type
+      - log
+      - logger
+    type: string
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
+    let http_pipeline = r#"
+processors:
+
+transform:
+  - fields:
+      - id1, id1_http
+      - id2, id2_http
+    type: int32
+  - fields:
+      - log
+      - logger
+    type: string
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/root")
+        .header("Content-Type", "application/x-yaml")
+        .body(root_pipeline)
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = client
+        .post("/v1/events/pipelines/http")
+        .header("Content-Type", "application/x-yaml")
+        .body(http_pipeline)
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 2. write data
+    let data_body = r#"
+[
+  {
+    "id1": "2436",
+    "id2": "2528",
+    "logger": "INTERACT.MANAGER",
+    "type": "http",
+    "time": "2024-05-25 20:16:37.217",
+    "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+  }
+]
+"#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=root")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let data_body = r#"
+[
+  {
+    "id1": "2436",
+    "id2": "2528",
+    "logger": "INTERACT.MANAGER",
+    "type": "db",
+    "time": "2024-05-25 20:16:37.217",
+    "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+  }
+]
+"#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=root")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let data_body = r#"
+[
+  {
+    "id1": "2436",
+    "id2": "2528",
+    "logger": "INTERACT.MANAGER",
+    "type": "api",
+    "time": "2024-05-25 20:16:37.217",
+    "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+  }
+]
+"#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=root")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let data_body = r#"
+[
+  {
+    "id1": "2436",
+    "id2": "2528",
+    "logger": "INTERACT.MANAGER",
+    "type": "not_found",
+    "time": "2024-05-25 20:16:37.217",
+    "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+  }
+]
+"#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=root")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // 3. verify data
+    let expected = "[[2436]]";
+    validate_data(
+        "test_dispatcher_pipeline default table",
+        &client,
+        "select id1_root from logs1",
+        expected,
+    )
+    .await;
+
+    let expected = "[[2436]]";
+    validate_data(
+        "test_dispatcher_pipeline http table",
+        &client,
+        "select id1_http from logs1_http",
+        expected,
+    )
+    .await;
+
+    let expected = "[[\"2436\"]]";
+    validate_data(
+        "test_dispatcher_pipeline db table",
+        &client,
+        "select id1 from logs1_db",
+        expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
 pub async fn test_identify_pipeline_with_flatten(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
@@ -1587,8 +1779,8 @@ transform:
             .await;
         assert_eq!(res.status(), StatusCode::OK);
         let body: Value = res.json().await;
-        let schema = &body["schema"];
-        let rows = &body["rows"];
+        let schema = &body[0]["schema"];
+        let rows = &body[0]["rows"];
         assert_eq!(schema, &dryrun_schema);
         assert_eq!(rows, &dryrun_rows);
     }
@@ -1617,8 +1809,8 @@ transform:
             .await;
         assert_eq!(res.status(), StatusCode::OK);
         let body: Value = res.json().await;
-        let schema = &body["schema"];
-        let rows = &body["rows"];
+        let schema = &body[0]["schema"];
+        let rows = &body[0]["rows"];
         assert_eq!(schema, &dryrun_schema);
         assert_eq!(rows, &dryrun_rows);
     }
@@ -1645,8 +1837,8 @@ transform:
             .await;
         assert_eq!(res.status(), StatusCode::OK);
         let body: Value = res.json().await;
-        let schema = &body["schema"];
-        let rows = &body["rows"];
+        let schema = &body[0]["schema"];
+        let rows = &body[0]["rows"];
         assert_eq!(schema, &dryrun_schema);
         assert_eq!(rows, &dryrun_rows);
     }
@@ -1687,7 +1879,7 @@ pub async fn test_plain_text_ingestion(store_type: StorageType) {
 processors:
   - dissect:
       fields:
-        - line
+        - message
       patterns:
         - "%{+ts} %{+ts} %{content}"
   - date:
@@ -2316,7 +2508,7 @@ async fn validate_data(test_name: &str, client: &TestClient, sql: &str, expected
         .get(format!("/v1/sql?sql={sql}").as_str())
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::OK, "validate {test_name} fail");
     let resp = res.text().await;
     let v = get_rows_from_output(&resp);
 

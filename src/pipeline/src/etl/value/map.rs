@@ -49,6 +49,12 @@ impl From<HashMap<String, Value>> for Map {
     }
 }
 
+impl From<BTreeMap<String, Value>> for Map {
+    fn from(values: BTreeMap<String, Value>) -> Self {
+        Self { values }
+    }
+}
+
 impl std::ops::Deref for Map {
     type Target = BTreeMap<String, Value>;
 
