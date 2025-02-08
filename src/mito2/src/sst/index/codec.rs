@@ -24,9 +24,7 @@ use store_api::metadata::ColumnMetadata;
 use store_api::storage::ColumnId;
 
 use crate::error::{FieldTypeMismatchSnafu, IndexEncodeNullSnafu, Result};
-use crate::row_converter::{
-    build_primary_key_codec_with_fields, CompositeValues, PrimaryKeyCodec, SortField,
-};
+use crate::row_converter::{build_primary_key_codec_with_fields, PrimaryKeyCodec, SortField};
 
 /// Encodes index values according to their data types for sorting and storage use.
 pub struct IndexValueCodec;
@@ -64,13 +62,21 @@ impl IndexValueCodec {
     }
 }
 
+pub struct PkColInfo {
+    pub idx: usize,
+    pub field: SortField,
+}
+
+impl PkColInfo {
+    pub fn new(idx: usize, field: SortField) -> Self {
+        Self { idx, field }
+    }
+}
+
 /// Decodes primary key values into their corresponding column ids, data types and values.
 pub struct IndexValuesCodec {
-    /// Tuples containing column id and its corresponding index_name (result of `to_string` on ColumnId),
-    /// to minimize redundant `to_string` calls.
-    column_ids: HashMap<ColumnId, String>,
-    /// The data types of tag columns.
-    fields: Vec<(ColumnId, SortField)>,
+    /// Column ids -> column info mapping.
+    columns_mapping: HashMap<ColumnId, PkColInfo>,
     /// The decoder for the primary key.
     decoder: Arc<dyn PrimaryKeyCodec>,
 }
@@ -81,42 +87,31 @@ impl IndexValuesCodec {
         primary_key_encoding: PrimaryKeyEncoding,
         tag_columns: impl Iterator<Item = &'a ColumnMetadata>,
     ) -> Self {
-        let (column_ids, fields): (Vec<_>, Vec<_>) = tag_columns
-            .map(|column| {
-                (
-                    (column.column_id, column.column_id.to_string()),
-                    (
-                        column.column_id,
-                        SortField::new(column.column_schema.data_type.clone()),
-                    ),
-                )
-            })
-            .unzip();
+        let (columns_mapping, fields): (HashMap<ColumnId, PkColInfo>, Vec<(ColumnId, SortField)>) =
+            tag_columns
+                .enumerate()
+                .map(|(idx, column)| {
+                    let col_id = column.column_id;
+                    let field = SortField::new(column.column_schema.data_type.clone());
+                    let pk_col_info = PkColInfo::new(idx, field.clone());
+                    ((col_id, pk_col_info), (col_id, field))
+                })
+                .unzip();
 
-        let column_ids = column_ids.into_iter().collect();
-        let decoder =
-            build_primary_key_codec_with_fields(primary_key_encoding, fields.clone().into_iter());
+        let decoder = build_primary_key_codec_with_fields(primary_key_encoding, fields.into_iter());
 
         Self {
-            column_ids,
-            fields,
+            columns_mapping,
             decoder,
         }
     }
 
-    /// Returns the column ids of the index.
-    pub fn column_ids(&self) -> &HashMap<ColumnId, String> {
-        &self.column_ids
+    pub fn pk_col_info(&self, column_id: ColumnId) -> Option<&PkColInfo> {
+        self.columns_mapping.get(&column_id)
     }
 
-    /// Returns the fields of the index.
-    pub fn fields(&self) -> &[(ColumnId, SortField)] {
-        &self.fields
-    }
-
-    /// Decodes a primary key into its corresponding column ids, data types and values.
-    pub fn decode(&self, primary_key: &[u8]) -> Result<CompositeValues> {
-        self.decoder.decode(primary_key)
+    pub fn decoder(&self) -> &dyn PrimaryKeyCodec {
+        self.decoder.as_ref()
     }
 }
 
@@ -185,7 +180,7 @@ mod tests {
 
         let codec =
             IndexValuesCodec::from_tag_columns(PrimaryKeyEncoding::Dense, tag_columns.iter());
-        let values = codec.decode(&primary_key).unwrap().into_dense();
+        let values = codec.decoder().decode(&primary_key).unwrap().into_dense();
 
         assert_eq!(values.len(), 2);
         assert_eq!(values[0], Value::Null);

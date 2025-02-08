@@ -26,7 +26,7 @@ pub(crate) mod scan_util;
 pub(crate) mod seq_scan;
 pub(crate) mod unordered_scan;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,7 +40,7 @@ use datatypes::arrow::compute::SortOptions;
 use datatypes::arrow::row::{RowConverter, SortField};
 use datatypes::prelude::{ConcreteDataType, DataType, ScalarVector};
 use datatypes::types::TimestampType;
-use datatypes::value::ValueRef;
+use datatypes::value::{Value, ValueRef};
 use datatypes::vectors::{
     BooleanVector, Helper, TimestampMicrosecondVector, TimestampMillisecondVector,
     TimestampNanosecondVector, TimestampSecondVector, UInt32Vector, UInt64Vector, UInt8Vector,
@@ -58,7 +58,7 @@ use crate::error::{
 use crate::memtable::BoxedBatchIterator;
 use crate::metrics::{READ_BATCHES_RETURN, READ_ROWS_RETURN, READ_STAGE_ELAPSED};
 use crate::read::prune::PruneReader;
-use crate::row_converter::CompositeValues;
+use crate::row_converter::{CompositeValues, PrimaryKeyCodec};
 
 /// Storage internal representation of a batch of rows for a primary key (time series).
 ///
@@ -82,6 +82,8 @@ pub struct Batch {
     op_types: Arc<UInt8Vector>,
     /// Fields organized in columnar format.
     fields: Vec<BatchColumn>,
+    /// Cache for field index lookup.
+    fields_idx: Option<HashMap<ColumnId, usize>>,
 }
 
 impl Batch {
@@ -229,6 +231,7 @@ impl Batch {
             sequences: Arc::new(self.sequences.get_slice(offset, length)),
             op_types: Arc::new(self.op_types.get_slice(offset, length)),
             fields,
+            fields_idx: self.fields_idx.clone(),
         }
     }
 
@@ -588,6 +591,44 @@ impl Batch {
             other.first_sequence()
         ))
     }
+
+    /// Returns the value of the column in the primary key.
+    ///
+    /// Lazily decodes the primary key and caches the result.
+    pub fn pk_col_value(
+        &mut self,
+        codec: &dyn PrimaryKeyCodec,
+        col_idx_in_pk: usize,
+        column_id: ColumnId,
+    ) -> Result<Option<&Value>> {
+        if self.pk_values.is_none() {
+            self.pk_values = Some(codec.decode(&self.primary_key)?);
+        }
+
+        let pk_values = self.pk_values.as_ref().unwrap();
+        Ok(match pk_values {
+            CompositeValues::Dense(values) => values.get(col_idx_in_pk).map(|(_, v)| v),
+            CompositeValues::Sparse(values) => values.get(&column_id),
+        })
+    }
+
+    /// Returns values of the field in the batch.
+    ///
+    /// Lazily caches the field index.
+    pub fn field_col_value(&mut self, column_id: ColumnId) -> Option<&BatchColumn> {
+        if self.fields_idx.is_none() {
+            self.fields_idx = Some(
+                self.fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| (c.column_id, i))
+                    .collect(),
+            );
+        }
+
+        let idx = self.fields_idx.as_ref().unwrap().get(&column_id)?;
+        Some(&self.fields[*idx])
+    }
 }
 
 /// A struct to check the batch is monotonic.
@@ -876,6 +917,7 @@ impl BatchBuilder {
             sequences,
             op_types,
             fields: self.fields,
+            fields_idx: None,
         })
     }
 }
@@ -1019,8 +1061,12 @@ impl ScannerMetrics {
 
 #[cfg(test)]
 mod tests {
+    use store_api::codec::PrimaryKeyEncoding;
+    use store_api::storage::consts::ReservedColumnId;
+
     use super::*;
     use crate::error::Error;
+    use crate::row_converter::{self, build_primary_key_codec_with_fields};
     use crate::test_util::new_batch_builder;
 
     fn new_batch(
@@ -1391,5 +1437,89 @@ mod tests {
             &[23, 22, 21],
         );
         assert_eq!(expect, batch);
+    }
+
+    #[test]
+    fn test_get_value() {
+        let encodings = [PrimaryKeyEncoding::Dense, PrimaryKeyEncoding::Sparse];
+
+        for encoding in encodings {
+            let codec = build_primary_key_codec_with_fields(
+                encoding,
+                [
+                    (
+                        ReservedColumnId::table_id(),
+                        row_converter::SortField::new(ConcreteDataType::uint32_datatype()),
+                    ),
+                    (
+                        ReservedColumnId::tsid(),
+                        row_converter::SortField::new(ConcreteDataType::uint64_datatype()),
+                    ),
+                    (
+                        100,
+                        row_converter::SortField::new(ConcreteDataType::string_datatype()),
+                    ),
+                    (
+                        200,
+                        row_converter::SortField::new(ConcreteDataType::string_datatype()),
+                    ),
+                ]
+                .into_iter(),
+            );
+
+            let values = [
+                Value::UInt32(1000),
+                Value::UInt64(2000),
+                Value::String("abcdefgh".into()),
+                Value::String("zyxwvu".into()),
+            ];
+            let mut buf = vec![];
+            codec
+                .encode_values(
+                    &[
+                        (ReservedColumnId::table_id(), values[0].clone()),
+                        (ReservedColumnId::tsid(), values[1].clone()),
+                        (100, values[2].clone()),
+                        (200, values[3].clone()),
+                    ],
+                    &mut buf,
+                )
+                .unwrap();
+
+            let field_col_id = 2;
+            let mut batch = new_batch_builder(
+                &buf,
+                &[1, 2, 3],
+                &[1, 1, 1],
+                &[OpType::Put, OpType::Put, OpType::Put],
+                field_col_id,
+                &[42, 43, 44],
+            )
+            .build()
+            .unwrap();
+
+            let v = batch
+                .pk_col_value(&*codec, 0, ReservedColumnId::table_id())
+                .unwrap()
+                .unwrap();
+            assert_eq!(values[0], *v);
+
+            let v = batch
+                .pk_col_value(&*codec, 1, ReservedColumnId::tsid())
+                .unwrap()
+                .unwrap();
+            assert_eq!(values[1], *v);
+
+            let v = batch.pk_col_value(&*codec, 2, 100).unwrap().unwrap();
+            assert_eq!(values[2], *v);
+
+            let v = batch.pk_col_value(&*codec, 3, 200).unwrap().unwrap();
+            assert_eq!(values[3], *v);
+
+            let v = batch.field_col_value(field_col_id).unwrap();
+            assert_eq!(v.data.get(0), Value::UInt64(42));
+            assert_eq!(v.data.get(1), Value::UInt64(43));
+            assert_eq!(v.data.get(2), Value::UInt64(44));
+        }
     }
 }
