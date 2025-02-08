@@ -3,7 +3,6 @@ on:
   pull_request:
     types: [opened, edited]
 
-
 jobs:
   docbot:
     runs-on: ubuntu-20.04
