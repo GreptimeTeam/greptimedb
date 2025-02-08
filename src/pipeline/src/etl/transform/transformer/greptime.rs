@@ -17,7 +17,7 @@ pub mod coerce;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
-use ahash::HashMap;
+use ahash::{HashMap, HashMapExt};
 use api::helper::proto_value_type;
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
@@ -228,6 +228,15 @@ pub struct SchemaInfo {
     pub schema: Vec<ColumnSchema>,
     /// index of the column name
     pub index: HashMap<String, usize>,
+}
+
+impl SchemaInfo {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            schema: Vec::with_capacity(capacity),
+            index: HashMap::with_capacity(capacity),
+        }
+    }
 }
 
 fn resolve_schema(

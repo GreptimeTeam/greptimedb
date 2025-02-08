@@ -14,6 +14,15 @@ SELECT a FROM test LIMIT 1;
 | 1970-01-01T00:00:00.011 |
 +-------------------------+
 
+SELECT b FROM test ORDER BY b LIMIT 2 OFFSET 0;
+
++----+
+| b  |
++----+
+| 21 |
+| 22 |
++----+
+
 SELECT a FROM test LIMIT 1.25;
 
 Error: 3001(EngineExecuteQuery), DataFusion error: Error during planning: Expected LIMIT to be an integer or null, but got Float64

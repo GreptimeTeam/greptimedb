@@ -26,18 +26,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::fmt::{self, Display};
 
+use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, RegionNumber};
+use table::metadata::TableId;
 
+use crate::ddl::utils::parse_region_wal_options;
 use crate::error::{Error, InvalidMetadataSnafu, Result};
 use crate::key::{MetadataKey, TOPIC_REGION_PATTERN, TOPIC_REGION_PREFIX};
+use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::store::{BatchPutRequest, PutRequest, RangeRequest};
+use crate::rpc::store::{BatchDeleteRequest, BatchPutRequest, PutRequest, RangeRequest};
 use crate::rpc::KeyValue;
 
+// The TopicRegionKey is a key for the topic-region mapping in the kvbackend.
+// The layout of the key is `__topic_region/{topic_name}/{region_id}`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TopicRegionKey<'a> {
     pub region_id: RegionId,
@@ -53,7 +60,7 @@ impl<'a> TopicRegionKey<'a> {
     }
 
     pub fn range_topic_key(topic: &str) -> String {
-        format!("{}/{}", TOPIC_REGION_PREFIX, topic)
+        format!("{}/{}/", TOPIC_REGION_PREFIX, topic)
     }
 }
 
@@ -80,7 +87,7 @@ impl Display for TopicRegionKey<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}/{}",
+            "{}{}",
             Self::range_topic_key(self.topic),
             self.region_id.as_u64()
         )
@@ -151,6 +158,24 @@ impl TopicRegionManager {
         Ok(())
     }
 
+    pub fn build_create_txn(
+        &self,
+        table_id: TableId,
+        region_wal_options: &HashMap<RegionNumber, String>,
+    ) -> Result<Txn> {
+        let region_wal_options = parse_region_wal_options(region_wal_options)?;
+        let topic_region_mapping = self.get_topic_region_mapping(table_id, &region_wal_options);
+        let topic_region_keys = topic_region_mapping
+            .iter()
+            .map(|(topic, region_id)| TopicRegionKey::new(*topic, region_id))
+            .collect::<Vec<_>>();
+        let operations = topic_region_keys
+            .into_iter()
+            .map(|key| TxnOp::Put(key.to_bytes(), vec![]))
+            .collect::<Vec<_>>();
+        Ok(Txn::new().and_then(operations))
+    }
+
     /// Returns the list of region ids using specified topic.
     pub async fn regions(&self, topic: &str) -> Result<Vec<RegionId>> {
         let prefix = TopicRegionKey::range_topic_key(topic);
@@ -169,11 +194,48 @@ impl TopicRegionManager {
         self.kv_backend.delete(&raw_key, false).await?;
         Ok(())
     }
+
+    pub async fn batch_delete(&self, keys: Vec<TopicRegionKey<'_>>) -> Result<()> {
+        let raw_keys = keys.iter().map(|key| key.to_bytes()).collect::<Vec<_>>();
+        let req = BatchDeleteRequest {
+            keys: raw_keys,
+            prev_kv: false,
+        };
+        self.kv_backend.batch_delete(req).await?;
+        Ok(())
+    }
+
+    /// Retrieves a mapping of [`RegionId`]s to their corresponding topics name
+    /// based on the provided table ID and WAL options.
+    ///
+    /// # Returns
+    /// A vector of tuples, where each tuple contains a [`RegionId`] and its corresponding topic name.
+    pub fn get_topic_region_mapping<'a>(
+        &self,
+        table_id: TableId,
+        region_wal_options: &'a HashMap<RegionNumber, WalOptions>,
+    ) -> Vec<(RegionId, &'a str)> {
+        region_wal_options
+            .keys()
+            .filter_map(
+                |region_number| match region_wal_options.get(region_number) {
+                    Some(WalOptions::Kafka(kafka)) => {
+                        let region_id = RegionId::new(table_id, *region_number);
+                        Some((region_id, kafka.topic.as_str()))
+                    }
+                    Some(WalOptions::RaftEngine) => None,
+                    None => None,
+                },
+            )
+            .collect::<Vec<_>>()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
+    use common_wal::options::KafkaWalOptions;
 
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
@@ -219,5 +281,46 @@ mod tests {
             .collect::<Vec<_>>();
         key_values.sort_by_key(|id| id.as_u64());
         assert_eq!(key_values, expected);
+    }
+
+    #[test]
+    fn test_topic_region_map() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let manager = TopicRegionManager::new(kv_backend.clone());
+
+        let table_id = 1;
+        let region_wal_options = (0..64)
+            .map(|i| {
+                let region_number = i;
+                let wal_options = if i % 2 == 0 {
+                    WalOptions::Kafka(KafkaWalOptions {
+                        topic: format!("topic_{}", i),
+                    })
+                } else {
+                    WalOptions::RaftEngine
+                };
+                (region_number, serde_json::to_string(&wal_options).unwrap())
+            })
+            .collect::<HashMap<_, _>>();
+
+        let region_wal_options = parse_region_wal_options(&region_wal_options).unwrap();
+        let mut topic_region_mapping =
+            manager.get_topic_region_mapping(table_id, &region_wal_options);
+        let mut expected = (0..64)
+            .filter_map(|i| {
+                if i % 2 == 0 {
+                    Some((RegionId::new(table_id, i), format!("topic_{}", i)))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        topic_region_mapping.sort_by_key(|(region_id, _)| region_id.as_u64());
+        let topic_region_map = topic_region_mapping
+            .iter()
+            .map(|(region_id, topic)| (*region_id, topic.to_string()))
+            .collect::<Vec<_>>();
+        expected.sort_by_key(|(region_id, _)| region_id.as_u64());
+        assert_eq!(topic_region_map, expected);
     }
 }

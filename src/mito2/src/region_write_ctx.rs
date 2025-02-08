@@ -16,6 +16,7 @@ use std::mem;
 use std::sync::Arc;
 
 use api::v1::{Mutation, OpType, Rows, WalEntry, WriteHint};
+use futures::stream::{FuturesUnordered, StreamExt};
 use snafu::ResultExt;
 use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
@@ -197,23 +198,43 @@ impl RegionWriteCtx {
     }
 
     /// Consumes mutations and writes them into mutable memtable.
-    pub(crate) fn write_memtable(&mut self) {
+    pub(crate) async fn write_memtable(&mut self) {
         debug_assert_eq!(self.notifiers.len(), self.wal_entry.mutations.len());
 
         if self.failed {
             return;
         }
 
-        let mutable = &self.version.memtables.mutable;
-        // Takes mutations from the wal entry.
-        let mutations = mem::take(&mut self.wal_entry.mutations);
-        for (mutation, notify) in mutations.into_iter().zip(&mut self.notifiers) {
-            // Write mutation to the memtable.
-            let Some(kvs) = KeyValues::new(&self.version.metadata, mutation) else {
-                continue;
-            };
-            if let Err(e) = mutable.write(&kvs) {
-                notify.err = Some(Arc::new(e));
+        let mutable = self.version.memtables.mutable.clone();
+        let mutations = mem::take(&mut self.wal_entry.mutations)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, mutation)| {
+                let kvs = KeyValues::new(&self.version.metadata, mutation)?;
+                Some((i, kvs))
+            })
+            .collect::<Vec<_>>();
+
+        if mutations.len() == 1 {
+            if let Err(err) = mutable.write(&mutations[0].1) {
+                self.notifiers[mutations[0].0].err = Some(Arc::new(err));
+            }
+        } else {
+            let mut tasks = FuturesUnordered::new();
+            for (i, kvs) in mutations {
+                let mutable = mutable.clone();
+                // use tokio runtime to schedule tasks.
+                tasks.push(common_runtime::spawn_blocking_global(move || {
+                    (i, mutable.write(&kvs))
+                }));
+            }
+
+            while let Some(result) = tasks.next().await {
+                // first unwrap the result from `spawn` above
+                let (i, result) = result.unwrap();
+                if let Err(err) = result {
+                    self.notifiers[i].err = Some(Arc::new(err));
+                }
             }
         }
 

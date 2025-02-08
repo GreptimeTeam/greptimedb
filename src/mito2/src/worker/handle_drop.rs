@@ -32,7 +32,7 @@ use crate::region::{RegionLeaderState, RegionMapRef};
 use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
 
 const GC_TASK_INTERVAL_SEC: u64 = 5 * 60; // 5 minutes
-const MAX_RETRY_TIMES: u64 = 288; // 24 hours (5m * 288)
+const MAX_RETRY_TIMES: u64 = 12; // 1 hours (5m * 12)
 
 impl<S> RegionWorkerLoop<S>
 where
@@ -118,12 +118,16 @@ where
     }
 }
 
-/// Background GC task to remove the entire region path once it find there is no
-/// parquet file left. Returns whether the path is removed.
+/// Background GC task to remove the entire region path once one of the following
+/// conditions is true:
+/// - It finds there is no parquet file left.
+/// - After `gc_duration`.
 ///
-/// This task will keep running until finished. Any resource captured by it will
-/// not be released before then. Be sure to only pass weak reference if something
-/// is depended on ref-count mechanism.
+/// Returns whether the path is removed.
+///
+/// This task will retry on failure and keep running until finished. Any resource
+/// captured by it will not be released before then. Be sure to only pass weak reference
+/// if something is depended on ref-count mechanism.
 async fn later_drop_task(
     region_id: RegionId,
     region_path: String,
@@ -131,9 +135,9 @@ async fn later_drop_task(
     dropping_regions: RegionMapRef,
     gc_duration: Duration,
 ) -> bool {
+    let mut force = false;
     for _ in 0..MAX_RETRY_TIMES {
-        sleep(gc_duration).await;
-        let result = remove_region_dir_once(&region_path, &object_store).await;
+        let result = remove_region_dir_once(&region_path, &object_store, force).await;
         match result {
             Err(err) => {
                 warn!(
@@ -143,11 +147,14 @@ async fn later_drop_task(
             }
             Ok(true) => {
                 dropping_regions.remove_region(region_id);
-                info!("Region {} is dropped", region_path);
+                info!("Region {} is dropped, force: {}", region_path, force);
                 return true;
             }
             Ok(false) => (),
         }
+        sleep(gc_duration).await;
+        // Force recycle after gc duration.
+        force = true;
     }
 
     warn!(
@@ -160,9 +167,11 @@ async fn later_drop_task(
 
 // TODO(ruihang): place the marker in a separate dir
 /// Removes region dir if there is no parquet files, returns whether the directory is removed.
+/// If `force = true`, always removes the dir.
 pub(crate) async fn remove_region_dir_once(
     region_path: &str,
     object_store: &ObjectStore,
+    force: bool,
 ) -> Result<bool> {
     // list all files under the given region path to check if there are un-deleted parquet files
     let mut has_parquet_file = false;
@@ -173,7 +182,8 @@ pub(crate) async fn remove_region_dir_once(
         .await
         .context(OpenDalSnafu)?;
     while let Some(file) = files.try_next().await.context(OpenDalSnafu)? {
-        if file.path().ends_with(".parquet") {
+        if !force && file.path().ends_with(".parquet") {
+            // If not in force mode, we only remove the region dir if there is no parquet file
             has_parquet_file = true;
             break;
         } else if !file.path().ends_with(DROPPING_MARKER_FILE) {

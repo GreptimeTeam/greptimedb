@@ -13,9 +13,9 @@
 // limitations under the License.
 
 mod selector;
-mod topic_creator;
+pub(crate) mod topic_creator;
 mod topic_manager;
-mod topic_pool;
+pub(crate) mod topic_pool;
 
 use std::collections::HashMap;
 use std::sync::Arc;

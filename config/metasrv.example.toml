@@ -4,7 +4,9 @@ data_home = "/tmp/metasrv/"
 ## The bind address of metasrv.
 bind_addr = "127.0.0.1:3002"
 
-## The communication server address for frontend and datanode to connect to metasrv,  "127.0.0.1:3002" by default for localhost.
+## The communication server address for the frontend and datanode to connect to metasrv.
+## If left empty or unset, the server will automatically use the IP address of the first network interface
+## on the host, with the same port number as the one specified in `bind_addr`.
 server_addr = "127.0.0.1:3002"
 
 ## Store server address default to etcd store.

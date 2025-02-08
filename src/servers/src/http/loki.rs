@@ -31,7 +31,7 @@ use common_telemetry::{error, warn};
 use hashbrown::HashMap;
 use headers::ContentType;
 use lazy_static::lazy_static;
-use loki_api::prost_types::Timestamp;
+use loki_proto::prost_types::Timestamp;
 use prost::Message;
 use quoted_string::test_utils::TestSpec;
 use session::context::{Channel, QueryContext};
@@ -103,11 +103,7 @@ pub async fn loki_ingest(
 
     // fill Null for missing values
     for row in rows.iter_mut() {
-        if row.len() < schemas.len() {
-            for _ in row.len()..schemas.len() {
-                row.push(GreptimeValue { value_data: None });
-            }
-        }
+        row.resize(schemas.len(), GreptimeValue::default());
     }
 
     let rows = Rows {
@@ -245,7 +241,7 @@ async fn handle_pb_req(
     schemas: &mut Vec<ColumnSchema>,
 ) -> Result<Vec<Vec<GreptimeValue>>> {
     let decompressed = prom_store::snappy_decompress(&bytes).unwrap();
-    let req = loki_api::logproto::PushRequest::decode(&decompressed[..])
+    let req = loki_proto::logproto::PushRequest::decode(&decompressed[..])
         .context(DecodeOtlpRequestSnafu)?;
 
     let mut column_indexer: HashMap<String, u16> = HashMap::new();
@@ -439,7 +435,7 @@ macro_rules! unwrap_or_warn_continue {
 mod tests {
     use std::collections::BTreeMap;
 
-    use loki_api::prost_types::Timestamp;
+    use loki_proto::prost_types::Timestamp;
 
     use crate::error::Error::InvalidLokiLabels;
     use crate::http::loki::{parse_loki_labels, prost_ts_to_nano};

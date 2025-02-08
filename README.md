@@ -13,7 +13,7 @@
   <a href="https://greptime.com/product/cloud">GreptimeCloud</a> |
   <a href="https://docs.greptime.com/">User Guide</a> |
   <a href="https://greptimedb.rs/">API Docs</a> |
-  <a href="https://github.com/GreptimeTeam/greptimedb/issues/3412">Roadmap 2024</a>
+  <a href="https://github.com/GreptimeTeam/greptimedb/issues/5446">Roadmap 2025</a>
 </h4>
 
 <a href="https://github.com/GreptimeTeam/greptimedb/releases/latest">
@@ -116,7 +116,7 @@ docker run -p 127.0.0.1:4000-4003:4000-4003 \
   --name greptime --rm \
   greptime/greptimedb:latest standalone start \
   --http-addr 0.0.0.0:4000 \
-  --rpc-addr 0.0.0.0:4001 \
+  --rpc-bind-addr 0.0.0.0:4001 \
   --mysql-addr 0.0.0.0:4002 \
   --postgres-addr 0.0.0.0:4003
 ```

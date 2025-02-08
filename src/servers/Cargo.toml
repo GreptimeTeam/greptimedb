@@ -70,7 +70,7 @@ itertools.workspace = true
 jsonb.workspace = true
 lazy_static.workspace = true
 log-query.workspace = true
-loki-api.workspace = true
+loki-proto.workspace = true
 mime_guess = "2.0"
 notify.workspace = true
 object-pool = "0.5"
@@ -142,7 +142,7 @@ tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.12"
 
 [target.'cfg(unix)'.dev-dependencies]
-pprof = { version = "0.13", features = ["criterion", "flamegraph"] }
+pprof = { version = "0.14", features = ["criterion", "flamegraph"] }
 
 [build-dependencies]
 common-version.workspace = true

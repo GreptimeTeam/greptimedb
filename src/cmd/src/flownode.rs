@@ -129,11 +129,13 @@ struct StartCommand {
     #[clap(long)]
     node_id: Option<u64>,
     /// Bind address for the gRPC server.
-    #[clap(long)]
-    rpc_addr: Option<String>,
-    /// Hostname for the gRPC server.
-    #[clap(long)]
-    rpc_hostname: Option<String>,
+    #[clap(long, alias = "rpc-addr")]
+    rpc_bind_addr: Option<String>,
+    /// The address advertised to the metasrv, and used for connections from outside the host.
+    /// If left empty or unset, the server will automatically use the IP address of the first network interface
+    /// on the host, with the same port number as the one specified in `rpc_bind_addr`.
+    #[clap(long, alias = "rpc-hostname")]
+    rpc_server_addr: Option<String>,
     /// Metasrv address list;
     #[clap(long, value_delimiter = ',', num_args = 1..)]
     metasrv_addrs: Option<Vec<String>>,
@@ -184,12 +186,12 @@ impl StartCommand {
             tokio_console_addr: global_options.tokio_console_addr.clone(),
         };
 
-        if let Some(addr) = &self.rpc_addr {
-            opts.grpc.addr.clone_from(addr);
+        if let Some(addr) = &self.rpc_bind_addr {
+            opts.grpc.bind_addr.clone_from(addr);
         }
 
-        if let Some(hostname) = &self.rpc_hostname {
-            opts.grpc.hostname.clone_from(hostname);
+        if let Some(server_addr) = &self.rpc_server_addr {
+            opts.grpc.server_addr.clone_from(server_addr);
         }
 
         if let Some(node_id) = self.node_id {
@@ -237,7 +239,7 @@ impl StartCommand {
         info!("Flownode options: {:#?}", opts);
 
         let mut opts = opts.component;
-        opts.grpc.detect_hostname();
+        opts.grpc.detect_server_addr();
 
         // TODO(discord9): make it not optionale after cluster id is required
         let cluster_id = opts.cluster_id.unwrap_or(0);

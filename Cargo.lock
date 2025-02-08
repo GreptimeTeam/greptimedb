@@ -1053,7 +1053,7 @@ dependencies = [
  "bitflags 2.6.0",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "regex",
@@ -1967,10 +1967,12 @@ dependencies = [
  "common-wal",
  "config",
  "datanode",
+ "humantime-serde",
  "meta-client",
  "num_cpus",
  "serde",
  "serde_json",
+ "serde_with",
  "snafu 0.8.5",
  "sysinfo",
  "temp-env",
@@ -2261,7 +2263,7 @@ version = "0.12.0"
 dependencies = [
  "common-error",
  "common-macro",
- "pprof 0.14.0",
+ "pprof",
  "prost 0.13.3",
  "snafu 0.8.5",
  "tokio",
@@ -4351,7 +4353,6 @@ dependencies = [
  "promql-parser",
  "prost 0.13.3",
  "query",
- "raft-engine",
  "serde",
  "serde_json",
  "servers",
@@ -6267,7 +6268,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4979f22fdb869068da03c9f7528f8297c6fd2606bc3a4affe42e6a823fdb8da4"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -6376,6 +6377,7 @@ dependencies = [
  "bytes",
  "chrono",
  "common-base",
+ "common-config",
  "common-error",
  "common-macro",
  "common-meta",
@@ -6408,12 +6410,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "loki-api"
-version = "0.1.2"
-source = "git+https://github.com/shuiyisong/tracing-loki?branch=chore%2Fprost_version#ad135292a77b6ce638d126571804c19fdaa36215"
+name = "loki-proto"
+version = "0.1.0"
+source = "git+https://github.com/GreptimeTeam/loki-proto.git?rev=1434ecf23a2654025d86188fb5205e7a74b225d3#1434ecf23a2654025d86188fb5205e7a74b225d3"
 dependencies = [
  "prost 0.13.3",
  "prost-types 0.13.3",
+ "tonic 0.12.3",
+ "tonic-build 0.12.3",
 ]
 
 [[package]]
@@ -6754,17 +6758,18 @@ dependencies = [
 [[package]]
 name = "meter-core"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=a10facb353b41460eeb98578868ebf19c2084fac#a10facb353b41460eeb98578868ebf19c2084fac"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=5618e779cf2bb4755b499c630fba4c35e91898cb#5618e779cf2bb4755b499c630fba4c35e91898cb"
 dependencies = [
  "anymap2",
  "once_cell",
  "parking_lot 0.12.3",
+ "tracing",
 ]
 
 [[package]]
 name = "meter-macros"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=a10facb353b41460eeb98578868ebf19c2084fac#a10facb353b41460eeb98578868ebf19c2084fac"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=5618e779cf2bb4755b499c630fba4c35e91898cb#5618e779cf2bb4755b499c630fba4c35e91898cb"
 dependencies = [
  "meter-core",
 ]
@@ -8567,27 +8572,6 @@ checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
 name = "pprof"
-version = "0.13.0"
-source = "git+https://github.com/GreptimeTeam/pprof-rs?rev=1bd1e21#1bd1e210d8626da3d1e5aff976e6feee994f576d"
-dependencies = [
- "backtrace",
- "cfg-if",
- "criterion 0.5.1",
- "findshlibs",
- "inferno",
- "libc",
- "log",
- "nix 0.26.4",
- "once_cell",
- "parking_lot 0.12.3",
- "smallvec",
- "symbolic-demangle",
- "tempfile",
- "thiserror 1.0.64",
-]
-
-[[package]]
-name = "pprof"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebbe2f8898beba44815fdc9e5a4ae9c929e21c5dc29b0c774a15555f7f58d6d0"
@@ -8595,6 +8579,7 @@ dependencies = [
  "aligned-vec",
  "backtrace",
  "cfg-if",
+ "criterion 0.5.1",
  "findshlibs",
  "inferno",
  "libc",
@@ -8884,7 +8869,7 @@ checksum = "0c1318b19085f08681016926435853bbf7858f9c082d0999b80550ff5d9abe15"
 dependencies = [
  "bytes",
  "heck 0.5.0",
- "itertools 0.13.0",
+ "itertools 0.11.0",
  "log",
  "multimap",
  "once_cell",
@@ -8930,7 +8915,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e9552f850d5f0964a4e4d0bf306459ac29323ddfbae05e35a7c0d35cb0803cc5"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.96",
@@ -10543,7 +10528,7 @@ dependencies = [
  "lazy_static",
  "local-ip-address",
  "log-query",
- "loki-api",
+ "loki-proto",
  "mime_guess",
  "mysql_async",
  "notify",
@@ -10558,7 +10543,7 @@ dependencies = [
  "pin-project",
  "pipeline",
  "postgres-types",
- "pprof 0.13.0",
+ "pprof",
  "prometheus",
  "promql-parser",
  "prost 0.13.3",
@@ -11927,7 +11912,7 @@ dependencies = [
  "hyper-util",
  "itertools 0.10.5",
  "log-query",
- "loki-api",
+ "loki-proto",
  "meta-client",
  "meta-srv",
  "moka",
@@ -13424,7 +13409,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

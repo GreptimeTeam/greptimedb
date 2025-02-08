@@ -38,7 +38,7 @@ use query::sql::{
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::ast::ColumnOption;
+use sql::ast::{ColumnOption, ObjectName};
 use sql::statements::alter::{
     AlterDatabase, AlterDatabaseOperation, AlterTable, AlterTableOperation,
 };
@@ -55,8 +55,9 @@ use table::table_reference::TableReference;
 use crate::error::{
     BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu,
     ConvertIdentifierSnafu, EncodeJsonSnafu, ExternalSnafu, IllegalPrimaryKeysDefSnafu,
-    InferFileTableSchemaSnafu, InvalidSqlSnafu, NotSupportedSnafu, ParseSqlSnafu,
-    PrepareFileTableSnafu, Result, SchemaIncompatibleSnafu, UnrecognizedTableOptionSnafu,
+    InferFileTableSchemaSnafu, InvalidFlowNameSnafu, InvalidSqlSnafu, NotSupportedSnafu,
+    ParseSqlSnafu, PrepareFileTableSnafu, Result, SchemaIncompatibleSnafu,
+    UnrecognizedTableOptionSnafu,
 };
 
 #[derive(Debug, Copy, Clone)]
@@ -731,7 +732,7 @@ pub fn to_create_flow_task_expr(
 
     Ok(CreateFlowExpr {
         catalog_name: query_ctx.current_catalog().to_string(),
-        flow_name: create_flow.flow_name.to_string(),
+        flow_name: sanitize_flow_name(create_flow.flow_name)?,
         source_table_names,
         sink_table_name: Some(sink_table_name),
         or_replace: create_flow.or_replace,
@@ -741,6 +742,18 @@ pub fn to_create_flow_task_expr(
         sql: create_flow.query.to_string(),
         flow_options: HashMap::new(),
     })
+}
+
+/// sanitize the flow name, remove possible quotes
+fn sanitize_flow_name(mut flow_name: ObjectName) -> Result<String> {
+    ensure!(
+        flow_name.0.len() == 1,
+        InvalidFlowNameSnafu {
+            name: flow_name.to_string(),
+        }
+    );
+    // safety: we've checked flow_name.0 has exactly one element.
+    Ok(flow_name.0.swap_remove(0).value)
 }
 
 #[cfg(test)]
@@ -754,6 +767,62 @@ mod tests {
     use store_api::storage::ColumnDefaultConstraint;
 
     use super::*;
+
+    #[test]
+    fn test_create_flow_expr() {
+        let sql = r"
+CREATE FLOW `task_2`
+SINK TO schema_1.table_1
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::CreateFlow(create_flow) = stmt else {
+            unreachable!()
+        };
+        let expr = to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
+
+        let to_dot_sep =
+            |c: TableName| format!("{}.{}.{}", c.catalog_name, c.schema_name, c.table_name);
+        assert_eq!("task_2", expr.flow_name);
+        assert_eq!("greptime", expr.catalog_name);
+        assert_eq!(
+            "greptime.schema_1.table_1",
+            expr.sink_table_name.map(to_dot_sep).unwrap()
+        );
+        assert_eq!(1, expr.source_table_names.len());
+        assert_eq!(
+            "greptime.schema_2.table_2",
+            to_dot_sep(expr.source_table_names[0].clone())
+        );
+        assert_eq!("SELECT max(c1), min(c2) FROM schema_2.table_2", expr.sql);
+
+        let sql = r"
+CREATE FLOW abc.`task_2`
+SINK TO schema_1.table_1
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::CreateFlow(create_flow) = stmt else {
+            unreachable!()
+        };
+        let res = to_create_flow_task_expr(create_flow, &QueryContext::arc());
+
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid flow name: abc.`task_2`"));
+    }
 
     #[test]
     fn test_create_to_expr() {

@@ -433,6 +433,30 @@ select * from information_schema.columns order by table_schema, table_name, colu
 | greptime      | public             | numbers                               | number                            | 1                |                          |                        | 10                | 0             |                    |                    |                | PRI        |       | select,insert |                       | UInt32               | int unsigned    | TAG           |                | No          | int unsigned    |                |        |
 +---------------+--------------------+---------------------------------------+-----------------------------------+------------------+--------------------------+------------------------+-------------------+---------------+--------------------+--------------------+----------------+------------+-------+---------------+-----------------------+----------------------+-----------------+---------------+----------------+-------------+-----------------+----------------+--------+
 
+select table_schema, table_name from information_schema.tables order by table_name limit 5;
+
++--------------------+---------------------------------------+
+| table_schema       | table_name                            |
++--------------------+---------------------------------------+
+| information_schema | build_info                            |
+| information_schema | character_sets                        |
+| information_schema | check_constraints                     |
+| information_schema | cluster_info                          |
+| information_schema | collation_character_set_applicability |
++--------------------+---------------------------------------+
+
+select table_schema, table_name from information_schema.tables order by table_name limit 5 offset 0;
+
++--------------------+---------------------------------------+
+| table_schema       | table_name                            |
++--------------------+---------------------------------------+
+| information_schema | build_info                            |
+| information_schema | character_sets                        |
+| information_schema | check_constraints                     |
+| information_schema | cluster_info                          |
+| information_schema | collation_character_set_applicability |
++--------------------+---------------------------------------+
+
 create
 database my_db;
 

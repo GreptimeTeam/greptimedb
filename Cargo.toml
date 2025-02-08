@@ -138,8 +138,8 @@ itertools = "0.10"
 jsonb = { git = "https://github.com/databendlabs/jsonb.git", rev = "8c8d2fc294a39f3ff08909d60f718639cfba3875", default-features = false }
 lazy_static = "1.4"
 local-ip-address = "0.6"
-loki-api = { git = "https://github.com/shuiyisong/tracing-loki", branch = "chore/prost_version" }
-meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "a10facb353b41460eeb98578868ebf19c2084fac" }
+loki-proto = { git = "https://github.com/GreptimeTeam/loki-proto.git", rev = "1434ecf23a2654025d86188fb5205e7a74b225d3" }
+meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "5618e779cf2bb4755b499c630fba4c35e91898cb" }
 mockall = "0.11.4"
 moka = "0.12"
 nalgebra = "0.33"
@@ -278,12 +278,10 @@ tokio-rustls = { git = "https://github.com/GreptimeTeam/tokio-rustls", rev = "46
 # This is commented, since we are not using aws-lc-sys, if we need to use it, we need to uncomment this line or use a release after this commit, or it wouldn't compile with gcc < 8.1
 # see https://github.com/aws/aws-lc-rs/pull/526
 # aws-lc-sys = { git ="https://github.com/aws/aws-lc-rs", rev = "556558441e3494af4b156ae95ebc07ebc2fd38aa" }
-# Apply a fix for pprof for unaligned pointer access
-pprof = { git = "https://github.com/GreptimeTeam/pprof-rs", rev = "1bd1e21" }
 
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"
-rev = "a10facb353b41460eeb98578868ebf19c2084fac"
+rev = "5618e779cf2bb4755b499c630fba4c35e91898cb"
 
 [profile.release]
 debug = 1

@@ -63,7 +63,7 @@ mod tests {
             .args([
                 "datanode",
                 "start",
-                "--rpc-addr=0.0.0.0:4321",
+                "--rpc-bind-addr=0.0.0.0:4321",
                 "--node-id=1",
                 &format!("--data-home={}", data_home.path().display()),
                 &format!("--wal-dir={}", wal_dir.path().display()),
@@ -80,7 +80,7 @@ mod tests {
             "--log-level=off",
             "cli",
             "attach",
-            "--grpc-addr=0.0.0.0:4321",
+            "--grpc-bind-addr=0.0.0.0:4321",
             // history commands can sneaky into stdout and mess up our tests, so disable it
             "--disable-helper",
         ]);

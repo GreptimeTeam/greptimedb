@@ -23,8 +23,8 @@ use common_error::status_code::StatusCode as ErrorCode;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use log_query::{Context, Limit, LogQuery, TimeFilter};
-use loki_api::logproto::{EntryAdapter, PushRequest, StreamAdapter};
-use loki_api::prost_types::Timestamp;
+use loki_proto::logproto::{EntryAdapter, PushRequest, StreamAdapter};
+use loki_proto::prost_types::Timestamp;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
@@ -907,8 +907,8 @@ cors_allowed_origins = []
 enable_cors = true
 
 [grpc]
-addr = "127.0.0.1:4001"
-hostname = "127.0.0.1:4001"
+bind_addr = "127.0.0.1:4001"
+server_addr = "127.0.0.1:4001"
 max_recv_message_size = "512MiB"
 max_send_message_size = "512MiB"
 runtime_size = 8
@@ -964,8 +964,9 @@ prefill_log_files = false
 {storage}
 
 [metadata_store]
-file_size = "256MiB"
-purge_threshold = "4GiB"
+file_size = "64MiB"
+purge_threshold = "256MiB"
+purge_interval = "1m"
 
 [procedure]
 max_retry_times = 3
@@ -1228,7 +1229,7 @@ transform:
 
     // 1. create pipeline
     let res = client
-        .post("/v1/events/pipelines/greptime_guagua")
+        .post("/v1/pipelines/greptime_guagua")
         .header("Content-Type", "application/x-yaml")
         .body(body)
         .send()
@@ -1243,7 +1244,7 @@ transform:
     );
 
     let res = client
-        .post("/v1/events/pipelines/test")
+        .post("/v1/pipelines/test")
         .header("Content-Type", "application/x-yaml")
         .body(body)
         .send()
@@ -1287,7 +1288,7 @@ transform:
 ]
 "#;
     let res = client
-        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test")
+        .post("/v1/ingest?db=public&table=logs1&pipeline_name=test")
         .header("Content-Type", "application/json")
         .body(data_body)
         .send()
@@ -1298,7 +1299,7 @@ transform:
 
     // 3. remove pipeline
     let res = client
-        .delete(format!("/v1/events/pipelines/test?version={}", encoded).as_str())
+        .delete(format!("/v1/pipelines/test?version={}", encoded).as_str())
         .send()
         .await;
 
@@ -1316,7 +1317,7 @@ transform:
 
     // 4. write data failed
     let res = client
-        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test")
+        .post("/v1/ingest?db=public&table=logs1&pipeline_name=test")
         .header("Content-Type", "application/json")
         .body(data_body)
         .send()
@@ -1337,7 +1338,7 @@ pub async fn test_identify_pipeline(store_type: StorageType) {
     let body = r#"{"__time__":1453809242,"__topic__":"","__source__":"10.170.***.***","ip":"10.200.**.***","time":"26/Jan/2016:19:54:02 +0800","url":"POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","status":"200","user-agent":"aliyun-sdk-java"}
 {"__time__":1453809242,"__topic__":"","__source__":"10.170.***.***","ip":"10.200.**.***","time":"26/Jan/2016:19:54:02 +0800","url":"POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","status":"200","user-agent":"aliyun-sdk-java","hasagei":"hasagei","dongdongdong":"guaguagua"}"#;
     let res = client
-        .post("/v1/events/logs?db=public&table=logs&pipeline_name=greptime_identity")
+        .post("/v1/ingest?db=public&table=logs&pipeline_name=greptime_identity")
         .header("Content-Type", "application/json")
         .body(body)
         .send()
@@ -1594,7 +1595,7 @@ pub async fn test_identify_pipeline_with_flatten(store_type: StorageType) {
                 HeaderValue::from_static("flatten_json_object=true"),
             ),
         ],
-        "/v1/events/logs?table=logs&pipeline_name=greptime_identity",
+        "/v1/ingest?table=logs&pipeline_name=greptime_identity",
         body.as_bytes().to_vec(),
         false,
     )
@@ -1655,7 +1656,7 @@ transform:
 
     // 1. create pipeline
     let res = client
-        .post("/v1/events/pipelines/test")
+        .post("/v1/pipelines/test")
         .header("Content-Type", "application/x-yaml")
         .body(pipeline_content)
         .send()
@@ -1771,7 +1772,7 @@ transform:
         ]
         "#;
         let res = client
-            .post("/v1/events/pipelines/dryrun?pipeline_name=test")
+            .post("/v1/pipelines/_dryrun?pipeline_name=test")
             .header("Content-Type", "application/json")
             .body(data_body)
             .send()
@@ -1801,7 +1802,7 @@ transform:
             }
         "#;
         let res = client
-            .post("/v1/events/pipelines/dryrun")
+            .post("/v1/pipelines/_dryrun")
             .header("Content-Type", "application/json")
             .body(body)
             .send()
@@ -1829,7 +1830,7 @@ transform:
         });
         body["pipeline"] = json!(pipeline_content);
         let res = client
-            .post("/v1/events/pipelines/dryrun")
+            .post("/v1/pipelines/_dryrun")
             .header("Content-Type", "application/json")
             .body(body.to_string())
             .send()
@@ -1857,7 +1858,7 @@ transform:
         ]
         });
         let res = client
-            .post("/v1/events/pipelines/dryrun")
+            .post("/v1/pipelines/_dryrun")
             .header("Content-Type", "application/json")
             .body(body.to_string())
             .send()
@@ -1898,7 +1899,7 @@ transform:
 
     // 1. create pipeline
     let res = client
-        .post("/v1/events/pipelines/test")
+        .post("/v1/pipelines/test")
         .header("Content-Type", "application/x-yaml")
         .body(body)
         .send()
@@ -1933,7 +1934,7 @@ transform:
 2024-05-25 20:16:37.218 hello world
 "#;
     let res = client
-        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test")
+        .post("/v1/ingest?db=public&table=logs1&pipeline_name=test")
         .header("Content-Type", "text/plain")
         .body(data_body)
         .send()
@@ -2096,7 +2097,7 @@ pub async fn test_otlp_logs(store_type: StorageType) {
 
     let client = TestClient::new(app).await;
     let content = r#"
-{"resourceLogs":[{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeLogs":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"logRecords":[{"timeUnixNano":"1736413568497632000","observedTimeUnixNano":"0","severityNumber":9,"severityText":"Info","body":{"stringValue":"the message line one"},"attributes":[{"key":"app","value":{"stringValue":"server"}}],"droppedAttributesCount":0,"flags":0,"traceId":"f665100a612542b69cc362fe2ae9d3bf","spanId":"e58f01c4c69f4488"}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.4.0"},{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeLogs":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"logRecords":[{"timeUnixNano":"1736413568538897000","observedTimeUnixNano":"0","severityNumber":9,"severityText":"Info","body":{"stringValue":"the message line two"},"attributes":[{"key":"app","value":{"stringValue":"server"}}],"droppedAttributesCount":0,"flags":0,"traceId":"f665100a612542b69cc362fe2ae9d3bf","spanId":"e58f01c4c69f4488"}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.4.0"}]}
+{"resourceLogs":[{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeLogs":[{"scope":{"name":"","version":"","attributes":[{"key":"instance_num","value":{"stringValue":"10"}}],"droppedAttributesCount":0},"logRecords":[{"timeUnixNano":"1736413568497632000","observedTimeUnixNano":"0","severityNumber":9,"severityText":"Info","body":{"stringValue":"the message line one"},"attributes":[{"key":"app","value":{"stringValue":"server1"}}],"droppedAttributesCount":0,"flags":0,"traceId":"f665100a612542b69cc362fe2ae9d3bf","spanId":"e58f01c4c69f4488"}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.4.0"},{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeLogs":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"logRecords":[{"timeUnixNano":"1736413568538897000","observedTimeUnixNano":"0","severityNumber":9,"severityText":"Info","body":{"stringValue":"the message line two"},"attributes":[{"key":"app","value":{"stringValue":"server2"}}],"droppedAttributesCount":0,"flags":0,"traceId":"f665100a612542b69cc362fe2ae9d3bf","spanId":"e58f01c4c69f4488"}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.4.0"}]}
 "#;
 
     let req: ExportLogsServiceRequest = serde_json::from_str(content).unwrap();
@@ -2106,24 +2107,24 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         // write log data
         let res = send_req(
             &client,
-            vec![
-                (
-                    HeaderName::from_static("content-type"),
-                    HeaderValue::from_static("application/x-protobuf"),
-                ),
-                (
-                    HeaderName::from_static("x-greptime-log-table-name"),
-                    HeaderValue::from_static("logs1"),
-                ),
-            ],
+            vec![(
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            )],
             "/v1/otlp/v1/logs?db=public",
             body.clone(),
             false,
         )
         .await;
         assert_eq!(StatusCode::OK, res.status());
-        let expected = "[[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server\"},0,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\"],[1736413568538897000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line two\",{\"app\":\"server\"},0,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\"]]";
-        validate_data("otlp_logs", &client, "select * from logs1;", expected).await;
+        let expected = "[[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server1\"},0,\"\",\"\",{\"instance_num\":\"10\"},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\"],[1736413568538897000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line two\",{\"app\":\"server2\"},0,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\"]]";
+        validate_data(
+            "otlp_logs",
+            &client,
+            "select * from opentelemetry_logs;",
+            expected,
+        )
+        .await;
     }
 
     {
@@ -2137,7 +2138,7 @@ pub async fn test_otlp_logs(store_type: StorageType) {
                 ),
                 (
                     HeaderName::from_static("x-greptime-log-table-name"),
-                    HeaderValue::from_static("logs"),
+                    HeaderValue::from_static("cus_logs"),
                 ),
                 (
                     HeaderName::from_static("x-greptime-log-extract-keys"),
@@ -2151,11 +2152,51 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         .await;
         assert_eq!(StatusCode::OK, res.status());
 
-        let expected = "[[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server\"},0,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",\"server\"],[1736413568538897000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line two\",{\"app\":\"server\"},0,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",\"server\"]]";
+        let expected = "[[1736413568538897000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line two\",{\"app\":\"server2\"},0,\"\",\"\",{},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",null,\"server2\"],[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server1\"},0,\"\",\"\",{\"instance_num\":\"10\"},\"\",{},\"https://opentelemetry.io/schemas/1.4.0\",\"10\",\"server1\"]]";
         validate_data(
             "otlp_logs_with_selector",
             &client,
-            "select * from logs;",
+            "select * from cus_logs;",
+            expected,
+        )
+        .await;
+    }
+
+    {
+        // test same selector with multiple value
+        let content = r#"
+        {"resourceLogs":[{"resource":{"attributes":[{"key":"fromwhere","value":{"stringValue":"resource"}}],"droppedAttributesCount":0},"scopeLogs":[{"scope":{"name":"","version":"","attributes":[{"key":"fromwhere","value":{"stringValue":"scope"}}],"droppedAttributesCount":0},"logRecords":[{"timeUnixNano":"1736413568497632000","observedTimeUnixNano":"0","severityNumber":9,"severityText":"Info","body":{"stringValue":"the message line one"},"attributes":[{"key":"app","value":{"stringValue":"server"}},{"key":"fromwhere","value":{"stringValue":"log_attr"}}],"droppedAttributesCount":0,"flags":0,"traceId":"f665100a612542b69cc362fe2ae9d3bf","spanId":"e58f01c4c69f4488"}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.4.0"}]}
+        "#;
+        let req: ExportLogsServiceRequest = serde_json::from_str(content).unwrap();
+        let body = req.encode_to_vec();
+        let res = send_req(
+            &client,
+            vec![
+                (
+                    HeaderName::from_static("content-type"),
+                    HeaderValue::from_static("application/x-protobuf"),
+                ),
+                (
+                    HeaderName::from_static("x-greptime-log-table-name"),
+                    HeaderValue::from_static("logs2"),
+                ),
+                (
+                    HeaderName::from_static("x-greptime-log-extract-keys"),
+                    HeaderValue::from_static("fromwhere"),
+                ),
+            ],
+            "/v1/otlp/v1/logs?db=public",
+            body.clone(),
+            false,
+        )
+        .await;
+        assert_eq!(StatusCode::OK, res.status());
+
+        let expected = "[[1736413568497632000,\"f665100a612542b69cc362fe2ae9d3bf\",\"e58f01c4c69f4488\",\"Info\",9,\"the message line one\",{\"app\":\"server\",\"fromwhere\":\"log_attr\"},0,\"\",\"\",{\"fromwhere\":\"scope\"},\"\",{\"fromwhere\":\"resource\"},\"https://opentelemetry.io/schemas/1.4.0\",\"log_attr\"]]";
+        validate_data(
+            "otlp_logs_with_selector_overlapping",
+            &client,
+            "select * from logs2;",
             expected,
         )
         .await;
@@ -2178,10 +2219,14 @@ pub async fn test_loki_pb_logs(store_type: StorageType) {
                 EntryAdapter {
                     timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
                     line: "this is a log message".to_string(),
+                    structured_metadata: vec![],
+                    parsed: vec![],
                 },
                 EntryAdapter {
                     timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
                     line: "this is a log message".to_string(),
+                    structured_metadata: vec![],
+                    parsed: vec![],
                 },
             ],
             hash: rand::random(),

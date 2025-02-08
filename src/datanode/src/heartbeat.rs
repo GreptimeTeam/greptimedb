@@ -89,7 +89,7 @@ impl HeartbeatTask {
             node_id: opts.node_id.unwrap_or(0),
             // We use datanode's start time millis as the node's epoch.
             node_epoch: common_time::util::current_time_millis() as u64,
-            peer_addr: addrs::resolve_addr(&opts.grpc.addr, Some(&opts.grpc.hostname)),
+            peer_addr: addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),
             running: Arc::new(AtomicBool::new(false)),
             meta_client,
             region_server,

@@ -219,6 +219,7 @@ pub(crate) fn find_key_index(intermediate_keys: &[String], key: &str, kind: &str
 }
 
 /// SelectInfo is used to store the selected keys from OpenTelemetry record attrs
+/// The key is used to uplift value from the attributes and serve as column name in the table
 #[derive(Default)]
 pub struct SelectInfo {
     pub keys: Vec<String>,

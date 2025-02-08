@@ -28,6 +28,7 @@ use common_meta::kv_backend::postgres::PgStore;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_telemetry::info;
+use common_wal::options::WalOptions;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use rand::Rng;
@@ -184,7 +185,7 @@ fn create_region_routes(regions: Vec<RegionNumber>) -> Vec<RegionRoute> {
     region_routes
 }
 
-fn create_region_wal_options(regions: Vec<RegionNumber>) -> HashMap<RegionNumber, String> {
+fn create_region_wal_options(regions: Vec<RegionNumber>) -> HashMap<RegionNumber, WalOptions> {
     // TODO(niebayes): construct region wal options for benchmark.
     let _ = regions;
     HashMap::default()

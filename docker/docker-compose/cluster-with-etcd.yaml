@@ -43,8 +43,8 @@ services:
     command:
       - metasrv
       - start
-      - --bind-addr=0.0.0.0:3002
-      - --server-addr=metasrv:3002
+      - --rpc-bind-addr=0.0.0.0:3002
+      - --rpc-server-addr=metasrv:3002
       - --store-addrs=etcd0:2379
       - --http-addr=0.0.0.0:3000
     healthcheck:
@@ -68,8 +68,8 @@ services:
       - datanode
       - start
       - --node-id=0
-      - --rpc-addr=0.0.0.0:3001
-      - --rpc-hostname=datanode0:3001
+      - --rpc-bind-addr=0.0.0.0:3001
+      - --rpc-server-addr=datanode0:3001
       - --metasrv-addrs=metasrv:3002
       - --http-addr=0.0.0.0:5000
     volumes:
@@ -98,7 +98,7 @@ services:
       - start
       - --metasrv-addrs=metasrv:3002
       - --http-addr=0.0.0.0:4000
-      - --rpc-addr=0.0.0.0:4001
+      - --rpc-bind-addr=0.0.0.0:4001
       - --mysql-addr=0.0.0.0:4002
       - --postgres-addr=0.0.0.0:4003
     healthcheck:
@@ -123,8 +123,8 @@ services:
       - start
       - --node-id=0
       - --metasrv-addrs=metasrv:3002
-      - --rpc-addr=0.0.0.0:4004
-      - --rpc-hostname=flownode0:4004
+      - --rpc-bind-addr=0.0.0.0:4004
+      - --rpc-server-addr=flownode0:4004
       - --http-addr=0.0.0.0:4005
     depends_on:
       frontend0:

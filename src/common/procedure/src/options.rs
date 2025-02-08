@@ -19,7 +19,7 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProcedureConfig {
     /// Max retry times of procedure.
