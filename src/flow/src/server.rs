@@ -37,9 +37,11 @@ use operator::delete::Deleter;
 use operator::insert::Inserter;
 use operator::statement::StatementExecutor;
 use partition::manager::PartitionRuleManager;
+use query::parser::QueryLanguageParser;
 use query::{QueryEngine, QueryEngineFactory};
 use servers::error::{AlreadyStartedSnafu, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu};
 use servers::http::{HttpServer, HttpServerBuilder};
+use servers::interceptor::{QueryContextInterceptor, QueryContextInterceptorRef};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
 use session::context::{QueryContextBuilder, QueryContextRef};
@@ -133,9 +135,12 @@ impl flow_server::Flow for FlowService {
     }
 }
 
+/// The core of flownode service with a shutdown signal sender.
 pub struct FlownodeServer {
-    shutdown_tx: Mutex<Option<broadcast::Sender<()>>>,
     flow_service: FlowService,
+    plugins: Plugins,
+    /// The shutdown signal sender. None means the flownode havn't started yet.
+    shutdown_tx: Mutex<Option<broadcast::Sender<()>>>,
 }
 
 impl FlownodeServer {
@@ -143,7 +148,24 @@ impl FlownodeServer {
         Self {
             flow_service,
             shutdown_tx: Mutex::new(None),
+            plugins: Plugins::new(),
         }
+    }
+
+    pub fn with_shutdown_tx(mut self, tx: broadcast::Sender<()>) -> Self {
+        self.shutdown_tx = Mutex::new(Some(tx));
+        self
+    }
+
+    pub fn with_plugins(mut self, plugins: Plugins) -> Self {
+        self.plugins = plugins;
+        self
+    }
+
+    /// Get the shutdown signal receiver.
+    pub async fn shutdown_rx(&self) -> Option<broadcast::Receiver<()>> {
+        let shutdown_tx = self.shutdown_tx.lock().await;
+        shutdown_tx.as_ref().map(|tx| tx.subscribe())
     }
 }
 
@@ -154,6 +176,27 @@ impl FlownodeServer {
             .send_compressed(CompressionEncoding::Gzip)
             .accept_compressed(CompressionEncoding::Zstd)
             .send_compressed(CompressionEncoding::Zstd)
+    }
+
+    /// Run flow worker manager locally without grpc server.
+    pub async fn start_local(&self) {
+        self.flow_service
+            .manager
+            .clone()
+            .run_background(self.shutdown_rx().await);
+    }
+
+    /// Shutdown the flow worker manager.
+    pub async fn shutdown_local(&self) -> Result<(), Error> {
+        let mut shutdown_tx = self.shutdown_tx.lock().await;
+        if let Some(tx) = shutdown_tx.take() {
+            if tx.send(()).is_err() {
+                info!("Receiver dropped, the flow node server has already shutdown");
+            }
+        }
+        info!("Shutdown flow node server");
+
+        Ok(())
     }
 }
 
@@ -172,7 +215,7 @@ impl servers::server::Server for FlownodeServer {
     }
     async fn start(&self, addr: SocketAddr) -> Result<SocketAddr, servers::error::Error> {
         let (tx, rx) = broadcast::channel::<()>(1);
-        let mut rx_server = tx.subscribe();
+        let mut rx_server = self.shutdown_rx().await.expect("rx_server");
         let (incoming, addr) = {
             let mut shutdown_tx = self.shutdown_tx.lock().await;
             ensure!(
@@ -201,8 +244,7 @@ impl servers::server::Server for FlownodeServer {
                 .context(StartGrpcSnafu);
         });
 
-        let manager_ref = self.flow_service.manager.clone();
-        let _handle = manager_ref.clone().run_background(Some(rx));
+        self.start_local().await;
 
         Ok(addr)
     }
@@ -214,7 +256,7 @@ impl servers::server::Server for FlownodeServer {
 
 /// The flownode server instance.
 pub struct FlownodeInstance {
-    server: FlownodeServer,
+    pub server: FlownodeServer,
     addr: SocketAddr,
     /// only used for health check
     http_server: HttpServer,
@@ -323,7 +365,8 @@ impl FlownodeBuilder {
             common_telemetry::error!(err; "Failed to recover flows");
         }
 
-        let server = FlownodeServer::new(FlowService::new(manager.clone()));
+        let server =
+            FlownodeServer::new(FlowService::new(manager.clone())).with_plugins(self.plugins);
 
         let http_addr = self.opts.http.addr.parse().context(ParseAddrSnafu {
             addr: self.opts.http.addr.clone(),
@@ -480,6 +523,7 @@ pub struct FrontendInvoker {
     inserter: Arc<Inserter>,
     deleter: Arc<Deleter>,
     statement_executor: Arc<StatementExecutor>,
+    plugins: Plugins,
 }
 
 impl FrontendInvoker {
@@ -487,11 +531,13 @@ impl FrontendInvoker {
         inserter: Arc<Inserter>,
         deleter: Arc<Deleter>,
         statement_executor: Arc<StatementExecutor>,
+        plugins: Plugins,
     ) -> Self {
         Self {
             inserter,
             deleter,
             statement_executor,
+            plugins,
         }
     }
 
@@ -502,6 +548,7 @@ impl FrontendInvoker {
         layered_cache_registry: LayeredCacheRegistryRef,
         procedure_executor: ProcedureExecutorRef,
         node_manager: NodeManagerRef,
+        plugins: Plugins,
     ) -> Result<FrontendInvoker, Error> {
         let table_route_cache: TableRouteCacheRef =
             layered_cache_registry.get().context(CacheRequiredSnafu {
@@ -543,7 +590,7 @@ impl FrontendInvoker {
             table_route_cache,
         ));
 
-        let invoker = FrontendInvoker::new(inserter, deleter, statement_executor);
+        let invoker = FrontendInvoker::new(inserter, deleter, statement_executor, plugins);
         Ok(invoker)
     }
 }
@@ -579,6 +626,32 @@ impl FrontendInvoker {
             .await
             .map_err(BoxedError::new)
             .context(common_frontend::error::ExternalSnafu)
+    }
+
+    pub async fn exec_sql(&self, sql: &str, query_ctx: QueryContextRef) -> Result<Output, Error> {
+        let stmt_exec = &self.statement_executor;
+
+        let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        let plan = stmt_exec
+            .plan(&stmt, query_ctx.clone())
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        // TODO(discord9): add plugin handling
+
+        let ctx_interceptor = self.plugins.get::<QueryContextInterceptorRef<Error>>();
+        let ctx_interceptor = ctx_interceptor.as_ref();
+        ctx_interceptor.pre_execute(&plan, query_ctx.clone())?;
+
+        let output_data = stmt_exec
+            .exec_plan(plan, query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
+        Ok(output_data)
     }
 
     pub fn statement_executor(&self) -> Arc<StatementExecutor> {

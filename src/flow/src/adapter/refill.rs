@@ -14,7 +14,7 @@
 
 //! This module contains the refill flow task, which is used to refill flow with given table id and a time range.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
@@ -23,11 +23,12 @@ use common_meta::key::flow::FlowMetadataManagerRef;
 use common_recordbatch::{RecordBatch, RecordBatches, SendableRecordBatchStream};
 use common_runtime::JoinHandle;
 use common_telemetry::error;
+use common_time::Tz;
 use datatypes::value::Value;
 use futures::StreamExt;
-use query::parser::QueryLanguageParser;
 use session::context::QueryContextBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::mito_engine_options::SNAPSHOT_READ;
 use table::metadata::TableId;
 
 use super::{FlowId, FlowWorkerManager};
@@ -36,6 +37,7 @@ use crate::adapter::FlowWorkerManagerRef;
 use crate::error::{FlowNotFoundSnafu, JoinTaskSnafu, UnexpectedSnafu};
 use crate::expr::error::ExternalSnafu;
 use crate::expr::utils::find_plan_time_window_expr_lower_bound;
+use crate::metrics::METRIC_FLOW_REFILL_QUERY_TIME;
 use crate::repr::RelationDesc;
 use crate::server::get_all_flow_ids;
 use crate::{Error, FrontendInvoker};
@@ -168,6 +170,8 @@ struct TaskData {
     flow_id: FlowId,
     table_id: TableId,
     table_schema: RelationDesc,
+    time_range: Option<(common_time::Timestamp, common_time::Timestamp)>,
+    sql: String,
 }
 
 impl TaskData {
@@ -271,7 +275,27 @@ impl TaskState<()> {
         mut output_stream: SendableRecordBatchStream,
     ) -> Result<(), Error> {
         let data = (*task_data).clone();
+        let time_range_readable = data
+            .time_range
+            .map(|(l, r)| {
+                format!(
+                    "Time range: {} 'UTC' - {} 'UTC'",
+                    l.to_timezone_aware_string(Some(&common_time::Timezone::Named(Tz::UTC))),
+                    r.to_timezone_aware_string(Some(&common_time::Timezone::Named(Tz::UTC)))
+                )
+            })
+            .unwrap_or("No time range".to_string());
+        let timer = METRIC_FLOW_REFILL_QUERY_TIME
+            .with_label_values(&[
+                "refill_sql_query",
+                &task_data.sql,
+                &task_data.table_id.to_string(),
+                &task_data.flow_id.to_string(),
+                &time_range_readable,
+            ])
+            .start_timer();
         let handle: JoinHandle<Result<(), Error>> = common_runtime::spawn_global(async move {
+            let _timer = timer;
             while let Some(rb) = output_stream.next().await {
                 let rb = match rb {
                     Ok(rb) => rb,
@@ -376,6 +400,8 @@ impl RefillTask {
                 flow_id,
                 table_id,
                 table_schema: table_schema.relation_desc,
+                time_range,
+                sql: sql.clone(),
             },
             state: TaskState::new(sql),
         })
@@ -395,29 +421,20 @@ impl RefillTask {
         };
 
         // we don't need information from query context in this query so a default query context is enough
+        // also set snapshot read to true to make sure we can read the snapshot data only
+        // because newer data is mirrored instead
         let query_ctx = Arc::new(
             QueryContextBuilder::default()
                 .current_catalog("greptime".to_string())
                 .current_schema("public".to_string())
+                .extensions(HashMap::from([(
+                    SNAPSHOT_READ.to_string(),
+                    "true".to_string(),
+                )]))
                 .build(),
         );
 
-        let stmt_exec = invoker.statement_executor();
-
-        let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx)
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
-        let plan = stmt_exec
-            .plan(&stmt, query_ctx.clone())
-            .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
-
-        let output_data = stmt_exec
-            .exec_plan(plan, query_ctx)
-            .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
+        let output_data = invoker.exec_sql(&sql, query_ctx.clone()).await?;
 
         let output_stream = QueryStream::try_from(output_data)?;
         let output_stream = output_stream.try_into_stream()?;

@@ -56,11 +56,13 @@ use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::DescribeResult;
 use query::stats::StatementStatistics;
 use query::QueryEngineRef;
-use servers::error as server_error;
-use servers::error::{AuthSnafu, ExecuteQuerySnafu, ParsePromQLSnafu};
+use servers::error::{
+    self as server_error, AuthSnafu, ExecuteQuerySnafu, OtherSnafu, ParsePromQLSnafu,
+};
 use servers::export_metrics::ExportMetricsTask;
 use servers::interceptor::{
-    PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
+    PromQueryInterceptor, PromQueryInterceptorRef, QueryContextInterceptor,
+    QueryContextInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
 };
 use servers::prometheus_handler::PrometheusHandler;
 use servers::query_handler::grpc::GrpcQueryHandler;
@@ -231,6 +233,9 @@ impl Instance {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
 
+        let ctx_interceptor = self.plugins.get::<QueryContextInterceptorRef<Error>>();
+        let ctx_interceptor = ctx_interceptor.as_ref();
+
         let _slow_query_timer = self
             .stats
             .start_slow_query_timer(QueryStatement::Sql(stmt.clone()));
@@ -247,6 +252,7 @@ impl Instance {
                     unreachable!()
                 };
                 query_interceptor.pre_execute(&stmt, Some(&plan), query_ctx.clone())?;
+                ctx_interceptor.pre_execute(&plan, query_ctx.clone())?;
 
                 self.statement_executor.exec_plan(plan, query_ctx).await
             }
@@ -261,6 +267,7 @@ impl Instance {
                     Some(&plan),
                     query_ctx.clone(),
                 )?;
+                ctx_interceptor.pre_execute(&plan, query_ctx.clone())?;
 
                 self.statement_executor.exec_plan(plan, query_ctx).await
             }
@@ -442,6 +449,13 @@ impl PrometheusHandler for Instance {
             .context(ExecuteQuerySnafu)?;
 
         interceptor.pre_execute(query, Some(&plan), query_ctx.clone())?;
+
+        let ctx_interceptor = self.plugins.get::<QueryContextInterceptorRef<Error>>();
+        let ctx_interceptor = ctx_interceptor.as_ref();
+        ctx_interceptor
+            .pre_execute(&plan, query_ctx.clone())
+            .map_err(BoxedError::new)
+            .context(OtherSnafu)?;
 
         let output = self
             .statement_executor

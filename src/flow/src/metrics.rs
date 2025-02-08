@@ -42,6 +42,12 @@ lazy_static! {
         &["type"]
     )
     .unwrap();
+    pub static ref METRIC_FLOW_REFILL_QUERY_TIME: HistogramVec = register_histogram_vec!(
+        "greptime_flow_refill_query_time",
+        "Time spent calling refill query for flow",
+        &["type"]
+    )
+    .unwrap();
     pub static ref METRIC_FLOW_ERRORS: IntCounterVec = register_int_counter_vec!(
         "greptime_flow_errors",
         "Count of errors in flow processing",

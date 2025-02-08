@@ -230,7 +230,7 @@ impl GreptimeDbStandaloneBuilder {
             ddl_task_executor.clone(),
             StatementStatistics::default(),
         )
-        .with_plugin(plugins)
+        .with_plugin(plugins.clone())
         .try_build()
         .await
         .unwrap();
@@ -243,6 +243,7 @@ impl GreptimeDbStandaloneBuilder {
             cache_registry.clone(),
             ddl_task_executor.clone(),
             node_manager.clone(),
+            plugins.clone(),
         )
         .await
         .context(StartFlownodeSnafu)
