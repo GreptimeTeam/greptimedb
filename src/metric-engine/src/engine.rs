@@ -133,12 +133,17 @@ impl RegionEngine for MetricEngine {
     ) -> Result<RegionResponse, BoxedError> {
         match batch_request {
             BatchRegionRequest::Create(requests) => {
-                self.handle_requests(
-                    requests
-                        .into_iter()
-                        .map(|(region_id, req)| (region_id, RegionRequest::Create(req))),
-                )
-                .await
+                let mut extension_return_value = HashMap::new();
+                let rows = self
+                    .inner
+                    .create_regions(requests, &mut extension_return_value)
+                    .await
+                    .map_err(BoxedError::new)?;
+
+                Ok(RegionResponse {
+                    affected_rows: rows,
+                    extensions: extension_return_value,
+                })
             }
             BatchRegionRequest::Alter(requests) => {
                 self.handle_requests(

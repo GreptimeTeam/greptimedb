@@ -246,6 +246,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Empty request"))]
+    EmptyRequest {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -263,7 +269,8 @@ impl ErrorExt for Error {
             | MultipleFieldColumn { .. }
             | NoFieldColumn { .. }
             | AddingFieldColumn { .. }
-            | ParseRegionOptions { .. } => StatusCode::InvalidArguments,
+            | ParseRegionOptions { .. }
+            | EmptyRequest { .. } => StatusCode::InvalidArguments,
 
             ForbiddenPhysicalAlter { .. } | UnsupportedRegionRequest { .. } => {
                 StatusCode::Unsupported
