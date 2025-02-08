@@ -608,7 +608,11 @@ impl Env {
     }
 
     /// Generate config file to `/tmp/{subcommand}-{current_time}.toml`
-    fn generate_config_file(&self, subcommand: &str, db_ctx: &GreptimeDBContext) -> String {
+    pub(crate) fn generate_config_file(
+        &self,
+        subcommand: &str,
+        db_ctx: &GreptimeDBContext,
+    ) -> String {
         let mut tt = TinyTemplate::new();
 
         let mut path = util::sqlness_conf_path();
@@ -914,7 +918,7 @@ impl Drop for GreptimeDB {
     }
 }
 
-struct GreptimeDBContext {
+pub struct GreptimeDBContext {
     /// Start time in millisecond
     time: i64,
     datanode_id: AtomicU32,
@@ -930,6 +934,10 @@ impl GreptimeDBContext {
             wal,
             store_config,
         }
+    }
+
+    pub(crate) fn time(&self) -> i64 {
+        self.time
     }
 
     fn is_raft_engine(&self) -> bool {
@@ -957,7 +965,7 @@ impl GreptimeDBContext {
         self.datanode_id.store(0, Ordering::Relaxed);
     }
 
-    fn store_config(&self) -> StoreConfig {
+    pub(crate) fn store_config(&self) -> StoreConfig {
         self.store_config.clone()
     }
 }

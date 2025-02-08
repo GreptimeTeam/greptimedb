@@ -26,6 +26,7 @@ use crate::env::StoreConfig;
 
 mod env;
 mod protocol_interceptor;
+mod server_mode;
 mod util;
 
 #[derive(ValueEnum, Debug, Clone)]
