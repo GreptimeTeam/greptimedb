@@ -57,7 +57,7 @@ const COLUMN_PREFIX: &str = "__column_";
 /// table id + region sequence. This handler will transform the region group by
 /// itself.
 pub struct MetadataRegion {
-    mito: MitoEngine,
+    pub(crate) mito: MitoEngine,
     /// Logical lock for operations that need to be serialized. Like update & read region columns.
     ///
     /// Region entry will be registered on creating and opening logical region, and deregistered on
@@ -472,6 +472,52 @@ impl MetadataRegion {
             series_row_selector: None,
             sequence: None,
         }
+    }
+
+    pub(crate) fn build_put_request_from_iter(
+        kv: impl Iterator<Item = (String, String)>,
+    ) -> RegionPutRequest {
+        let cols = vec![
+            ColumnSchema {
+                column_name: METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME.to_string(),
+                datatype: ColumnDataType::TimestampMillisecond as _,
+                semantic_type: SemanticType::Timestamp as _,
+                ..Default::default()
+            },
+            ColumnSchema {
+                column_name: METADATA_SCHEMA_KEY_COLUMN_NAME.to_string(),
+                datatype: ColumnDataType::String as _,
+                semantic_type: SemanticType::Tag as _,
+                ..Default::default()
+            },
+            ColumnSchema {
+                column_name: METADATA_SCHEMA_VALUE_COLUMN_NAME.to_string(),
+                datatype: ColumnDataType::String as _,
+                semantic_type: SemanticType::Field as _,
+                ..Default::default()
+            },
+        ];
+        let rows = Rows {
+            schema: cols,
+            rows: kv
+                .into_iter()
+                .map(|(key, value)| Row {
+                    values: vec![
+                        Value {
+                            value_data: Some(ValueData::TimestampMillisecondValue(0)),
+                        },
+                        Value {
+                            value_data: Some(ValueData::StringValue(key)),
+                        },
+                        Value {
+                            value_data: Some(ValueData::StringValue(value)),
+                        },
+                    ],
+                })
+                .collect(),
+        };
+
+        RegionPutRequest { rows, hint: None }
     }
 
     fn build_put_request(key: &str, value: &str) -> RegionPutRequest {
