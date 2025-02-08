@@ -40,6 +40,7 @@
 | `mysql.enable` | Bool | `true` | Whether to enable. |
 | `mysql.addr` | String | `127.0.0.1:4002` | The addr to bind the MySQL server. |
 | `mysql.runtime_size` | Integer | `2` | The number of server worker threads. |
+| `mysql.keep_alive_secs` | Integer | `0` | Server-side keep-alive time in seconds.<br/>Set to 0 (default) to disable. |
 | `mysql.tls` | -- | -- | -- |
 | `mysql.tls.mode` | String | `disable` | TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html<br/>- `disable` (default value)<br/>- `prefer`<br/>- `require`<br/>- `verify-ca`<br/>- `verify-full` |
 | `mysql.tls.cert_path` | String | Unset | Certificate file path. |
@@ -49,6 +50,7 @@
 | `postgres.enable` | Bool | `true` | Whether to enable |
 | `postgres.addr` | String | `127.0.0.1:4003` | The addr to bind the PostgresSQL server. |
 | `postgres.runtime_size` | Integer | `2` | The number of server worker threads. |
+| `postgres.keep_alive_secs` | Integer | `0` | Server-side keep-alive time in seconds.<br/>Set to 0 (default) to disable. |
 | `postgres.tls` | -- | -- | PostgresSQL server TLS options, see `mysql.tls` section. |
 | `postgres.tls.mode` | String | `disable` | TLS mode. |
 | `postgres.tls.cert_path` | String | Unset | Certificate file path. |
