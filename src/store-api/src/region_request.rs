@@ -89,6 +89,27 @@ impl RegionRequest {
     }
 }
 
+/// Requests for multiple regions.
+#[derive(Debug)]
+pub enum BatchRegionRequest {
+    Put(Vec<(RegionId, RegionPutRequest)>),
+}
+
+impl BatchRegionRequest {
+    /// Convert [Body](region_request::Body) to a group of [RegionRequest] with region id.
+    pub fn try_from_request_body(body: region_request::Body) -> Result<Self> {
+        match body {
+            region_request::Body::Inserts(inserts) => {
+                make_batch_region_puts(inserts).map(BatchRegionRequest::Put)
+            }
+            _ => InvalidRawRegionRequestSnafu {
+                err: "unsupported batch region request",
+            }
+            .fail(),
+        }
+    }
+}
+
 fn make_region_puts(inserts: InsertRequests) -> Result<Vec<(RegionId, RegionRequest)>> {
     let requests = inserts
         .requests
@@ -101,6 +122,19 @@ fn make_region_puts(inserts: InsertRequests) -> Result<Vec<(RegionId, RegionRequ
                     RegionRequest::Put(RegionPutRequest { rows, hint: None }),
                 )
             })
+        })
+        .collect();
+    Ok(requests)
+}
+
+fn make_batch_region_puts(inserts: InsertRequests) -> Result<Vec<(RegionId, RegionPutRequest)>> {
+    let requests = inserts
+        .requests
+        .into_iter()
+        .filter_map(|r| {
+            let region_id = r.region_id.into();
+            r.rows
+                .map(|rows| (region_id, RegionPutRequest { rows, hint: None }))
         })
         .collect();
     Ok(requests)

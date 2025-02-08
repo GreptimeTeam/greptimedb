@@ -59,7 +59,7 @@ use store_api::region_engine::{
     SettableRegionRoleState,
 };
 use store_api::region_request::{
-    AffectedRows, RegionCloseRequest, RegionOpenRequest, RegionRequest,
+    AffectedRows, RegionCloseRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
 use store_api::storage::RegionId;
 use tokio::sync::{Semaphore, SemaphorePermit};
@@ -156,6 +156,11 @@ impl RegionServer {
         request: RegionRequest,
     ) -> Result<RegionResponse> {
         self.inner.handle_request(region_id, request).await
+    }
+
+    #[tracing::instrument(skip_all, fields(request_type = "Put"))]
+    pub async fn handle_batch_body(&self, body: region_request::Body) -> Result<RegionResponse> {
+        self.inner.handle_batch_body(body).await
     }
 
     async fn table_provider(&self, region_id: RegionId) -> Result<Arc<dyn TableProvider>> {
@@ -784,6 +789,64 @@ impl RegionServerInner {
                 Err(err)
             }
         }
+    }
+
+    async fn handle_batch_body(&self, body: region_request::Body) -> Result<RegionResponse> {
+        let _timer = crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
+            .with_label_values(&["Put"])
+            .start_timer();
+
+        // Group requests by engine.
+        let mut engine_requests: HashMap<
+            String,
+            (RegionEngineRef, Vec<(RegionId, RegionPutRequest)>),
+        > = HashMap::with_capacity(1);
+        match body {
+            region_request::Body::Inserts(inserts) => {
+                let num_requests = inserts.requests.len();
+                for request in inserts.requests {
+                    let region_id = RegionId::from_u64(request.region_id);
+                    let CurrentEngine::Engine(engine) =
+                        self.get_engine(region_id, &RegionChange::None)?
+                    else {
+                        continue;
+                    };
+                    let Some(rows) = request.rows else {
+                        continue;
+                    };
+
+                    match engine_requests.get_mut(engine.name()) {
+                        Some((_, requests)) => {
+                            requests.push((region_id, RegionPutRequest { rows, hint: None }))
+                        }
+                        None => {
+                            let mut requests = Vec::with_capacity(num_requests);
+                            requests.push((region_id, RegionPutRequest { rows, hint: None }));
+                            engine_requests.insert(engine.name().to_string(), (engine, requests));
+                        }
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+
+        // match engine
+        //     .handle_request(region_id, request)
+        //     .await
+        //     .with_context(|_| HandleRegionRequestSnafu { region_id })
+        // {
+        //     Ok(result) => {
+        //         Ok(RegionResponse {
+        //             affected_rows: result.affected_rows,
+        //             extensions: result.extensions,
+        //         })
+        //     }
+        //     Err(err) => {
+        //         Err(err)
+        //     }
+        // }
+
+        todo!()
     }
 
     fn set_region_status_not_ready(
