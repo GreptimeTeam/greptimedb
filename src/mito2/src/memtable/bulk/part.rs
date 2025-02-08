@@ -38,6 +38,7 @@ use parquet::data_type::AsBytes;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterProperties;
 use snafu::ResultExt;
+use datatypes::value::ValueRef;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
@@ -48,7 +49,8 @@ use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::BulkPartIter;
 use crate::memtable::key_values::KeyValuesRef;
 use crate::memtable::BoxedBatchIterator;
-use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt};
+use crate::memtable::encoder::{FieldWithId, SparseEncoder};
+use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt, SortField, SparsePrimaryKeyCodec};
 use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::to_sst_arrow_schema;
@@ -108,7 +110,7 @@ pub struct BulkPartMeta {
 
 pub struct BulkPartEncoder {
     metadata: RegionMetadataRef,
-    pk_encoder: DensePrimaryKeyCodec,
+    pk_encoder: SparseEncoder,
     row_group_size: usize,
     dedup: bool,
     writer_props: Option<WriterProperties>,
@@ -120,7 +122,7 @@ impl BulkPartEncoder {
         dedup: bool,
         row_group_size: usize,
     ) -> BulkPartEncoder {
-        let codec = DensePrimaryKeyCodec::new(&metadata);
+        let encoder = SparseEncoder::new(&metadata);
         let writer_props = Some(
             WriterProperties::builder()
                 .set_write_batch_size(row_group_size)
@@ -129,7 +131,7 @@ impl BulkPartEncoder {
         );
         Self {
             metadata,
-            pk_encoder: codec,
+            pk_encoder: encoder,
             row_group_size,
             dedup,
             writer_props,
@@ -141,7 +143,7 @@ impl BulkPartEncoder {
     /// Encodes mutations to a [BulkPart], returns true if encoded data has been written to `dest`.
     pub(crate) fn encode_mutations(&self, mutations: &[Mutation]) -> Result<Option<BulkPart>> {
         let Some((arrow_record_batch, min_ts, max_ts)) =
-            mutations_to_record_batch(mutations, &self.metadata, &self.pk_encoder, self.dedup)?
+            mutations_to_record_batch(mutations, &self.metadata, self.dedup)?
         else {
             return Ok(None);
         };
@@ -179,7 +181,6 @@ impl BulkPartEncoder {
 fn mutations_to_record_batch(
     mutations: &[Mutation],
     metadata: &RegionMetadataRef,
-    pk_encoder: &DensePrimaryKeyCodec,
     dedup: bool,
 ) -> Result<Option<(RecordBatch, i64, i64)>> {
     let total_rows: usize = mutations
@@ -206,16 +207,18 @@ fn mutations_to_record_batch(
         .map(|f| f.column_schema.data_type.create_mutable_vector(total_rows))
         .collect();
 
-    let mut pk_buffer = vec![];
     for m in mutations {
         let Some(key_values) = KeyValuesRef::new(metadata, m) else {
             continue;
         };
 
         for row in key_values.iter() {
-            pk_buffer.clear();
-            pk_encoder.encode_to_vec(row.primary_keys(), &mut pk_buffer)?;
-            pk_builder.append_value(pk_buffer.as_bytes());
+            assert_eq!(1, row.num_primary_keys());
+            assert_eq!(1, row.num_fields());
+            let ValueRef::Binary(encoded_primary_keys) = row.primary_keys().next().unwrap()else{
+                unreachable!("Primary key must be encoded binary type");
+            };
+            pk_builder.append_value(encoded_primary_keys);
             ts_vector.push_value_ref(row.timestamp());
             sequence_builder.append_value(row.sequence());
             op_type_builder.append_value(row.op_type() as u8);
@@ -543,9 +546,9 @@ mod tests {
             .map(|r| r.rows.len())
             .sum();
 
-        let pk_encoder = DensePrimaryKeyCodec::new(&metadata);
+        let pk_encoder = SparseEncoder::new(&metadata);
 
-        let (batch, _, _) = mutations_to_record_batch(&mutations, &metadata, &pk_encoder, dedup)
+        let (batch, _, _) = mutations_to_record_batch(&mutations, &metadata, dedup)
             .unwrap()
             .unwrap();
         let read_format = ReadFormat::new_with_all_columns(metadata.clone());
@@ -562,7 +565,7 @@ mod tests {
         let batch_values = batches
             .into_iter()
             .map(|b| {
-                let pk_values = pk_encoder.decode(b.primary_key()).unwrap().into_dense();
+                let pk_values = pk_encoder.decode(b.primary_key()).unwrap();
                 let timestamps = b
                     .timestamps()
                     .as_any()

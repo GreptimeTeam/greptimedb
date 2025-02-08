@@ -48,6 +48,7 @@ mod stats;
 pub mod time_partition;
 pub mod time_series;
 pub(crate) mod version;
+mod encoder;
 
 /// Id for memtables.
 ///
