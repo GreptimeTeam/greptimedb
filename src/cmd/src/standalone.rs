@@ -76,7 +76,7 @@ use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::ResultExt;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::RwLock;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
@@ -302,6 +302,10 @@ impl App for Instance {
             .await
             .context(StartFrontendSnafu)?;
 
+        plugins::start_flownode_plugins(self.flow_server.plugins().clone())
+            .await
+            .context(StartFlownodeSnafu)?;
+
         self.frontend.start().await.context(StartFrontendSnafu)?;
         self.flow_server.start_local().await;
         Ok(())
@@ -313,6 +317,15 @@ impl App for Instance {
             .await
             .context(ShutdownFrontendSnafu)?;
 
+        self.flow_server.shutdown_local().await
+            .map_err(|_e| {
+                flow::error::InternalSnafu {
+                    reason: "Failed to send shutdown signal to flow worker manager, all receiver end already closed".to_string(),
+                }
+                .build()
+            })
+            .context(ShutdownFlownodeSnafu)?;
+
         self.procedure_manager
             .stop()
             .await
@@ -323,15 +336,6 @@ impl App for Instance {
             .await
             .context(ShutdownDatanodeSnafu)?;
         info!("Datanode instance stopped.");
-
-        self.flow_server.shutdown_local().await
-            .map_err(|_e| {
-                flow::error::InternalSnafu {
-                    reason: "Failed to send shutdown signal to flow worker manager, all receiver end already closed".to_string(),
-                }
-                .build()
-            })
-            .context(ShutdownFlownodeSnafu)?;
 
         Ok(())
     }

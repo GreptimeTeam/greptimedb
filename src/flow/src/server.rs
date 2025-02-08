@@ -162,6 +162,10 @@ impl FlownodeServer {
         self
     }
 
+    pub fn plugins(&self) -> &Plugins {
+        &self.plugins
+    }
+
     /// Get the shutdown signal receiver.
     pub async fn shutdown_rx(&self) -> Option<broadcast::Receiver<()>> {
         let shutdown_tx = self.shutdown_tx.lock().await;
@@ -179,11 +183,17 @@ impl FlownodeServer {
     }
 
     /// Run flow worker manager locally without grpc server.
-    pub async fn start_local(&self) {
+    pub async fn run_worker_manager(&self) {
         self.flow_service
             .manager
             .clone()
             .run_background(self.shutdown_rx().await);
+    }
+
+    /// Start flow node server locally.
+    pub async fn start_local(&self) {
+        *self.shutdown_tx.lock().await = Some(broadcast::channel(1).0);
+        self.run_worker_manager().await;
     }
 
     /// Shutdown the flow worker manager.
@@ -215,13 +225,15 @@ impl servers::server::Server for FlownodeServer {
     }
     async fn start(&self, addr: SocketAddr) -> Result<SocketAddr, servers::error::Error> {
         let (tx, rx) = broadcast::channel::<()>(1);
-        let mut rx_server = self.shutdown_rx().await.expect("rx_server");
+        let mut rx_server = rx;
         let (incoming, addr) = {
             let mut shutdown_tx = self.shutdown_tx.lock().await;
             ensure!(
                 shutdown_tx.is_none(),
                 AlreadyStartedSnafu { server: "flow" }
             );
+            *shutdown_tx = Some(tx);
+
             let listener = TcpListener::bind(addr)
                 .await
                 .context(TcpBindSnafu { addr })?;
@@ -229,8 +241,6 @@ impl servers::server::Server for FlownodeServer {
             let incoming =
                 TcpIncoming::from_listener(listener, true, None).context(TcpIncomingSnafu)?;
             info!("flow server is bound to {}", addr);
-
-            *shutdown_tx = Some(tx);
 
             (incoming, addr)
         };
@@ -244,7 +254,7 @@ impl servers::server::Server for FlownodeServer {
                 .context(StartGrpcSnafu);
         });
 
-        self.start_local().await;
+        self.run_worker_manager().await;
 
         Ok(addr)
     }
