@@ -28,7 +28,7 @@ use crate::QueryEngineContext;
 /// `WITHIN` syntax.
 ///
 /// # How It Works
-/// 1. The rule detects `within(ts, timestamp)` functions in a `LogicalPlan`.
+/// 1. The rule analyzer detects `within(ts, timestamp)` functions in a `LogicalPlan`.
 /// 2. It infers the precision of the given timestamp (year, month, day, second, etc.).
 /// 3. Based on that precision, the rule calculates the appropriate start and end timestamps (e.g., `start = 2025-04-19 23:50:00`, `end = 2025-04-19 23:51:00`).
 /// 4. The `within` function is converted to a range expression like `ts >= start AND ts < end`.

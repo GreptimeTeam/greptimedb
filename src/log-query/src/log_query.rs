@@ -352,7 +352,7 @@ mod tests {
     fn test_canonicalize() {
         // with 'start' only
         let mut tf = TimeFilter {
-            start: Some("2023".to_string()),
+            start: Some("2023-10-01".to_string()),
             end: None,
             span: None,
         };
