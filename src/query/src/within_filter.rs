@@ -13,6 +13,42 @@ use crate::error::WithinFilterIntervalSnafu;
 use crate::optimizer::ExtensionAnalyzerRule;
 use crate::QueryEngineContext;
 
+/// `WithinFilterRule` is an analyzer rule for DataFusion that converts the `within(ts, timestamp)`
+/// function to a range
+/// expression like `ts >= start AND ts < end`.
+///
+/// # Purpose
+/// This rule simplifies time-based queries for users by letting them specify
+/// a single timestamp like `'2025-04-19'` while the filter
+/// is converted to:
+/// ```sql
+/// ts >= '2025-04-19 00:00:00' AND ts < '2025-04-20 00:00:00'
+/// ```
+/// Instead of writing these conditions manually, users can simply use the
+/// `WITHIN` syntax.
+///
+/// # How It Works
+/// 1. The rule detects `within(ts, timestamp)` functions in a `LogicalPlan`.
+/// 2. It infers the precision of the given timestamp (year, month, day, second, etc.).
+/// 3. Based on that precision, the rule calculates the appropriate start and end timestamps (e.g., `start = 2025-04-19 23:50:00`, `end = 2025-04-19 23:51:00`).
+/// 4. The `within` function is converted to a range expression like `ts >= start AND ts < end`.
+///
+/// # Examples
+/// - convert `ts WITHIN '2025'`
+///   to:
+///   ```sql
+///   ts >= '2025-01-01 00:00:00' AND ts < '2026-01-01 00:00:00'
+///   ```
+/// - convert `ts WITHIN '2025-04-19'`
+///   to:
+///   ```sql
+///   ts >= '2025-04-19 00:00:00' AND ts < '2025-04-20 00:00:00'
+///   ```
+/// - convert WITHIN '2025-04-19 23:50'`
+///   to:
+///   ```sql
+///   ts >= '2025-04-19 23:50:00' AND ts < '2025-04-19 23:51:00'
+///   ```
 pub struct WithinFilterRule {}
 
 impl WithinFilterRule {
@@ -249,6 +285,7 @@ mod test {
         // TODO: test within filter with time zone
         // TODO: verify within filter is pushed down by optimizer.
 
+        // 2015-01-01T00:00:00 <= timestamp < 2016-01-01T00:00:00
         let sql = "SELECT * FROM test WHERE ts WITHIN '2015'";
         let plan = do_query(sql).await.unwrap();
         let expected = "Projection: test.tag_1, test.ts, test.field_1\
@@ -256,6 +293,7 @@ mod test {
         \n    TableScan: test";
         assert_eq!(expected, format!("{plan:?}"));
 
+        // 2025-03-01T00:00:00 <= timestamp < 2025-04-01T00:00:00
         let sql = "SELECT * FROM test WHERE ts WITHIN '2025-3'";
         let plan = do_query(sql).await.unwrap();
         let expected = "Projection: test.tag_1, test.ts, test.field_1\
@@ -263,6 +301,7 @@ mod test {
         \n    TableScan: test";
         assert_eq!(expected, format!("{plan:?}"));
 
+        // 2025-12-1T00:00:00 <= timestamp < 2026-01-01T00:00:00
         let sql = "SELECT * FROM test WHERE ts WITHIN '2025-12'";
         let plan = do_query(sql).await.unwrap();
         let expected = "Projection: test.tag_1, test.ts, test.field_1\
@@ -270,6 +309,7 @@ mod test {
         \n    TableScan: test";
         assert_eq!(expected, format!("{plan:?}"));
 
+        // 2025-12-1T00:00:00 <= timestamp < 2025-12-2T00:00:00
         let sql = "SELECT * FROM test WHERE ts WITHIN '2015-12-1'";
         let plan = do_query(sql).await.unwrap();
         let expected = "Projection: test.tag_1, test.ts, test.field_1\
