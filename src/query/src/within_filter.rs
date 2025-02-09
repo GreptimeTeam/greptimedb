@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use chrono::format::{Parsed, StrftimeItems};
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime};
+use common_function::scalars::math::WITHIN_FILTER_NAME;
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode};
@@ -67,7 +68,7 @@ impl ExtensionAnalyzerRule for WithinFilterRule {
         plan.transform(|plan| match plan.clone() {
             LogicalPlan::Filter(filter) => {
                 if let Expr::ScalarFunction(func) = &filter.predicate
-                    && func.func.name() == "within_filter"
+                    && func.func.name() == WITHIN_FILTER_NAME
                 {
                     ensure!(
                         func.args.len() == 2,

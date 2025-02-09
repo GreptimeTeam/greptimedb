@@ -98,9 +98,11 @@ impl fmt::Display for WithinFilterFunction {
     }
 }
 
+pub const WITHIN_FILTER_NAME: &str = "within_filter";
+
 impl Function for WithinFilterFunction {
     fn name(&self) -> &str {
-        "within_filter"
+        WITHIN_FILTER_NAME
     }
 
     fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
