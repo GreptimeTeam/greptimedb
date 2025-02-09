@@ -299,62 +299,61 @@ mod test {
     #[tokio::test]
     async fn test_within_filter() {
         // TODO: test within filter with time zone
-        // TODO: verify within filter is pushed down by optimizer.
 
         // 2015-01-01T00:00:00 <= timestamp < 2016-01-01T00:00:00
         let sql = "SELECT * FROM test WHERE ts WITHIN '2015'";
         let plan = do_query(sql).await.unwrap();
-        let expected = "Projection: test.tag_1, test.ts, test.field_1\
+        let expected = "Projection: *\
         \n  Filter: test.ts >= TimestampSecond(1420070400, None) AND test.ts < TimestampSecond(1451606400, None)\
         \n    TableScan: test";
-        assert_eq!(expected, format!("{plan:?}"));
+        assert_eq!(expected, plan.to_string());
 
         // 2025-03-01T00:00:00 <= timestamp < 2025-04-01T00:00:00
         let sql = "SELECT * FROM test WHERE ts WITHIN '2025-3'";
         let plan = do_query(sql).await.unwrap();
-        let expected = "Projection: test.tag_1, test.ts, test.field_1\
+        let expected = "Projection: *\
         \n  Filter: test.ts >= TimestampSecond(1740787200, None) AND test.ts < TimestampSecond(1743465600, None)\
         \n    TableScan: test";
-        assert_eq!(expected, format!("{plan:?}"));
+        assert_eq!(expected, plan.to_string());
 
         // 2025-12-1T00:00:00 <= timestamp < 2026-01-01T00:00:00
         let sql = "SELECT * FROM test WHERE ts WITHIN '2025-12'";
         let plan = do_query(sql).await.unwrap();
-        let expected = "Projection: test.tag_1, test.ts, test.field_1\
+        let expected = "Projection: *\
         \n  Filter: test.ts >= TimestampSecond(1764547200, None) AND test.ts < TimestampSecond(1767225600, None)\
         \n    TableScan: test";
-        assert_eq!(expected, format!("{plan:?}"));
+        assert_eq!(expected, plan.to_string());
 
         // 2025-12-1T00:00:00 <= timestamp < 2025-12-2T00:00:00
         let sql = "SELECT * FROM test WHERE ts WITHIN '2015-12-1'";
         let plan = do_query(sql).await.unwrap();
-        let expected = "Projection: test.tag_1, test.ts, test.field_1\
+        let expected = "Projection: *\
         \n  Filter: test.ts >= TimestampSecond(1448928000, None) AND test.ts < TimestampSecond(1449014400, None)\
         \n    TableScan: test";
-        assert_eq!(expected, format!("{plan:?}"));
+        assert_eq!(expected, plan.to_string());
 
         // 2025-12-1T01:00:00 <= timestamp < 2025-12-1T02:00:00
         let sql = "SELECT * FROM test WHERE ts WITHIN '2025-12-1T01'";
         let plan = do_query(sql).await.unwrap();
-        let expected = "Projection: test.tag_1, test.ts, test.field_1\
+        let expected = "Projection: *\
         \n  Filter: test.ts >= TimestampSecond(1764550800, None) AND test.ts < TimestampSecond(1764554400, None)\
         \n    TableScan: test";
-        assert_eq!(expected, format!("{plan:?}"));
+        assert_eq!(expected, plan.to_string());
 
         // 2025-12-1T01:12:00 <= timestamp < 2025-12-1T01:13:00
         let sql = "SELECT * FROM test WHERE ts WITHIN '2025-12-1T01:12'";
         let plan = do_query(sql).await.unwrap();
-        let expected = "Projection: test.tag_1, test.ts, test.field_1\
+        let expected = "Projection: *\
         \n  Filter: test.ts >= TimestampSecond(1764551520, None) AND test.ts < TimestampSecond(1764551580, None)\
         \n    TableScan: test";
-        assert_eq!(expected, format!("{plan:?}"));
+        assert_eq!(expected, plan.to_string());
 
         // 2025-12-1T01:12:01 <= timestamp < 2025-12-1T01:12:02
         let sql = "SELECT * FROM test WHERE ts WITHIN '2025-12-1T01:12:01'";
         let plan = do_query(sql).await.unwrap();
-        let expected = "Projection: test.tag_1, test.ts, test.field_1\
+        let expected = "Projection: *\
         \n  Filter: test.ts >= TimestampSecond(1764551521, None) AND test.ts < TimestampSecond(1764551522, None)\
         \n    TableScan: test";
-        assert_eq!(expected, format!("{plan:?}"));
+        assert_eq!(expected, plan.to_string());
     }
 }
