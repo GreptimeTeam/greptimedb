@@ -9,7 +9,7 @@ use datafusion_common::{DataFusionError, Result as DFResult, ScalarValue};
 use datafusion_expr::{BinaryExpr, Expr, Filter, LogicalPlan, Operator};
 use snafu::ensure;
 
-use crate::error::WithinFilterIntervalSnafu;
+use crate::error::WithinFilterInternalSnafu;
 use crate::optimizer::ExtensionAnalyzerRule;
 use crate::QueryEngineContext;
 
@@ -71,7 +71,7 @@ impl ExtensionAnalyzerRule for WithinFilterRule {
                 {
                     ensure!(
                         func.args.len() == 2,
-                        WithinFilterIntervalSnafu {
+                        WithinFilterInternalSnafu {
                             message: "expected 2 arguments",
                         }
                     );
@@ -80,7 +80,7 @@ impl ExtensionAnalyzerRule for WithinFilterRule {
                     if let Expr::Literal(literal) = time_arg
                         && let ScalarValue::Utf8(Some(s)) = literal
                     {
-                        if let Some((start, end)) = try_parse_ts(&s) {
+                        if let Some((start, end)) = try_to_infer_time_range(&s) {
                             return Ok(Transformed::yes(convert_plan(
                                 filter.input,
                                 &column_name,
@@ -102,7 +102,8 @@ impl ExtensionAnalyzerRule for WithinFilterRule {
     }
 }
 
-fn try_parse_ts(start: &str) -> Option<(Timestamp, Timestamp)> {
+/// Infers the time range from a given timestamp string.
+fn try_to_infer_time_range(timestamp: &str) -> Option<(Timestamp, Timestamp)> {
     fn try_parse_year(s: &str) -> Option<NaiveDate> {
         let mut parsed = Parsed::new();
         if chrono::format::parse(&mut parsed, s, StrftimeItems::new("%Y")).is_err() {
@@ -128,19 +129,19 @@ fn try_parse_ts(start: &str) -> Option<(Timestamp, Timestamp)> {
         parsed.set_minute(0).unwrap();
         Some(parsed.to_naive_datetime_with_offset(0).unwrap())
     }
-    if let Some(naive_date) = try_parse_year(start) {
+    if let Some(naive_date) = try_parse_year(timestamp) {
         let start = Timestamp::from_chrono_date(naive_date).unwrap();
         let end = NaiveDate::from_ymd_opt(naive_date.year() + 1, 1, 1).unwrap();
         let end = Timestamp::from_chrono_date(end).unwrap();
         return Some((start, end));
     }
-    if let Ok(naive_date) = NaiveDate::parse_from_str(start, "%Y-%m-%d") {
+    if let Ok(naive_date) = NaiveDate::parse_from_str(timestamp, "%Y-%m-%d") {
         let start = Timestamp::from_chrono_date(naive_date).unwrap();
         let end = naive_date + Duration::days(1);
         let end = Timestamp::from_chrono_date(end).unwrap();
         return Some((start, end));
     }
-    if let Some(naive_date) = try_parse_month(start) {
+    if let Some(naive_date) = try_parse_month(timestamp) {
         let start = Timestamp::from_chrono_date(naive_date).unwrap();
         let end = if naive_date.month() == 12 {
             NaiveDate::from_ymd_opt(naive_date.year() + 1, 1, 1).unwrap()
@@ -150,19 +151,19 @@ fn try_parse_ts(start: &str) -> Option<(Timestamp, Timestamp)> {
         let end = Timestamp::from_chrono_date(end).unwrap();
         return Some((start, end));
     }
-    if let Some(naive_date) = try_parse_hour(start) {
+    if let Some(naive_date) = try_parse_hour(timestamp) {
         let start = Timestamp::from_chrono_datetime(naive_date).unwrap();
         let end = naive_date + Duration::hours(1);
         let end = Timestamp::from_chrono_datetime(end).unwrap();
         return Some((start, end));
     }
-    if let Ok(naive_date) = NaiveDateTime::parse_from_str(start, "%Y-%m-%dT%H:%M") {
+    if let Ok(naive_date) = NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%dT%H:%M") {
         let end = naive_date + Duration::minutes(1);
         let end = Timestamp::from_chrono_datetime(end).unwrap();
         let start = Timestamp::from_chrono_datetime(naive_date).unwrap();
         return Some((start, end));
     }
-    if let Ok(naive_date) = NaiveDateTime::parse_from_str(start, "%Y-%m-%dT%H:%M:%S") {
+    if let Ok(naive_date) = NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%dT%H:%M:%S") {
         let end = naive_date + Duration::seconds(1);
         let end = Timestamp::from_chrono_datetime(end).unwrap();
         let start = Timestamp::from_chrono_datetime(naive_date).unwrap();

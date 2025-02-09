@@ -325,7 +325,7 @@ pub enum Error {
     },
 
     #[snafu(display("Within filter interval error: {}", message))]
-    WithinFilterInterval {
+    WithinFilterInternal {
         message: String,
         #[snafu(implicit)]
         location: Location,
@@ -377,7 +377,7 @@ impl ErrorExt for Error {
 
             RegionQuery { source, .. } => source.status_code(),
             TableMutation { source, .. } => source.status_code(),
-            WithinFilterInterval { .. } | MissingTableMutationHandler { .. } => {
+            WithinFilterInternal { .. } | MissingTableMutationHandler { .. } => {
                 StatusCode::Unexpected
             }
             GetRegionMetadata { .. } => StatusCode::RegionNotReady,
