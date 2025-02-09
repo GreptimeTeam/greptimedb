@@ -118,6 +118,9 @@ impl Function for WithinFilterFunction {
     }
 
     fn eval(&self, _func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
-        Err(DataFusionError::Internal("todo".into())).context(GeneralDataFusionSnafu)
+        Err(DataFusionError::Internal(
+            "within_filter function just a empty function, it should not be eval!".into(),
+        ))
+        .context(GeneralDataFusionSnafu)
     }
 }
