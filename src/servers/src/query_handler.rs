@@ -56,6 +56,7 @@ pub type PromStoreProtocolHandlerRef = Arc<dyn PromStoreProtocolHandler + Send +
 pub type OpenTelemetryProtocolHandlerRef = Arc<dyn OpenTelemetryProtocolHandler + Send + Sync>;
 pub type PipelineHandlerRef = Arc<dyn PipelineHandler + Send + Sync>;
 pub type LogQueryHandlerRef = Arc<dyn LogQueryHandler + Send + Sync>;
+pub type JaegerQueryHandlerRef = Arc<dyn JaegerQueryHandler + Send + Sync>;
 
 #[async_trait]
 pub trait InfluxdbLineProtocolHandler {
@@ -169,4 +170,14 @@ pub trait PipelineHandler {
 #[async_trait]
 pub trait LogQueryHandler {
     async fn query(&self, query: LogQuery, ctx: QueryContextRef) -> Result<Output>;
+}
+
+/// Handle Jaeger query requests.
+#[async_trait]
+pub trait JaegerQueryHandler {
+    /// Get trace services. It's used for `/api/services` API.
+    async fn get_services(&self, ctx: QueryContextRef) -> Result<Output>;
+
+    /// Get trace by id. It's used for `/api/traces/{trace_id}` API.
+    async fn get_trace(&self, ctx: QueryContextRef, trace_id: String) -> Result<Output>;
 }

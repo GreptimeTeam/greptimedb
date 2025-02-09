@@ -114,8 +114,7 @@ where
         }
 
         if opts.jaeger.enable {
-            builder = builder
-                .with_jaeger_handler(ServerSqlQueryHandlerAdapter::arc(self.instance.clone()));
+            builder = builder.with_jaeger_handler(self.instance.clone());
         }
 
         builder

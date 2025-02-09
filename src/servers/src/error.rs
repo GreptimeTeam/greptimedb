@@ -25,6 +25,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_telemetry::{error, warn};
+use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use headers::ContentType;
 use http::header::InvalidHeaderValue;
@@ -601,16 +602,24 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to execute jaeger query, sql response: {:?}", sql_response))]
-    FailedToExecuteJaegerQuery {
-        sql_response: ErrorResponse,
+    #[snafu(display("Invalid Jaeger query, reason: {}", reason))]
+    InvalidJaegerQuery {
+        reason: String,
         #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("Invalid Jaeger query, reason: {}", reason))]
-    InvalidJaegerQuery {
-        reason: String,
+    #[snafu(display("Failed to read table"))]
+    ReadTable {
+        source: query::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("DataFusion error"))]
+    DataFusion {
+        #[snafu(source)]
+        error: DataFusionError,
         #[snafu(implicit)]
         location: Location,
     },
@@ -728,7 +737,7 @@ impl ErrorExt for Error {
 
             ConvertScalarValue { source, .. } => source.status_code(),
 
-            ToJson { .. } | FailedToExecuteJaegerQuery { .. } => StatusCode::Internal,
+            ToJson { .. } | ReadTable { .. } | DataFusion { .. } => StatusCode::Internal,
 
             ConvertSqlValue { source, .. } => source.status_code(),
 
