@@ -14,6 +14,9 @@
 
 use std::path::Path;
 
+use serde::Serialize;
+use tinytemplate::TinyTemplate;
+
 use crate::env::{Env, GreptimeDBContext};
 use crate::{util, ServerAddr};
 
@@ -53,6 +56,26 @@ pub enum ServerMode {
         metasrv_addr: String,
         node_id: u32,
     },
+}
+
+#[derive(Serialize)]
+struct ConfigContext {
+    wal_dir: String,
+    data_home: String,
+    procedure_dir: String,
+    is_raft_engine: bool,
+    kafka_wal_broker_endpoints: String,
+    use_etcd: bool,
+    store_addrs: String,
+    // for following addrs, leave it empty if not needed
+    // required for datanode
+    metasrv_addr: String,
+    // for frontend and standalone
+    grpc_addr: String,
+    // for standalone
+    mysql_addr: String,
+    // for standalone
+    postgres_addr: String,
 }
 
 impl ServerMode {
@@ -196,10 +219,96 @@ impl ServerMode {
         }
     }
 
+    pub fn generate_config_file(&self, sqlness_home: &Path, db_ctx: &GreptimeDBContext) -> String {
+        let mut tt = TinyTemplate::new();
+
+        let mut path = util::sqlness_conf_path();
+        path.push(format!("{}-test.toml.template", self.name()));
+        let template = std::fs::read_to_string(path).unwrap();
+        tt.add_template(self.name(), &template).unwrap();
+
+        let data_home = sqlness_home.join(format!("greptimedb-{}", self.name()));
+        std::fs::create_dir_all(data_home.as_path()).unwrap();
+
+        let wal_dir = data_home.join("wal").display().to_string();
+        let procedure_dir = data_home.join("procedure").display().to_string();
+
+        // Get the required addresses based on server mode
+        let (metasrv_addr, grpc_addr, mysql_addr, postgres_addr) = match self {
+            ServerMode::Standalone {
+                rpc_addr,
+                mysql_addr,
+                postgres_addr,
+                ..
+            } => (
+                String::new(),
+                rpc_addr.clone(),
+                mysql_addr.clone(),
+                postgres_addr.clone(),
+            ),
+            ServerMode::Frontend {
+                rpc_addr,
+                mysql_addr,
+                postgres_addr,
+                ..
+            } => (
+                String::new(),
+                rpc_addr.clone(),
+                mysql_addr.clone(),
+                postgres_addr.clone(),
+            ),
+            ServerMode::Datanode {
+                rpc_addr,
+                metasrv_addr,
+                ..
+            } => (
+                metasrv_addr.clone(),
+                rpc_addr.clone(),
+                String::new(),
+                String::new(),
+            ),
+            _ => (String::new(), String::new(), String::new(), String::new()),
+        };
+
+        let ctx = ConfigContext {
+            wal_dir,
+            data_home: data_home.display().to_string(),
+            procedure_dir,
+            is_raft_engine: db_ctx.is_raft_engine(),
+            kafka_wal_broker_endpoints: db_ctx.kafka_wal_broker_endpoints(),
+            use_etcd: !db_ctx.store_config().store_addrs.is_empty(),
+            store_addrs: db_ctx
+                .store_config()
+                .store_addrs
+                .iter()
+                .map(|p| format!("\"{p}\""))
+                .collect::<Vec<_>>()
+                .join(","),
+            metasrv_addr,
+            grpc_addr,
+            mysql_addr,
+            postgres_addr,
+        };
+
+        let rendered = tt.render(self.name(), &ctx).unwrap();
+
+        let conf_file = data_home
+            .join(format!("{}-{}.toml", self.name(), db_ctx.time()))
+            .display()
+            .to_string();
+        println!(
+            "Generating {} config file in {conf_file}, full content:\n{rendered}",
+            self.name()
+        );
+        std::fs::write(&conf_file, rendered).unwrap();
+
+        conf_file
+    }
+
     pub fn get_args(
         &self,
         sqlness_home: &Path,
-        env: &Env,
+        _env: &Env,
         db_ctx: &GreptimeDBContext,
     ) -> Vec<String> {
         let mut args = vec![
@@ -221,14 +330,7 @@ impl ServerMode {
                         sqlness_home.display()
                     ),
                     "-c".to_string(),
-                    env.generate_config_file(
-                        self.name(),
-                        db_ctx,
-                        String::new(),
-                        rpc_addr.to_string(),
-                        mysql_addr.to_string(),
-                        postgres_addr.to_string(),
-                    ),
+                    self.generate_config_file(sqlness_home, db_ctx),
                     format!("--http-addr={http_addr}"),
                     format!("--rpc-addr={rpc_addr}"),
                     format!("--mysql-addr={mysql_addr}"),
@@ -253,14 +355,7 @@ impl ServerMode {
                         sqlness_home.display()
                     ),
                     "-c".to_string(),
-                    env.generate_config_file(
-                        self.name(),
-                        db_ctx,
-                        String::new(),
-                        rpc_addr.to_string(),
-                        mysql_addr.to_string(),
-                        postgres_addr.to_string(),
-                    ),
+                    self.generate_config_file(sqlness_home, db_ctx),
                 ]);
             }
             ServerMode::Metasrv {
@@ -281,14 +376,7 @@ impl ServerMode {
                         sqlness_home.display()
                     ),
                     "-c".to_string(),
-                    env.generate_config_file(
-                        self.name(),
-                        db_ctx,
-                        String::new(),
-                        String::new(),
-                        String::new(),
-                        String::new(),
-                    ),
+                    self.generate_config_file(sqlness_home, db_ctx),
                 ]);
 
                 if db_ctx.store_config().setup_pg {
@@ -326,14 +414,7 @@ impl ServerMode {
                     format!("--log-dir={}/logs", data_home.display()),
                     format!("--node-id={node_id}"),
                     "-c".to_string(),
-                    env.generate_config_file(
-                        self.name(),
-                        db_ctx,
-                        metasrv_addr.to_string(),
-                        rpc_addr.to_string(),
-                        String::new(),
-                        String::new(),
-                    ),
+                    self.generate_config_file(sqlness_home, db_ctx),
                     format!("--metasrv-addrs={metasrv_addr}"),
                 ]);
             }

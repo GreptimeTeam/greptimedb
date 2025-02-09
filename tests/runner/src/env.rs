@@ -39,9 +39,7 @@ use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::{StringVectorBuilder, VectorRef};
 use mysql::prelude::Queryable;
 use mysql::{Conn as MySqlClient, Row as MySqlRow};
-use serde::Serialize;
 use sqlness::{Database, EnvController, QueryContext};
-use tinytemplate::TinyTemplate;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_postgres::{Client as PgClient, SimpleQueryMessage as PgRow};
 
@@ -515,80 +513,6 @@ impl Env {
         }
     }
 
-    /// Generate config file to `/tmp/{subcommand}-{current_time}.toml`
-    pub(crate) fn generate_config_file(
-        &self,
-        subcommand: &str,
-        db_ctx: &GreptimeDBContext,
-        // for following addrs, leave it empty if not needed
-        // required for datanode
-        metasrv_addr: String,
-        // for frontend and standalone
-        grpc_addr: String,
-        // for standalone
-        mysql_addr: String,
-        // for standalone
-        postgres_addr: String,
-    ) -> String {
-        let mut tt = TinyTemplate::new();
-
-        let mut path = util::sqlness_conf_path();
-        path.push(format!("{subcommand}-test.toml.template"));
-        let template = std::fs::read_to_string(path).unwrap();
-        tt.add_template(subcommand, &template).unwrap();
-
-        #[derive(Serialize)]
-        struct Context {
-            wal_dir: String,
-            data_home: String,
-            procedure_dir: String,
-            is_raft_engine: bool,
-            kafka_wal_broker_endpoints: String,
-            use_etcd: bool,
-            store_addrs: String,
-            metasrv_addr: String,
-            grpc_addr: String,
-            mysql_addr: String,
-            postgres_addr: String,
-        }
-
-        let data_home = self.sqlness_home.join(format!("greptimedb-{subcommand}"));
-        std::fs::create_dir_all(data_home.as_path()).unwrap();
-
-        let wal_dir = data_home.join("wal").display().to_string();
-        let procedure_dir = data_home.join("procedure").display().to_string();
-        let ctx = Context {
-            wal_dir,
-            data_home: data_home.display().to_string(),
-            procedure_dir,
-            is_raft_engine: db_ctx.is_raft_engine(),
-            kafka_wal_broker_endpoints: db_ctx.kafka_wal_broker_endpoints(),
-            use_etcd: !self.store_config.store_addrs.is_empty(),
-            store_addrs: self
-                .store_config
-                .store_addrs
-                .clone()
-                .iter()
-                .map(|p| format!("\"{p}\""))
-                .collect::<Vec<_>>()
-                .join(","),
-            metasrv_addr,
-            grpc_addr,
-            mysql_addr,
-            postgres_addr,
-        };
-        let rendered = tt.render(subcommand, &ctx).unwrap();
-
-        let conf_file = data_home
-            .join(format!("{subcommand}-{}.toml", db_ctx.time))
-            .display()
-            .to_string();
-        println!("Generating {subcommand} config file in {conf_file}, full content:\n{rendered}");
-        std::fs::write(&conf_file, rendered).unwrap();
-
-        conf_file
-    }
-
     /// Build the DB with `cargo build --bin greptime`
     fn build_db(&self) {
         if self.bins_dir.lock().unwrap().is_some() {
@@ -853,11 +777,11 @@ impl GreptimeDBContext {
         self.time
     }
 
-    fn is_raft_engine(&self) -> bool {
+    pub fn is_raft_engine(&self) -> bool {
         matches!(self.wal, WalConfig::RaftEngine)
     }
 
-    fn kafka_wal_broker_endpoints(&self) -> String {
+    pub fn kafka_wal_broker_endpoints(&self) -> String {
         match &self.wal {
             WalConfig::RaftEngine => String::new(),
             WalConfig::Kafka {
