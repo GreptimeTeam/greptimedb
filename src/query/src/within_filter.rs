@@ -1,14 +1,25 @@
-use chrono::NaiveDate;
+use std::sync::Arc;
+
+use chrono::format::{Parsed, StrftimeItems};
+use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime};
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode};
-use datafusion_common::{DataFusionError, Result, ScalarValue};
+use datafusion_common::{DataFusionError, Result as DFResult, ScalarValue};
 use datafusion_expr::{BinaryExpr, Expr, Filter, LogicalPlan, Operator};
+use snafu::ensure;
 
+use crate::error::WithinFilterIntervalSnafu;
 use crate::optimizer::ExtensionAnalyzerRule;
 use crate::QueryEngineContext;
 
-pub struct WithinFilterRule;
+pub struct WithinFilterRule {}
+
+impl WithinFilterRule {
+    pub fn new() -> Self {
+        WithinFilterRule {}
+    }
+}
 
 impl ExtensionAnalyzerRule for WithinFilterRule {
     fn analyze(
@@ -16,75 +27,35 @@ impl ExtensionAnalyzerRule for WithinFilterRule {
         plan: LogicalPlan,
         _ctx: &QueryEngineContext,
         _config: &ConfigOptions,
-    ) -> Result<LogicalPlan> {
+    ) -> DFResult<LogicalPlan> {
         plan.transform(|plan| match plan.clone() {
             LogicalPlan::Filter(filter) => {
                 if let Expr::ScalarFunction(func) = &filter.predicate
                     && func.func.name() == "within_filter"
                 {
+                    ensure!(
+                        func.args.len() == 2,
+                        WithinFilterIntervalSnafu {
+                            message: "expected 2 arguments",
+                        }
+                    );
                     let column_name = func.args[0].clone();
                     let time_arg = func.args[1].clone();
                     if let Expr::Literal(literal) = time_arg
                         && let ScalarValue::Utf8(Some(s)) = literal
                     {
-                        if let Ok(year) = s.parse::<i32>() {
-                            let timestamp = NaiveDate::from_ymd_opt(year, 1, 1).unwrap();
-                            let timestamp = Timestamp::from_chrono_date(timestamp).unwrap();
-                            let value = Some(timestamp.value());
-                            let timestamp = match timestamp.unit() {
-                                TimeUnit::Second => ScalarValue::TimestampSecond(value, None),
-                                TimeUnit::Millisecond => {
-                                    ScalarValue::TimestampMillisecond(value, None)
-                                }
-                                TimeUnit::Microsecond => {
-                                    ScalarValue::TimestampMicrosecond(value, None)
-                                }
-                                TimeUnit::Nanosecond => {
-                                    ScalarValue::TimestampNanosecond(value, None)
-                                }
-                            };
-                            let next_timestamp = NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap();
-                            let next_timestamp =
-                                Timestamp::from_chrono_date(next_timestamp).unwrap();
-                            let value = Some(next_timestamp.value());
-                            let next_timestamp = match next_timestamp.unit() {
-                                TimeUnit::Second => ScalarValue::TimestampSecond(value, None),
-                                TimeUnit::Millisecond => {
-                                    ScalarValue::TimestampMillisecond(value, None)
-                                }
-                                TimeUnit::Microsecond => {
-                                    ScalarValue::TimestampMicrosecond(value, None)
-                                }
-                                TimeUnit::Nanosecond => {
-                                    ScalarValue::TimestampNanosecond(value, None)
-                                }
-                            };
-                            let left = Expr::BinaryExpr(BinaryExpr {
-                                left: Box::new(column_name.clone()),
-                                op: Operator::GtEq,
-                                right: Box::new(Expr::Literal(timestamp)),
-                            });
-                            let right = Expr::BinaryExpr(BinaryExpr {
-                                left: Box::new(column_name),
-                                op: Operator::Lt,
-                                right: Box::new(Expr::Literal(next_timestamp)),
-                            });
-                            let new_expr = Expr::BinaryExpr(BinaryExpr::new(
-                                Box::new(left),
-                                Operator::And,
-                                Box::new(right),
-                            ));
-                            let new_plan =
-                                LogicalPlan::Filter(Filter::try_new(new_expr, filter.input)?);
-                            Ok(Transformed::yes(new_plan))
-                        } else {
-                            Err(DataFusionError::NotImplemented(
-                                "add more formats".to_string(),
-                            ))
+                        if let Some((start, end)) = try_parse_ts(&s) {
+                            return Ok(Transformed::yes(convert_plan(
+                                filter.input,
+                                &column_name,
+                                start,
+                                end,
+                            )?));
                         }
-                    } else {
-                        todo!();
                     }
+                    Err(DataFusionError::Plan(
+                        "Failed to convert within filter to normal filter.".to_string(),
+                    ))
                 } else {
                     Ok(Transformed::no(plan))
                 }
@@ -92,5 +63,242 @@ impl ExtensionAnalyzerRule for WithinFilterRule {
             _ => Ok(Transformed::no(plan)),
         })
         .map(|t| t.data)
+    }
+}
+
+fn try_parse_ts(start: &str) -> Option<(Timestamp, Timestamp)> {
+    fn try_parse_year(s: &str) -> Option<NaiveDate> {
+        let mut parsed = Parsed::new();
+        if chrono::format::parse(&mut parsed, s, StrftimeItems::new("%Y")).is_err() {
+            return None;
+        }
+        parsed.set_month(1).unwrap();
+        parsed.set_day(1).unwrap();
+        Some(parsed.to_naive_date().unwrap())
+    }
+    fn try_parse_month(s: &str) -> Option<NaiveDate> {
+        let mut parsed = Parsed::new();
+        if chrono::format::parse(&mut parsed, s, StrftimeItems::new("%Y-%m")).is_err() {
+            return None;
+        }
+        parsed.set_day(1).unwrap();
+        Some(parsed.to_naive_date().unwrap())
+    }
+    fn try_parse_hour(s: &str) -> Option<NaiveDateTime> {
+        let mut parsed = Parsed::new();
+        if chrono::format::parse(&mut parsed, s, StrftimeItems::new("%Y-%m-%dT%H")).is_err() {
+            return None;
+        }
+        parsed.set_minute(0).unwrap();
+        Some(parsed.to_naive_datetime_with_offset(0).unwrap())
+    }
+    if let Some(naive_date) = try_parse_year(start) {
+        let start = Timestamp::from_chrono_date(naive_date).unwrap();
+        let end = NaiveDate::from_ymd_opt(naive_date.year() + 1, 1, 1).unwrap();
+        let end = Timestamp::from_chrono_date(end).unwrap();
+        return Some((start, end));
+    }
+    if let Ok(naive_date) = NaiveDate::parse_from_str(start, "%Y-%m-%d") {
+        let start = Timestamp::from_chrono_date(naive_date).unwrap();
+        let end = naive_date + Duration::days(1);
+        let end = Timestamp::from_chrono_date(end).unwrap();
+        return Some((start, end));
+    }
+    if let Some(naive_date) = try_parse_month(start) {
+        let start = Timestamp::from_chrono_date(naive_date).unwrap();
+        let end = if naive_date.month() == 12 {
+            NaiveDate::from_ymd_opt(naive_date.year() + 1, 1, 1).unwrap()
+        } else {
+            NaiveDate::from_ymd_opt(naive_date.year(), naive_date.month() + 1, 1).unwrap()
+        };
+        let end = Timestamp::from_chrono_date(end).unwrap();
+        return Some((start, end));
+    }
+    if let Some(naive_date) = try_parse_hour(start) {
+        let start = Timestamp::from_chrono_datetime(naive_date).unwrap();
+        let end = naive_date + Duration::hours(1);
+        let end = Timestamp::from_chrono_datetime(end).unwrap();
+        return Some((start, end));
+    }
+    if let Ok(naive_date) = NaiveDateTime::parse_from_str(start, "%Y-%m-%dT%H:%M") {
+        let end = naive_date + Duration::minutes(1);
+        let end = Timestamp::from_chrono_datetime(end).unwrap();
+        let start = Timestamp::from_chrono_datetime(naive_date).unwrap();
+        return Some((start, end));
+    }
+    if let Ok(naive_date) = NaiveDateTime::parse_from_str(start, "%Y-%m-%dT%H:%M:%S") {
+        let end = naive_date + Duration::seconds(1);
+        let end = Timestamp::from_chrono_datetime(end).unwrap();
+        let start = Timestamp::from_chrono_datetime(naive_date).unwrap();
+        return Some((start, end));
+    }
+    None
+}
+
+fn convert_plan(
+    input_plan: Arc<LogicalPlan>,
+    column_name: &Expr,
+    start: Timestamp,
+    end: Timestamp,
+) -> DFResult<LogicalPlan> {
+    let value = Some(start.value());
+    let start = match start.unit() {
+        TimeUnit::Second => ScalarValue::TimestampSecond(value, None),
+        TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(value, None),
+        TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(value, None),
+        TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(value, None),
+    };
+    let value = Some(end.value());
+    let end = match end.unit() {
+        TimeUnit::Second => ScalarValue::TimestampSecond(value, None),
+        TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(value, None),
+        TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(value, None),
+        TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(value, None),
+    };
+    let left = Expr::BinaryExpr(BinaryExpr {
+        left: Box::new(column_name.clone()),
+        op: Operator::GtEq,
+        right: Box::new(Expr::Literal(start)),
+    });
+    let right = Expr::BinaryExpr(BinaryExpr {
+        left: Box::new(column_name.clone()),
+        op: Operator::Lt,
+        right: Box::new(Expr::Literal(end)),
+    });
+    let new_expr = Expr::BinaryExpr(BinaryExpr::new(
+        Box::new(left),
+        Operator::And,
+        Box::new(right),
+    ));
+    Ok(LogicalPlan::Filter(Filter::try_new(new_expr, input_plan)?))
+}
+
+#[cfg(test)]
+mod test {
+    use std::sync::Arc;
+
+    use catalog::memory::MemoryCatalogManager;
+    use catalog::RegisterTableRequest;
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, Schema};
+    use session::context::QueryContext;
+    use table::metadata::{TableInfoBuilder, TableMetaBuilder};
+    use table::test_util::EmptyTable;
+
+    use super::*;
+    use crate::error::Result;
+    use crate::parser::QueryLanguageParser;
+    use crate::{QueryEngineFactory, QueryEngineRef};
+
+    async fn create_test_engine() -> QueryEngineRef {
+        let table_name = "test".to_string();
+        let columns = vec![
+            ColumnSchema::new(
+                "tag_1".to_string(),
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                "ts".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new(
+                "field_1".to_string(),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ),
+        ];
+        let schema = Arc::new(Schema::new(columns));
+        let table_meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .value_indices(vec![6])
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::default()
+            .name(&table_name)
+            .meta(table_meta)
+            .build()
+            .unwrap();
+        let table = EmptyTable::from_table_info(&table_info);
+        let catalog_list = MemoryCatalogManager::with_default_setup();
+        assert!(catalog_list
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name,
+                table_id: 1024,
+                table,
+            })
+            .is_ok());
+        QueryEngineFactory::new(catalog_list, None, None, None, None, false).query_engine()
+    }
+
+    async fn do_query(sql: &str) -> Result<LogicalPlan> {
+        let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
+        let engine = create_test_engine().await;
+        engine.planner().plan(&stmt, QueryContext::arc()).await
+    }
+
+    #[tokio::test]
+    async fn test_within_filter() {
+        // TODO: test within filter with time zone
+        // TODO: verify within filter is pushed down by optimizer.
+
+        let sql = "SELECT * FROM test WHERE ts WITHIN '2015'";
+        let plan = do_query(sql).await.unwrap();
+        let expected = "Projection: test.tag_1, test.ts, test.field_1\
+        \n  Filter: test.ts >= TimestampSecond(1420070400, None) AND test.ts < TimestampSecond(1451606400, None)\
+        \n    TableScan: test";
+        assert_eq!(expected, format!("{plan:?}"));
+
+        let sql = "SELECT * FROM test WHERE ts WITHIN '2025-3'";
+        let plan = do_query(sql).await.unwrap();
+        let expected = "Projection: test.tag_1, test.ts, test.field_1\
+        \n  Filter: test.ts >= TimestampSecond(1740787200, None) AND test.ts < TimestampSecond(1743465600, None)\
+        \n    TableScan: test";
+        assert_eq!(expected, format!("{plan:?}"));
+
+        let sql = "SELECT * FROM test WHERE ts WITHIN '2025-12'";
+        let plan = do_query(sql).await.unwrap();
+        let expected = "Projection: test.tag_1, test.ts, test.field_1\
+        \n  Filter: test.ts >= TimestampSecond(1764547200, None) AND test.ts < TimestampSecond(1767225600, None)\
+        \n    TableScan: test";
+        assert_eq!(expected, format!("{plan:?}"));
+
+        let sql = "SELECT * FROM test WHERE ts WITHIN '2015-12-1'";
+        let plan = do_query(sql).await.unwrap();
+        let expected = "Projection: test.tag_1, test.ts, test.field_1\
+        \n  Filter: test.ts >= TimestampSecond(1448928000, None) AND test.ts < TimestampSecond(1449014400, None)\
+        \n    TableScan: test";
+        assert_eq!(expected, format!("{plan:?}"));
+
+        // 2025-12-1T01:00:00 <= timestamp < 2025-12-1T02:00:00
+        let sql = "SELECT * FROM test WHERE ts WITHIN '2025-12-1T01'";
+        let plan = do_query(sql).await.unwrap();
+        let expected = "Projection: test.tag_1, test.ts, test.field_1\
+        \n  Filter: test.ts >= TimestampSecond(1764550800, None) AND test.ts < TimestampSecond(1764554400, None)\
+        \n    TableScan: test";
+        assert_eq!(expected, format!("{plan:?}"));
+
+        // 2025-12-1T01:12:00 <= timestamp < 2025-12-1T01:13:00
+        let sql = "SELECT * FROM test WHERE ts WITHIN '2025-12-1T01:12'";
+        let plan = do_query(sql).await.unwrap();
+        let expected = "Projection: test.tag_1, test.ts, test.field_1\
+        \n  Filter: test.ts >= TimestampSecond(1764551520, None) AND test.ts < TimestampSecond(1764551580, None)\
+        \n    TableScan: test";
+        assert_eq!(expected, format!("{plan:?}"));
+
+        // 2025-12-1T01:12:01 <= timestamp < 2025-12-1T01:12:02
+        let sql = "SELECT * FROM test WHERE ts WITHIN '2025-12-1T01:12:01'";
+        let plan = do_query(sql).await.unwrap();
+        let expected = "Projection: test.tag_1, test.ts, test.field_1\
+        \n  Filter: test.ts >= TimestampSecond(1764551521, None) AND test.ts < TimestampSecond(1764551522, None)\
+        \n    TableScan: test";
+        assert_eq!(expected, format!("{plan:?}"));
     }
 }

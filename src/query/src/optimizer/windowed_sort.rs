@@ -174,7 +174,6 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
             partition_ranges = Some(region_scan_exec.get_uncollapsed_partition_ranges());
             time_index = Some(region_scan_exec.time_index());
             tag_columns = Some(region_scan_exec.tag_columns());
-
             // set distinguish_partition_ranges to true, this is an incorrect workaround
             if !is_batch_coalesced {
                 region_scan_exec.with_distinguish_partition_range(true);

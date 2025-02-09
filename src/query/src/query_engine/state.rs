@@ -101,7 +101,7 @@ impl QueryEngineState {
 
         // The [`TypeConversionRule`] must be at first
         extension_rules.insert(0, Arc::new(TypeConversionRule) as _);
-        extension_rules.push(Arc::new(WithinFilterRule));
+        extension_rules.push(Arc::new(WithinFilterRule::new()));
 
         // Apply the datafusion rules
         let mut analyzer = Analyzer::new();
