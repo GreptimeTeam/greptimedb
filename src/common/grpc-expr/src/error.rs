@@ -145,6 +145,17 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Unsupported column datatype: {column_type:?}, column: {column_name}, {msg}"
+    ))]
+    UnsupportedColumnDataType {
+        column_name: String,
+        column_type: ColumnDataType,
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -171,7 +182,8 @@ impl ErrorExt for Error {
             Error::InvalidSetTableOptionRequest { .. }
             | Error::InvalidUnsetTableOptionRequest { .. }
             | Error::InvalidSetFulltextOptionRequest { .. }
-            | Error::MissingAlterIndexOption { .. } => StatusCode::InvalidArguments,
+            | Error::MissingAlterIndexOption { .. }
+            | Error::UnsupportedColumnDataType { .. } => StatusCode::InvalidArguments,
         }
     }
 

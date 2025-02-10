@@ -28,7 +28,7 @@ use table::table_reference::TableReference;
 use crate::error::{
     self, DuplicatedColumnNameSnafu, DuplicatedTimestampColumnSnafu,
     InvalidFulltextColumnTypeSnafu, MissingTimestampColumnSnafu, Result,
-    UnknownColumnDataTypeSnafu,
+    UnknownColumnDataTypeSnafu, UnsupportedColumnDataTypeSnafu,
 };
 pub struct ColumnExpr<'a> {
     pub column_name: &'a str,
@@ -150,6 +150,15 @@ pub fn build_create_table_expr(
         }
 
         let column_type = infer_column_datatype(datatype, datatype_extension)?;
+
+        ensure!(
+            column_type != ColumnDataType::Datetime,
+            UnsupportedColumnDataTypeSnafu {
+                column_name,
+                column_type,
+                msg: "please use `TIMESTAMP` instead",
+            }
+        );
 
         ensure!(
             !contains_fulltext(options) || column_type == ColumnDataType::String,

@@ -167,6 +167,7 @@ pub(crate) fn get_type_by_alias(data_type: &DataType) -> Option<DataType> {
         DataType::UInt64 => Some(DataType::UnsignedBigInt(None)),
         DataType::Float32 => Some(DataType::Float(None)),
         DataType::Float64 => Some(DataType::Double),
+        DataType::Datetime(_) => Some(DataType::Timestamp(Some(6), TimezoneInfo::None)),
         _ => None,
     }
 }
@@ -188,7 +189,7 @@ pub(crate) fn get_data_type_by_alias_name(name: &str) -> Option<DataType> {
         "TIMESTAMP_MS" | "TIMESTAMPMILLISECOND" => {
             Some(DataType::Timestamp(Some(3), TimezoneInfo::None))
         }
-        "TIMESTAMP_US" | "TIMESTAMPMICROSECOND" => {
+        "TIMESTAMP_US" | "TIMESTAMPMICROSECOND" | "DATETIME" => {
             Some(DataType::Timestamp(Some(6), TimezoneInfo::None))
         }
         "TIMESTAMP_NS" | "TIMESTAMPNANOSECOND" => {
@@ -407,7 +408,7 @@ CREATE TABLE data_types (
   b BOOLEAN,
   vb VARBINARY,
   dt DATE,
-  dtt DATETIME,
+  dtt TIMESTAMP(6),
   ts0 TIMESTAMP(0),
   ts3 TIMESTAMP(3),
   ts6 TIMESTAMP(6),
