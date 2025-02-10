@@ -33,7 +33,7 @@ use tokio::sync::Semaphore;
 
 use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
-use crate::region_request::{RegionOpenRequest, RegionRequest};
+use crate::region_request::{BatchRegionRequest, RegionOpenRequest, RegionRequest};
 use crate::storage::{RegionId, ScanRequest};
 
 /// The settable region role state.
@@ -413,6 +413,11 @@ pub trait RegionEngine: Send + Sync {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<RegionResponse, BoxedError>;
+
+    async fn handle_batch_request(&self, request: BatchRegionRequest) -> Result<(), BoxedError> {
+        let _ = request;
+        unimplemented!()
+    }
 
     /// Handles query and return a scanner that can be used to scan the region concurrently.
     async fn handle_query(

@@ -59,7 +59,8 @@ use store_api::region_engine::{
     SettableRegionRoleState,
 };
 use store_api::region_request::{
-    AffectedRows, RegionCloseRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
+    AffectedRows, BatchRegionRequest, RegionCloseRequest, RegionOpenRequest, RegionPutRequest,
+    RegionRequest,
 };
 use store_api::storage::RegionId;
 use tokio::sync::{Semaphore, SemaphorePermit};
@@ -828,6 +829,14 @@ impl RegionServerInner {
                 }
             }
             _ => unreachable!(),
+        }
+
+        for (_, (engine, request)) in engine_requests {
+            // TODO(yingwen): Error for batch request.
+            engine
+                .handle_batch_request(BatchRegionRequest::Put(request))
+                .await
+                .unwrap();
         }
 
         // match engine

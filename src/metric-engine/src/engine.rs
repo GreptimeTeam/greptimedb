@@ -42,7 +42,7 @@ use store_api::region_engine::{
     RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetRegionRoleStateResponse,
     SettableRegionRoleState,
 };
-use store_api::region_request::RegionRequest;
+use store_api::region_request::{BatchRegionRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 
 use self::state::MetricEngineState;
@@ -173,6 +173,16 @@ impl RegionEngine for MetricEngine {
             affected_rows: rows,
             extensions: extension_return_value,
         })
+    }
+
+    async fn handle_batch_request(&self, request: BatchRegionRequest) -> Result<(), BoxedError> {
+        match request {
+            BatchRegionRequest::Put(put) => self
+                .inner
+                .batch_put_region(put)
+                .await
+                .map_err(BoxedError::new),
+        }
     }
 
     async fn handle_query(
