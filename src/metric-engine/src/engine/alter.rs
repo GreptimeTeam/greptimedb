@@ -122,14 +122,10 @@ impl MetricEngineInner {
                 *region_id,
                 columns
                     .iter()
-                    .flat_map(|col| {
+                    .map(|col| {
                         let column_name = col.column_metadata.column_schema.name.as_str();
-                        if new_column_names.contains(column_name) {
-                            let column_metadata = *physical_schema_map.get(column_name).unwrap();
-                            Some((column_metadata.column_schema.name.as_str(), column_metadata))
-                        } else {
-                            None
-                        }
+                        let column_metadata = *physical_schema_map.get(column_name).unwrap();
+                        (column_name, column_metadata)
                     })
                     .collect::<HashMap<_, _>>(),
             )
