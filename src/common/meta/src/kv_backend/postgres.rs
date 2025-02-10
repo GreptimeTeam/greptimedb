@@ -55,14 +55,25 @@ impl PgQueryExecutor<'_> {
         params: &[&(dyn ToSql + Sync)],
     ) -> Result<Vec<tokio_postgres::Row>> {
         match self {
-            PgQueryExecutor::Client(client) => client
-                .query(query, params)
-                .await
-                .context(PostgresExecutionSnafu { sql: query }),
-            PgQueryExecutor::Transaction(txn) => txn
-                .query(query, params)
-                .await
-                .context(PostgresExecutionSnafu { sql: query }),
+            PgQueryExecutor::Client(client) => {
+                let stmt = client
+                    .prepare_cached(query)
+                    .await
+                    .context(PostgresExecutionSnafu { sql: query })?;
+                client
+                    .query(&stmt, params)
+                    .await
+                    .context(PostgresExecutionSnafu { sql: query })
+            }
+            PgQueryExecutor::Transaction(txn) => {
+                let stmt = txn
+                    .prepare_cached(query)
+                    .await
+                    .context(PostgresExecutionSnafu { sql: query })?;
+                txn.query(&stmt, params)
+                    .await
+                    .context(PostgresExecutionSnafu { sql: query })
+            }
         }
     }
 
