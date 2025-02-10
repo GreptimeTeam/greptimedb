@@ -444,27 +444,20 @@ pub trait RegionEngine: Send + Sync {
     async fn get_last_seq_num(
         &self,
         region_id: RegionId,
-    ) -> Result<Option<SequenceNumber>, BoxedError> {
-        Ok(None)
-    }
+    ) -> Result<Option<SequenceNumber>, BoxedError>;
 
     async fn get_region_sequences(
         &self,
         seqs: RegionSequencesRequest,
-    ) -> Result<RegionResponse, BoxedError> {
-        let mut results = HashMap::new();
+    ) -> Result<HashMap<u64, u64>, BoxedError> {
+        let mut results = HashMap::with_capacity(seqs.region_ids.len());
+
         for region_id in seqs.region_ids {
             let seq = self.get_last_seq_num(region_id).await?.unwrap_or_default();
             results.insert(region_id.as_u64(), seq);
         }
-        let res_json = serde_json::to_string(&results)
-            .map_err(|e| PlainError::new(e.to_string(), StatusCode::Unexpected))
-            .map_err(BoxedError::new)?;
-        let res_u8 = res_json.as_bytes().to_vec();
-        Ok(RegionResponse {
-            affected_rows: 0,
-            extensions: HashMap::from([(SEQUENCES_KEY.to_string(), res_u8)]),
-        })
+
+        Ok(results)
     }
 
     /// Handles query and return a scanner that can be used to scan the region concurrently.
