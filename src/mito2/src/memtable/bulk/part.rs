@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use api::v1::Mutation;
 use bytes::Bytes;
+use common_telemetry::error;
 use common_time::timestamp::TimeUnit;
 use datafusion::arrow::array::{TimestampNanosecondArray, UInt64Builder};
 use datatypes::arrow;
@@ -32,13 +33,13 @@ use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow_array::BinaryArray;
 use datatypes::data_type::DataType;
 use datatypes::prelude::{MutableVector, ScalarVectorBuilder, Vector};
+use datatypes::value::ValueRef;
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
 use parquet::arrow::ArrowWriter;
 use parquet::data_type::AsBytes;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterProperties;
 use snafu::ResultExt;
-use datatypes::value::ValueRef;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
@@ -47,10 +48,10 @@ use crate::error;
 use crate::error::{ComputeArrowSnafu, EncodeMemtableSnafu, NewRecordBatchSnafu, Result};
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::BulkPartIter;
+use crate::memtable::encoder::{FieldWithId, SparseEncoder};
 use crate::memtable::key_values::KeyValuesRef;
 use crate::memtable::BoxedBatchIterator;
-use crate::memtable::encoder::{FieldWithId, SparseEncoder};
-use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt, SortField, SparsePrimaryKeyCodec};
+use crate::row_converter::{PrimaryKeyCodec, PrimaryKeyCodecExt};
 use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::to_sst_arrow_schema;
@@ -215,10 +216,18 @@ fn mutations_to_record_batch(
         for row in key_values.iter() {
             assert_eq!(1, row.num_primary_keys());
             assert_eq!(1, row.num_fields());
-            let ValueRef::Binary(encoded_primary_keys) = row.primary_keys().next().unwrap()else{
-                unreachable!("Primary key must be encoded binary type");
+            let first_primary_key_col = row.primary_keys().next().unwrap();
+
+            let bytes = match first_primary_key_col {
+                ValueRef::Binary(b) => b,
+                _ => {
+                    unreachable!(
+                        "Primary key must be encoded binary type, found: {:?}",
+                        first_primary_key_col
+                    );
+                }
             };
-            pk_builder.append_value(encoded_primary_keys);
+            pk_builder.append_value(bytes);
             ts_vector.push_value_ref(row.timestamp());
             sequence_builder.append_value(row.sequence());
             op_type_builder.append_value(row.op_type() as u8);

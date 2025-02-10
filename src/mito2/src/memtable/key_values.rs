@@ -19,8 +19,8 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::value::ValueRef;
 use memcomparable::Deserializer;
 use store_api::codec::{infer_primary_key_encoding_from_hint, PrimaryKeyEncoding};
-use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::metadata::RegionMetadata;
+use store_api::storage::SequenceNumber;
 
 use crate::row_converter::{SortField, COLUMN_ID_ENCODE_SIZE};
 

@@ -75,6 +75,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .with_label_values(&["encode_bulk"])
                 .start_timer();
             for region_ctx in region_ctxs.values_mut() {
+                // Avoid encoding to bulk part when mutations are dense encoded.
+                if region_ctx.version().metadata.primary_key_encoding == PrimaryKeyEncoding::Dense {
+                    continue;
+                }
                 // TODO(yingwen): We don't do region level parallelism as we only test
                 // one region now.
                 if let Err(e) = region_ctx.encode_bulks().await.map_err(Arc::new) {

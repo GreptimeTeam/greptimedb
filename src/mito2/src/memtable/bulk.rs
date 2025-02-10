@@ -17,6 +17,7 @@
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
@@ -25,6 +26,7 @@ use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::key_values::KeyValue;
+use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtableBuilder};
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
     MemtableRanges, MemtableRef, MemtableStats,
@@ -44,17 +46,23 @@ pub struct BulkMemtableBuilder {
     write_buffer_manager: Option<WriteBufferManagerRef>,
     dedup: bool,
     merge_mode: MergeMode,
+    fallback_builder: PartitionTreeMemtableBuilder,
 }
 
 impl MemtableBuilder for BulkMemtableBuilder {
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
-        Arc::new(BulkMemtable::new(
-            metadata.clone(),
-            id,
-            self.write_buffer_manager.clone(),
-            self.dedup,
-            self.merge_mode,
-        ))
+        //todo(hl): create different memtables according to region type (metadata/physical)
+        if metadata.primary_key_encoding == PrimaryKeyEncoding::Dense {
+            self.fallback_builder.build(id, metadata)
+        } else {
+            Arc::new(BulkMemtable::new(
+                metadata.clone(),
+                id,
+                self.write_buffer_manager.clone(),
+                self.dedup,
+                self.merge_mode,
+            )) as MemtableRef
+        }
     }
 }
 
@@ -64,10 +72,16 @@ impl BulkMemtableBuilder {
         dedup: bool,
         merge_mode: MergeMode,
     ) -> Self {
+        let builder = PartitionTreeMemtableBuilder::new(
+            PartitionTreeConfig::default(),
+            write_buffer_manager.clone(),
+        );
+
         Self {
             write_buffer_manager,
             dedup,
             merge_mode,
+            fallback_builder: builder,
         }
     }
 }

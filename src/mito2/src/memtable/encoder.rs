@@ -14,17 +14,15 @@
 
 //! Sparse primary key encoder;
 
-use std::collections::HashMap;
 use datatypes::prelude::ValueRef;
-use memcomparable::{Deserializer, Serializer};
-use serde::{Deserialize, Serialize};
+use memcomparable::Serializer;
+use serde::Serialize;
 use snafu::ResultExt;
-use datatypes::value::Value;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
-use crate::error;
-use crate::error::{DeserializeFieldSnafu, SerializeFieldSnafu};
-use crate::row_converter::{SortField, SparseValues};
+
+use crate::error::SerializeFieldSnafu;
+use crate::row_converter::SortField;
 
 pub(crate) struct FieldWithId {
     pub(crate) field: SortField,
@@ -33,15 +31,17 @@ pub(crate) struct FieldWithId {
 
 pub(crate) struct SparseEncoder {
     pub(crate) columns: Vec<FieldWithId>,
-    pub(crate) column_id_to_field: HashMap<ColumnId, (SortField,usize)>,
+    #[cfg(test)]
+    pub(crate) column_id_to_field: std::collections::HashMap<ColumnId, (SortField, usize)>,
 }
 
 impl SparseEncoder {
     pub(crate) fn new(metadata: &RegionMetadataRef) -> Self {
         let mut columns = Vec::with_capacity(metadata.primary_key.len());
-        let mut column_id_to_field = HashMap::with_capacity(metadata.primary_key.len());
-        for (idx, c) in metadata
-            .primary_key_columns().enumerate() {
+        #[cfg(test)]
+        let mut column_id_to_field =
+            std::collections::HashMap::with_capacity(metadata.primary_key.len());
+        for (_idx, c) in metadata.primary_key_columns().enumerate() {
             let sort_field = SortField::new(c.column_schema.data_type.clone());
 
             let field = FieldWithId {
@@ -49,17 +49,19 @@ impl SparseEncoder {
                 column_id: c.column_id,
             };
             columns.push(field);
-            column_id_to_field.insert(c.column_id, (sort_field, idx));
+            #[cfg(test)]
+            column_id_to_field.insert(c.column_id, (sort_field, _idx));
         }
         Self {
             columns,
+            #[cfg(test)]
             column_id_to_field,
         }
     }
 
     pub fn encode_to_vec<'a, I>(&self, row: I, buffer: &mut Vec<u8>) -> crate::error::Result<()>
     where
-        I: Iterator<Item=ValueRef<'a>>,
+        I: Iterator<Item = ValueRef<'a>>,
     {
         let mut serializer = Serializer::new(buffer);
         for (value, field) in row.zip(self.columns.iter()) {
@@ -74,12 +76,15 @@ impl SparseEncoder {
         Ok(())
     }
 
-    pub fn decode(&self, bytes: &[u8]) -> error::Result<Vec<Value>> {
-        let mut deserializer = Deserializer::new(bytes);
-        let mut values = vec![Value::Null; self.columns.len()];
+    #[cfg(test)]
+    pub fn decode(&self, bytes: &[u8]) -> crate::error::Result<Vec<datatypes::value::Value>> {
+        use serde::Deserialize;
+        let mut deserializer = memcomparable::Deserializer::new(bytes);
+        let mut values = vec![datatypes::value::Value::Null; self.columns.len()];
 
         while deserializer.has_remaining() {
-            let column_id = u32::deserialize(&mut deserializer).context(DeserializeFieldSnafu)?;
+            let column_id =
+                u32::deserialize(&mut deserializer).context(crate::error::DeserializeFieldSnafu)?;
             let (field, idx) = self.column_id_to_field.get(&column_id).unwrap();
             let value = field.deserialize(&mut deserializer)?;
             values[*idx] = value;

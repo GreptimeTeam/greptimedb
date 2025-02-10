@@ -18,13 +18,14 @@ use std::sync::Arc;
 use api::v1::{Mutation, OpType, Rows, WalEntry, WriteHint};
 use futures::future::try_join_all;
 use snafu::ResultExt;
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
 use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::error::{Error, JoinSnafu, Result, WriteGroupSnafu};
 use crate::memtable::bulk::part::BulkPartEncoder;
-use crate::memtable::BulkPart;
+use crate::memtable::{BulkPart, KeyValues};
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::request::OptionOutputTx;
 use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
@@ -213,22 +214,36 @@ impl RegionWriteCtx {
         }
 
         let mutable = &self.version.memtables.mutable;
-        // Takes mutations from the wal entry.
-        let bulk_parts = mem::take(&mut self.bulk_parts);
-        for (bulk_part, notify) in bulk_parts.into_iter().zip(&mut self.notifiers) {
-            // Write mutation to the memtable.
-            let Some(bulk_part) = bulk_part else {
-                continue;
-            };
-            if let Err(e) = mutable.write_bulk(bulk_part) {
-                notify.err = Some(Arc::new(e));
+
+        if self.version().metadata.primary_key_encoding == PrimaryKeyEncoding::Dense {
+            let mutations = mem::take(&mut self.wal_entry.mutations);
+            for (mutation, notify) in mutations.into_iter().zip(&mut self.notifiers) {
+                // Write mutation to the memtable.
+                let Some(kvs) = KeyValues::new(&self.version.metadata, mutation) else {
+                    continue;
+                };
+                if let Err(e) = mutable.write(&kvs) {
+                    notify.err = Some(Arc::new(e));
+                }
             }
-            // let Some(kvs) = KeyValues::new(&self.version.metadata, mutation) else {
-            //     continue;
-            // };
-            // if let Err(e) = mutable.write(&kvs) {
-            //     notify.err = Some(Arc::new(e));
-            // }
+        } else {
+            // Takes mutations from the wal entry.
+            let bulk_parts = mem::take(&mut self.bulk_parts);
+            for (bulk_part, notify) in bulk_parts.into_iter().zip(&mut self.notifiers) {
+                // Write mutation to the memtable.
+                let Some(bulk_part) = bulk_part else {
+                    continue;
+                };
+                if let Err(e) = mutable.write_bulk(bulk_part) {
+                    notify.err = Some(Arc::new(e));
+                }
+                // let Some(kvs) = KeyValues::new(&self.version.metadata, mutation) else {
+                //     continue;
+                // };
+                // if let Err(e) = mutable.write(&kvs) {
+                //     notify.err = Some(Arc::new(e));
+                // }
+            }
         }
 
         // Updates region sequence and entry id. Since we stores last sequence and entry id in region, we need
