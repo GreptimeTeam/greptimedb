@@ -626,8 +626,11 @@ impl Batch {
             );
         }
 
-        let idx = self.fields_idx.as_ref().unwrap().get(&column_id)?;
-        Some(&self.fields[*idx])
+        self.fields_idx
+            .as_ref()
+            .unwrap()
+            .get(&column_id)
+            .map(|&idx| &self.fields[idx])
     }
 }
 
