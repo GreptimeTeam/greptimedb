@@ -85,15 +85,11 @@ pub fn convert_body_to_requests(body: region_request::Body) -> Result<RegionRequ
         // Batch requests
         region_request::Body::Inserts(inserts) => {
             let requests = make_region_puts(inserts)?;
-            Ok(RegionRequestBundle::new_batch(BatchRegionRequest::Put(
-                requests,
-            )))
+            Ok(RegionRequestBundle::new_vector(requests))
         }
         region_request::Body::Deletes(deletes) => {
             let requests = make_region_deletes(deletes)?;
-            Ok(RegionRequestBundle::new_batch(BatchRegionRequest::Delete(
-                requests,
-            )))
+            Ok(RegionRequestBundle::new_vector(requests))
         }
         region_request::Body::Creates(creates) => {
             let requests = make_region_creates(creates.requests)?;
@@ -119,6 +115,7 @@ pub fn convert_body_to_requests(body: region_request::Body) -> Result<RegionRequ
 /// A bundle of region requests.
 pub enum RegionRequestBundle {
     Batch(BatchRegionRequest),
+    Vector(Vec<(RegionId, RegionRequest)>),
     Single((RegionId, RegionRequest)),
 }
 
@@ -131,12 +128,8 @@ impl RegionRequestBundle {
         Self::Single((region_id, request))
     }
 
-    pub fn is_batch(&self) -> bool {
-        matches!(self, RegionRequestBundle::Batch(_))
-    }
-
-    pub fn is_single(&self) -> bool {
-        matches!(self, RegionRequestBundle::Single(_))
+    pub fn new_vector(requests: Vec<(RegionId, RegionRequest)>) -> Self {
+        Self::Vector(requests)
     }
 }
 
@@ -145,8 +138,6 @@ pub enum BatchRegionRequest {
     Create(Vec<(RegionId, RegionCreateRequest)>),
     Drop(Vec<(RegionId, RegionDropRequest)>),
     Alter(Vec<(RegionId, RegionAlterRequest)>),
-    Put(Vec<(RegionId, RegionPutRequest)>),
-    Delete(Vec<(RegionId, RegionDeleteRequest)>),
 }
 
 impl BatchRegionRequest {
@@ -167,16 +158,6 @@ impl BatchRegionRequest {
                 requests
                     .into_iter()
                     .map(|(region_id, req)| (region_id, RegionRequest::Alter(req))),
-            ),
-            BatchRegionRequest::Put(requests) => Box::new(
-                requests
-                    .into_iter()
-                    .map(|(region_id, req)| (region_id, RegionRequest::Put(req))),
-            ),
-            BatchRegionRequest::Delete(requests) => Box::new(
-                requests
-                    .into_iter()
-                    .map(|(region_id, req)| (region_id, RegionRequest::Delete(req))),
             ),
         }
     }
@@ -280,26 +261,35 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<(RegionId, RegionTr
     Ok((region_id, RegionTruncateRequest {}))
 }
 
-fn make_region_puts(inserts: InsertRequests) -> Result<Vec<(RegionId, RegionPutRequest)>> {
+fn make_region_puts(inserts: InsertRequests) -> Result<Vec<(RegionId, RegionRequest)>> {
     let requests = inserts
         .requests
         .into_iter()
         .filter_map(|r| {
             let region_id = r.region_id.into();
-            r.rows
-                .map(|rows| (region_id, RegionPutRequest { rows, hint: None }))
+            r.rows.map(|rows| {
+                (
+                    region_id,
+                    RegionRequest::Put(RegionPutRequest { rows, hint: None }),
+                )
+            })
         })
         .collect();
     Ok(requests)
 }
 
-fn make_region_deletes(deletes: DeleteRequests) -> Result<Vec<(RegionId, RegionDeleteRequest)>> {
+fn make_region_deletes(deletes: DeleteRequests) -> Result<Vec<(RegionId, RegionRequest)>> {
     let requests = deletes
         .requests
         .into_iter()
         .filter_map(|r| {
             let region_id = r.region_id.into();
-            r.rows.map(|rows| (region_id, RegionDeleteRequest { rows }))
+            r.rows.map(|rows| {
+                (
+                    region_id,
+                    RegionRequest::Delete(RegionDeleteRequest { rows }),
+                )
+            })
         })
         .collect();
     Ok(requests)

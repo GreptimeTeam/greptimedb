@@ -156,22 +156,6 @@ impl RegionEngine for MetricEngine {
                 )
                 .await
             }
-            BatchRegionRequest::Delete(requests) => {
-                self.handle_requests(
-                    requests
-                        .into_iter()
-                        .map(|(region_id, req)| (region_id, RegionRequest::Delete(req))),
-                )
-                .await
-            }
-            BatchRegionRequest::Put(requests) => {
-                self.handle_requests(
-                    requests
-                        .into_iter()
-                        .map(|(region_id, req)| (region_id, RegionRequest::Put(req))),
-                )
-                .await
-            }
         }
     }
 

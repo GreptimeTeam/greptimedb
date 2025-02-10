@@ -38,6 +38,7 @@ use datafusion::datasource::{provider_as_source, TableProvider};
 use datafusion::error::Result as DfResult;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_expr::{LogicalPlan, TableSource};
+use futures::future::try_join_all;
 use metric_engine::engine::MetricEngine;
 use mito2::engine::MITO_ENGINE_NAME;
 use prost::Message;
@@ -367,6 +368,40 @@ impl RegionServer {
     async fn handle_batch_request(&self, batch: BatchRegionRequest) -> Result<RegionResponse> {
         self.inner.handle_batch_request(batch).await
     }
+
+    async fn handle_vector_request(
+        &self,
+        requests: Vec<(RegionId, RegionRequest)>,
+    ) -> Result<RegionResponse> {
+        let tracing_context = TracingContext::from_current_span();
+
+        let join_tasks = requests.into_iter().map(|(region_id, req)| {
+            let self_to_move = self.clone();
+            let span = tracing_context.attach(info_span!(
+                "RegionServer::handle_region_request",
+                region_id = region_id.to_string()
+            ));
+            async move {
+                self_to_move
+                    .handle_request(region_id, req)
+                    .trace(span)
+                    .await
+            }
+        });
+
+        let results = try_join_all(join_tasks).await?;
+        let mut affected_rows = 0;
+        let mut extensions = HashMap::new();
+        for result in results {
+            affected_rows += result.affected_rows;
+            extensions.extend(result.extensions);
+        }
+
+        Ok(RegionResponse {
+            affected_rows,
+            extensions,
+        })
+    }
 }
 
 #[async_trait]
@@ -380,6 +415,11 @@ impl RegionServerHandler for RegionServer {
         let result = match bundle {
             RegionRequestBundle::Single((region_id, request)) => self
                 .handle_single_request(region_id, request)
+                .await
+                .map_err(BoxedError::new)
+                .context(ExecuteGrpcRequestSnafu)?,
+            RegionRequestBundle::Vector(requests) => self
+                .handle_vector_request(requests)
                 .await
                 .map_err(BoxedError::new)
                 .context(ExecuteGrpcRequestSnafu)?,
@@ -730,14 +770,6 @@ impl RegionServerInner {
                 .map(|(region_id, _)| (*region_id, RegionChange::Deregisters))
                 .collect::<Vec<_>>(),
             BatchRegionRequest::Alter(requests) => requests
-                .iter()
-                .map(|(region_id, _)| (*region_id, RegionChange::None))
-                .collect::<Vec<_>>(),
-            BatchRegionRequest::Delete(requests) => requests
-                .iter()
-                .map(|(region_id, _)| (*region_id, RegionChange::None))
-                .collect::<Vec<_>>(),
-            BatchRegionRequest::Put(requests) => requests
                 .iter()
                 .map(|(region_id, _)| (*region_id, RegionChange::None))
                 .collect::<Vec<_>>(),
