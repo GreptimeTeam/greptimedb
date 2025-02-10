@@ -21,7 +21,6 @@
 //! TODO: think of better ways to not ser/de every time a accum needed to be updated, since it's in a tight loop
 
 mod accum_v2;
-mod min_max;
 
 use std::any::type_name;
 use std::fmt::Display;
