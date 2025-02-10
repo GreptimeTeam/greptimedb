@@ -149,6 +149,21 @@ impl Memtable for BulkMemtable {
     fn write_bulk(&self, fragment: BulkPart) -> Result<()> {
         self.alloc_tracker.on_allocation(fragment.data.len());
         let mut parts = self.parts.write().unwrap();
+        let part_metadata = fragment.metadata();
+        if self.max_timestamp.load(Ordering::Relaxed) < part_metadata.max_timestamp {
+            self.max_timestamp
+                .store(part_metadata.max_timestamp, Ordering::Relaxed);
+        }
+        if self.min_timestamp.load(Ordering::Relaxed) > part_metadata.min_timestamp {
+            self.min_timestamp
+                .store(part_metadata.min_timestamp, Ordering::Relaxed);
+        }
+        if self.max_sequence.load(Ordering::Relaxed) < part_metadata.max_sequence {
+            self.max_sequence
+                .store(part_metadata.max_sequence, Ordering::Relaxed);
+        }
+        self.num_rows
+            .fetch_add(part_metadata.num_rows, Ordering::Relaxed);
         parts.push(fragment);
         Ok(())
     }

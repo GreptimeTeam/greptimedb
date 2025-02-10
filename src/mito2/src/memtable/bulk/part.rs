@@ -103,6 +103,8 @@ pub struct BulkPartMeta {
     pub max_timestamp: i64,
     /// Min timestamp in part.
     pub min_timestamp: i64,
+    /// Max sequence number in part.
+    pub max_sequence: u64,
     /// Part file metadata.
     pub parquet_metadata: Arc<ParquetMetaData>,
     /// Part region schema.
@@ -143,7 +145,7 @@ impl BulkPartEncoder {
 impl BulkPartEncoder {
     /// Encodes mutations to a [BulkPart], returns true if encoded data has been written to `dest`.
     pub(crate) fn encode_mutations(&self, mutations: &[Mutation]) -> Result<Option<BulkPart>> {
-        let Some((arrow_record_batch, min_ts, max_ts)) =
+        let Some((arrow_record_batch, min_ts, max_ts, max_sequence)) =
             mutations_to_record_batch(mutations, &self.metadata, self.dedup)?
         else {
             return Ok(None);
@@ -171,6 +173,7 @@ impl BulkPartEncoder {
                 num_rows: arrow_record_batch.num_rows(),
                 max_timestamp: max_ts,
                 min_timestamp: min_ts,
+                max_sequence,
                 parquet_metadata,
                 region_metadata: self.metadata.clone(),
             },
@@ -183,7 +186,7 @@ fn mutations_to_record_batch(
     mutations: &[Mutation],
     metadata: &RegionMetadataRef,
     dedup: bool,
-) -> Result<Option<(RecordBatch, i64, i64)>> {
+) -> Result<Option<(RecordBatch, i64, i64, u64)>> {
     let total_rows: usize = mutations
         .iter()
         .map(|m| m.rows.as_ref().map(|r| r.rows.len()).unwrap_or(0))
@@ -208,6 +211,7 @@ fn mutations_to_record_batch(
         .map(|f| f.column_schema.data_type.create_mutable_vector(total_rows))
         .collect();
 
+    let mut max_sequence = u64::MIN;
     for m in mutations {
         let Some(key_values) = KeyValuesRef::new(metadata, m) else {
             continue;
@@ -230,6 +234,7 @@ fn mutations_to_record_batch(
             pk_builder.append_value(bytes);
             ts_vector.push_value_ref(row.timestamp());
             sequence_builder.append_value(row.sequence());
+            max_sequence = max_sequence.max(row.sequence());
             op_type_builder.append_value(row.op_type() as u8);
             for (builder, field) in field_builders.iter_mut().zip(row.fields()) {
                 builder.push_value_ref(field);
@@ -259,7 +264,9 @@ fn mutations_to_record_batch(
         arrow_schema,
     };
 
-    sorter.sort().map(Some)
+    sorter.sort().map(|(batch, min, max)|{
+        Some((batch, min, max, max_sequence))
+    })
 }
 
 struct ArraysSorter<I> {
@@ -557,7 +564,7 @@ mod tests {
 
         let pk_encoder = SparseEncoder::new(&metadata);
 
-        let (batch, _, _) = mutations_to_record_batch(&mutations, &metadata, dedup)
+        let (batch, _, _,_) = mutations_to_record_batch(&mutations, &metadata, dedup)
             .unwrap()
             .unwrap();
         let read_format = ReadFormat::new_with_all_columns(metadata.clone());
