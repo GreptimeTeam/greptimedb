@@ -661,7 +661,7 @@ impl RegionServerInner {
                             }
                         }
                         Err(e) => {
-                            self.unset_region_status(region_id, *region_change);
+                            self.unset_region_status(region_id, &engine, *region_change);
                             error!(e; "Failed to open region: {}", region_id);
                             errors.push(e);
                         }
@@ -670,7 +670,7 @@ impl RegionServerInner {
             }
             Err(e) => {
                 for (&region_id, region_change) in &region_changes {
-                    self.unset_region_status(region_id, *region_change);
+                    self.unset_region_status(region_id, &engine, *region_change);
                 }
                 error!(e; "Failed to open batch regions");
                 errors.push(BoxedError::new(e));
@@ -780,7 +780,7 @@ impl RegionServerInner {
             }
             Err(err) => {
                 // Removes the region status if the operation fails.
-                self.unset_region_status(region_id, region_change);
+                self.unset_region_status(region_id, &engine, region_change);
                 Err(err)
             }
         }
@@ -809,11 +809,20 @@ impl RegionServerInner {
         }
     }
 
-    fn unset_region_status(&self, region_id: RegionId, region_change: RegionChange) {
+    fn unset_region_status(
+        &self,
+        region_id: RegionId,
+        engine: &RegionEngineRef,
+        region_change: RegionChange,
+    ) {
         match region_change {
             RegionChange::None => {}
-            RegionChange::Register(_) | RegionChange::Deregisters => {
+            RegionChange::Register(_) => {
                 self.region_map.remove(&region_id);
+            }
+            RegionChange::Deregisters => {
+                self.region_map
+                    .insert(region_id, RegionEngineWithStatus::Ready(engine.clone()));
             }
             RegionChange::Catchup => {}
         }
@@ -1195,7 +1204,7 @@ mod tests {
             .unwrap_err();
 
         let status = mock_region_server.inner.region_map.get(&region_id);
-        assert!(status.is_none());
+        assert!(status.is_some());
     }
 
     struct CurrentEngineTest {
