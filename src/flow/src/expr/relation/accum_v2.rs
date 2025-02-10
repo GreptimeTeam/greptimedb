@@ -14,15 +14,18 @@
 
 //! new accumulator trait that is more flexible and can be used in the future for more complex accumulators
 
-use std::any::type_name;
+use std::any::{type_name, Any};
 use std::fmt::Display;
+use std::sync::{Mutex, MutexGuard};
 
+use datafusion::logical_expr::Accumulator as DfAccumulator;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use serde::{Deserialize, Serialize};
-use snafu::ensure;
+use snafu::{ensure, ResultExt};
 
-use crate::expr::error::{InternalSnafu, TryFromValueSnafu};
+use crate::expr::error::{DataTypeSnafu, DatafusionSnafu, InternalSnafu, TryFromValueSnafu};
 use crate::expr::EvalError;
 
 ///  Basically a copy of datafusion's Accumulator, but with a few modifications
@@ -60,6 +63,88 @@ pub trait AccumulatorV2: Send + Sync + std::fmt::Debug {
     /// Does the accumulator support incrementally updating its value by removing values.
     fn supports_retract_batch(&self) -> bool {
         false
+    }
+}
+
+/// Adapter for several hand-picked datafusion accumulators that can be used in flow
+///
+/// i.e: can call evaluate multiple times.
+#[derive(Debug)]
+pub struct DfAccumulatorAdapter {
+    inner: Mutex<Box<dyn DfAccumulator>>,
+}
+
+pub trait AcceptDfAccumulator: DfAccumulator {}
+
+impl AcceptDfAccumulator for datafusion::functions_aggregate::min_max::MaxAccumulator {}
+
+impl AcceptDfAccumulator for datafusion::functions_aggregate::min_max::MinAccumulator {}
+
+impl DfAccumulatorAdapter {
+    // TODO(discord9): find a way to whitelist only certain type of accumulators
+    fn new_unchecked(acc: Box<dyn DfAccumulator>) -> Self {
+        Self {
+            inner: Mutex::new(acc),
+        }
+    }
+
+    fn new<T: AcceptDfAccumulator + 'static>(acc: T) -> Self {
+        Self::new_unchecked(Box::new(acc))
+    }
+
+    fn acc(&self) -> MutexGuard<Box<dyn DfAccumulator>> {
+        self.inner.lock().expect("lock poisoned")
+    }
+}
+
+impl AccumulatorV2 for DfAccumulatorAdapter {
+    fn update_batch(&mut self, values: &[VectorRef]) -> Result<(), EvalError> {
+        let values = values
+            .iter()
+            .map(|v| v.to_arrow_array().clone())
+            .collect::<Vec<_>>();
+        self.acc().update_batch(&values).context(DatafusionSnafu {
+            context: "failed to update batch: {}",
+        })
+    }
+
+    fn evaluate(&self) -> Result<Value, EvalError> {
+        // TODO(discord9): find a way to confirm internal state is not consumed
+        let value = self.acc().evaluate().context(DatafusionSnafu {
+            context: "failed to evaluate accumulator: {}",
+        })?;
+        let value = Value::try_from(value).context(DataTypeSnafu {
+            msg: "failed to convert evaluate result from `ScalarValue` to `Value`",
+        })?;
+        Ok(value)
+    }
+
+    fn size(&self) -> usize {
+        self.acc().size()
+    }
+
+    fn into_state(self) -> Result<Vec<Value>, EvalError> {
+        let state = self.acc().state().context(DatafusionSnafu {
+            context: "failed to get state: {}",
+        })?;
+        let state = state
+            .into_iter()
+            .map(Value::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(|_| DataTypeSnafu {
+                msg: "failed to convert `ScalarValue` state to `Value`",
+            })?;
+        Ok(state)
+    }
+
+    fn merge_batch(&mut self, states: &[VectorRef]) -> Result<(), EvalError> {
+        let states = states
+            .iter()
+            .map(|v| v.to_arrow_array().clone())
+            .collect::<Vec<_>>();
+        self.acc().merge_batch(&states).context(DatafusionSnafu {
+            context: "failed to merge batch",
+        })
     }
 }
 
