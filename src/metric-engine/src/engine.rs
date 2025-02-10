@@ -127,6 +127,54 @@ impl RegionEngine for MetricEngine {
         METRIC_ENGINE_NAME
     }
 
+    async fn handle_batch_request(
+        &self,
+        batch_request: BatchRegionRequest,
+    ) -> Result<RegionResponse, BoxedError> {
+        match batch_request {
+            BatchRegionRequest::Create(requests) => {
+                self.handle_requests(
+                    requests
+                        .into_iter()
+                        .map(|(region_id, req)| (region_id, RegionRequest::Create(req))),
+                )
+                .await
+            }
+            BatchRegionRequest::Alter(requests) => {
+                self.handle_requests(
+                    requests
+                        .into_iter()
+                        .map(|(region_id, req)| (region_id, RegionRequest::Alter(req))),
+                )
+                .await
+            }
+            BatchRegionRequest::Drop(requests) => {
+                self.handle_requests(
+                    requests
+                        .into_iter()
+                        .map(|(region_id, req)| (region_id, RegionRequest::Drop(req))),
+                )
+                .await
+            }
+            BatchRegionRequest::Delete(requests) => {
+                self.handle_requests(
+                    requests
+                        .into_iter()
+                        .map(|(region_id, req)| (region_id, RegionRequest::Delete(req))),
+                )
+                .await
+            }
+            BatchRegionRequest::Put(requests) => {
+                self.handle_requests(
+                    requests
+                        .into_iter()
+                        .map(|(region_id, req)| (region_id, RegionRequest::Put(req))),
+                )
+                .await
+            }
+        }
+    }
+
     /// Handles non-query request to the region. Returns the count of affected rows.
     async fn handle_request(
         &self,
@@ -268,6 +316,24 @@ impl RegionEngine for MetricEngine {
 }
 
 impl MetricEngine {
+    async fn handle_requests(
+        &self,
+        requests: impl IntoIterator<Item = (RegionId, RegionRequest)>,
+    ) -> Result<RegionResponse, BoxedError> {
+        let mut affected_rows = 0;
+        let mut extensions = HashMap::new();
+        for (region_id, request) in requests {
+            let response = self.handle_request(region_id, request).await?;
+            affected_rows += response.affected_rows;
+            extensions.extend(response.extensions);
+        }
+
+        Ok(RegionResponse {
+            affected_rows,
+            extensions,
+        })
+    }
+
     pub fn new(mito: MitoEngine, config: EngineConfig) -> Self {
         let metadata_region = MetadataRegion::new(mito.clone());
         let data_region = DataRegion::new(mito.clone());

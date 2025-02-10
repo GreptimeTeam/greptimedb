@@ -38,7 +38,6 @@ use datafusion::datasource::{provider_as_source, TableProvider};
 use datafusion::error::Result as DfResult;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_expr::{LogicalPlan, TableSource};
-use futures_util::future::try_join_all;
 use metric_engine::engine::MetricEngine;
 use mito2::engine::MITO_ENGINE_NAME;
 use prost::Message;
@@ -59,8 +58,8 @@ use store_api::region_engine::{
     SettableRegionRoleState,
 };
 use store_api::region_request::{
-    AffectedRows, BatchRegionRequest, RegionCloseRequest, RegionOpenRequest, RegionPutRequest,
-    RegionRequest,
+    convert_body_to_requests, AffectedRows, BatchRegionRequest, RegionCloseRequest,
+    RegionOpenRequest, RegionRequest, RegionRequestBundle,
 };
 use store_api::storage::RegionId;
 use tokio::sync::{Semaphore, SemaphorePermit};
@@ -71,8 +70,9 @@ use crate::error::{
     self, BuildRegionRequestsSnafu, ConcurrentQueryLimiterClosedSnafu,
     ConcurrentQueryLimiterTimeoutSnafu, DataFusionSnafu, DecodeLogicalPlanSnafu,
     ExecuteLogicalPlanSnafu, FindLogicalRegionsSnafu, HandleBatchOpenRequestSnafu,
-    HandleRegionRequestSnafu, NewPlanDecoderSnafu, RegionEngineNotFoundSnafu, RegionNotFoundSnafu,
-    RegionNotReadySnafu, Result, StopRegionEngineSnafu, UnexpectedSnafu, UnsupportedOutputSnafu,
+    HandleBatchRequestSnafu, HandleRegionRequestSnafu, NewPlanDecoderSnafu,
+    RegionEngineNotFoundSnafu, RegionNotFoundSnafu, RegionNotReadySnafu, Result,
+    StopRegionEngineSnafu, UnexpectedSnafu, UnsupportedOutputSnafu,
 };
 use crate::event_listener::RegionServerEventListenerRef;
 
@@ -350,68 +350,45 @@ impl RegionServer {
             .region_map
             .insert(region_id, RegionEngineWithStatus::Ready(engine));
     }
+
+    async fn handle_single_request(
+        &self,
+        region_id: RegionId,
+        request: RegionRequest,
+    ) -> Result<RegionResponse> {
+        let tracing_context = TracingContext::from_current_span();
+        let span = tracing_context.attach(info_span!(
+            "RegionServer::handle_region_request",
+            region_id = region_id.to_string()
+        ));
+        self.handle_request(region_id, request).trace(span).await
+    }
+
+    async fn handle_batch_request(&self, batch: BatchRegionRequest) -> Result<RegionResponse> {
+        self.inner.handle_batch_request(batch).await
+    }
 }
 
 #[async_trait]
 impl RegionServerHandler for RegionServer {
     async fn handle(&self, request: region_request::Body) -> ServerResult<RegionResponseV1> {
-        let is_parallel = matches!(
-            request,
-            region_request::Body::Inserts(_) | region_request::Body::Deletes(_)
-        );
-        let requests = RegionRequest::try_from_request_body(request)
+        let bundle = convert_body_to_requests(request)
             .context(BuildRegionRequestsSnafu)
             .map_err(BoxedError::new)
             .context(ExecuteGrpcRequestSnafu)?;
 
-        let tracing_context = TracingContext::from_current_span();
-
-        let results = if is_parallel {
-            let join_tasks = requests.into_iter().map(|(region_id, req)| {
-                let self_to_move = self.clone();
-                let span = tracing_context.attach(info_span!(
-                    "RegionServer::handle_region_request",
-                    region_id = region_id.to_string()
-                ));
-                async move {
-                    self_to_move
-                        .handle_request(region_id, req)
-                        .trace(span)
-                        .await
-                }
-            });
-
-            try_join_all(join_tasks)
+        let result = match bundle {
+            RegionRequestBundle::Single((region_id, request)) => self
+                .handle_single_request(region_id, request)
                 .await
                 .map_err(BoxedError::new)
-                .context(ExecuteGrpcRequestSnafu)?
-        } else {
-            let mut results = Vec::with_capacity(requests.len());
-            // FIXME(jeremy, ruihang): Once the engine supports merged calls, we should immediately
-            // modify this part to avoid inefficient serial loop calls.
-            for (region_id, req) in requests {
-                let span = tracing_context.attach(info_span!(
-                    "RegionServer::handle_region_request",
-                    region_id = region_id.to_string()
-                ));
-                let result = self
-                    .handle_request(region_id, req)
-                    .trace(span)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(ExecuteGrpcRequestSnafu)?;
-                results.push(result);
-            }
-            results
+                .context(ExecuteGrpcRequestSnafu)?,
+            RegionRequestBundle::Batch(requests) => self
+                .handle_batch_request(requests)
+                .await
+                .map_err(BoxedError::new)
+                .context(ExecuteGrpcRequestSnafu)?,
         };
-
-        // merge results by sum up affected rows and merge extensions.
-        let mut affected_rows = 0;
-        let mut extensions = HashMap::new();
-        for result in results {
-            affected_rows += result.affected_rows;
-            extensions.extend(result.extensions);
-        }
 
         Ok(RegionResponseV1 {
             header: Some(ResponseHeader {
@@ -420,8 +397,8 @@ impl RegionServerHandler for RegionServer {
                     ..Default::default()
                 }),
             }),
-            affected_rows: affected_rows as _,
-            extensions,
+            affected_rows: result.affected_rows as _,
+            extensions: result.extensions,
         })
     }
 }
@@ -731,6 +708,76 @@ impl RegionServerInner {
             .into_iter()
             .flatten()
             .collect::<Vec<_>>())
+    }
+
+    // Handle requests in batch.
+    //
+    // limitation: all create requests must be in the same engine.
+    pub async fn handle_batch_request(
+        &self,
+        batch_request: BatchRegionRequest,
+    ) -> Result<RegionResponse> {
+        let region_changes = match &batch_request {
+            BatchRegionRequest::Create(requests) => requests
+                .iter()
+                .map(|(region_id, create)| {
+                    let attribute = parse_region_attribute(&create.engine, &create.options)?;
+                    Ok((*region_id, RegionChange::Register(attribute)))
+                })
+                .collect::<Result<Vec<_>>>()?,
+            BatchRegionRequest::Drop(requests) => requests
+                .iter()
+                .map(|(region_id, _)| (*region_id, RegionChange::Deregisters))
+                .collect::<Vec<_>>(),
+            BatchRegionRequest::Alter(requests) => requests
+                .iter()
+                .map(|(region_id, _)| (*region_id, RegionChange::None))
+                .collect::<Vec<_>>(),
+            BatchRegionRequest::Delete(requests) => requests
+                .iter()
+                .map(|(region_id, _)| (*region_id, RegionChange::None))
+                .collect::<Vec<_>>(),
+            BatchRegionRequest::Put(requests) => requests
+                .iter()
+                .map(|(region_id, _)| (*region_id, RegionChange::None))
+                .collect::<Vec<_>>(),
+        };
+
+        let (first_region_id, first_region_change) = region_changes.first().unwrap();
+        let engine = match self.get_engine(*first_region_id, first_region_change)? {
+            CurrentEngine::Engine(engine) => engine,
+            CurrentEngine::EarlyReturn(rows) => return Ok(RegionResponse::new(rows)),
+        };
+
+        for (region_id, region_change) in region_changes.iter() {
+            self.set_region_status_not_ready(*region_id, &engine, region_change);
+        }
+
+        let result = engine
+            .handle_batch_request(batch_request)
+            .await
+            .context(HandleBatchRequestSnafu {});
+
+        match result {
+            Ok(result) => {
+                for (region_id, region_change) in region_changes {
+                    self.set_region_status_ready(region_id, engine.clone(), region_change)
+                        .await?;
+                }
+
+                Ok(RegionResponse {
+                    affected_rows: result.affected_rows,
+                    extensions: result.extensions,
+                })
+            }
+            Err(err) => {
+                for (region_id, region_change) in region_changes {
+                    self.unset_region_status(region_id, &engine, region_change);
+                }
+
+                Err(err)
+            }
+        }
     }
 
     pub async fn handle_request(
