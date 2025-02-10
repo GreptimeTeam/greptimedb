@@ -664,13 +664,6 @@ impl WorkerRequest {
                 sender: sender.into(),
                 request: DdlRequest::Catchup(v),
             }),
-            RegionRequest::Sequences(_) => {
-                return InvalidRequestSnafu {
-                    region_id,
-                    reason: "sequences request should not be handle by worker".to_string(),
-                }
-                .fail();
-            }
         };
 
         Ok((worker_request, receiver))
