@@ -14,13 +14,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use api::v1::SemanticType;
-use snafu::ensure;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_request::{AlterKind, RegionAlterRequest};
 use store_api::storage::{ColumnId, RegionId};
 
-use crate::error::{AddingFieldColumnSnafu, Result};
+use crate::error::Result;
 
 /// Extract new columns from the create requests.
 ///
@@ -42,10 +40,6 @@ pub fn extract_new_columns<'a>(
             if !physical_columns.contains_key(column_name)
                 && !new_column_names.contains(column_name)
             {
-                ensure!(
-                    col.column_metadata.semantic_type != SemanticType::Field,
-                    AddingFieldColumnSnafu { name: column_name }
-                );
                 new_column_names.insert(column_name);
                 // TODO(weny): avoid clone
                 new_columns.push(col.column_metadata.clone());
