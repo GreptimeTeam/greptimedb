@@ -59,7 +59,8 @@ use store_api::region_engine::{
     SettableRegionRoleState,
 };
 use store_api::region_request::{
-    AffectedRows, RegionCloseRequest, RegionOpenRequest, RegionRequest,
+    convert_body_to_requests, AffectedRows, BatchRegionRequest, RegionCloseRequest,
+    RegionOpenRequest, RegionRequest, RegionRequestBundle,
 };
 use store_api::storage::RegionId;
 use tokio::sync::{Semaphore, SemaphorePermit};
@@ -344,68 +345,151 @@ impl RegionServer {
             .region_map
             .insert(region_id, RegionEngineWithStatus::Ready(engine));
     }
-}
 
-#[async_trait]
-impl RegionServerHandler for RegionServer {
-    async fn handle(&self, request: region_request::Body) -> ServerResult<RegionResponseV1> {
-        let is_parallel = matches!(
-            request,
-            region_request::Body::Inserts(_) | region_request::Body::Deletes(_)
-        );
-        let requests = RegionRequest::try_from_request_body(request)
-            .context(BuildRegionRequestsSnafu)
-            .map_err(BoxedError::new)
-            .context(ExecuteGrpcRequestSnafu)?;
-
+    async fn handle_single_request(
+        &self,
+        region_id: RegionId,
+        request: RegionRequest,
+    ) -> Result<RegionResponse> {
         let tracing_context = TracingContext::from_current_span();
+        let span = tracing_context.attach(info_span!(
+            "RegionServer::handle_single_request",
+            region_id = region_id.to_string()
+        ));
+        self.handle_request(region_id, request).trace(span).await
+    }
 
-        let results = if is_parallel {
-            let join_tasks = requests.into_iter().map(|(region_id, req)| {
-                let self_to_move = self.clone();
-                let span = tracing_context.attach(info_span!(
-                    "RegionServer::handle_region_request",
-                    region_id = region_id.to_string()
-                ));
-                async move {
-                    self_to_move
-                        .handle_request(region_id, req)
-                        .trace(span)
-                        .await
-                }
-            });
+    async fn handle_requests(
+        &self,
+        requests: impl IntoIterator<Item = (RegionId, RegionRequest)>,
+    ) -> Result<RegionResponse> {
+        let tracing_context = TracingContext::from_current_span();
+        let mut affected_rows = 0;
+        let mut extensions = HashMap::new();
+        for (region_id, req) in requests {
+            let span = tracing_context.attach(info_span!(
+                "RegionServer::handle_region_request",
+                region_id = region_id.to_string()
+            ));
+            let response = self
+                .handle_single_request(region_id, req)
+                .trace(span)
+                .await?;
+            affected_rows += response.affected_rows;
+            extensions.extend(response.extensions);
+        }
+        Ok(RegionResponse {
+            affected_rows,
+            extensions,
+        })
+    }
 
-            try_join_all(join_tasks)
-                .await
-                .map_err(BoxedError::new)
-                .context(ExecuteGrpcRequestSnafu)?
-        } else {
-            let mut results = Vec::with_capacity(requests.len());
-            // FIXME(jeremy, ruihang): Once the engine supports merged calls, we should immediately
-            // modify this part to avoid inefficient serial loop calls.
-            for (region_id, req) in requests {
-                let span = tracing_context.attach(info_span!(
-                    "RegionServer::handle_region_request",
-                    region_id = region_id.to_string()
-                ));
-                let result = self
+    async fn handle_requests_parallel(
+        &self,
+        requests: impl IntoIterator<Item = (RegionId, RegionRequest)>,
+    ) -> Result<RegionResponse> {
+        let tracing_context = TracingContext::from_current_span();
+        let join_tasks = requests.into_iter().map(|(region_id, req)| {
+            let self_to_move = self.clone();
+            let span = tracing_context.attach(info_span!(
+                "RegionServer::handle_region_request",
+                region_id = region_id.to_string()
+            ));
+            async move {
+                self_to_move
                     .handle_request(region_id, req)
                     .trace(span)
                     .await
-                    .map_err(BoxedError::new)
-                    .context(ExecuteGrpcRequestSnafu)?;
-                results.push(result);
             }
-            results
-        };
+        });
+        let results = try_join_all(join_tasks).await?;
 
-        // merge results by sum up affected rows and merge extensions.
         let mut affected_rows = 0;
         let mut extensions = HashMap::new();
         for result in results {
             affected_rows += result.affected_rows;
             extensions.extend(result.extensions);
         }
+
+        Ok(RegionResponse {
+            affected_rows,
+            extensions,
+        })
+    }
+
+    async fn handle_batch_request(&self, batch: BatchRegionRequest) -> Result<RegionResponse> {
+        match batch {
+            BatchRegionRequest::Create(creates) => {
+                // FIXME(jeremy, ruihang, wenkang): Once the engine supports merged calls, we should immediately
+                // modify this part to avoid inefficient serial loop calls.
+                self.handle_requests(
+                    creates
+                        .into_iter()
+                        .map(|(region_id, req)| (region_id, RegionRequest::Create(req))),
+                )
+                .await
+            }
+            BatchRegionRequest::Drop(drops) => {
+                // FIXME(jeremy, ruihang, wenkang): Once the engine supports merged calls, we should immediately
+                // modify this part to avoid inefficient serial loop calls.
+                self.handle_requests(
+                    drops
+                        .into_iter()
+                        .map(|(region_id, req)| (region_id, RegionRequest::Drop(req))),
+                )
+                .await
+            }
+            BatchRegionRequest::Alter(alters) => {
+                // FIXME(jeremy, ruihang, wenkang): Once the engine supports merged calls, we should immediately
+                // modify this part to avoid inefficient serial loop calls.
+                self.handle_requests(
+                    alters
+                        .into_iter()
+                        .map(|(region_id, req)| (region_id, RegionRequest::Alter(req))),
+                )
+                .await
+            }
+            BatchRegionRequest::Put(put) => {
+                // TODO(yingwen, wenkang): Implement it in engine level.
+                self.handle_requests_parallel(
+                    put.into_iter()
+                        .map(|(region_id, req)| (region_id, RegionRequest::Put(req))),
+                )
+                .await
+            }
+            BatchRegionRequest::Delete(delete) => {
+                // TODO(yingwen, wenkang): Implement it in engine level.
+                self.handle_requests_parallel(
+                    delete
+                        .into_iter()
+                        .map(|(region_id, req)| (region_id, RegionRequest::Delete(req))),
+                )
+                .await
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl RegionServerHandler for RegionServer {
+    async fn handle(&self, request: region_request::Body) -> ServerResult<RegionResponseV1> {
+        let bundle = convert_body_to_requests(request)
+            .context(BuildRegionRequestsSnafu)
+            .map_err(BoxedError::new)
+            .context(ExecuteGrpcRequestSnafu)?;
+
+        let result = match bundle {
+            RegionRequestBundle::Single((region_id, request)) => self
+                .handle_single_request(region_id, request)
+                .await
+                .map_err(BoxedError::new)
+                .context(ExecuteGrpcRequestSnafu)?,
+            RegionRequestBundle::Batch(requests) => self
+                .handle_batch_request(requests)
+                .await
+                .map_err(BoxedError::new)
+                .context(ExecuteGrpcRequestSnafu)?,
+        };
 
         Ok(RegionResponseV1 {
             header: Some(ResponseHeader {
@@ -414,8 +498,8 @@ impl RegionServerHandler for RegionServer {
                     ..Default::default()
                 }),
             }),
-            affected_rows: affected_rows as _,
-            extensions,
+            affected_rows: result.affected_rows as _,
+            extensions: result.extensions,
         })
     }
 }
