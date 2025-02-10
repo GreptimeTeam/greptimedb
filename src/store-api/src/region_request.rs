@@ -138,6 +138,7 @@ pub enum BatchRegionRequest {
     Create(Vec<(RegionId, RegionCreateRequest)>),
     Drop(Vec<(RegionId, RegionDropRequest)>),
     Alter(Vec<(RegionId, RegionAlterRequest)>),
+    Put(Vec<(RegionId, RegionPutRequest)>),
 }
 
 impl BatchRegionRequest {
@@ -158,6 +159,11 @@ impl BatchRegionRequest {
                 requests
                     .into_iter()
                     .map(|(region_id, req)| (region_id, RegionRequest::Alter(req))),
+            ),
+            BatchRegionRequest::Put(requests) => Box::new(
+                requests
+                    .into_iter()
+                    .map(|(region_id, req)| (region_id, RegionRequest::Put(req))),
             ),
         }
     }

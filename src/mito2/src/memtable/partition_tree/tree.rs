@@ -23,16 +23,15 @@ use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_time::Timestamp;
 use datafusion_common::ScalarValue;
 use datatypes::prelude::ValueRef;
-use snafu::{ensure, };
+use snafu::ensure;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
 
-use crate::error::{
-    EncodeSparsePrimaryKeySnafu, PrimaryKeyLengthMismatchSnafu, Result,
-};
+use crate::error::{EncodeSparsePrimaryKeySnafu, PrimaryKeyLengthMismatchSnafu, Result};
 use crate::flush::WriteBufferManagerRef;
+use crate::memtable::encoder::SparseEncoder;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::partition::{
     Partition, PartitionKey, PartitionReader, PartitionRef, ReadPartitionContext,
@@ -40,12 +39,11 @@ use crate::memtable::partition_tree::partition::{
 use crate::memtable::partition_tree::PartitionTreeConfig;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{BoxedBatchIterator, KeyValues};
-use crate::memtable::encoder::{ SparseEncoder};
 use crate::metrics::{PARTITION_TREE_READ_STAGE_ELAPSED, READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::dedup::LastNonNullIter;
 use crate::read::Batch;
 use crate::region::options::MergeMode;
-use crate::row_converter::{PrimaryKeyCodec};
+use crate::row_converter::PrimaryKeyCodec;
 
 /// The partition tree.
 pub struct PartitionTree {

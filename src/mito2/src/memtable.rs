@@ -42,13 +42,13 @@ use crate::region::options::{MemtableOptions, MergeMode};
 use crate::sst::file::FileTimeRange;
 
 pub mod bulk;
+mod encoder;
 pub mod key_values;
 pub mod partition_tree;
 mod stats;
 pub mod time_partition;
 pub mod time_series;
 pub(crate) mod version;
-mod encoder;
 
 /// Id for memtables.
 ///

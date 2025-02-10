@@ -56,7 +56,7 @@ impl MetricEngineInner {
     pub async fn batch_put_region(
         &self,
         requests: Vec<(RegionId, RegionPutRequest)>,
-    ) -> Result<()> {
+    ) -> Result<AffectedRows> {
         {
             let state = self.state.read().unwrap();
             for region_id in requests.iter().map(|(region_id, _)| region_id) {
@@ -69,8 +69,7 @@ impl MetricEngineInner {
             }
         }
 
-        self.batch_put_logical_regions(requests).await?;
-        Ok(())
+        self.batch_put_logical_regions(requests).await
     }
 
     async fn put_logical_region(

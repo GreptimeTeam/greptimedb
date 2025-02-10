@@ -132,6 +132,18 @@ impl RegionEngine for MetricEngine {
         batch_request: BatchRegionRequest,
     ) -> Result<RegionResponse, BoxedError> {
         match batch_request {
+            BatchRegionRequest::Put(requests) => {
+                let rows = self
+                    .inner
+                    .batch_put_region(requests)
+                    .await
+                    .map_err(BoxedError::new)?;
+
+                Ok(RegionResponse {
+                    affected_rows: rows,
+                    extensions: HashMap::new(),
+                })
+            }
             BatchRegionRequest::Create(requests) => {
                 let mut extension_return_value = HashMap::new();
                 let rows = self
@@ -215,16 +227,6 @@ impl RegionEngine for MetricEngine {
             affected_rows: rows,
             extensions: extension_return_value,
         })
-    }
-
-    async fn handle_batch_request(&self, request: BatchRegionRequest) -> Result<(), BoxedError> {
-        match request {
-            BatchRegionRequest::Put(put) => self
-                .inner
-                .batch_put_region(put)
-                .await
-                .map_err(BoxedError::new),
-        }
     }
 
     async fn handle_query(

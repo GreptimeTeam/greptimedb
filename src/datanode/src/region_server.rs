@@ -60,7 +60,7 @@ use store_api::region_engine::{
 };
 use store_api::region_request::{
     convert_body_to_requests, AffectedRows, BatchRegionRequest, RegionCloseRequest,
-    RegionOpenRequest, RegionRequest, RegionRequestBundle,
+    RegionOpenRequest, RegionPutRequest, RegionRequest, RegionRequestBundle,
 };
 use store_api::storage::RegionId;
 use tokio::sync::{Semaphore, SemaphorePermit};
@@ -776,6 +776,10 @@ impl RegionServerInner {
                 .iter()
                 .map(|(region_id, _)| (*region_id, RegionChange::None))
                 .collect::<Vec<_>>(),
+            BatchRegionRequest::Put(requests) => requests
+                .iter()
+                .map(|(region_id, _)| (*region_id, RegionChange::None))
+                .collect::<Vec<_>>(),
         };
 
         let (first_region_id, first_region_change) = region_changes.first().unwrap();
@@ -807,7 +811,7 @@ impl RegionServerInner {
             }
             Err(err) => {
                 for (region_id, region_change) in region_changes {
-                    self.unset_region_status(region_id, &engine, region_change);
+                    self.unset_region_status(region_id, region_change);
                 }
 
                 Err(err)
