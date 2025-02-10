@@ -19,8 +19,8 @@ mod validate;
 
 use std::collections::{HashMap, HashSet};
 
-use add_columns::add_columns_to_physical_data_region;
-use add_logical_regions::add_logical_regions_to_meta_region;
+pub(crate) use add_columns::add_columns_to_physical_data_region;
+pub(crate) use add_logical_regions::add_logical_regions_to_meta_region;
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_telemetry::{info, warn};
@@ -53,10 +53,10 @@ use crate::engine::options::{set_data_region_options, IndexOptions, PhysicalRegi
 use crate::engine::MetricEngineInner;
 use crate::error::{
     AddingFieldColumnSnafu, ColumnNotFoundSnafu, ColumnTypeMismatchSnafu,
-    ConflictRegionOptionSnafu, CreateMitoRegionSnafu, EmptyRequestSnafu,
-    InternalColumnOccupiedSnafu, InvalidMetadataSnafu, MissingRegionOptionSnafu,
-    MitoReadOperationSnafu, MultipleFieldColumnSnafu, NoFieldColumnSnafu, ParseRegionIdSnafu,
-    PhysicalRegionNotFoundSnafu, Result, SerializeColumnMetadataSnafu,
+    ConflictRegionOptionSnafu, CreateMitoRegionSnafu, InternalColumnOccupiedSnafu,
+    InvalidMetadataSnafu, MissingRegionOptionSnafu, MitoReadOperationSnafu,
+    MultipleFieldColumnSnafu, NoFieldColumnSnafu, ParseRegionIdSnafu, PhysicalRegionNotFoundSnafu,
+    Result, SerializeColumnMetadataSnafu,
 };
 use crate::metrics::{LOGICAL_REGION_COUNT, PHYSICAL_COLUMN_COUNT, PHYSICAL_REGION_COUNT};
 use crate::utils::{self, to_data_region_id, to_metadata_region_id};
@@ -85,16 +85,8 @@ impl MetricEngineInner {
             .options
             .contains_key(LOGICAL_TABLE_METADATA_KEY)
         {
-            let physical_region_id = self.create_logical_regions(requests).await?;
-            let physical_columns = self
-                .data_region
-                .physical_columns(physical_region_id)
+            self.create_logical_regions(requests, extension_return_value)
                 .await?;
-            extension_return_value.insert(
-                ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
-                ColumnMetadata::encode_list(&physical_columns)
-                    .context(SerializeColumnMetadataSnafu)?,
-            );
         } else {
             return MissingRegionOptionSnafu {}.fail();
         }
@@ -194,14 +186,11 @@ impl MetricEngineInner {
     }
 
     /// Create multiple logical regions on the same physical region.
-    ///
-    /// Returns the physical region id of the created logical regions.
     async fn create_logical_regions(
         &self,
         requests: Vec<(RegionId, RegionCreateRequest)>,
-    ) -> Result<RegionId> {
-        ensure!(!requests.is_empty(), EmptyRequestSnafu {});
-
+        extension_return_value: &mut HashMap<String, Vec<u8>>,
+    ) -> Result<()> {
         let physical_region_id = validate_create_logical_regions(&requests)?;
         let data_region_id = utils::to_data_region_id(physical_region_id);
 
@@ -257,7 +246,7 @@ impl MetricEngineInner {
             .iter()
             .map(|(region_id, _)| (*region_id))
             .collect::<Vec<_>>();
-        let logical_regions_column_names = requests.iter().map(|(region_id, request)| {
+        let logical_region_columns = requests.iter().map(|(region_id, request)| {
             (
                 *region_id,
                 request
@@ -285,11 +274,17 @@ impl MetricEngineInner {
             )
         });
 
+        extension_return_value.insert(
+            ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
+            ColumnMetadata::encode_list(&physical_columns).context(SerializeColumnMetadataSnafu)?,
+        );
+
         // Writes logical regions metadata to metadata region
         add_logical_regions_to_meta_region(
             &self.metadata_region,
             physical_region_id,
-            logical_regions_column_names,
+            true,
+            logical_region_columns,
         )
         .await?;
 
@@ -297,7 +292,7 @@ impl MetricEngineInner {
         state.add_physical_columns(data_region_id, new_add_columns);
         state.add_logical_regions(physical_region_id, logical_regions);
 
-        Ok(data_region_id)
+        Ok(())
     }
 
     /// Create a logical region.

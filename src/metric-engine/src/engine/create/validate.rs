@@ -18,8 +18,7 @@ use store_api::region_request::RegionCreateRequest;
 use store_api::storage::RegionId;
 
 use crate::error::{
-    ConflictRegionOptionSnafu, EmptyRequestSnafu, MissingRegionOptionSnafu, ParseRegionIdSnafu,
-    Result,
+    ConflictRegionOptionSnafu, MissingRegionOptionSnafu, ParseRegionIdSnafu, Result,
 };
 
 /// Validate the create logical regions request.
@@ -28,8 +27,6 @@ use crate::error::{
 pub fn validate_create_logical_regions(
     requests: &[(RegionId, RegionCreateRequest)],
 ) -> Result<RegionId> {
-    ensure!(!requests.is_empty(), EmptyRequestSnafu {});
-
     let (_, request) = requests.first().unwrap();
     let first_physical_region_id_raw = request
         .options

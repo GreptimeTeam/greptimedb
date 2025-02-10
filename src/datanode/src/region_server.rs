@@ -60,7 +60,7 @@ use store_api::region_engine::{
 };
 use store_api::region_request::{
     convert_body_to_requests, AffectedRows, BatchRegionRequest, RegionCloseRequest,
-    RegionCreateRequest, RegionOpenRequest, RegionRequest, RegionRequestBundle,
+    RegionOpenRequest, RegionRequest, RegionRequestBundle,
 };
 use store_api::storage::RegionId;
 use tokio::sync::{Semaphore, SemaphorePermit};
@@ -165,11 +165,11 @@ impl RegionServer {
         self.inner.handle_batch_body(body).await
     }
 
-    pub async fn handle_create_request(
+    pub async fn handle_batch_request(
         &self,
-        requests: Vec<(RegionId, RegionCreateRequest)>,
+        batch_request: BatchRegionRequest,
     ) -> Result<RegionResponse> {
-        self.inner.handle_batch_create_requests(requests).await
+        self.inner.handle_batch_request(batch_request).await
     }
 
     async fn table_provider(&self, region_id: RegionId) -> Result<Arc<dyn TableProvider>> {
@@ -372,10 +372,6 @@ impl RegionServer {
         self.handle_request(region_id, request).trace(span).await
     }
 
-    async fn handle_batch_request(&self, batch: BatchRegionRequest) -> Result<RegionResponse> {
-        self.inner.handle_batch_request(batch).await
-    }
-
     async fn handle_vector_request(
         &self,
         requests: Vec<(RegionId, RegionRequest)>,
@@ -408,49 +404,6 @@ impl RegionServer {
             affected_rows,
             extensions,
         })
-    }
-
-    async fn handle_batch_request(&self, batch: BatchRegionRequest) -> Result<RegionResponse> {
-        match batch {
-            BatchRegionRequest::Create(creates) => self.handle_create_request(creates).await,
-            BatchRegionRequest::Drop(drops) => {
-                // FIXME(jeremy, ruihang, wenkang): Once the engine supports merged calls, we should immediately
-                // modify this part to avoid inefficient serial loop calls.
-                self.handle_requests(
-                    drops
-                        .into_iter()
-                        .map(|(region_id, req)| (region_id, RegionRequest::Drop(req))),
-                )
-                .await
-            }
-            BatchRegionRequest::Alter(alters) => {
-                // FIXME(jeremy, ruihang, wenkang): Once the engine supports merged calls, we should immediately
-                // modify this part to avoid inefficient serial loop calls.
-                self.handle_requests(
-                    alters
-                        .into_iter()
-                        .map(|(region_id, req)| (region_id, RegionRequest::Alter(req))),
-                )
-                .await
-            }
-            BatchRegionRequest::Put(put) => {
-                // TODO(yingwen, wenkang): Implement it in engine level.
-                self.handle_requests_parallel(
-                    put.into_iter()
-                        .map(|(region_id, req)| (region_id, RegionRequest::Put(req))),
-                )
-                .await
-            }
-            BatchRegionRequest::Delete(delete) => {
-                // TODO(yingwen, wenkang): Implement it in engine level.
-                self.handle_requests_parallel(
-                    delete
-                        .into_iter()
-                        .map(|(region_id, req)| (region_id, RegionRequest::Delete(req))),
-                )
-                .await
-            }
-        }
     }
 }
 

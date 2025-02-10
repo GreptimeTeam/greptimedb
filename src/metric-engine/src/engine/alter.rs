@@ -12,15 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+mod extract_new_columns;
+mod validate;
+
+use std::collections::{HashMap, HashSet};
 
 use common_telemetry::error;
+use extract_new_columns::extract_new_columns;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
 use store_api::region_request::{AffectedRows, AlterKind, RegionAlterRequest};
 use store_api::storage::RegionId;
+use validate::validate_alter_region_requests;
 
+use crate::engine::create::{
+    add_columns_to_physical_data_region, add_logical_regions_to_meta_region,
+};
 use crate::engine::MetricEngineInner;
 use crate::error::{
     LogicalRegionNotFoundSnafu, PhysicalRegionNotFoundSnafu, Result, SerializeColumnMetadataSnafu,
@@ -28,6 +36,137 @@ use crate::error::{
 use crate::utils::{to_data_region_id, to_metadata_region_id};
 
 impl MetricEngineInner {
+    pub async fn alter_regions(
+        &self,
+        requests: Vec<(RegionId, RegionAlterRequest)>,
+        extension_return_value: &mut HashMap<String, Vec<u8>>,
+    ) -> Result<AffectedRows> {
+        if requests.is_empty() {
+            return Ok(0);
+        }
+
+        let first_region_id = &requests.first().unwrap().0;
+        if self.is_physical_region(*first_region_id) {
+            for (region_id, request) in requests {
+                self.alter_physical_region(region_id, request).await?;
+            }
+        } else {
+            self.alter_logical_regions(requests, extension_return_value)
+                .await?;
+        }
+        Ok(0)
+    }
+
+    /// Alter multiple logical regions on the same physical region.
+    pub async fn alter_logical_regions(
+        &self,
+        requests: Vec<(RegionId, RegionAlterRequest)>,
+        extension_return_value: &mut HashMap<String, Vec<u8>>,
+    ) -> Result<AffectedRows> {
+        validate_alter_region_requests(&requests)?;
+
+        let first_logical_region_id = requests[0].0;
+
+        // Finds new columns to add
+        let mut new_column_names = HashSet::new();
+        let mut new_columns_to_add = vec![];
+
+        let (physical_region_id, index_options) = {
+            let state = &self.state.read().unwrap();
+            let physical_region_id = state
+                .get_physical_region_id(first_logical_region_id)
+                .with_context(|| {
+                    error!("Trying to alter an nonexistent region {first_logical_region_id}");
+                    LogicalRegionNotFoundSnafu {
+                        region_id: first_logical_region_id,
+                    }
+                })?;
+            let region_state = state
+                .physical_region_states()
+                .get(&physical_region_id)
+                .with_context(|| PhysicalRegionNotFoundSnafu {
+                    region_id: physical_region_id,
+                })?;
+            let physical_columns = region_state.physical_columns();
+
+            extract_new_columns(
+                &requests,
+                physical_columns,
+                &mut new_column_names,
+                &mut new_columns_to_add,
+            )?;
+
+            (physical_region_id, region_state.options().index)
+        };
+        let data_region_id = to_data_region_id(physical_region_id);
+
+        add_columns_to_physical_data_region(
+            data_region_id,
+            index_options,
+            &mut new_columns_to_add,
+            &self.data_region,
+        )
+        .await?;
+
+        let physical_columns = self.data_region.physical_columns(data_region_id).await?;
+        let physical_schema_map = physical_columns
+            .iter()
+            .map(|metadata| (metadata.column_schema.name.as_str(), metadata))
+            .collect::<HashMap<_, _>>();
+
+        let logical_region_columns = requests.iter().map(|(region_id, request)| {
+            let AlterKind::AddColumns { columns } = &request.kind else {
+                unreachable!()
+            };
+            (
+                *region_id,
+                columns
+                    .iter()
+                    .flat_map(|col| {
+                        let column_name = col.column_metadata.column_schema.name.as_str();
+                        if new_column_names.contains(column_name) {
+                            let column_metadata = *physical_schema_map.get(column_name).unwrap();
+                            Some((column_metadata.column_schema.name.as_str(), column_metadata))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<HashMap<_, _>>(),
+            )
+        });
+
+        let new_add_columns = new_columns_to_add.iter().map(|metadata| {
+            // Safety: previous steps ensure the physical region exist
+            let column_metadata = *physical_schema_map
+                .get(metadata.column_schema.name.as_str())
+                .unwrap();
+            (
+                metadata.column_schema.name.to_string(),
+                column_metadata.column_id,
+            )
+        });
+
+        // Writes logical regions metadata to metadata region
+        add_logical_regions_to_meta_region(
+            &self.metadata_region,
+            physical_region_id,
+            false,
+            logical_region_columns,
+        )
+        .await?;
+
+        extension_return_value.insert(
+            ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
+            ColumnMetadata::encode_list(&physical_columns).context(SerializeColumnMetadataSnafu)?,
+        );
+
+        let mut state = self.state.write().unwrap();
+        state.add_physical_columns(data_region_id, new_add_columns);
+        state.invalid_logical_regions_cache(requests.iter().map(|(region_id, _)| *region_id));
+
+        Ok(0)
+    }
+
     /// Dispatch region alter request
     pub async fn alter_region(
         &self,

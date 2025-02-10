@@ -27,27 +27,33 @@ use crate::utils;
 pub async fn add_logical_regions_to_meta_region(
     metadata_region: &MetadataRegion,
     physical_region_id: RegionId,
+    write_region_id: bool,
     logical_regions: impl Iterator<Item = (RegionId, HashMap<&str, &ColumnMetadata>)>,
 ) -> Result<()> {
     let region_id = utils::to_metadata_region_id(physical_region_id);
-    let iter = logical_regions
-        .into_iter()
-        .flat_map(|(logical_region_id, column_metadatas)| {
-            Some((
-                MetadataRegion::concat_region_key(logical_region_id),
-                String::new(),
-            ))
+    let iter =
+        logical_regions
             .into_iter()
-            .chain(column_metadatas.into_iter().map(
-                move |(name, column_metadata)| {
-                    (
-                        MetadataRegion::concat_column_key(logical_region_id, name),
-                        MetadataRegion::serialize_column_metadata(column_metadata),
-                    )
-                },
-            ))
-        })
-        .collect::<Vec<_>>();
+            .flat_map(|(logical_region_id, column_metadatas)| {
+                if write_region_id {
+                    Some((
+                        MetadataRegion::concat_region_key(logical_region_id),
+                        String::new(),
+                    ))
+                } else {
+                    None
+                }
+                .into_iter()
+                .chain(column_metadatas.into_iter().map(
+                    move |(name, column_metadata)| {
+                        (
+                            MetadataRegion::concat_column_key(logical_region_id, name),
+                            MetadataRegion::serialize_column_metadata(column_metadata),
+                        )
+                    },
+                ))
+            })
+            .collect::<Vec<_>>();
 
     let put_request = MetadataRegion::build_put_request_from_iter(iter.into_iter());
     metadata_region
