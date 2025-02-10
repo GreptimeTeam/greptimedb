@@ -936,11 +936,10 @@ impl RegionServerInner {
         }
 
         for (_, (engine, request)) in engine_requests {
-            // TODO(yingwen): Error for batch request.
             engine
                 .handle_batch_request(BatchRegionRequest::Put(request))
                 .await
-                .unwrap();
+                .context(HandleBatchRequestSnafu)?;
         }
 
         // match engine
