@@ -134,6 +134,8 @@ impl MetricEngineState {
         let state = self.physical_regions.get_mut(&physical_region_id).unwrap();
         for logical_region_id in logical_region_ids {
             state.logical_regions.insert(logical_region_id);
+            self.logical_regions
+                .insert(logical_region_id, physical_region_id);
         }
     }
 
