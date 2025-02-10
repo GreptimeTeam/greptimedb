@@ -1070,19 +1070,19 @@ impl HttpServer {
     fn route_jaeger<S>(handler: JaegerQueryHandlerRef) -> Router<S> {
         Router::new()
             .route("/api/services", routing::get(jaeger::handle_get_services))
-            // .route(
-            //     "/api/services/{service_name}/operations",
-            //     routing::get(jaeger::handle_get_operations_by_service),
-            // )
-            // .route(
-            //     "/api/operations",
-            //     routing::get(jaeger::handle_get_operations),
-            // )
-            // .route("/api/traces", routing::get(jaeger::handle_get_traces))
-            // .route(
-            //     "/api/traces/{trace_id}",
-            //     routing::get(jaeger::handle_get_trace_by_id),
-            // )
+            .route(
+                "/api/services/{service_name}/operations",
+                routing::get(jaeger::handle_get_operations_by_service),
+            )
+            .route(
+                "/api/operations",
+                routing::get(jaeger::handle_get_operations),
+            )
+            .route("/api/traces", routing::get(jaeger::handle_find_traces))
+            .route(
+                "/api/traces/{trace_id}",
+                routing::get(jaeger::handle_get_trace),
+            )
             .with_state(handler)
     }
 }

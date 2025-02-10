@@ -4336,6 +4336,7 @@ dependencies = [
  "common-test-util",
  "common-time",
  "common-version",
+ "datafusion",
  "datafusion-expr",
  "datanode",
  "datatypes",

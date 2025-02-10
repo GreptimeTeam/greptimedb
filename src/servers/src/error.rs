@@ -33,8 +33,6 @@ use query::parser::PromQuery;
 use serde_json::json;
 use snafu::{Location, Snafu};
 
-use crate::http::result::error_result::ErrorResponse;
-
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
@@ -609,13 +607,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to read table"))]
-    ReadTable {
-        source: query::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("DataFusion error"))]
     DataFusion {
         #[snafu(source)]
@@ -737,7 +728,7 @@ impl ErrorExt for Error {
 
             ConvertScalarValue { source, .. } => source.status_code(),
 
-            ToJson { .. } | ReadTable { .. } | DataFusion { .. } => StatusCode::Internal,
+            ToJson { .. } | DataFusion { .. } => StatusCode::Internal,
 
             ConvertSqlValue { source, .. } => source.status_code(),
 

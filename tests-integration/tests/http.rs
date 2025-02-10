@@ -2521,10 +2521,10 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
             "resource": {
             "attributes": [
                 {
-                "key": "service.name",
-                "value": {
-                    "stringValue": "test-jaeger-query-api"
-                }
+                    "key": "service.name",
+                    "value": {
+                        "stringValue": "test-jaeger-query-api"
+                    }
                 }
             ]
             },

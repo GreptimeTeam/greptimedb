@@ -46,10 +46,10 @@ use serde_json::Value;
 use session::context::{QueryContext, QueryContextRef};
 
 use crate::error::Result;
+use crate::http::jaeger::QueryTraceParams;
 use crate::influxdb::InfluxdbRequest;
 use crate::opentsdb::codec::DataPoint;
 use crate::prom_store::Metrics;
-
 pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + Sync>;
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
 pub type PromStoreProtocolHandlerRef = Arc<dyn PromStoreProtocolHandler + Send + Sync>;
@@ -178,6 +178,21 @@ pub trait JaegerQueryHandler {
     /// Get trace services. It's used for `/api/services` API.
     async fn get_services(&self, ctx: QueryContextRef) -> Result<Output>;
 
+    /// Get Jaeger operations. It's used for `/api/operations` and `/api/services/{service_name}/operations` API.
+    async fn get_operations(
+        &self,
+        ctx: QueryContextRef,
+        service_name: &str,
+        span_kind: Option<&str>,
+    ) -> Result<Output>;
+
     /// Get trace by id. It's used for `/api/traces/{trace_id}` API.
-    async fn get_trace(&self, ctx: QueryContextRef, trace_id: String) -> Result<Output>;
+    async fn get_trace(&self, ctx: QueryContextRef, trace_id: &str) -> Result<Output>;
+
+    /// Find traces by query params. It's used for `/api/traces` API.
+    async fn find_traces(
+        &self,
+        ctx: QueryContextRef,
+        query_params: QueryTraceParams,
+    ) -> Result<Output>;
 }

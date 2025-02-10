@@ -15,14 +15,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Extension;
 use common_error::ext::ErrorExt;
 use common_query::{Output, OutputData};
 use common_recordbatch::util;
-use common_telemetry::{debug, tracing, warn};
+use common_telemetry::{debug, error, tracing, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use session::context::{Channel, QueryContext};
@@ -40,9 +40,9 @@ use crate::query_handler::JaegerQueryHandlerRef;
 #[derive(Default, Debug, Serialize, Deserialize, PartialEq)]
 pub struct JaegerAPIResponse {
     pub data: Option<JaegerData>,
-    pub total: i32,
-    pub limit: i32,
-    pub offset: i32,
+    pub total: usize,
+    pub limit: usize,
+    pub offset: usize,
     pub errors: Option<Vec<JaegerAPIError>>,
 }
 
@@ -52,6 +52,7 @@ pub struct JaegerAPIResponse {
 pub enum JaegerData {
     Services(Vec<String>),
     Operations(Vec<Operation>),
+    OperationsNames(Vec<String>),
     Traces(Vec<Trace>),
 }
 
@@ -195,13 +196,13 @@ pub struct JaegerQueryParams {
     pub operation_name: Option<String>,
 
     /// Limit the return data.
-    pub limit: Option<i32>,
+    pub limit: Option<usize>,
 
     /// Start time of the trace in microseconds since unix epoch.
-    pub start: Option<u64>,
+    pub start: Option<i64>,
 
     /// End time of the trace in microseconds since unix epoch.
-    pub end: Option<u64>,
+    pub end: Option<i64>,
 
     /// Max duration string value of the trace. Units can be `ns`, `us` (or `µs`), `ms`, `s`, `m`, `h`.
     pub max_duration: Option<String>,
@@ -278,30 +279,29 @@ impl QueryTraceParams {
             internal_query_params.tags = Some(tags_map);
         }
 
-        // Default limit is 100.
-        internal_query_params.limit = Some(query_params.limit.unwrap_or(100));
+        internal_query_params.limit = query_params.limit;
 
         Ok(internal_query_params)
     }
 }
 
 #[derive(Debug, Default, PartialEq)]
-struct QueryTraceParams {
-    db: String,
-    service_name: String,
-    operation_name: Option<String>,
+pub struct QueryTraceParams {
+    pub db: String,
+    pub service_name: String,
+    pub operation_name: Option<String>,
 
     // The limit of the number of traces to return.
-    limit: Option<i32>,
+    pub limit: Option<usize>,
 
     // Select the traces with the given tags(span attributes).
-    tags: Option<HashMap<String, JsonValue>>,
+    pub tags: Option<HashMap<String, JsonValue>>,
 
     // The unit of the following time related parameters is nanoseconds.
-    start_time: Option<u64>,
-    end_time: Option<u64>,
-    min_duration: Option<u64>,
-    max_duration: Option<u64>,
+    pub start_time: Option<i64>,
+    pub end_time: Option<i64>,
+    pub min_duration: Option<u64>,
+    pub max_duration: Option<u64>,
 }
 
 /// Handle the GET `/api/services` request.
@@ -341,7 +341,211 @@ pub async fn handle_get_services(
                     StatusCode::OK,
                     axum::Json(JaegerAPIResponse {
                         data: Some(JaegerData::Services(services)),
-                        total: services_num as i32,
+                        total: services_num,
+                        ..Default::default()
+                    }),
+                )
+            }
+            Ok(None) => (StatusCode::OK, axum::Json(JaegerAPIResponse::default())),
+            Err(err) => {
+                error!("Failed to get services: {:?}", err);
+                error_response(err)
+            }
+        },
+        Err(err) => error_response(err),
+    }
+}
+
+/// Handle the GET `/api/traces/{trace_id}` request.
+#[axum_macros::debug_handler]
+#[tracing::instrument(skip_all, fields(protocol = "jaeger", request_type = "get_trace"))]
+pub async fn handle_get_trace(
+    State(handler): State<JaegerQueryHandlerRef>,
+    Path(trace_id): Path<String>,
+    Query(query_params): Query<JaegerQueryParams>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+) -> impl IntoResponse {
+    debug!(
+        "Received Jaeger '/api/traces/{}' request, query_params: {:?}, query_ctx: {:?}",
+        trace_id, query_params, query_ctx
+    );
+    query_ctx.set_channel(Channel::Jaeger);
+    let query_ctx = Arc::new(query_ctx);
+    let db = query_ctx.get_db_string();
+
+    // Record the query time histogram.
+    let _timer = METRIC_JAEGER_QUERY_ELAPSED
+        .with_label_values(&[&db, "/api/traces"])
+        .start_timer();
+
+    match handler.get_trace(query_ctx, &trace_id).await {
+        Ok(output) => match covert_to_records(output).await {
+            Ok(Some(records)) => (
+                StatusCode::OK,
+                axum::Json(JaegerAPIResponse {
+                    data: Some(JaegerData::Traces(traces_from_records(records))),
+                    ..Default::default()
+                }),
+            ),
+            Ok(None) => (StatusCode::OK, axum::Json(JaegerAPIResponse::default())),
+            Err(err) => {
+                error!("Failed to get trace '{}': {:?}", trace_id, err);
+                error_response(err)
+            }
+        },
+        Err(err) => error_response(err),
+    }
+}
+
+/// Handle the GET `/api/traces` request.
+#[axum_macros::debug_handler]
+#[tracing::instrument(skip_all, fields(protocol = "jaeger", request_type = "get_traces"))]
+pub async fn handle_find_traces(
+    State(handler): State<JaegerQueryHandlerRef>,
+    Query(query_params): Query<JaegerQueryParams>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+) -> impl IntoResponse {
+    debug!(
+        "Received Jaeger '/api/traces' request, query_params: {:?}, query_ctx: {:?}",
+        query_params, query_ctx
+    );
+    query_ctx.set_channel(Channel::Jaeger);
+    let query_ctx = Arc::new(query_ctx);
+    let db = query_ctx.get_db_string();
+
+    // Record the query time histogram.
+    let _timer = METRIC_JAEGER_QUERY_ELAPSED
+        .with_label_values(&[&db, "/api/traces"])
+        .start_timer();
+
+    match QueryTraceParams::from_jaeger_query_params(&db, query_params) {
+        Ok(query_params) => {
+            let output = handler.find_traces(query_ctx, query_params).await;
+            match output {
+                Ok(output) => match covert_to_records(output).await {
+                    Ok(Some(records)) => (
+                        StatusCode::OK,
+                        axum::Json(JaegerAPIResponse {
+                            data: Some(JaegerData::Traces(traces_from_records(records))),
+                            ..Default::default()
+                        }),
+                    ),
+                    Ok(None) => (StatusCode::OK, axum::Json(JaegerAPIResponse::default())),
+                    Err(err) => error_response(err),
+                },
+                Err(err) => {
+                    error!("Failed to find traces: {:?}", err);
+                    error_response(err)
+                }
+            }
+        }
+        Err(e) => error_response(e),
+    }
+}
+
+/// Handle the GET `/api/operations` request.
+#[axum_macros::debug_handler]
+#[tracing::instrument(skip_all, fields(protocol = "jaeger", request_type = "get_operations"))]
+pub async fn handle_get_operations(
+    State(handler): State<JaegerQueryHandlerRef>,
+    Query(query_params): Query<JaegerQueryParams>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+) -> impl IntoResponse {
+    debug!(
+        "Received Jaeger '/api/operations' request, query_params: {:?}, query_ctx: {:?}",
+        query_params, query_ctx
+    );
+    if let Some(service_name) = query_params.service_name {
+        query_ctx.set_channel(Channel::Jaeger);
+        let query_ctx = Arc::new(query_ctx);
+        let db = query_ctx.get_db_string();
+
+        // Record the query time histogram.
+        let _timer = METRIC_JAEGER_QUERY_ELAPSED
+            .with_label_values(&[&db, "/api/operations"])
+            .start_timer();
+
+        match handler
+            .get_operations(query_ctx, &service_name, query_params.span_kind.as_deref())
+            .await
+        {
+            Ok(output) => match covert_to_records(output).await {
+                Ok(Some(records)) => {
+                    let operations = operations_from_records(records, true);
+                    let total = operations.len();
+                    (
+                        StatusCode::OK,
+                        axum::Json(JaegerAPIResponse {
+                            data: Some(JaegerData::Operations(operations)),
+                            total,
+                            ..Default::default()
+                        }),
+                    )
+                }
+                Ok(None) => (StatusCode::OK, axum::Json(JaegerAPIResponse::default())),
+                Err(err) => error_response(err),
+            },
+            Err(err) => {
+                error!(
+                    "Failed to get operations for service '{}': {:?}",
+                    service_name, err
+                );
+                error_response(err)
+            }
+        }
+    } else {
+        (
+            StatusCode::BAD_REQUEST,
+            axum::Json(JaegerAPIResponse {
+                errors: Some(vec![JaegerAPIError {
+                    code: 400,
+                    msg: "parameter 'service' is required".to_string(),
+                    trace_id: None,
+                }]),
+                ..Default::default()
+            }),
+        )
+    }
+}
+
+/// Handle the GET `/api/services/{service_name}/operations` request.
+#[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "jaeger", request_type = "get_operations_by_service")
+)]
+pub async fn handle_get_operations_by_service(
+    State(handler): State<JaegerQueryHandlerRef>,
+    Path(service_name): Path<String>,
+    Query(query_params): Query<JaegerQueryParams>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+) -> impl IntoResponse {
+    debug!(
+        "Received Jaeger '/api/services/{}/operations' request, query_params: {:?}, query_ctx: {:?}",
+        service_name, query_params, query_ctx
+    );
+    query_ctx.set_channel(Channel::Jaeger);
+    let query_ctx = Arc::new(query_ctx);
+    let db = query_ctx.get_db_string();
+
+    // Record the query time histogram.
+    let _timer = METRIC_JAEGER_QUERY_ELAPSED
+        .with_label_values(&[&db, "/api/services"])
+        .start_timer();
+
+    match handler.get_operations(query_ctx, &service_name, None).await {
+        Ok(output) => match covert_to_records(output).await {
+            Ok(Some(records)) => {
+                let operations: Vec<String> = operations_from_records(records, false)
+                    .into_iter()
+                    .map(|op| op.name)
+                    .collect();
+                let total = operations.len();
+                (
+                    StatusCode::OK,
+                    axum::Json(JaegerAPIResponse {
+                        data: Some(JaegerData::OperationsNames(operations)),
+                        total,
                         ..Default::default()
                     }),
                 )
@@ -349,7 +553,13 @@ pub async fn handle_get_services(
             Ok(None) => (StatusCode::OK, axum::Json(JaegerAPIResponse::default())),
             Err(err) => error_response(err),
         },
-        Err(err) => error_response(err),
+        Err(err) => {
+            error!(
+                "Failed to get operations for service '{}': {:?}",
+                service_name, err
+            );
+            error_response(err)
+        }
     }
 }
 
@@ -361,7 +571,7 @@ async fn covert_to_records(output: Output) -> Result<Option<HttpRecordsOutput>> 
                 .await
                 .context(CollectRecordbatchSnafu)?,
         )?)),
-        // If the output is not a stream, return None.
+        // It's unlikely to happen. However, if the output is not a stream, return None.
         _ => Ok(None),
     }
 }
@@ -509,7 +719,7 @@ fn operations_from_records(records: HttpRecordsOutput, contain_span_kind: bool) 
             };
             if contain_span_kind {
                 if let Some(JsonValue::String(span_kind)) = row_iter.next() {
-                    operation.span_kind = Some(normalize_span_kind(span_kind.as_str()).to_string());
+                    operation.span_kind = Some(remove_span_kind_prefix(&span_kind));
                 }
             } else {
                 // skip span kind.
@@ -521,14 +731,14 @@ fn operations_from_records(records: HttpRecordsOutput, contain_span_kind: bool) 
     operations
 }
 
-fn normalize_span_kind(span_kind: &str) -> String {
+fn remove_span_kind_prefix(span_kind: &str) -> String {
     const SPAN_KIND_PREFIX: &str = "SPAN_KIND_";
     // If the span_kind starts with `SPAN_KIND_` prefix, remove it and convert to lowercase.
     if let Some(stripped) = span_kind.strip_prefix(SPAN_KIND_PREFIX) {
         stripped.to_lowercase()
     } else {
-        // If no prefix exists, add the `SPAN_KIND_` prefix and convert the value to uppercase
-        format!("{}{}", SPAN_KIND_PREFIX, span_kind.to_uppercase())
+        // It's unlikely to happen. However, we still convert it to lowercase for consistency.
+        span_kind.to_lowercase()
     }
 }
 
@@ -558,4 +768,281 @@ fn convert_string_to_boolean(input: &serde_json::Value) -> Option<serde_json::Va
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+    use serde_json::{json, Number, Value as JsonValue};
+
+    use super::*;
+    use crate::http::{ColumnSchema, HttpRecordsOutput, OutputSchema};
+
+    #[test]
+    fn test_operations_from_records() {
+        // The tests is the tuple of `(test_records, contain_span_kind, expected)`.
+        let tests = vec![
+            (
+                HttpRecordsOutput {
+                    schema: OutputSchema {
+                        column_schemas: vec![
+                            ColumnSchema {
+                                name: "span_name".to_string(),
+                                data_type: "String".to_string(),
+                            },
+                            ColumnSchema {
+                                name: "span_kind".to_string(),
+                                data_type: "String".to_string(),
+                            },
+                        ],
+                    },
+                    rows: vec![
+                        vec![
+                            JsonValue::String("access-mysql".to_string()),
+                            JsonValue::String("SPAN_KIND_SERVER".to_string()),
+                        ],
+                        vec![
+                            JsonValue::String("access-redis".to_string()),
+                            JsonValue::String("SPAN_KIND_CLIENT".to_string()),
+                        ],
+                    ],
+                    total_rows: 2,
+                    metrics: HashMap::new(),
+                },
+                false,
+                vec![
+                    Operation {
+                        name: "access-mysql".to_string(),
+                        span_kind: None,
+                    },
+                    Operation {
+                        name: "access-redis".to_string(),
+                        span_kind: None,
+                    },
+                ],
+            ),
+            (
+                HttpRecordsOutput {
+                    schema: OutputSchema {
+                        column_schemas: vec![
+                            ColumnSchema {
+                                name: "span_name".to_string(),
+                                data_type: "String".to_string(),
+                            },
+                            ColumnSchema {
+                                name: "span_kind".to_string(),
+                                data_type: "String".to_string(),
+                            },
+                        ],
+                    },
+                    rows: vec![
+                        vec![
+                            JsonValue::String("access-mysql".to_string()),
+                            JsonValue::String("SPAN_KIND_SERVER".to_string()),
+                        ],
+                        vec![
+                            JsonValue::String("access-redis".to_string()),
+                            JsonValue::String("SPAN_KIND_CLIENT".to_string()),
+                        ],
+                    ],
+                    total_rows: 2,
+                    metrics: HashMap::new(),
+                },
+                true,
+                vec![
+                    Operation {
+                        name: "access-mysql".to_string(),
+                        span_kind: Some("server".to_string()),
+                    },
+                    Operation {
+                        name: "access-redis".to_string(),
+                        span_kind: Some("client".to_string()),
+                    },
+                ],
+            ),
+        ];
+
+        for (records, contain_span_kind, expected) in tests {
+            let operations = operations_from_records(records, contain_span_kind);
+            assert_eq!(operations, expected);
+        }
+    }
+
+    #[test]
+    fn test_traces_from_records() {
+        // The tests is the tuple of `(test_records, expected)`.
+        let tests = vec![(
+            HttpRecordsOutput {
+                schema: OutputSchema {
+                    column_schemas: vec![
+                        ColumnSchema {
+                            name: "trace_id".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "timestamp".to_string(),
+                            data_type: "TimestampNanosecond".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "duration_nano".to_string(),
+                            data_type: "UInt64".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "service_name".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "span_name".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "span_id".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "span_attributes".to_string(),
+                            data_type: "Json".to_string(),
+                        },
+                    ],
+                },
+                rows: vec![
+                    vec![
+                        JsonValue::String("5611dce1bc9ebed65352d99a027b08ea".to_string()),
+                        JsonValue::Number(Number::from_u128(1738726754492422000).unwrap()),
+                        JsonValue::Number(Number::from_u128(100000000).unwrap()),
+                        JsonValue::String("test-service-0".to_string()),
+                        JsonValue::String("access-mysql".to_string()),
+                        JsonValue::String("008421dbbd33a3e9".to_string()),
+                        JsonValue::Object(
+                            json!({
+                                "operation.type": "access-mysql",
+                            })
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                        ),
+                    ],
+                    vec![
+                        JsonValue::String("5611dce1bc9ebed65352d99a027b08ea".to_string()),
+                        JsonValue::Number(Number::from_u128(1738726754642422000).unwrap()),
+                        JsonValue::Number(Number::from_u128(100000000).unwrap()),
+                        JsonValue::String("test-service-0".to_string()),
+                        JsonValue::String("access-redis".to_string()),
+                        JsonValue::String("ffa03416a7b9ea48".to_string()),
+                        JsonValue::Object(
+                            json!({
+                                "operation.type": "access-redis",
+                            })
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                        ),
+                    ],
+                ],
+                total_rows: 2,
+                metrics: HashMap::new(),
+            },
+            vec![Trace {
+                trace_id: "5611dce1bc9ebed65352d99a027b08ea".to_string(),
+                spans: vec![
+                    Span {
+                        trace_id: "5611dce1bc9ebed65352d99a027b08ea".to_string(),
+                        span_id: "008421dbbd33a3e9".to_string(),
+                        operation_name: "access-mysql".to_string(),
+                        start_time: 1738726754492422,
+                        duration: 100000,
+                        tags: vec![KeyValue {
+                            key: "operation.type".to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String("access-mysql".to_string()),
+                        }],
+                        process_id: "p1".to_string(),
+                        ..Default::default()
+                    },
+                    Span {
+                        trace_id: "5611dce1bc9ebed65352d99a027b08ea".to_string(),
+                        span_id: "ffa03416a7b9ea48".to_string(),
+                        operation_name: "access-redis".to_string(),
+                        start_time: 1738726754642422,
+                        duration: 100000,
+                        tags: vec![KeyValue {
+                            key: "operation.type".to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String("access-redis".to_string()),
+                        }],
+                        process_id: "p1".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                processes: Some(HashMap::from([(
+                    "p1".to_string(),
+                    Process {
+                        service_name: "test-service-0".to_string(),
+                        tags: vec![],
+                    },
+                )])),
+                ..Default::default()
+            }],
+        )];
+
+        for (records, expected) in tests {
+            let traces = traces_from_records(records);
+            assert_eq!(traces, expected);
+        }
+    }
+
+    #[test]
+    fn test_from_jaeger_query_params() {
+        // The tests is the tuple of `(test_query_params, expected)`.
+        let tests = vec![
+            (
+                JaegerQueryParams {
+                    service_name: Some("test-service-0".to_string()),
+                    ..Default::default()
+                },
+                QueryTraceParams {
+                    db: DEFAULT_SCHEMA_NAME.to_string(),
+                    service_name: "test-service-0".to_string(),
+                    ..Default::default()
+                },
+            ),
+            (
+                JaegerQueryParams {
+                    service_name: Some("test-service-0".to_string()),
+                    operation_name: Some("access-mysql".to_string()),
+                    start: Some(1738726754492422),
+                    end: Some(1738726754642422),
+                    max_duration: Some("100ms".to_string()),
+                    min_duration: Some("50ms".to_string()),
+                    limit: Some(10),
+                    tags: Some("{\"http.status_code\":\"200\",\"latency\":\"11.234\",\"error\":\"false\",\"http.method\":\"GET\",\"http.path\":\"/api/v1/users\"}".to_string()),
+                    ..Default::default()
+                },
+                QueryTraceParams {
+                    db: DEFAULT_SCHEMA_NAME.to_string(),
+                    service_name: "test-service-0".to_string(),
+                    operation_name: Some("access-mysql".to_string()),
+                    start_time: Some(1738726754492422000),
+                    end_time: Some(1738726754642422000),
+                    min_duration: Some(50000000),
+                    max_duration: Some(100000000),
+                    limit: Some(10),
+                    tags: Some(HashMap::from([
+                        ("http.status_code".to_string(), JsonValue::Number(Number::from(200))),
+                        ("latency".to_string(), JsonValue::Number(Number::from_f64(11.234).unwrap())),
+                        ("error".to_string(), JsonValue::Bool(false)),
+                        ("http.method".to_string(), JsonValue::String("GET".to_string())),
+                        ("http.path".to_string(), JsonValue::String("/api/v1/users".to_string())),
+                    ])),
+                },
+            ),
+        ];
+
+        for (query_params, expected) in tests {
+            let query_params =
+                QueryTraceParams::from_jaeger_query_params(DEFAULT_SCHEMA_NAME, query_params)
+                    .unwrap();
+            assert_eq!(query_params, expected);
+        }
+    }
 }
