@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use datatypes::schema::SkippingIndexType;
 use index::bloom_filter::creator::BloomFilterCreator;
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
@@ -30,7 +30,7 @@ use crate::error::{
     PuffinAddBlobSnafu, PushBloomFilterValueSnafu, Result,
 };
 use crate::read::Batch;
-use crate::row_converter::{CompositeValues, SortField};
+use crate::row_converter::SortField;
 use crate::sst::file::FileId;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
 use crate::sst::index::codec::{IndexValueCodec, IndexValuesCodec};
@@ -195,68 +195,63 @@ impl BloomFilterIndexer {
         let n = batch.num_rows();
         guard.inc_row_count(n);
 
-        // TODO(weny, zhenchi): lazy decode
-        if batch.pk_values().is_none() {
-            let values = self.codec.decode(batch.primary_key())?;
-            batch.set_pk_values(values);
-        }
+        for (col_id, creator) in &mut self.creators {
+            match self.codec.pk_col_info(*col_id) {
+                // tags
+                Some(col_info) => {
+                    let pk_idx = col_info.idx;
+                    let field = &col_info.field;
+                    let elems = batch
+                        .pk_col_value(self.codec.decoder(), pk_idx, *col_id)?
+                        .filter(|v| !v.is_null())
+                        .map(|v| {
+                            let mut buf = vec![];
+                            IndexValueCodec::encode_nonnull_value(
+                                v.as_value_ref(),
+                                field,
+                                &mut buf,
+                            )?;
+                            Ok(buf)
+                        })
+                        .transpose()?;
+                    creator
+                        .push_n_row_elems(n, elems)
+                        .await
+                        .context(PushBloomFilterValueSnafu)?;
+                }
+                // fields
+                None => {
+                    let Some(values) = batch.field_col_value(*col_id) else {
+                        debug!(
+                            "Column {} not found in the batch during building bloom filter index",
+                            col_id
+                        );
+                        continue;
+                    };
+                    let sort_field = SortField::new(values.data.data_type());
+                    for i in 0..n {
+                        let value = values.data.get_ref(i);
+                        let elems = (!value.is_null())
+                            .then(|| {
+                                let mut buf = vec![];
+                                IndexValueCodec::encode_nonnull_value(
+                                    value,
+                                    &sort_field,
+                                    &mut buf,
+                                )?;
+                                Ok(buf)
+                            })
+                            .transpose()?;
 
-        // Safety: the primary key is decoded
-        let values = batch.pk_values().unwrap();
-        // Tags
-        for (idx, (col_id, field)) in self.codec.fields().iter().enumerate() {
-            let Some(creator) = self.creators.get_mut(col_id) else {
-                continue;
-            };
-
-            let value = match &values {
-                CompositeValues::Dense(vec) => {
-                    let value = &vec[idx].1;
-                    if value.is_null() {
-                        None
-                    } else {
-                        Some(value)
+                        creator
+                            .push_row_elems(elems)
+                            .await
+                            .context(PushBloomFilterValueSnafu)?;
                     }
                 }
-                CompositeValues::Sparse(sparse_values) => sparse_values.get(col_id),
-            };
-
-            let elems = value
-                .map(|v| {
-                    let mut buf = vec![];
-                    IndexValueCodec::encode_nonnull_value(v.as_value_ref(), field, &mut buf)?;
-                    Ok(buf)
-                })
-                .transpose()?;
-            creator
-                .push_n_row_elems(n, elems)
-                .await
-                .context(PushBloomFilterValueSnafu)?;
-        }
-
-        // Fields
-        for field in batch.fields() {
-            let Some(creator) = self.creators.get_mut(&field.column_id) else {
-                continue;
-            };
-
-            let sort_field = SortField::new(field.data.data_type());
-            for i in 0..n {
-                let value = field.data.get_ref(i);
-                let elems = (!value.is_null())
-                    .then(|| {
-                        let mut buf = vec![];
-                        IndexValueCodec::encode_nonnull_value(value, &sort_field, &mut buf)?;
-                        Ok(buf)
-                    })
-                    .transpose()?;
-
-                creator
-                    .push_row_elems(elems)
-                    .await
-                    .context(PushBloomFilterValueSnafu)?;
             }
         }
+
         Ok(())
     }
 

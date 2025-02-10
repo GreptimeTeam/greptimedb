@@ -55,6 +55,7 @@ pub trait PrimaryKeyFilter: Send + Sync {
     fn matches(&mut self, pk: &[u8]) -> bool;
 }
 
+/// Composite values decoded from primary key bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompositeValues {
     Dense(Vec<(ColumnId, Value)>),
