@@ -786,6 +786,36 @@ transform:
 }
 
 #[test]
+fn test_timestamp_default_now() {
+    let input_value = serde_json::json!({"abc": "hello world"});
+
+    let pipeline_yaml = r#"
+processors:
+transform:
+    - field: abc
+      type: string
+      on_failure: default
+"#;
+
+    let yaml_content = Content::Yaml(pipeline_yaml);
+    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
+
+    let mut status = json_to_intermediate_state(input_value).unwrap();
+    let row = pipeline
+        .exec_mut(&mut status)
+        .unwrap()
+        .into_transformed()
+        .expect("expect transformed result ");
+
+    row.values.into_iter().for_each(|v| {
+        if let ValueData::TimestampNanosecondValue(v) = v.value_data.unwrap() {
+            let now = chrono::Utc::now().timestamp_nanos_opt().unwrap();
+            assert!(now - v < 1_000_000);
+        }
+    });
+}
+
+#[test]
 fn test_dispatch() {
     let input_value_str1 = r#"
 {

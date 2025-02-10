@@ -84,9 +84,8 @@ impl GreptimePipelineParams {
 impl GreptimeTransformer {
     /// Add a default timestamp column to the transforms
     fn add_greptime_timestamp_column(transforms: &mut Transforms) {
-        let ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
-        let type_ = Value::Timestamp(Timestamp::Nanosecond(ns));
-        let default = Some(type_.clone());
+        let type_ = Value::Timestamp(Timestamp::Nanosecond(0));
+        let default = None;
 
         let transform = Transform {
             fields: Fields::one(Field::new(
@@ -192,9 +191,17 @@ impl Transformer for GreptimeTransformer {
                         values[output_index] = GreptimeValue { value_data };
                     }
                     None => {
-                        let default = transform.get_default();
-                        let value_data = match default {
-                            Some(default) => coerce_value(default, transform)?,
+                        let value_data = match transform.on_failure {
+                            Some(crate::etl::transform::OnFailure::Default) => {
+                                match transform.get_default() {
+                                    Some(default) => coerce_value(default, transform)?,
+                                    None => match transform.get_default_value_when_data_is_none() {
+                                        Some(default) => coerce_value(&default, transform)?,
+                                        None => None,
+                                    },
+                                }
+                            }
+                            Some(crate::etl::transform::OnFailure::Ignore) => None,
                             None => None,
                         };
                         values[output_index] = GreptimeValue { value_data };

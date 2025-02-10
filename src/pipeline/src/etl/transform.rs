@@ -17,6 +17,8 @@ pub mod transformer;
 
 use std::collections::BTreeMap;
 
+use snafu::OptionExt;
+
 use crate::etl::error::{Error, Result};
 use crate::etl::transform::index::Index;
 use crate::etl::value::Value;
@@ -28,7 +30,6 @@ const TRANSFORM_INDEX: &str = "index";
 const TRANSFORM_DEFAULT: &str = "default";
 const TRANSFORM_ON_FAILURE: &str = "on_failure";
 
-use snafu::OptionExt;
 pub use transformer::greptime::GreptimeTransformer;
 
 use super::error::{
@@ -37,6 +38,7 @@ use super::error::{
 };
 use super::field::Fields;
 use super::processor::{yaml_new_field, yaml_new_fields, yaml_string};
+use super::value::Timestamp;
 
 pub trait Transformer: std::fmt::Debug + Sized + Send + Sync + 'static {
     type Output;
@@ -166,6 +168,19 @@ impl Transform {
     pub(crate) fn get_type_matched_default_val(&self) -> &Value {
         &self.type_
     }
+
+    pub(crate) fn get_default_value_when_data_is_none(&self) -> Option<Value> {
+        match &self.type_ {
+            Value::Timestamp(_) => {
+                if self.index.is_some_and(|i| i == Index::Time) {
+                    Some(Value::Timestamp(Timestamp::default()))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
@@ -228,6 +243,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
                 (_, _) => {
                     let target = type_.parse_str_value(default_value.to_str_value().as_str())?;
                     final_default = Some(target);
+                    on_failure = Some(OnFailure::Default);
                 }
             }
         }
