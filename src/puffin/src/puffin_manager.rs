@@ -21,6 +21,7 @@ pub mod stager;
 mod tests;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_base::range_read::RangeReader;
@@ -28,6 +29,7 @@ use futures::AsyncRead;
 
 use crate::blob_metadata::CompressionCodec;
 use crate::error::Result;
+use crate::file_metadata::FileMetadata;
 
 /// The `PuffinManager` trait provides a unified interface for creating `PuffinReader` and `PuffinWriter`.
 #[async_trait]
@@ -78,6 +80,9 @@ pub trait PuffinReader {
     type Dir: DirGuard;
 
     fn with_file_size_hint(self, file_size_hint: Option<u64>) -> Self;
+
+    /// Returns the metadata of the Puffin file.
+    async fn metadata(&self) -> Result<Arc<FileMetadata>>;
 
     /// Reads a blob from the Puffin file.
     ///
