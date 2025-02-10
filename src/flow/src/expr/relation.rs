@@ -20,7 +20,9 @@ pub(crate) use func::AggregateFunc;
 use crate::expr::ScalarExpr;
 
 mod accum;
+mod accum_v2;
 mod func;
+mod udaf;
 
 /// Describes an aggregation expression.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]

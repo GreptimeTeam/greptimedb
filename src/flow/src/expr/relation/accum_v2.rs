@@ -15,15 +15,15 @@
 //! new accumulator trait that is more flexible and can be used in the future for more complex accumulators
 
 use std::any::type_name;
+use std::fmt::Display;
 
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
 
-use crate::expr::error::InternalSnafu;
+use crate::expr::error::{InternalSnafu, TryFromValueSnafu};
 use crate::expr::EvalError;
-use crate::repr::Diff as FlowDiff;
 
 ///  Basically a copy of datafusion's Accumulator, but with a few modifications
 /// to accomodate our needs in flow and keep the upgradability of datafusion
@@ -39,11 +39,6 @@ pub trait AccumulatorV2: Send + Sync + std::fmt::Debug {
 
     /// Returns the intermediate state of the accumulator, consuming the intermediate state.
     fn into_state(self) -> Result<Vec<Value>, EvalError>;
-
-    /// Creates an accumulator from its intermediate state.
-    fn from_state(values: &[Value]) -> Result<Self, EvalError>
-    where
-        Self: Sized;
 
     /// Merges the states of multiple accumulators into this accumulator.
     /// The states array passed was formed by concatenating the results of calling `Self::into_state` on zero or more other Accumulator instances.
@@ -65,46 +60,6 @@ pub trait AccumulatorV2: Send + Sync + std::fmt::Debug {
     /// Does the accumulator support incrementally updating its value by removing values.
     fn supports_retract_batch(&self) -> bool {
         false
-    }
-}
-
-/// Bool accumulator, used for `Any` `All` `Max/MinBool`
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Bool {
-    /// The number of `true` values observed.
-    trues: FlowDiff,
-    /// The number of `false` values observed.
-    falses: FlowDiff,
-}
-
-impl AccumulatorV2 for Bool {
-    fn from_state(values: &[Value]) -> Result<Self, EvalError>
-    where
-        Self: Sized,
-    {
-        let mut iter = values.iter();
-        Ok(Self {
-            trues: FlowDiff::try_from(iter.next().ok_or_else(fail_accum::<Self>)?)
-                .map_err(err_try_from_val)?,
-            falses: FlowDiff::try_from(iter.next().ok_or_else(fail_accum::<Self>)?)
-                .map_err(err_try_from_val)?,
-        })
-    }
-
-    fn into_state(self) -> Result<Vec<Value>, EvalError> {
-        Ok(vec![self.trues.into(), self.falses.into()])
-    }
-
-    fn update_batch(&mut self, values: &[VectorRef]) -> Result<(), EvalError> {
-        ensure!(
-            values.len() == 1,
-            InternalSnafu {
-                reason: format!("Bool accumulator expects 1 column, got {}", values.len())
-            }
-        );
-        let values = &values[0];
-        todo!();
-        Ok(())
     }
 }
 
