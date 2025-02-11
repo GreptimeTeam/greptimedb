@@ -790,7 +790,7 @@ fn operations_from_records(
             };
             if contain_span_kind {
                 if let Some(JsonValue::String(span_kind)) = row_iter.next() {
-                    operation.span_kind = Some(remove_span_kind_prefix(&span_kind));
+                    operation.span_kind = Some(normalize_span_kind(&span_kind));
                 }
             } else {
                 // skip span kind.
@@ -804,7 +804,7 @@ fn operations_from_records(
 }
 
 // Check whether the schema of the records is correct.
-fn check_schema(records: &HttpRecordsOutput, expected_schema: &Vec<(&str, &str)>) -> Result<()> {
+fn check_schema(records: &HttpRecordsOutput, expected_schema: &[(&str, &str)]) -> Result<()> {
     for (i, column) in records.schema.column_schemas.iter().enumerate() {
         if column.name != expected_schema[i].0 || column.data_type != expected_schema[i].1 {
             InvalidJaegerQuerySnafu {
@@ -818,7 +818,7 @@ fn check_schema(records: &HttpRecordsOutput, expected_schema: &Vec<(&str, &str)>
 
 // By default, the span kind is stored as `SPAN_KIND_<kind>` in GreptimeDB.
 // However, in Jaeger API, the span kind is returned as `<kind>` which is the lowercase of the span kind and without the `SPAN_KIND_` prefix.
-fn remove_span_kind_prefix(span_kind: &str) -> String {
+fn normalize_span_kind(span_kind: &str) -> String {
     const SPAN_KIND_PREFIX: &str = "SPAN_KIND_";
     // If the span_kind starts with `SPAN_KIND_` prefix, remove it and convert to lowercase.
     if let Some(stripped) = span_kind.strip_prefix(SPAN_KIND_PREFIX) {
@@ -1220,14 +1220,14 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_span_kind_prefix() {
+    fn test_normalize_span_kind() {
         let tests = vec![
             ("SPAN_KIND_SERVER".to_string(), "server".to_string()),
             ("SPAN_KIND_CLIENT".to_string(), "client".to_string()),
         ];
 
         for (input, expected) in tests {
-            let result = remove_span_kind_prefix(&input);
+            let result = normalize_span_kind(&input);
             assert_eq!(result, expected);
         }
     }
