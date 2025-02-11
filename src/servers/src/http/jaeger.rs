@@ -43,7 +43,7 @@ pub struct JaegerAPIResponse {
     pub total: usize,
     pub limit: usize,
     pub offset: usize,
-    pub errors: Option<Vec<JaegerAPIError>>,
+    pub errors: Vec<JaegerAPIError>,
 }
 
 /// JaegerData is the query result of Jaeger HTTP API.
@@ -82,8 +82,12 @@ pub struct Trace {
     #[serde(rename = "traceID")]
     pub trace_id: String,
     pub spans: Vec<Span>,
-    pub processes: Option<HashMap<String, Process>>,
-    pub warnings: Option<Vec<String>>,
+
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub processes: HashMap<String, Process>,
+
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Span is a single operation within a trace.
@@ -117,7 +121,8 @@ pub struct Span {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process: Option<Process>,
 
-    pub warnings: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Reference is a reference from one span to another.
@@ -497,11 +502,11 @@ pub async fn handle_get_operations(
         (
             StatusCode::BAD_REQUEST,
             axum::Json(JaegerAPIResponse {
-                errors: Some(vec![JaegerAPIError {
+                errors: vec![JaegerAPIError {
                     code: 400,
                     msg: "parameter 'service' is required".to_string(),
                     trace_id: None,
-                }]),
+                }],
                 ..Default::default()
             }),
         )
@@ -580,11 +585,11 @@ fn error_response(err: Error) -> (StatusCode, axum::Json<JaegerAPIResponse>) {
     (
         status_code_to_http_status(&err.status_code()),
         axum::Json(JaegerAPIResponse {
-            errors: Some(vec![JaegerAPIError {
+            errors: vec![JaegerAPIError {
                 code: err.status_code() as i32,
                 msg: err.to_string(),
                 ..Default::default()
-            }]),
+            }],
             ..Default::default()
         }),
     )
@@ -699,7 +704,7 @@ fn traces_from_records(records: HttpRecordsOutput) -> Vec<Trace> {
                     },
                 );
             }
-            trace.processes = Some(process_id_to_process);
+            trace.processes = process_id_to_process;
         }
         traces.push(trace);
     }
@@ -974,13 +979,13 @@ mod tests {
                         ..Default::default()
                     },
                 ],
-                processes: Some(HashMap::from([(
+                processes: HashMap::from([(
                     "p1".to_string(),
                     Process {
                         service_name: "test-service-0".to_string(),
                         tags: vec![],
                     },
-                )])),
+                )]),
                 ..Default::default()
             }],
         )];
