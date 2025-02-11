@@ -206,7 +206,7 @@ async fn query_trace_table(
 
     let dataframe = dataframe.select(selects).context(DataFusionSnafu)?;
 
-    // Apply all filters
+    // Apply all filters.
     let dataframe = filters
         .into_iter()
         .chain(tags.map_or(Ok(vec![]), |t| tags_filters(&dataframe, t))?)

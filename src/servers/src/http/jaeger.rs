@@ -657,12 +657,22 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
 
         // Convert timestamp from nanoseconds to microseconds.
         if let Some(JsonValue::Number(timestamp)) = row_iter.next() {
-            span.start_time = timestamp.as_u64().unwrap_or(0) / 1000;
+            span.start_time = timestamp.as_u64().ok_or_else(|| {
+                InvalidJaegerQuerySnafu {
+                    reason: "Failed to convert timestamp to u64".to_string(),
+                }
+                .build()
+            })? / 1000;
         }
 
         // Convert duration from nanoseconds to microseconds.
         if let Some(JsonValue::Number(duration)) = row_iter.next() {
-            span.duration = duration.as_u64().unwrap_or(0) / 1000;
+            span.duration = duration.as_u64().ok_or_else(|| {
+                InvalidJaegerQuerySnafu {
+                    reason: "Failed to convert duration to u64".to_string(),
+                }
+                .build()
+            })? / 1000;
         }
 
         // Collect services to construct processes.
