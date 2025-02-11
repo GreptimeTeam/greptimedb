@@ -35,6 +35,7 @@ pub struct PostgresServer {
     base_server: BaseTcpServer,
     make_handler: Arc<MakePostgresServerHandler>,
     tls_server_config: Arc<ReloadableTlsServerConfig>,
+    keep_alive_secs: u64,
 }
 
 impl PostgresServer {
@@ -43,6 +44,7 @@ impl PostgresServer {
         query_handler: ServerSqlQueryHandlerRef,
         force_tls: bool,
         tls_server_config: Arc<ReloadableTlsServerConfig>,
+        keep_alive_secs: u64,
         io_runtime: Runtime,
         user_provider: Option<UserProviderRef>,
     ) -> PostgresServer {
@@ -58,6 +60,7 @@ impl PostgresServer {
             base_server: BaseTcpServer::create_server("Postgres", io_runtime),
             make_handler,
             tls_server_config,
+            keep_alive_secs,
         }
     }
 
@@ -116,7 +119,10 @@ impl Server for PostgresServer {
     }
 
     async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
-        let (stream, addr) = self.base_server.bind(listening).await?;
+        let (stream, addr) = self
+            .base_server
+            .bind(listening, self.keep_alive_secs)
+            .await?;
 
         let io_runtime = self.base_server.io_runtime();
         let join_handle = common_runtime::spawn_global(self.accept(io_runtime, stream));

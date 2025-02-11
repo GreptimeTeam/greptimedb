@@ -72,6 +72,8 @@ pub struct MysqlSpawnConfig {
     // tls config
     force_tls: bool,
     tls: Arc<ReloadableTlsServerConfig>,
+    // keep-alive config
+    keep_alive_secs: u64,
     // other shim config
     reject_no_database: bool,
 }
@@ -80,11 +82,13 @@ impl MysqlSpawnConfig {
     pub fn new(
         force_tls: bool,
         tls: Arc<ReloadableTlsServerConfig>,
+        keep_alive_secs: u64,
         reject_no_database: bool,
     ) -> MysqlSpawnConfig {
         MysqlSpawnConfig {
             force_tls,
             tls,
+            keep_alive_secs,
             reject_no_database,
         }
     }
@@ -218,7 +222,10 @@ impl Server for MysqlServer {
     }
 
     async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
-        let (stream, addr) = self.base_server.bind(listening).await?;
+        let (stream, addr) = self
+            .base_server
+            .bind(listening, self.spawn_config.keep_alive_secs)
+            .await?;
         let io_runtime = self.base_server.io_runtime();
 
         let join_handle = common_runtime::spawn_global(self.accept(io_runtime, stream));

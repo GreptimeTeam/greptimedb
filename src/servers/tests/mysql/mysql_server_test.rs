@@ -71,6 +71,7 @@ fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn S
         Arc::new(MysqlSpawnConfig::new(
             opts.tls.should_force_tls(),
             tls_server_config,
+            0,
             opts.reject_no_database,
         )),
     ))

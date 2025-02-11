@@ -923,6 +923,7 @@ watch = false
 enable = true
 addr = "127.0.0.1:4002"
 runtime_size = 2
+keep_alive = "0s"
 
 [mysql.tls]
 mode = "disable"
@@ -934,6 +935,7 @@ watch = false
 enable = true
 addr = "127.0.0.1:4003"
 runtime_size = 2
+keep_alive = "0s"
 
 [postgres.tls]
 mode = "disable"
