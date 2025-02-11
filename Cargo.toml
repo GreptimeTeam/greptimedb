@@ -186,7 +186,6 @@ shadow-rs = "0.38"
 similar-asserts = "1.6.0"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
-socket2 = "0.5"
 sysinfo = "0.30"
 # on branch v0.52.x
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "71dd86058d2af97b9925093d40c4e03360403170", features = [
