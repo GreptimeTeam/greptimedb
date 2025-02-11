@@ -65,18 +65,6 @@ pub enum TableConstraint {
     PrimaryKey { columns: Vec<Ident> },
     /// Time index constraint.
     TimeIndex { column: Ident },
-    /// Inverted index constraint.
-    InvertedIndex { columns: Vec<Ident> },
-    /// Skipping index constraint.
-    SkippingIndex {
-        columns: Vec<Ident>,
-        options: OptionMap,
-    },
-    /// Fulltext index constraint.
-    FulltextIndex {
-        columns: Vec<Ident>,
-        options: OptionMap,
-    },
 }
 
 impl Display for TableConstraint {
@@ -87,23 +75,6 @@ impl Display for TableConstraint {
             }
             TableConstraint::TimeIndex { column } => {
                 write!(f, "TIME INDEX ({})", column)
-            }
-            TableConstraint::InvertedIndex { columns } => {
-                write!(f, "INVERTED INDEX ({})", format_list_comma!(columns))
-            }
-            TableConstraint::SkippingIndex { columns, options } => {
-                write!(f, "SKIPPING INDEX ({})", format_list_comma!(columns))?;
-                if !options.is_empty() {
-                    write!(f, " WITH({})", format_list_comma!(options.kv_pairs()))?;
-                }
-                Ok(())
-            }
-            TableConstraint::FulltextIndex { columns, options } => {
-                write!(f, "FULLTEXT INDEX ({})", format_list_comma!(columns))?;
-                if !options.is_empty() {
-                    write!(f, " WITH({})", format_list_comma!(options.kv_pairs()))?;
-                }
-                Ok(())
             }
         }
     }

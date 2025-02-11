@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS system_metrics (
     host STRING,
-    idc STRING FULLTEXT INDEX,
+    idc STRING FULLTEXT INDEX INVERTED INDEX,
     cpu_util DOUBLE,
     memory_util DOUBLE,
     disk_util DOUBLE,
@@ -9,7 +9,6 @@ CREATE TABLE IF NOT EXISTS system_metrics (
     desc3 STRING FULLTEXT INDEX,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(host, idc),
-    INVERTED INDEX(idc, desc1, desc2),
     TIME INDEX(ts)
 );
 

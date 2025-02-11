@@ -301,10 +301,9 @@ CREATE TABLE "specify_invereted_index_cols" (
   "ts" TIMESTAMP(3) NOT NULL,
   "val" DOUBLE NULL,
   "host" STRING NULL,
-  "job" STRING NULL,
+  "job" STRING NULL INVERTED INDEX,
   TIME INDEX ("ts"),
   PRIMARY KEY ("host", "job"),
-  INVERTED INDEX ("job")
 );
 
 Affected Rows: 0
@@ -338,7 +337,6 @@ CREATE TABLE "specify_empty_invereted_index_cols" (
   "job" STRING NULL,
   TIME INDEX ("ts"),
   PRIMARY KEY ("host", "job"),
-  INVERTED INDEX ()
 );
 
 Affected Rows: 0
@@ -362,40 +360,6 @@ show create table specify_empty_invereted_index_cols;
 +------------------------------------+-------------------------------------------------------------------+
 
 drop table specify_empty_invereted_index_cols;
-
-Affected Rows: 0
-
-CREATE TABLE test_table_constrain_composite_indexes (
-  `id` INT,
-  host STRING,
-  ts TIMESTAMP,
-  PRIMARY KEY (`id`, host),
-  INVERTED INDEX (host),
-  FULLTEXT INDEX (host) WITH (analyzer='English', case_sensitive='true'),
-  SKIPPING INDEX (host, `id`),
-  TIME INDEX (ts)
-);
-
-Affected Rows: 0
-
-show create table test_table_constrain_composite_indexes;
-
-+----------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| Table                                  | Create Table                                                                                                                                                 |
-+----------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| test_table_constrain_composite_indexes | CREATE TABLE IF NOT EXISTS "test_table_constrain_composite_indexes" (                                                                                        |
-|                                        |   "id" INT NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM'),                                                                                  |
-|                                        |   "host" STRING NULL FULLTEXT WITH(analyzer = 'English', case_sensitive = 'true') SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM') INVERTED INDEX, |
-|                                        |   "ts" TIMESTAMP(3) NOT NULL,                                                                                                                                |
-|                                        |   TIME INDEX ("ts"),                                                                                                                                         |
-|                                        |   PRIMARY KEY ("id", "host")                                                                                                                                 |
-|                                        | )                                                                                                                                                            |
-|                                        |                                                                                                                                                              |
-|                                        | ENGINE=mito                                                                                                                                                  |
-|                                        |                                                                                                                                                              |
-+----------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
-
-drop table test_table_constrain_composite_indexes;
 
 Affected Rows: 0
 
