@@ -12,14 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use datatypes::prelude::{ConcreteDataType, DataType};
 use itertools::Itertools;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use substrait_proto::proto;
 use substrait_proto::proto::aggregate_function::AggregationInvocation;
 use substrait_proto::proto::aggregate_rel::{Grouping, Measure};
 use substrait_proto::proto::function_argument::ArgType;
+use substrait_proto::proto::sort_field::{SortDirection, SortKind};
 
-use crate::error::{Error, NotImplementedSnafu, PlanSnafu};
+use crate::error::{DatafusionSnafu, DatatypesSnafu, Error, NotImplementedSnafu, PlanSnafu};
+use crate::expr::relation::{AggregateExprV2, OrderingReq, SortExpr};
 use crate::expr::{
     AggregateExpr, AggregateFunc, MapFilterProject, ScalarExpr, TypedExpr, UnaryFunc,
 };
@@ -86,7 +89,7 @@ impl TypedExpr {
 impl AggregateExpr {
     /// Convert list of `Measure` into Flow's AggregateExpr
     ///
-    /// Return both the AggregateExpr and a MapFilterProject that is the final output of the aggregate function
+    /// Return the AggregateExpr List that is the final output of the aggregate function
     async fn from_substrait_agg_measures(
         ctx: &mut FlownodeContext,
         measures: &[Measure],
@@ -194,6 +197,155 @@ impl AggregateExpr {
                 f.function_reference
             ),
         }
+    }
+}
+
+impl AggregateExprV2 {
+    /// Convert list of `Measure` into Flow's AggregateExpr
+    ///
+    /// Return the AggregateExpr List that is the final output of the aggregate function
+    async fn from_substrait_agg_measures(
+        ctx: &mut FlownodeContext,
+        measures: &[Measure],
+        typ: &RelationDesc,
+        extensions: &FunctionExtensions,
+    ) -> Result<Vec<Self>, Error> {
+        let mut all_aggr_exprs = vec![];
+
+        for m in measures {
+            let filter = match &m.filter {
+                Some(fil) => Some(TypedExpr::from_substrait_rex(fil, typ, extensions).await?),
+                None => None,
+            };
+
+            let Some(f) = &m.measure else {
+                not_impl_err!("Expect aggregate function")?
+            };
+
+            let aggr_expr = Self::from_substrait_agg_func(ctx, f, typ, extensions, &filter).await?;
+            all_aggr_exprs.push(aggr_expr);
+        }
+        Ok(all_aggr_exprs)
+    }
+
+    /// Convert AggregateFunction into Flow's AggregateExpr
+    ///
+    /// the returned value is a tuple of AggregateExpr and a optional ScalarExpr that if exist is the final output of the aggregate function
+    /// since aggr functions like `avg` need to be transform to `sum(x)/cast(count(x) as x_type)`
+    pub async fn from_substrait_agg_func(
+        ctx: &mut FlownodeContext,
+        f: &proto::AggregateFunction,
+        input_schema: &RelationDesc,
+        extensions: &FunctionExtensions,
+        filter: &Option<TypedExpr>,
+    ) -> Result<Self, Error> {
+        // TODO(discord9): impl filter
+        let _ = filter;
+
+        let mut args = vec![];
+        for arg in &f.arguments {
+            let arg_expr = match &arg.arg_type {
+                Some(ArgType::Value(e)) => {
+                    TypedExpr::from_substrait_rex(e, input_schema, extensions).await
+                }
+                _ => not_impl_err!("Aggregated function argument non-Value type not supported"),
+            }?;
+            args.push(arg_expr);
+        }
+        let args = args;
+        let distinct = match f.invocation {
+            _ if f.invocation == AggregationInvocation::Distinct as i32 => true,
+            _ if f.invocation == AggregationInvocation::All as i32 => false,
+            _ => false,
+        };
+
+        let fn_name = extensions
+            .get(&f.function_reference)
+            .cloned()
+            .with_context(|| PlanSnafu {
+                reason: format!(
+                    "Aggregated function not found: function anchor = {:?}",
+                    f.function_reference
+                ),
+            })?;
+
+        let fn_impl = ctx
+            .aggregate_functions
+            .get(&fn_name)
+            .with_context(|| PlanSnafu {
+                reason: format!("Aggregate function not found: {:?}", fn_name),
+            })?;
+
+        let input_types = args
+            .iter()
+            .map(|a| a.typ.scalar_type().clone())
+            .collect_vec();
+
+        let return_type = {
+            let arrow_input_types = input_types.iter().map(|t| t.as_arrow_type()).collect_vec();
+            let ret = fn_impl
+                .return_type(&arrow_input_types)
+                .context(DatafusionSnafu {
+                    context: "failed to get return type of aggregate function",
+                })?;
+            ConcreteDataType::try_from(&ret).context(DatatypesSnafu {
+                context: "failed to convert return type to ConcreteDataType",
+            })?
+        };
+
+        let ordering_req = {
+            let mut ret = Vec::with_capacity(f.sorts.len());
+            for sort in &f.sorts {
+                let Some(raw_expr) = sort.expr.as_ref() else {
+                    return not_impl_err!("Sort expression not found in sort");
+                };
+                let expr =
+                    TypedExpr::from_substrait_rex(raw_expr, input_schema, extensions).await?;
+                let sort_dir = sort.sort_kind;
+                let Some(SortKind::Direction(dir)) = sort_dir else {
+                    return not_impl_err!("Sort direction not found in sort");
+                };
+                let dir = SortDirection::try_from(dir).map_err(|e| {
+                    PlanSnafu {
+                        reason: format!("{} is not a valid direction", e.0),
+                    }
+                    .build()
+                })?;
+
+                let (descending, nulls_first) = match dir {
+                    // align with default datafusion option
+                    SortDirection::Unspecified => (false, true),
+                    SortDirection::AscNullsFirst => (false, true),
+                    SortDirection::AscNullsLast => (false, false),
+                    SortDirection::DescNullsFirst => (true, true),
+                    SortDirection::DescNullsLast => (true, false),
+                    SortDirection::Clustered => not_impl_err!("Clustered sort not supported")?,
+                };
+
+                let sort_expr = SortExpr {
+                    expr: expr.expr,
+                    descending,
+                    nulls_first,
+                };
+                ret.push(sort_expr);
+            }
+            OrderingReq { exprs: ret }
+        };
+
+        // TODO(discord9): determine other options from substrait too instead of default
+        Ok(Self {
+            func: fn_impl.as_ref().clone(),
+            args: args.into_iter().map(|a| a.expr).collect(),
+            return_type,
+            name: fn_name,
+            schema: input_schema.clone(),
+            ordering_req,
+            ignore_nulls: false,
+            is_distinct: distinct,
+            is_reversed: false,
+            input_types,
+            is_nullable: true,
+        })
     }
 }
 

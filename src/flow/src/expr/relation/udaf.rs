@@ -63,10 +63,12 @@ pub struct AccumulatorArgs<'a> {
     pub exprs: &'a [ScalarExpr],
 }
 
+#[derive(Debug, Clone)]
 pub struct OrderingReq {
     pub exprs: Vec<SortExpr>,
 }
 
+#[derive(Debug, Clone)]
 pub struct SortExpr {
     /// expression representing the column to sort
     pub expr: ScalarExpr,

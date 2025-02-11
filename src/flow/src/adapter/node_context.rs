@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use common_recordbatch::RecordBatch;
 use common_telemetry::trace;
+use datafusion_expr::AggregateUDF;
 use datatypes::prelude::ConcreteDataType;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
@@ -59,11 +60,13 @@ pub struct FlownodeContext {
     /// All the tables that have been registered in the worker
     pub table_repr: IdToNameMap,
     pub query_context: Option<Arc<QueryContext>>,
+    /// Aggregate functions registered in the context
+    pub aggregate_functions: HashMap<String, Arc<AggregateUDF>>,
 }
 
 impl FlownodeContext {
     pub fn new(table_source: Box<dyn FlowTableSource>) -> Self {
-        Self {
+        let mut ret = Self {
             source_to_tasks: Default::default(),
             flow_to_sink: Default::default(),
             flow_plans: Default::default(),
@@ -73,7 +76,32 @@ impl FlownodeContext {
             table_source,
             table_repr: Default::default(),
             query_context: Default::default(),
-        }
+            aggregate_functions: Default::default(),
+        };
+        ret.register_all_built_in_aggr_fns();
+        ret
+    }
+
+    pub fn register_all_built_in_aggr_fns(&mut self) {
+        // sum/min/max/count are built-in aggregate functions
+        use datafusion::functions_aggregate::count::count_udaf;
+        use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
+        use datafusion::functions_aggregate::sum::sum_udaf;
+        let res = HashMap::from([
+            ("sum".to_string(), sum_udaf()),
+            ("min".to_string(), min_udaf()),
+            ("max".to_string(), max_udaf()),
+            ("count".to_string(), count_udaf()),
+        ]);
+        self.aggregate_functions.extend(res);
+    }
+
+    pub fn register_aggr_fn(
+        &mut self,
+        name: String,
+        aggr_fn: Arc<AggregateUDF>,
+    ) -> Option<Arc<AggregateUDF>> {
+        self.aggregate_functions.insert(name, aggr_fn)
     }
 
     pub fn get_flow_ids(&self, table_id: TableId) -> Option<&BTreeSet<FlowId>> {

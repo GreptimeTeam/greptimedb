@@ -159,7 +159,6 @@ fn states_to_batch(states: Vec<Vec<Value>>, dts: Vec<CDT>) -> Result<Vec<VectorR
             reason: "states have different lengths"
         }
     );
-    let state_cnt = states.len();
     let state_len = states[0].len();
     ensure!(
         state_len == dts.len(),
@@ -176,9 +175,9 @@ fn states_to_batch(states: Vec<Vec<Value>>, dts: Vec<CDT>) -> Result<Vec<VectorR
         .map(|dt| dt.create_mutable_vector(state_len))
         .collect::<Vec<_>>();
     for i in 0..state_len {
-        for j in 0..state_cnt {
+        for state in states.iter() {
             // the j-th state's i-th value
-            let val = &states[j][i];
+            let val = &state[i];
             ret.get_mut(i)
                 .with_context(|| InternalSnafu {
                     reason: format!("failed to get mutable vector at index {}", i),

@@ -347,7 +347,7 @@ impl TypedExpr {
                             datatypes::types::cast(val.clone(), &dest_type)
                         .with_context(|_|
                             DatatypesSnafu{
-                                extra: format!("Failed to implicitly cast literal {val:?} to type {dest_type:?}")
+                                context: format!("Failed to implicitly cast literal {val:?} to type {dest_type:?}")
                             })?
                         } else {
                             val.clone()

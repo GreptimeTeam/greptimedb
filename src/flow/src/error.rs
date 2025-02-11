@@ -148,10 +148,10 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Datatypes error: {source} with extra message: {extra}"))]
+    #[snafu(display("Datatypes error: {source} with extra message: {context}"))]
     Datatypes {
         source: datatypes::Error,
-        extra: String,
+        context: String,
         #[snafu(implicit)]
         location: Location,
     },

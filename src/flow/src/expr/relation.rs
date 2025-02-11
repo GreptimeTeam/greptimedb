@@ -15,9 +15,15 @@
 //! Describes an aggregation function and it's input expression.
 
 pub(crate) use accum::{Accum, Accumulator};
+use datafusion_expr::AggregateUDF;
+use datatypes::prelude::ConcreteDataType;
 pub(crate) use func::AggregateFunc;
+pub use udaf::{OrderingReq, SortExpr};
 
+use crate::expr::relation::accum_v2::AccumulatorV2;
 use crate::expr::ScalarExpr;
+use crate::repr::RelationDesc;
+use crate::Error;
 
 mod accum;
 mod accum_v2;
@@ -35,4 +41,29 @@ pub struct AggregateExpr {
     pub expr: ScalarExpr,
     /// Should the aggregation be applied only to distinct results in each group.
     pub distinct: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct AggregateExprV2 {
+    pub func: AggregateUDF,
+    pub args: Vec<ScalarExpr>,
+    /// Output / return type of this aggregate
+    pub return_type: ConcreteDataType,
+    pub name: String,
+    /// The schema of the input relation to this aggregate
+    pub schema: RelationDesc,
+    // i.e. FIRST_VALUE(a ORDER BY b)
+    pub ordering_req: OrderingReq,
+    pub ignore_nulls: bool,
+    pub is_distinct: bool,
+    pub is_reversed: bool,
+    /// The types of the arguments to this aggregate
+    pub input_types: Vec<ConcreteDataType>,
+    pub is_nullable: bool,
+}
+
+impl AggregateExprV2 {
+    pub fn create_accumulator(&self) -> Result<Box<dyn AccumulatorV2>, Error> {
+        todo!("create_accumulator")
+    }
 }
