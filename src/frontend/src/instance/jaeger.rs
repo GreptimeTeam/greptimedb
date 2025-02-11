@@ -36,22 +36,16 @@ use servers::error::{
     TableNotFoundSnafu,
 };
 use servers::http::jaeger::QueryTraceParams;
-use servers::otlp::trace::TRACE_TABLE_NAME;
+use servers::otlp::trace::{
+    DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_ID_COLUMN,
+    SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
+};
 use servers::query_handler::JaegerQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
 use super::Instance;
-
-const SERVICE_NAME_COLUMN: &str = "service_name";
-const TRACE_ID_COLUMN: &str = "trace_id";
-const TIMESTAMP_COLUMN: &str = "timestamp";
-const DURATION_NANO_COLUMN: &str = "duration_nano";
-const SPAN_ID_COLUMN: &str = "span_id";
-const SPAN_NAME_COLUMN: &str = "span_name";
-const SPAN_KIND_COLUMN: &str = "span_kind";
-const SPAN_ATTRIBUTES_COLUMN: &str = "span_attributes";
 
 const DEFAULT_LIMIT: usize = 100;
 

@@ -33,6 +33,10 @@ use crate::error::{
 };
 use crate::http::HttpRecordsOutput;
 use crate::metrics::METRIC_JAEGER_QUERY_ELAPSED;
+use crate::otlp::trace::{
+    DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_ID_COLUMN,
+    SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
+};
 use crate::query_handler::JaegerQueryHandlerRef;
 
 /// JaegerAPIResponse is the response of Jaeger HTTP API.
@@ -50,9 +54,9 @@ pub struct JaegerAPIResponse {
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum JaegerData {
-    Services(Vec<String>),
-    Operations(Vec<Operation>),
+    ServiceNames(Vec<String>),
     OperationsNames(Vec<String>),
+    Operations(Vec<Operation>),
     Traces(Vec<Trace>),
 }
 
@@ -332,25 +336,23 @@ pub async fn handle_get_services(
 
     match handler.get_services(query_ctx).await {
         Ok(output) => match covert_to_records(output).await {
-            Ok(Some(records)) => {
-                let mut services = Vec::with_capacity(records.total_rows);
-                for row in records.rows.into_iter() {
-                    for value in row.into_iter() {
-                        if let JsonValue::String(service_name) = value {
-                            services.push(service_name);
-                        }
-                    }
+            Ok(Some(records)) => match services_from_records(records) {
+                Ok(services) => {
+                    let services_num = services.len();
+                    (
+                        StatusCode::OK,
+                        axum::Json(JaegerAPIResponse {
+                            data: Some(JaegerData::ServiceNames(services)),
+                            total: services_num,
+                            ..Default::default()
+                        }),
+                    )
                 }
-                let services_num = services.len();
-                (
-                    StatusCode::OK,
-                    axum::Json(JaegerAPIResponse {
-                        data: Some(JaegerData::Services(services)),
-                        total: services_num,
-                        ..Default::default()
-                    }),
-                )
-            }
+                Err(err) => {
+                    error!("Failed to get services: {:?}", err);
+                    error_response(err)
+                }
+            },
             Ok(None) => (StatusCode::OK, axum::Json(JaegerAPIResponse::default())),
             Err(err) => {
                 error!("Failed to get services: {:?}", err);
@@ -385,13 +387,19 @@ pub async fn handle_get_trace(
 
     match handler.get_trace(query_ctx, &trace_id).await {
         Ok(output) => match covert_to_records(output).await {
-            Ok(Some(records)) => (
-                StatusCode::OK,
-                axum::Json(JaegerAPIResponse {
-                    data: Some(JaegerData::Traces(traces_from_records(records))),
-                    ..Default::default()
-                }),
-            ),
+            Ok(Some(records)) => match traces_from_records(records) {
+                Ok(traces) => (
+                    StatusCode::OK,
+                    axum::Json(JaegerAPIResponse {
+                        data: Some(JaegerData::Traces(traces)),
+                        ..Default::default()
+                    }),
+                ),
+                Err(err) => {
+                    error!("Failed to get trace '{}': {:?}", trace_id, err);
+                    error_response(err)
+                }
+            },
             Ok(None) => (StatusCode::OK, axum::Json(JaegerAPIResponse::default())),
             Err(err) => {
                 error!("Failed to get trace '{}': {:?}", trace_id, err);
@@ -428,13 +436,19 @@ pub async fn handle_find_traces(
             let output = handler.find_traces(query_ctx, query_params).await;
             match output {
                 Ok(output) => match covert_to_records(output).await {
-                    Ok(Some(records)) => (
-                        StatusCode::OK,
-                        axum::Json(JaegerAPIResponse {
-                            data: Some(JaegerData::Traces(traces_from_records(records))),
-                            ..Default::default()
-                        }),
-                    ),
+                    Ok(Some(records)) => match traces_from_records(records) {
+                        Ok(traces) => (
+                            StatusCode::OK,
+                            axum::Json(JaegerAPIResponse {
+                                data: Some(JaegerData::Traces(traces)),
+                                ..Default::default()
+                            }),
+                        ),
+                        Err(err) => {
+                            error!("Failed to find traces: {:?}", err);
+                            error_response(err)
+                        }
+                    },
                     Ok(None) => (StatusCode::OK, axum::Json(JaegerAPIResponse::default())),
                     Err(err) => error_response(err),
                 },
@@ -475,18 +489,23 @@ pub async fn handle_get_operations(
             .await
         {
             Ok(output) => match covert_to_records(output).await {
-                Ok(Some(records)) => {
-                    let operations = operations_from_records(records, true);
-                    let total = operations.len();
-                    (
-                        StatusCode::OK,
-                        axum::Json(JaegerAPIResponse {
-                            data: Some(JaegerData::Operations(operations)),
-                            total,
-                            ..Default::default()
-                        }),
-                    )
-                }
+                Ok(Some(records)) => match operations_from_records(records, true) {
+                    Ok(operations) => {
+                        let total = operations.len();
+                        (
+                            StatusCode::OK,
+                            axum::Json(JaegerAPIResponse {
+                                data: Some(JaegerData::Operations(operations)),
+                                total,
+                                ..Default::default()
+                            }),
+                        )
+                    }
+                    Err(err) => {
+                        error!("Failed to get operations: {:?}", err);
+                        error_response(err)
+                    }
+                },
                 Ok(None) => (StatusCode::OK, axum::Json(JaegerAPIResponse::default())),
                 Err(err) => error_response(err),
             },
@@ -540,21 +559,28 @@ pub async fn handle_get_operations_by_service(
 
     match handler.get_operations(query_ctx, &service_name, None).await {
         Ok(output) => match covert_to_records(output).await {
-            Ok(Some(records)) => {
-                let operations: Vec<String> = operations_from_records(records, false)
-                    .into_iter()
-                    .map(|op| op.name)
-                    .collect();
-                let total = operations.len();
-                (
-                    StatusCode::OK,
-                    axum::Json(JaegerAPIResponse {
-                        data: Some(JaegerData::OperationsNames(operations)),
-                        total,
-                        ..Default::default()
-                    }),
-                )
-            }
+            Ok(Some(records)) => match operations_from_records(records, false) {
+                Ok(operations) => {
+                    let operations: Vec<String> =
+                        operations.into_iter().map(|op| op.name).collect();
+                    let total = operations.len();
+                    (
+                        StatusCode::OK,
+                        axum::Json(JaegerAPIResponse {
+                            data: Some(JaegerData::OperationsNames(operations)),
+                            total,
+                            ..Default::default()
+                        }),
+                    )
+                }
+                Err(err) => {
+                    error!(
+                        "Failed to get operations for service '{}': {:?}",
+                        service_name, err
+                    );
+                    error_response(err)
+                }
+            },
             Ok(None) => (StatusCode::OK, axum::Json(JaegerAPIResponse::default())),
             Err(err) => error_response(err),
         },
@@ -570,12 +596,16 @@ pub async fn handle_get_operations_by_service(
 
 async fn covert_to_records(output: Output) -> Result<Option<HttpRecordsOutput>> {
     match output.data {
-        OutputData::Stream(stream) => Ok(Some(HttpRecordsOutput::try_new(
-            stream.schema().clone(),
-            util::collect(stream)
-                .await
-                .context(CollectRecordbatchSnafu)?,
-        )?)),
+        OutputData::Stream(stream) => {
+            let records = HttpRecordsOutput::try_new(
+                stream.schema().clone(),
+                util::collect(stream)
+                    .await
+                    .context(CollectRecordbatchSnafu)?,
+            )?;
+            debug!("The query records: {:?}", records);
+            Ok(Some(records))
+        }
         // It's unlikely to happen. However, if the output is not a stream, return None.
         _ => Ok(None),
     }
@@ -594,10 +624,21 @@ fn error_response(err: Error) -> (StatusCode, axum::Json<JaegerAPIResponse>) {
         }),
     )
 }
-
 // Construct Jaeger traces from records.
-// The records has column order: `trace_id`, `timestamp`, `duration_nano`, `service_name`, `span_name`, `span_id`, `span_attributes`.
-fn traces_from_records(records: HttpRecordsOutput) -> Vec<Trace> {
+fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
+    let expected_schema = vec![
+        (TRACE_ID_COLUMN, "String"),
+        (TIMESTAMP_COLUMN, "TimestampNanosecond"),
+        (DURATION_NANO_COLUMN, "UInt64"),
+        (SERVICE_NAME_COLUMN, "String"),
+        (SPAN_NAME_COLUMN, "String"),
+        (SPAN_ID_COLUMN, "String"),
+        (SPAN_ATTRIBUTES_COLUMN, "Json"),
+    ];
+    // Check the schema and it should satisfy the following order with the correct column names and data types:
+    // `trace_id(string)`, `timestamp(timestamp_nanosecond)`, `duration_nano(uint64)`, `service_name(string)`, `span_name(string)`, `span_id(string)`, `span_attributes(json)`.
+    check_schema(&records, &expected_schema)?;
+
     // maintain the mapping: trace_id -> (process_id -> service_name).
     let mut trace_id_to_processes: HashMap<String, HashMap<String, String>> = HashMap::new();
     // maintain the mapping: trace_id -> spans.
@@ -709,11 +750,36 @@ fn traces_from_records(records: HttpRecordsOutput) -> Vec<Trace> {
         traces.push(trace);
     }
 
-    traces
+    Ok(traces)
+}
+
+fn services_from_records(records: HttpRecordsOutput) -> Result<Vec<String>> {
+    let expected_schema = vec![(SERVICE_NAME_COLUMN, "String")];
+    check_schema(&records, &expected_schema)?;
+
+    let mut services = Vec::with_capacity(records.total_rows);
+    for row in records.rows.into_iter() {
+        for value in row.into_iter() {
+            if let JsonValue::String(service_name) = value {
+                services.push(service_name);
+            }
+        }
+    }
+    Ok(services)
 }
 
 // Construct Jaeger operations from records.
-fn operations_from_records(records: HttpRecordsOutput, contain_span_kind: bool) -> Vec<Operation> {
+fn operations_from_records(
+    records: HttpRecordsOutput,
+    contain_span_kind: bool,
+) -> Result<Vec<Operation>> {
+    let expected_schema = vec![
+        (SPAN_NAME_COLUMN, "String"),
+        (SPAN_KIND_COLUMN, "String"),
+        (SERVICE_NAME_COLUMN, "String"),
+    ];
+    check_schema(&records, &expected_schema)?;
+
     let mut operations = Vec::with_capacity(records.total_rows);
     for row in records.rows.into_iter() {
         let mut row_iter = row.into_iter();
@@ -733,9 +799,25 @@ fn operations_from_records(records: HttpRecordsOutput, contain_span_kind: bool) 
             operations.push(operation);
         }
     }
-    operations
+
+    Ok(operations)
 }
 
+// Check whether the schema of the records is correct.
+fn check_schema(records: &HttpRecordsOutput, expected_schema: &Vec<(&str, &str)>) -> Result<()> {
+    for (i, column) in records.schema.column_schemas.iter().enumerate() {
+        if column.name != expected_schema[i].0 || column.data_type != expected_schema[i].1 {
+            InvalidJaegerQuerySnafu {
+                reason: "query result schema is not correct".to_string(),
+            }
+            .fail()?
+        }
+    }
+    Ok(())
+}
+
+// By default, the span kind is stored as `SPAN_KIND_<kind>` in GreptimeDB.
+// However, in Jaeger API, the span kind is returned as `<kind>` which is the lowercase of the span kind and without the `SPAN_KIND_` prefix.
 fn remove_span_kind_prefix(span_kind: &str) -> String {
     const SPAN_KIND_PREFIX: &str = "SPAN_KIND_";
     // If the span_kind starts with `SPAN_KIND_` prefix, remove it and convert to lowercase.
@@ -782,6 +864,33 @@ mod tests {
 
     use super::*;
     use crate::http::{ColumnSchema, HttpRecordsOutput, OutputSchema};
+
+    #[test]
+    fn test_services_from_records() {
+        // The tests is the tuple of `(test_records, expected)`.
+        let tests = vec![(
+            HttpRecordsOutput {
+                schema: OutputSchema {
+                    column_schemas: vec![ColumnSchema {
+                        name: "service_name".to_string(),
+                        data_type: "String".to_string(),
+                    }],
+                },
+                rows: vec![
+                    vec![JsonValue::String("test-service-0".to_string())],
+                    vec![JsonValue::String("test-service-1".to_string())],
+                ],
+                total_rows: 2,
+                metrics: HashMap::new(),
+            },
+            vec!["test-service-0".to_string(), "test-service-1".to_string()],
+        )];
+
+        for (records, expected) in tests {
+            let services = services_from_records(records).unwrap();
+            assert_eq!(services, expected);
+        }
+    }
 
     #[test]
     fn test_operations_from_records() {
@@ -868,7 +977,7 @@ mod tests {
         ];
 
         for (records, contain_span_kind, expected) in tests {
-            let operations = operations_from_records(records, contain_span_kind);
+            let operations = operations_from_records(records, contain_span_kind).unwrap();
             assert_eq!(operations, expected);
         }
     }
@@ -991,7 +1100,7 @@ mod tests {
         )];
 
         for (records, expected) in tests {
-            let traces = traces_from_records(records);
+            let traces = traces_from_records(records).unwrap();
             assert_eq!(traces, expected);
         }
     }
@@ -1048,6 +1157,116 @@ mod tests {
                 QueryTraceParams::from_jaeger_query_params(DEFAULT_SCHEMA_NAME, query_params)
                     .unwrap();
             assert_eq!(query_params, expected);
+        }
+    }
+
+    #[test]
+    fn test_check_schema() {
+        // The tests is the tuple of `(test_records, expected_schema, is_ok)`.
+        let tests = vec![(
+            HttpRecordsOutput {
+                schema: OutputSchema {
+                    column_schemas: vec![
+                        ColumnSchema {
+                            name: "trace_id".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "timestamp".to_string(),
+                            data_type: "TimestampNanosecond".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "duration_nano".to_string(),
+                            data_type: "UInt64".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "service_name".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "span_name".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "span_id".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "span_attributes".to_string(),
+                            data_type: "Json".to_string(),
+                        },
+                    ],
+                },
+                rows: vec![],
+                total_rows: 0,
+                metrics: HashMap::new(),
+            },
+            vec![
+                (TRACE_ID_COLUMN, "String"),
+                (TIMESTAMP_COLUMN, "TimestampNanosecond"),
+                (DURATION_NANO_COLUMN, "UInt64"),
+                (SERVICE_NAME_COLUMN, "String"),
+                (SPAN_NAME_COLUMN, "String"),
+                (SPAN_ID_COLUMN, "String"),
+                (SPAN_ATTRIBUTES_COLUMN, "Json"),
+            ],
+            true,
+        )];
+
+        for (records, expected_schema, is_ok) in tests {
+            let result = check_schema(&records, &expected_schema);
+            assert_eq!(result.is_ok(), is_ok);
+        }
+    }
+
+    #[test]
+    fn test_remove_span_kind_prefix() {
+        let tests = vec![
+            ("SPAN_KIND_SERVER".to_string(), "server".to_string()),
+            ("SPAN_KIND_CLIENT".to_string(), "client".to_string()),
+        ];
+
+        for (input, expected) in tests {
+            let result = remove_span_kind_prefix(&input);
+            assert_eq!(result, expected);
+        }
+    }
+
+    #[test]
+    fn test_convert_string_to_number() {
+        let tests = vec![
+            (
+                JsonValue::String("123".to_string()),
+                Some(JsonValue::Number(Number::from(123))),
+            ),
+            (
+                JsonValue::String("123.456".to_string()),
+                Some(JsonValue::Number(Number::from_f64(123.456).unwrap())),
+            ),
+        ];
+
+        for (input, expected) in tests {
+            let result = convert_string_to_number(&input);
+            assert_eq!(result, expected);
+        }
+    }
+
+    #[test]
+    fn test_convert_string_to_boolean() {
+        let tests = vec![
+            (
+                JsonValue::String("true".to_string()),
+                Some(JsonValue::Bool(true)),
+            ),
+            (
+                JsonValue::String("false".to_string()),
+                Some(JsonValue::Bool(false)),
+            ),
+        ];
+
+        for (input, expected) in tests {
+            let result = convert_string_to_boolean(&input);
+            assert_eq!(result, expected);
         }
     }
 }
