@@ -72,7 +72,7 @@ impl CreateExprFactory {
         desc: Option<&str>,
     ) -> Result<CreateTableExpr> {
         let column_exprs = ColumnExpr::from_column_schemas(column_schemas);
-        let create_expr = common_grpc_expr::util::build_create_table_expr(
+        let expr = common_grpc_expr::util::build_create_table_expr(
             None,
             table_name,
             column_exprs,
@@ -81,7 +81,8 @@ impl CreateExprFactory {
         )
         .context(BuildCreateExprOnInsertionSnafu)?;
 
-        Ok(create_expr)
+        validate_create_expr(&expr, true)?;
+        Ok(expr)
     }
 }
 
@@ -173,6 +174,7 @@ pub(crate) async fn create_external_expr(
         table_id: None,
         engine: create.engine.to_string(),
     };
+
     Ok(expr)
 }
 
@@ -213,12 +215,12 @@ pub fn create_to_expr(
         engine: create.engine.to_string(),
     };
 
-    validate_create_expr(&expr)?;
+    validate_create_expr(&expr, false)?;
     Ok(expr)
 }
 
 /// Validate the [`CreateTableExpr`] request.
-pub fn validate_create_expr(create: &CreateTableExpr) -> Result<()> {
+pub fn validate_create_expr(create: &CreateTableExpr, auto_schema: bool) -> Result<()> {
     // construct column list
     let mut column_to_indices = HashMap::with_capacity(create.column_defs.len());
     for (idx, column) in create.column_defs.iter().enumerate() {
@@ -287,7 +289,26 @@ pub fn validate_create_expr(create: &CreateTableExpr) -> Result<()> {
         }
     }
 
+    if auto_schema {
+        // `DateTime` type is not supported in auto schema mode.
+        for column in &create.column_defs {
+            if is_date_time_type(&column.data_type()) {
+                return InvalidSqlSnafu {
+                    err_msg: format!(
+                        "column name `{}` is datetime type, which is not supported, please use `timestamp` type instead",
+                        column.name
+                    ),
+                }
+                .fail();
+            }
+        }
+    }
+
     Ok(())
+}
+
+fn is_date_time_type(data_type: &ColumnDataType) -> bool {
+    matches!(data_type, ColumnDataType::Datetime)
 }
 
 fn is_interval_type(data_type: &ColumnDataType) -> bool {
