@@ -159,19 +159,7 @@ fn coerce_type(transform: &Transform) -> Result<(ColumnDataType, Option<ColumnDa
 
 pub(crate) fn coerce_value(val: &Value, transform: &Transform) -> Result<Option<ValueData>> {
     match val {
-        Value::Null => match &transform.default {
-            Some(default) => coerce_value(default, transform),
-            None => match transform.on_failure {
-                Some(OnFailure::Ignore) => Ok(None),
-                Some(OnFailure::Default) => transform
-                    .get_default()
-                    .map(|default| coerce_value(default, transform))
-                    .unwrap_or_else(|| {
-                        coerce_value(transform.get_type_matched_default_val(), transform)
-                    }),
-                None => Ok(None),
-            },
-        },
+        Value::Null => Ok(None),
 
         Value::Int8(n) => coerce_i64_value(*n as i64, transform),
         Value::Int16(n) => coerce_i64_value(*n as i64, transform),
