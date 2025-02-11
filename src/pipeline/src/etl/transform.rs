@@ -170,16 +170,11 @@ impl Transform {
     }
 
     pub(crate) fn get_default_value_when_data_is_none(&self) -> Option<Value> {
-        match &self.type_ {
-            Value::Timestamp(_) => {
-                if self.index.is_some_and(|i| i == Index::Time) {
-                    Some(Value::Timestamp(Timestamp::default()))
-                } else {
-                    None
-                }
-            }
-            _ => None,
+        if matches!(self.type_, Value::Timestamp(_)) && self.index.is_some_and(|i| i == Index::Time)
+        {
+            return Some(Value::Timestamp(Timestamp::default()));
         }
+        None
     }
 }
 
