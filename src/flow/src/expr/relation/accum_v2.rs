@@ -14,16 +14,14 @@
 
 //! new accumulator trait that is more flexible and can be used in the future for more complex accumulators
 
-use std::any::{type_name, Any};
+use std::any::type_name;
 use std::fmt::Display;
-use std::sync::{Mutex, MutexGuard};
 
 use datafusion::logical_expr::Accumulator as DfAccumulator;
-use datatypes::prelude::ConcreteDataType;
+use datatypes::prelude::{ConcreteDataType as CDT, DataType};
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
-use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::expr::error::{DataTypeSnafu, DatafusionSnafu, InternalSnafu, TryFromValueSnafu};
 use crate::expr::EvalError;
@@ -35,13 +33,15 @@ pub trait AccumulatorV2: Send + Sync + std::fmt::Debug {
     fn update_batch(&mut self, values: &[VectorRef]) -> Result<(), EvalError>;
 
     /// Returns the current aggregate value, NOT consuming the internal state, so it can be called multiple times.
-    fn evaluate(&self) -> Result<Value, EvalError>;
+    fn evaluate(&mut self) -> Result<Value, EvalError>;
 
     /// Returns the allocated size required for this accumulator, in bytes, including Self.
     fn size(&self) -> usize;
 
     /// Returns the intermediate state of the accumulator, consuming the intermediate state.
-    fn into_state(self) -> Result<Vec<Value>, EvalError>;
+    ///
+    /// note that Value::Null's type is unknown, so (Value, ConcreteDataType) is used instead of just Value
+    fn into_state(self) -> Result<Vec<(Value, CDT)>, EvalError>;
 
     /// Merges the states of multiple accumulators into this accumulator.
     /// The states array passed was formed by concatenating the results of calling `Self::into_state` on zero or more other Accumulator instances.
@@ -71,7 +71,8 @@ pub trait AccumulatorV2: Send + Sync + std::fmt::Debug {
 /// i.e: can call evaluate multiple times.
 #[derive(Debug)]
 pub struct DfAccumulatorAdapter {
-    inner: Mutex<Box<dyn DfAccumulator>>,
+    /// accumulator that is wrapped in a mutex to allow for evaluation
+    inner: Box<dyn DfAccumulator>,
 }
 
 pub trait AcceptDfAccumulator: DfAccumulator {}
@@ -81,19 +82,13 @@ impl AcceptDfAccumulator for datafusion::functions_aggregate::min_max::MaxAccumu
 impl AcceptDfAccumulator for datafusion::functions_aggregate::min_max::MinAccumulator {}
 
 impl DfAccumulatorAdapter {
-    // TODO(discord9): find a way to whitelist only certain type of accumulators
+    /// create a new accumulator from a datafusion accumulator without checking if it is supported in flow
     fn new_unchecked(acc: Box<dyn DfAccumulator>) -> Self {
-        Self {
-            inner: Mutex::new(acc),
-        }
+        Self { inner: acc }
     }
 
     fn new<T: AcceptDfAccumulator + 'static>(acc: T) -> Self {
         Self::new_unchecked(Box::new(acc))
-    }
-
-    fn acc(&self) -> MutexGuard<Box<dyn DfAccumulator>> {
-        self.inner.lock().expect("lock poisoned")
     }
 }
 
@@ -103,14 +98,14 @@ impl AccumulatorV2 for DfAccumulatorAdapter {
             .iter()
             .map(|v| v.to_arrow_array().clone())
             .collect::<Vec<_>>();
-        self.acc().update_batch(&values).context(DatafusionSnafu {
+        self.inner.update_batch(&values).context(DatafusionSnafu {
             context: "failed to update batch: {}",
         })
     }
 
-    fn evaluate(&self) -> Result<Value, EvalError> {
+    fn evaluate(&mut self) -> Result<Value, EvalError> {
         // TODO(discord9): find a way to confirm internal state is not consumed
-        let value = self.acc().evaluate().context(DatafusionSnafu {
+        let value = self.inner.evaluate().context(DatafusionSnafu {
             context: "failed to evaluate accumulator: {}",
         })?;
         let value = Value::try_from(value).context(DataTypeSnafu {
@@ -120,16 +115,20 @@ impl AccumulatorV2 for DfAccumulatorAdapter {
     }
 
     fn size(&self) -> usize {
-        self.acc().size()
+        self.inner.size()
     }
 
-    fn into_state(self) -> Result<Vec<Value>, EvalError> {
-        let state = self.acc().state().context(DatafusionSnafu {
+    fn into_state(mut self) -> Result<Vec<(Value, CDT)>, EvalError> {
+        let state = self.inner.state().context(DatafusionSnafu {
             context: "failed to get state: {}",
         })?;
         let state = state
             .into_iter()
-            .map(Value::try_from)
+            .map(|v| -> Result<_, _> {
+                let dt = CDT::try_from(&v.data_type())?;
+                let val = Value::try_from(v)?;
+                Ok((val, dt))
+            })
             .collect::<Result<Vec<_>, _>>()
             .with_context(|_| DataTypeSnafu {
                 msg: "failed to convert `ScalarValue` state to `Value`",
@@ -142,10 +141,53 @@ impl AccumulatorV2 for DfAccumulatorAdapter {
             .iter()
             .map(|v| v.to_arrow_array().clone())
             .collect::<Vec<_>>();
-        self.acc().merge_batch(&states).context(DatafusionSnafu {
+        self.inner.merge_batch(&states).context(DatafusionSnafu {
             context: "failed to merge batch",
         })
     }
+}
+
+/// Convert a list of states(from `Accumulator::into_state`)
+/// to a batch of vectors(that can be feed to `Accumulator::merge_batch`)
+fn states_to_batch(states: Vec<Vec<Value>>, dts: Vec<CDT>) -> Result<Vec<VectorRef>, EvalError> {
+    if states.is_empty() || states[0].is_empty() {
+        return Ok(vec![]);
+    }
+    ensure!(
+        states.iter().map(|v| v.len()).all(|l| l == states[0].len()),
+        InternalSnafu {
+            reason: "states have different lengths"
+        }
+    );
+    let state_cnt = states.len();
+    let state_len = states[0].len();
+    ensure!(
+        state_len == dts.len(),
+        InternalSnafu {
+            reason: format!(
+                "states and data types have different lengths: {} != {}",
+                state_len,
+                dts.len()
+            )
+        }
+    );
+    let mut ret = dts
+        .into_iter()
+        .map(|dt| dt.create_mutable_vector(state_len))
+        .collect::<Vec<_>>();
+    for i in 0..state_len {
+        for j in 0..state_cnt {
+            // the j-th state's i-th value
+            let val = &states[j][i];
+            ret.get_mut(i)
+                .with_context(|| InternalSnafu {
+                    reason: format!("failed to get mutable vector at index {}", i),
+                })?
+                .push_value_ref(val.as_value_ref());
+        }
+    }
+    let ret = ret.into_iter().map(|mut v| v.to_vector()).collect();
+    Ok(ret)
 }
 
 fn fail_accum<T>() -> EvalError {
