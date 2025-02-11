@@ -412,7 +412,7 @@ pub async fn handle_get_trace(
 
 /// Handle the GET `/api/traces` request.
 #[axum_macros::debug_handler]
-#[tracing::instrument(skip_all, fields(protocol = "jaeger", request_type = "get_traces"))]
+#[tracing::instrument(skip_all, fields(protocol = "jaeger", request_type = "find_traces"))]
 pub async fn handle_find_traces(
     State(handler): State<JaegerQueryHandlerRef>,
     Query(query_params): Query<JaegerQueryParams>,
