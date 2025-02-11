@@ -224,7 +224,7 @@ pub struct JaegerQueryParams {
     /// The key and value of the map are both strings. The key and value is the attribute name and value of the span. The value will be converted to the corresponding type when querying.
     pub tags: Option<String>,
 
-    #[serde(rename = "spanKind")]
+    /// The span kind of the trace.
     pub span_kind: Option<String>,
 }
 
@@ -635,8 +635,6 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
         (SPAN_ID_COLUMN, "String"),
         (SPAN_ATTRIBUTES_COLUMN, "Json"),
     ];
-    // Check the schema and it should satisfy the following order with the correct column names and data types:
-    // `trace_id(string)`, `timestamp(timestamp_nanosecond)`, `duration_nano(uint64)`, `service_name(string)`, `span_name(string)`, `span_id(string)`, `span_attributes(json)`.
     check_schema(&records, &expected_schema)?;
 
     // maintain the mapping: trace_id -> (process_id -> service_name).
@@ -644,7 +642,6 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
     // maintain the mapping: trace_id -> spans.
     let mut trace_id_to_spans: HashMap<String, Vec<Span>> = HashMap::new();
 
-    // FIXME(zyy17): Should return the error if the schema is not correct.
     for row in records.rows.into_iter() {
         let mut span = Span::default();
         let mut row_iter = row.into_iter();
