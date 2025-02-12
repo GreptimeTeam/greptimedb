@@ -251,6 +251,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Unexpected request: {}", reason))]
+    UnexpectedRequest {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -269,7 +276,8 @@ impl ErrorExt for Error {
             | NoFieldColumn { .. }
             | AddingFieldColumn { .. }
             | ParseRegionOptions { .. }
-            | EmptyRequest { .. } => StatusCode::InvalidArguments,
+            | EmptyRequest { .. }
+            | UnexpectedRequest { .. } => StatusCode::InvalidArguments,
 
             ForbiddenPhysicalAlter { .. } | UnsupportedRegionRequest { .. } => {
                 StatusCode::Unsupported

@@ -52,7 +52,7 @@ use crate::error::{
     ColumnNotFoundSnafu, ColumnTypeMismatchSnafu, ConflictRegionOptionSnafu, CreateMitoRegionSnafu,
     EmptyRequestSnafu, InternalColumnOccupiedSnafu, InvalidMetadataSnafu, MissingRegionOptionSnafu,
     MultipleFieldColumnSnafu, NoFieldColumnSnafu, PhysicalRegionNotFoundSnafu, Result,
-    SerializeColumnMetadataSnafu,
+    SerializeColumnMetadataSnafu, UnexpectedRequestSnafu,
 };
 use crate::metrics::{PHYSICAL_COLUMN_COUNT, PHYSICAL_REGION_COUNT};
 use crate::utils::{self, to_data_region_id, to_metadata_region_id};
@@ -60,7 +60,7 @@ use crate::utils::{self, to_data_region_id, to_metadata_region_id};
 impl MetricEngineInner {
     pub async fn create_regions(
         &self,
-        requests: Vec<(RegionId, RegionCreateRequest)>,
+        mut requests: Vec<(RegionId, RegionCreateRequest)>,
         extension_return_value: &mut HashMap<String, Vec<u8>>,
     ) -> Result<AffectedRows> {
         if requests.is_empty() {
@@ -73,9 +73,15 @@ impl MetricEngineInner {
 
         let first_request = &requests.first().unwrap().1;
         if first_request.is_physical_table() {
-            for (region_id, request) in requests {
-                self.create_physical_region(region_id, request).await?;
-            }
+            ensure!(
+                requests.len() == 1,
+                UnexpectedRequestSnafu {
+                    reason: "Physical table must be created with single request".to_string(),
+                }
+            );
+            let (region_id, request) = requests.pop().unwrap();
+            self.create_physical_region(region_id, request).await?;
+
             return Ok(0);
         } else if first_request
             .options
