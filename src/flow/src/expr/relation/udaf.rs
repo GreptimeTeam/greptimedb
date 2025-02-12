@@ -14,58 +14,26 @@
 
 use std::fmt::Debug;
 
-use common_query::prelude::Signature;
-use datatypes::prelude::ConcreteDataType;
+use datafusion_common::DFSchema;
+use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
 
-use crate::expr::relation::accum_v2::AccumulatorV2;
 use crate::expr::ScalarExpr;
-use crate::repr::RelationDesc;
 use crate::Result;
-
-/// User-defined aggregate function (UDAF) implementation.
-/// All built-in UDAFs for flow is also impl by this trait.
-pub trait AggrUDFImpl: Debug + Send + Sync {
-    fn as_any(&self) -> &dyn std::any::Any;
-
-    fn name(&self) -> &str;
-
-    fn signature(&self) -> &Signature;
-    /// What ConcreteDataType will be returned by this function, given the types of the arguments
-    ///
-    /// Keep the return_type's error type the same as `Function`'s return_type
-    fn return_type(&self, arg_type: &[ConcreteDataType]) -> Result<ConcreteDataType>;
-
-    fn accumulator(&self, acc_args: AccumulatorArgs<'_>) -> Result<Box<dyn AccumulatorV2>>;
-}
-
-/// contains information about how an aggregate function was called,
-/// including the types of its arguments and any optional ordering expressions.
-///
-/// Should be created from AggregateExpr
-pub struct AccumulatorArgs<'a> {
-    pub return_type: &'a ConcreteDataType,
-    pub schema: &'a RelationDesc,
-    pub ignore_nulls: bool,
-    /// The expressions in the `ORDER BY` clause passed to this aggregator.
-    ///
-    /// SQL allows the user to specify the ordering of arguments to the
-    /// aggregate using an `ORDER BY`. For example:
-    ///
-    /// ```sql
-    /// SELECT FIRST_VALUE(column1 ORDER BY column2) FROM t;
-    /// ```
-    ///
-    /// If no `ORDER BY` is specified, `ordering_req` will be empty.
-    pub ordering_req: &'a OrderingReq,
-    pub is_reversed: bool,
-    pub name: &'a str,
-    pub is_distinct: bool,
-    pub exprs: &'a [ScalarExpr],
-}
 
 #[derive(Debug, Clone)]
 pub struct OrderingReq {
     pub exprs: Vec<SortExpr>,
+}
+
+impl OrderingReq {
+    pub fn to_lex_ordering(&self, schema: &DFSchema) -> Result<LexOrdering> {
+        Ok(LexOrdering::new(
+            self.exprs
+                .iter()
+                .map(|e| e.to_sort_phy_expr(schema))
+                .collect::<Result<_>>()?,
+        ))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -76,4 +44,18 @@ pub struct SortExpr {
     pub descending: bool,
     /// Whether to sort nulls first
     pub nulls_first: bool,
+}
+
+impl SortExpr {
+    pub fn to_sort_phy_expr(&self, schema: &DFSchema) -> Result<PhysicalSortExpr> {
+        let phy = self.expr.as_physical_expr(schema)?;
+        let sort_options = datafusion_common::arrow::compute::SortOptions {
+            descending: self.descending,
+            nulls_first: self.nulls_first,
+        };
+        Ok(PhysicalSortExpr {
+            expr: phy,
+            options: sort_options,
+        })
+    }
 }

@@ -15,9 +15,12 @@
 //! Scalar expressions.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use arrow::array::{make_array, ArrayData, ArrayRef};
 use common_error::ext::BoxedError;
+use datafusion_common::DFSchema;
+use datafusion_physical_expr::PhysicalExpr;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::value::Value;
 use datatypes::vectors::{BooleanVector, Helper, VectorRef};
@@ -26,7 +29,8 @@ use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
-    DatafusionSnafu, Error, InvalidQuerySnafu, UnexpectedSnafu, UnsupportedTemporalFilterSnafu,
+    DatafusionSnafu, Error, InvalidQuerySnafu, NotImplementedSnafu, UnexpectedSnafu,
+    UnsupportedTemporalFilterSnafu,
 };
 use crate::expr::error::{
     ArrowSnafu, DataTypeSnafu, EvalError, InvalidArgumentSnafu, OptimizeSnafu, TypeMismatchSnafu,
@@ -95,6 +99,23 @@ pub enum ScalarExpr {
 }
 
 impl ScalarExpr {
+    // TODO(discord9): impl more convert?
+    pub fn as_physical_expr(&self, df_schema: &DFSchema) -> Result<Arc<dyn PhysicalExpr>, Error> {
+        match self {
+            Self::Column(i) => {
+                let field = df_schema.field(*i);
+                datafusion::physical_expr::expressions::col(field.name(), df_schema.as_arrow())
+                    .with_context(|_| DatafusionSnafu {
+                        context: "Failed to create datafusion column expression",
+                    })
+            }
+            _ => NotImplementedSnafu {
+                reason: "Not implemented yet".to_string(),
+            }
+            .fail()?,
+        }
+    }
+
     pub fn with_type(self, typ: ColumnType) -> TypedExpr {
         TypedExpr::new(self, typ)
     }

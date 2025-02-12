@@ -15,12 +15,15 @@
 //! Describes an aggregation function and it's input expression.
 
 pub(crate) use accum::{Accum, Accumulator};
+use datafusion_expr::function::AccumulatorArgs;
 use datafusion_expr::AggregateUDF;
-use datatypes::prelude::ConcreteDataType;
+use datatypes::prelude::{ConcreteDataType, DataType};
 pub(crate) use func::AggregateFunc;
+use snafu::ResultExt;
 pub use udaf::{OrderingReq, SortExpr};
 
-use crate::expr::relation::accum_v2::AccumulatorV2;
+use crate::error::DatafusionSnafu;
+use crate::expr::relation::accum_v2::{AccumulatorV2, DfAccumulatorAdapter};
 use crate::expr::ScalarExpr;
 use crate::repr::RelationDesc;
 use crate::Error;
@@ -64,6 +67,31 @@ pub struct AggregateExprV2 {
 
 impl AggregateExprV2 {
     pub fn create_accumulator(&self) -> Result<Box<dyn AccumulatorV2>, Error> {
-        todo!("create_accumulator")
+        let data_type = self.return_type.as_arrow_type();
+        let schema = self.schema.to_df_schema()?;
+        let ordering_req = self.ordering_req.to_lex_ordering(&schema)?;
+        let exprs = self
+            .args
+            .iter()
+            .map(|e| e.as_physical_expr(&schema))
+            .collect::<Result<Vec<_>, _>>()?;
+        let accum_args = AccumulatorArgs {
+            return_type: &data_type,
+            schema: schema.as_arrow(),
+            ignore_nulls: self.ignore_nulls,
+            ordering_req: &ordering_req,
+            is_reversed: self.is_reversed,
+            name: &self.name,
+            is_distinct: self.is_distinct,
+            exprs: &exprs,
+        };
+        let acc = self
+            .func
+            .accumulator(accum_args)
+            .with_context(|_| DatafusionSnafu {
+                context: "Fail to build accumulator",
+            })?;
+        let acc = DfAccumulatorAdapter::new_unchecked(acc);
+        Ok(Box::new(acc))
     }
 }

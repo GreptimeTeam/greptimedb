@@ -83,11 +83,11 @@ impl AcceptDfAccumulator for datafusion::functions_aggregate::min_max::MinAccumu
 
 impl DfAccumulatorAdapter {
     /// create a new accumulator from a datafusion accumulator without checking if it is supported in flow
-    fn new_unchecked(acc: Box<dyn DfAccumulator>) -> Self {
+    pub fn new_unchecked(acc: Box<dyn DfAccumulator>) -> Self {
         Self { inner: acc }
     }
 
-    fn new<T: AcceptDfAccumulator + 'static>(acc: T) -> Self {
+    pub fn new<T: AcceptDfAccumulator + 'static>(acc: T) -> Self {
         Self::new_unchecked(Box::new(acc))
     }
 }
