@@ -197,8 +197,8 @@ async fn query_trace_table(
         .context(CatalogSnafu)?
         .with_context(|| TableNotFoundSnafu {
             table: TRACE_TABLE_NAME,
-            catalog: ctx.current_catalog().to_string(),
-            schema: db.to_string(),
+            catalog: ctx.current_catalog(),
+            schema: db,
         })?;
 
     let df_context = create_df_context(query_engine, ctx.clone())?;
@@ -244,6 +244,7 @@ async fn query_trace_table(
 // The current implementation registers UDFs during the planning stage, which makes it difficult
 // to utilize them through DataFrame APIs. To address this limitation, we create a new session
 // context and register the required UDFs, allowing them to be decoupled from the global context.
+// TODO(zyy17): Is it possible or necessary to reuse the existing session context?
 fn create_df_context(
     query_engine: &QueryEngineRef,
     ctx: QueryContextRef,

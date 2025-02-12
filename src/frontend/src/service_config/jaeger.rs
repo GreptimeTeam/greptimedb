@@ -14,8 +14,10 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Options for Jaeger query APIs.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JaegerOptions {
+    /// Whether to enable Jaeger query APIs.
     pub enable: bool,
 }
 
