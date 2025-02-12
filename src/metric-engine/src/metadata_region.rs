@@ -37,7 +37,7 @@ use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use crate::error::{
     CollectRecordBatchStreamSnafu, DecodeColumnValueSnafu, DeserializeColumnMetadataSnafu,
     LogicalRegionNotFoundSnafu, MitoReadOperationSnafu, MitoWriteOperationSnafu,
-    ParseRegionIdSnafu, RegionAlreadyExistsSnafu, Result,
+    ParseRegionIdSnafu, Result,
 };
 use crate::utils;
 
@@ -70,36 +70,6 @@ impl MetadataRegion {
         Self {
             mito,
             logical_region_lock: RwLock::new(HashMap::new()),
-        }
-    }
-
-    /// Add a new table key to metadata.
-    ///
-    /// This method will check if the table key already exists, if so, it will return
-    /// a [TableAlreadyExistsSnafu] error.
-    pub async fn add_logical_region(
-        &self,
-        physical_region_id: RegionId,
-        logical_region_id: RegionId,
-    ) -> Result<()> {
-        let region_id = utils::to_metadata_region_id(physical_region_id);
-        let region_key = Self::concat_region_key(logical_region_id);
-
-        let put_success = self
-            .put_if_absent(region_id, region_key, String::new())
-            .await?;
-
-        if !put_success {
-            RegionAlreadyExistsSnafu {
-                region_id: logical_region_id,
-            }
-            .fail()
-        } else {
-            self.logical_region_lock
-                .write()
-                .await
-                .insert(logical_region_id, Arc::new(RwLock::new(())));
-            Ok(())
         }
     }
 
@@ -197,17 +167,6 @@ impl MetadataRegion {
             .remove(&logical_region_id);
 
         Ok(())
-    }
-
-    /// Check if the given logical region exists.
-    pub async fn is_logical_region_exists(
-        &self,
-        physical_region_id: RegionId,
-        logical_region_id: RegionId,
-    ) -> Result<bool> {
-        let region_id = utils::to_metadata_region_id(physical_region_id);
-        let region_key = Self::concat_region_key(logical_region_id);
-        self.exists(region_id, &region_key).await
     }
 
     /// Check if the given column exists. Return the semantic type if exists.
@@ -768,31 +727,6 @@ mod test {
         let result = metadata_region.get(region_id, &key).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Some(value));
-    }
-
-    #[tokio::test]
-    async fn test_add_logical_region() {
-        let env = TestEnv::new().await;
-        env.init_metric_region().await;
-        let metadata_region = env.metadata_region();
-        let physical_region_id = to_metadata_region_id(env.default_physical_region_id());
-
-        // add one table
-        let logical_region_id = RegionId::new(196, 2333);
-        metadata_region
-            .add_logical_region(physical_region_id, logical_region_id)
-            .await
-            .unwrap();
-        assert!(metadata_region
-            .is_logical_region_exists(physical_region_id, logical_region_id)
-            .await
-            .unwrap());
-
-        // add it again
-        assert!(metadata_region
-            .add_logical_region(physical_region_id, logical_region_id)
-            .await
-            .is_err());
     }
 
     #[tokio::test]

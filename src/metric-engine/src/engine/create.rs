@@ -22,7 +22,6 @@ use std::collections::{HashMap, HashSet};
 use add_columns::add_columns_to_physical_data_region;
 use add_logical_regions::add_logical_regions_to_meta_region;
 use api::v1::SemanticType;
-use common_error::ext::BoxedError;
 use common_telemetry::{info, warn};
 use common_time::{Timestamp, FOREVER};
 use datatypes::data_type::ConcreteDataType;
@@ -52,13 +51,12 @@ use crate::engine::create::extract_new_columns::extract_new_columns;
 use crate::engine::options::{set_data_region_options, IndexOptions, PhysicalRegionOptions};
 use crate::engine::MetricEngineInner;
 use crate::error::{
-    AddingFieldColumnSnafu, ColumnNotFoundSnafu, ColumnTypeMismatchSnafu,
-    ConflictRegionOptionSnafu, CreateMitoRegionSnafu, EmptyRequestSnafu,
-    InternalColumnOccupiedSnafu, InvalidMetadataSnafu, MissingRegionOptionSnafu,
-    MitoReadOperationSnafu, MultipleFieldColumnSnafu, NoFieldColumnSnafu, ParseRegionIdSnafu,
-    PhysicalRegionNotFoundSnafu, Result, SerializeColumnMetadataSnafu,
+    ColumnNotFoundSnafu, ColumnTypeMismatchSnafu, ConflictRegionOptionSnafu, CreateMitoRegionSnafu,
+    EmptyRequestSnafu, InternalColumnOccupiedSnafu, InvalidMetadataSnafu, MissingRegionOptionSnafu,
+    MultipleFieldColumnSnafu, NoFieldColumnSnafu, PhysicalRegionNotFoundSnafu, Result,
+    SerializeColumnMetadataSnafu,
 };
-use crate::metrics::{LOGICAL_REGION_COUNT, PHYSICAL_COLUMN_COUNT, PHYSICAL_REGION_COUNT};
+use crate::metrics::{PHYSICAL_COLUMN_COUNT, PHYSICAL_REGION_COUNT};
 use crate::utils::{self, to_data_region_id, to_metadata_region_id};
 
 impl MetricEngineInner {
@@ -100,40 +98,6 @@ impl MetricEngineInner {
         }
 
         Ok(0)
-    }
-
-    /// Dispatch region creation request to physical region creation or logical
-    pub async fn create_region(
-        &self,
-        region_id: RegionId,
-        request: RegionCreateRequest,
-        extension_return_value: &mut HashMap<String, Vec<u8>>,
-    ) -> Result<AffectedRows> {
-        Self::verify_region_create_request(&request)?;
-
-        let result = if request.is_physical_table() {
-            self.create_physical_region(region_id, request).await
-        } else if request.options.contains_key(LOGICAL_TABLE_METADATA_KEY) {
-            let physical_region_id = self.create_logical_region(region_id, request).await?;
-
-            // Add physical table's column to extension map.
-            // It's ok to overwrite existing key, as the latter come schema is more up-to-date
-            let physical_columns = self
-                .data_region
-                .physical_columns(physical_region_id)
-                .await?;
-            extension_return_value.insert(
-                ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
-                ColumnMetadata::encode_list(&physical_columns)
-                    .context(SerializeColumnMetadataSnafu)?,
-            );
-
-            Ok(())
-        } else {
-            MissingRegionOptionSnafu {}.fail()
-        };
-
-        result.map(|_| 0)
     }
 
     /// Initialize a physical metric region at given region id.
@@ -296,141 +260,6 @@ impl MetricEngineInner {
         let mut state = self.state.write().unwrap();
         state.add_physical_columns(data_region_id, new_add_columns);
         state.add_logical_regions(physical_region_id, logical_regions);
-
-        Ok(data_region_id)
-    }
-
-    /// Create a logical region.
-    ///
-    /// Physical table and logical table can have multiple regions, and their
-    /// region number should be the same. Thus we can infer the physical region
-    /// id by simply replace the table id part in the given region id, which
-    /// represent the "logical region" to request.
-    ///
-    /// This method will alter the data region to add columns if necessary.
-    ///
-    /// If the logical region to create already exists, this method will do nothing.
-    ///
-    /// `alter_request` is a hashmap that stores the alter requests that were executed
-    /// to the physical region.
-    ///
-    /// Return the physical region id of this logical region
-    async fn create_logical_region(
-        &self,
-        logical_region_id: RegionId,
-        request: RegionCreateRequest,
-    ) -> Result<RegionId> {
-        // transform IDs
-        let physical_region_id_raw = request
-            .options
-            .get(LOGICAL_TABLE_METADATA_KEY)
-            .ok_or(MissingRegionOptionSnafu {}.build())?;
-        let physical_region_id: RegionId = physical_region_id_raw
-            .parse::<u64>()
-            .with_context(|_| ParseRegionIdSnafu {
-                raw: physical_region_id_raw,
-            })?
-            .into();
-        let (data_region_id, metadata_region_id) = Self::transform_region_id(physical_region_id);
-
-        // check if the logical region already exist
-        if self
-            .metadata_region
-            .is_logical_region_exists(metadata_region_id, logical_region_id)
-            .await?
-        {
-            info!("Create a existing logical region {logical_region_id}. Skipped");
-            return Ok(data_region_id);
-        }
-
-        // find new columns to add
-        let mut new_columns = vec![];
-        let mut existing_columns = vec![];
-        let index_option = {
-            let state = &self.state.read().unwrap();
-            let region_state = state
-                .physical_region_states()
-                .get(&data_region_id)
-                .with_context(|| PhysicalRegionNotFoundSnafu {
-                    region_id: data_region_id,
-                })?;
-            let physical_columns = region_state.physical_columns();
-
-            for col in &request.column_metadatas {
-                if !physical_columns.contains_key(&col.column_schema.name) {
-                    // Multi-field on physical table is explicit forbidden at present
-                    // TODO(ruihang): support multi-field on both logical and physical column
-                    ensure!(
-                        col.semantic_type != SemanticType::Field,
-                        AddingFieldColumnSnafu {
-                            name: col.column_schema.name.clone()
-                        }
-                    );
-                    new_columns.push(col.clone());
-                } else {
-                    existing_columns.push(col.column_schema.name.clone());
-                }
-            }
-
-            region_state.options().index
-        };
-
-        if !new_columns.is_empty() {
-            info!("Found new columns {new_columns:?} to add to physical region {data_region_id}");
-
-            self.add_columns_to_physical_data_region(
-                data_region_id,
-                logical_region_id,
-                &mut new_columns,
-                index_option,
-            )
-            .await?;
-
-            // register columns to metadata region
-            for col in &new_columns {
-                self.metadata_region
-                    .add_column(metadata_region_id, logical_region_id, col)
-                    .await?;
-            }
-        }
-
-        // register logical region to metadata region
-        self.metadata_region
-            .add_logical_region(metadata_region_id, logical_region_id)
-            .await?;
-
-        // register existing physical column to this new logical region.
-        let physical_schema = self
-            .data_region
-            .physical_columns(data_region_id)
-            .await
-            .map_err(BoxedError::new)
-            .context(MitoReadOperationSnafu)?;
-        let physical_schema_map = physical_schema
-            .into_iter()
-            .map(|metadata| (metadata.column_schema.name.clone(), metadata))
-            .collect::<HashMap<_, _>>();
-        for col in &existing_columns {
-            let column_metadata = physical_schema_map
-                .get(col)
-                .with_context(|| ColumnNotFoundSnafu {
-                    name: col,
-                    region_id: physical_region_id,
-                })?
-                .clone();
-            self.metadata_region
-                .add_column(metadata_region_id, logical_region_id, &column_metadata)
-                .await?;
-        }
-
-        // update the mapping
-        // Safety: previous steps ensure the physical region exist
-        self.state
-            .write()
-            .unwrap()
-            .add_logical_region(physical_region_id, logical_region_id);
-        info!("Created new logical region {logical_region_id} on physical region {data_region_id}");
-        LOGICAL_REGION_COUNT.inc();
 
         Ok(data_region_id)
     }

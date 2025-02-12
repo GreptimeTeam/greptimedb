@@ -176,7 +176,7 @@ impl RegionEngine for MetricEngine {
             RegionRequest::Put(put) => self.inner.put_region(region_id, put).await,
             RegionRequest::Create(create) => {
                 self.inner
-                    .create_region(region_id, create, &mut extension_return_value)
+                    .create_regions(vec![(region_id, create)], &mut extension_return_value)
                     .await
             }
             RegionRequest::Drop(drop) => self.inner.drop_region(region_id, drop).await,
