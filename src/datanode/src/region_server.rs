@@ -350,7 +350,7 @@ impl RegionServer {
         &self,
         request: region_request::Body,
     ) -> Result<RegionResponse> {
-        // Safety: we have already checked the request type in the gRPC handler.
+        // Safety: we have already checked the request type in `RegionServer::handle()`.
         let batch_request = BatchRegionDdlRequest::try_from_request_body(request)
             .context(BuildRegionRequestsSnafu)?
             .unwrap();
@@ -789,7 +789,8 @@ impl RegionServerInner {
                 .collect::<Vec<_>>(),
         };
 
-        // All requests must be in the same engine. therefore, we can get the engine from the first request.
+        // The ddl procedure will ensure all requests are in the same engine.
+        // Therefore, we can get the engine from the first request.
         let (first_region_id, first_region_change) = region_changes.first().unwrap();
         let engine = match self.get_engine(*first_region_id, first_region_change)? {
             CurrentEngine::Engine(engine) => engine,
@@ -800,10 +801,11 @@ impl RegionServerInner {
             self.set_region_status_not_ready(*region_id, &engine, region_change);
         }
 
+        let ddl_type = batch_request.request_type();
         let result = engine
             .handle_batch_ddl_requests(batch_request)
             .await
-            .context(HandleBatchDdlRequestSnafu {});
+            .context(HandleBatchDdlRequestSnafu { ddl_type });
 
         match result {
             Ok(result) => {

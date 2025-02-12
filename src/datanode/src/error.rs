@@ -260,11 +260,12 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to handle batch ddl request"))]
+    #[snafu(display("Failed to handle batch ddl request, ddl_type: {}", ddl_type))]
     HandleBatchDdlRequest {
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
+        ddl_type: String,
     },
 
     #[snafu(display("RegionId {} not found", region_id))]
