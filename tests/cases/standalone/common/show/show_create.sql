@@ -122,10 +122,9 @@ CREATE TABLE "specify_invereted_index_cols" (
   "ts" TIMESTAMP(3) NOT NULL,
   "val" DOUBLE NULL,
   "host" STRING NULL,
-  "job" STRING NULL,
+  "job" STRING NULL INVERTED INDEX,
   TIME INDEX ("ts"),
   PRIMARY KEY ("host", "job"),
-  INVERTED INDEX ("job")
 );
 
 show create table specify_invereted_index_cols;
@@ -139,9 +138,18 @@ CREATE TABLE "specify_empty_invereted_index_cols" (
   "job" STRING NULL,
   TIME INDEX ("ts"),
   PRIMARY KEY ("host", "job"),
-  INVERTED INDEX ()
 );
 
 show create table specify_empty_invereted_index_cols;
 
 drop table specify_empty_invereted_index_cols;
+
+CREATE TABLE test_column_constrain_composite_indexes (
+  `id` INT SKIPPING INDEX INVERTED INDEX,
+  host STRING PRIMARY KEY SKIPPING INDEX FULLTEXT INDEX INVERTED INDEX,
+  ts TIMESTAMP TIME INDEX,
+);
+
+show create table test_column_constrain_composite_indexes;
+
+drop table test_column_constrain_composite_indexes;

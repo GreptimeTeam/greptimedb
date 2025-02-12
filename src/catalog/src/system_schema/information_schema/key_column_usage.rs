@@ -228,12 +228,6 @@ impl InformationSchemaKeyColumnUsageBuilder {
                 let keys = &table_info.meta.primary_key_indices;
                 let schema = table.schema();
 
-                // For compatibility, use primary key columns as inverted index columns.
-                let pk_as_inverted_index = !schema
-                    .column_schemas()
-                    .iter()
-                    .any(|c| c.has_inverted_index_key());
-
                 for (idx, column) in schema.column_schemas().iter().enumerate() {
                     let mut constraints = vec![];
                     if column.is_time_index() {
@@ -251,10 +245,6 @@ impl InformationSchemaKeyColumnUsageBuilder {
                     // TODO(dimbtp): foreign key constraint not supported yet
                     if keys.contains(&idx) {
                         constraints.push(PRI_CONSTRAINT_NAME);
-
-                        if pk_as_inverted_index {
-                            constraints.push(INVERTED_INDEX_CONSTRAINT_NAME);
-                        }
                     }
                     if column.is_inverted_indexed() {
                         constraints.push(INVERTED_INDEX_CONSTRAINT_NAME);

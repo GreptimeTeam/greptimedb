@@ -183,12 +183,6 @@ impl ColumnSchema {
         self
     }
 
-    // Put a placeholder to invalidate schemas.all(!has_inverted_index_key).
-    pub fn insert_inverted_index_placeholder(&mut self) {
-        self.metadata
-            .insert(INVERTED_INDEX_KEY.to_string(), "".to_string());
-    }
-
     pub fn is_inverted_indexed(&self) -> bool {
         self.metadata
             .get(INVERTED_INDEX_KEY)
