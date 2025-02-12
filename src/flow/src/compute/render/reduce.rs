@@ -545,7 +545,9 @@ fn reduce_batch_subgraph(
                     .create_accumulator()
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?;
-                cur_accum.merge_states(&[cur_accum_value], state_types)?;
+                if !cur_accum_value.is_empty() {
+                    cur_accum.merge_states(&[cur_accum_value], state_types)?;
+                }
 
                 for val_batch in val_batches.iter() {
                     // if batch is empty, input null instead
@@ -1220,12 +1222,14 @@ mod test {
     use std::time::Duration;
 
     use common_time::Timestamp;
+    use datafusion::functions_aggregate::sum::sum_udaf;
     use datatypes::data_type::{ConcreteDataType, ConcreteDataType as CDT};
     use hydroflow::scheduled::graph::Hydroflow;
 
     use super::*;
     use crate::compute::render::test::{get_output_handle, harness_test_ctx, run_and_check};
     use crate::compute::state::DataflowState;
+    use crate::expr::relation::{AggregateExprV2, OrderingReq};
     use crate::expr::{
         self, AggregateExpr, AggregateFunc, BinaryFunc, GlobalId, MapFilterProject, UnaryFunc,
     };
@@ -1590,26 +1594,29 @@ mod test {
             val_plan: MapFilterProject::new(1).project([0]).unwrap().into_safe(),
         };
 
-        let simple_aggrs = vec![AggrWithIndex::new(
-            AggregateExpr {
-                func: AggregateFunc::SumInt64,
-                expr: ScalarExpr::Column(0),
-                distinct: false,
-            },
-            0,
-            0,
-        )];
-        let accum_plan = AccumulablePlan {
-            full_aggrs: vec![AggregateExpr {
-                func: AggregateFunc::SumInt64,
-                expr: ScalarExpr::Column(0),
-                distinct: false,
-            }],
-            simple_aggrs,
-            distinct_aggrs: vec![],
+        let aggr_expr = AggregateExprV2 {
+            func: sum_udaf().as_ref().clone(),
+            args: vec![ScalarExpr::Column(0)],
+            return_type: CDT::int64_datatype(),
+            name: "sum".to_string(),
+            schema: RelationType::new(vec![ColumnType::new(
+                ConcreteDataType::int32_datatype(),
+                false,
+            )])
+            .into_named(vec![Some("number".to_string())]),
+            ordering_req: OrderingReq::empty(),
+            ignore_nulls: false,
+            is_distinct: false,
+            is_reversed: false,
+            input_types: vec![CDT::int64_datatype()],
+            is_nullable: true,
         };
 
-        let reduce_plan = ReducePlan::Accumulable(accum_plan);
+        let accum_plan = AccumulablePlanV2 {
+            full_aggrs: vec![AggrWithIndexV2::new(aggr_expr, vec![0], 0).unwrap()],
+        };
+
+        let reduce_plan = ReducePlan::AccumulableV2(accum_plan);
         let bundle = ctx
             .render_reduce_batch(
                 Box::new(input_plan.with_types(typ.into_unnamed())),
