@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 api.workspace = true
 aquamarine.workspace = true
+async-stream.workspace = true
 async-trait.workspace = true
 base64.workspace = true
 common-base.workspace = true
@@ -21,6 +22,7 @@ common-telemetry.workspace = true
 common-time.workspace = true
 datafusion.workspace = true
 datatypes.workspace = true
+futures-util.workspace = true
 itertools.workspace = true
 lazy_static = "1.4"
 mito2.workspace = true

@@ -6781,6 +6781,7 @@ version = "0.12.0"
 dependencies = [
  "api",
  "aquamarine",
+ "async-stream",
  "async-trait",
  "base64 0.21.7",
  "common-base",
@@ -6793,6 +6794,7 @@ dependencies = [
  "common-time",
  "datafusion",
  "datatypes",
+ "futures-util",
  "itertools 0.10.5",
  "lazy_static",
  "mito2",

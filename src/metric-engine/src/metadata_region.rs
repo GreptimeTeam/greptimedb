@@ -17,9 +17,13 @@ use std::sync::Arc;
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
+use async_stream::try_stream;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine;
-use common_recordbatch::util::collect;
+use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
+use datafusion::prelude::{col, lit};
+use futures_util::stream::BoxStream;
+use futures_util::TryStreamExt;
 use mito2::engine::MitoEngine;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::ColumnMetadata;
@@ -146,22 +150,6 @@ impl MetadataRegion {
         Ok(())
     }
 
-    /// Check if the given column exists. Return the semantic type if exists.
-    #[cfg(test)]
-    pub async fn column_semantic_type(
-        &self,
-        physical_region_id: RegionId,
-        logical_region_id: RegionId,
-        column_name: &str,
-    ) -> Result<Option<SemanticType>> {
-        let region_id = utils::to_metadata_region_id(physical_region_id);
-        let column_key = Self::concat_column_key(logical_region_id, column_name);
-        let semantic_type = self.get(region_id, &column_key).await?;
-        semantic_type
-            .map(|s| Self::deserialize_column_metadata(&s).map(|c| c.semantic_type))
-            .transpose()
-    }
-
     // TODO(ruihang): avoid using `get_all`
     /// Get all the columns of a given logical region.
     /// Return a list of (column_name, column_metadata).
@@ -174,7 +162,10 @@ impl MetadataRegion {
         let region_column_prefix = Self::concat_column_key_prefix(logical_region_id);
 
         let mut columns = vec![];
-        for (k, v) in self.get_all(metadata_region_id).await? {
+        for (k, v) in self
+            .get_all_with_prefix(metadata_region_id, &region_column_prefix)
+            .await?
+        {
             if !k.starts_with(&region_column_prefix) {
                 continue;
             }
@@ -191,7 +182,10 @@ impl MetadataRegion {
         let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
 
         let mut regions = vec![];
-        for (k, _) in self.get_all(metadata_region_id).await? {
+        for k in self
+            .get_all_key_with_prefix(metadata_region_id, REGION_PREFIX)
+            .await?
+        {
             if !k.starts_with(REGION_PREFIX) {
                 continue;
             }
@@ -263,51 +257,122 @@ impl MetadataRegion {
     }
 }
 
+/// Decode a record batch stream to a stream of items.
+pub fn decode_batch_stream<T: Send + 'static>(
+    mut record_batch_stream: SendableRecordBatchStream,
+    decode: fn(RecordBatch) -> Vec<T>,
+) -> BoxStream<'static, Result<T>> {
+    let stream = try_stream! {
+        while let Some(batch) = record_batch_stream.try_next().await.context(CollectRecordBatchStreamSnafu)? {
+            for item in decode(batch) {
+                yield item;
+            }
+        }
+    };
+    Box::pin(stream)
+}
+
+/// Decode a record batch to a list of key and value.
+fn decode_record_batch_to_key_and_value(batch: RecordBatch) -> Vec<(String, String)> {
+    let key_col = batch.column(0);
+    let val_col = batch.column(1);
+
+    (0..batch.num_rows())
+        .flat_map(move |row_index| {
+            let key = key_col
+                .get_ref(row_index)
+                .as_string()
+                .unwrap()
+                .map(|s| s.to_string());
+
+            key.map(|k| {
+                (
+                    k,
+                    val_col
+                        .get_ref(row_index)
+                        .as_string()
+                        .unwrap()
+                        .map(|s| s.to_string())
+                        .unwrap_or_default(),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Decode a record batch to a list of key.
+fn decode_record_batch_to_key(batch: RecordBatch) -> Vec<String> {
+    let key_col = batch.column(0);
+
+    (0..batch.num_rows())
+        .flat_map(move |row_index| {
+            let key = key_col
+                .get_ref(row_index)
+                .as_string()
+                .unwrap()
+                .map(|s| s.to_string());
+            key
+        })
+        .collect()
+}
+
 // simulate to `KvBackend`
 //
 // methods in this block assume the given region id is transformed.
 impl MetadataRegion {
-    /// Load all metadata from a given region.
-    pub async fn get_all(&self, region_id: RegionId) -> Result<HashMap<String, String>> {
-        let scan_req = ScanRequest {
-            projection: Some(vec![
+    fn build_prefix_read_request(prefix: &str, key_only: bool) -> ScanRequest {
+        let filter_expr = col(METADATA_SCHEMA_KEY_COLUMN_NAME).like(lit(prefix));
+
+        let projection = if key_only {
+            vec![METADATA_SCHEMA_KEY_COLUMN_INDEX]
+        } else {
+            vec![
                 METADATA_SCHEMA_KEY_COLUMN_INDEX,
                 METADATA_SCHEMA_VALUE_COLUMN_INDEX,
-            ]),
-            filters: vec![],
+            ]
+        };
+        ScanRequest {
+            projection: Some(projection),
+            filters: vec![filter_expr],
             output_ordering: None,
             limit: None,
             series_row_selector: None,
             sequence: None,
-        };
+        }
+    }
+
+    pub async fn get_all_with_prefix(
+        &self,
+        region_id: RegionId,
+        prefix: &str,
+    ) -> Result<HashMap<String, String>> {
+        let scan_req = MetadataRegion::build_prefix_read_request(prefix, false);
         let record_batch_stream = self
             .mito
             .scan_to_stream(region_id, scan_req)
             .await
             .context(MitoReadOperationSnafu)?;
-        let scan_result = collect(record_batch_stream)
-            .await
-            .context(CollectRecordBatchStreamSnafu)?;
 
-        let mut result = HashMap::new();
-        for batch in scan_result {
-            let key_col = batch.column(0);
-            let val_col = batch.column(1);
-            for row_index in 0..batch.num_rows() {
-                let key = key_col
-                    .get_ref(row_index)
-                    .as_string()
-                    .unwrap()
-                    .map(|s| s.to_string());
-                let val = val_col
-                    .get_ref(row_index)
-                    .as_string()
-                    .unwrap()
-                    .map(|s| s.to_string());
-                result.insert(key.unwrap(), val.unwrap_or_default());
-            }
-        }
-        Ok(result)
+        decode_batch_stream(record_batch_stream, decode_record_batch_to_key_and_value)
+            .try_collect::<HashMap<_, _>>()
+            .await
+    }
+
+    pub async fn get_all_key_with_prefix(
+        &self,
+        region_id: RegionId,
+        prefix: &str,
+    ) -> Result<Vec<String>> {
+        let scan_req = MetadataRegion::build_prefix_read_request(prefix, true);
+        let record_batch_stream = self
+            .mito
+            .scan_to_stream(region_id, scan_req)
+            .await
+            .context(MitoReadOperationSnafu)?;
+
+        decode_batch_stream(record_batch_stream, decode_record_batch_to_key)
+            .try_collect::<Vec<_>>()
+            .await
     }
 
     /// Delete the given keys. For performance consideration, this method
@@ -449,98 +514,26 @@ impl MetadataRegion {
 
 #[cfg(test)]
 impl MetadataRegion {
-    fn build_put_request(key: &str, value: &str) -> RegionPutRequest {
-        let cols = vec![
-            ColumnSchema {
-                column_name: METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::TimestampMillisecond as _,
-                semantic_type: SemanticType::Timestamp as _,
-                ..Default::default()
-            },
-            ColumnSchema {
-                column_name: METADATA_SCHEMA_KEY_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::String as _,
-                semantic_type: SemanticType::Tag as _,
-                ..Default::default()
-            },
-            ColumnSchema {
-                column_name: METADATA_SCHEMA_VALUE_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::String as _,
-                semantic_type: SemanticType::Field as _,
-                ..Default::default()
-            },
-        ];
-        let rows = Rows {
-            schema: cols,
-            rows: vec![Row {
-                values: vec![
-                    Value {
-                        value_data: Some(ValueData::TimestampMillisecondValue(0)),
-                    },
-                    Value {
-                        value_data: Some(ValueData::StringValue(key.to_string())),
-                    },
-                    Value {
-                        value_data: Some(ValueData::StringValue(value.to_string())),
-                    },
-                ],
-            }],
-        };
-
-        RegionPutRequest { rows, hint: None }
-    }
-
-    /// Check if the given key exists.
-    ///
-    /// Notice that due to mito doesn't support transaction, TOCTTOU is possible.
-    pub async fn exists(&self, region_id: RegionId, key: &str) -> Result<bool> {
-        let scan_req = Self::build_read_request(key);
-        let record_batch_stream = self
-            .mito
-            .scan_to_stream(region_id, scan_req)
-            .await
-            .context(MitoReadOperationSnafu)?;
-        let scan_result = collect(record_batch_stream)
-            .await
-            .context(CollectRecordBatchStreamSnafu)?;
-
-        let exist = !scan_result.is_empty() && scan_result.first().unwrap().num_rows() != 0;
-        Ok(exist)
-    }
-
-    /// Put if not exist, return if this put operation is successful (error other
-    /// than "key already exist" will be wrapped in [Err]).
-    pub async fn put_if_absent(
-        &self,
-        region_id: RegionId,
-        key: String,
-        value: String,
-    ) -> Result<bool> {
-        if self.exists(region_id, &key).await? {
-            return Ok(false);
-        }
-
-        let put_request = Self::build_put_request(&key, &value);
-        self.mito
-            .handle_request(
-                region_id,
-                store_api::region_request::RegionRequest::Put(put_request),
-            )
-            .await
-            .context(MitoWriteOperationSnafu)?;
-        Ok(true)
-    }
-
     /// Retrieves the value associated with the given key in the specified region.
     /// Returns `Ok(None)` if the key is not found.
     pub async fn get(&self, region_id: RegionId, key: &str) -> Result<Option<String>> {
-        let scan_req = Self::build_read_request(key);
+        let filter_expr = datafusion::prelude::col(METADATA_SCHEMA_KEY_COLUMN_NAME)
+            .eq(datafusion::prelude::lit(key));
+
+        let scan_req = ScanRequest {
+            projection: Some(vec![METADATA_SCHEMA_VALUE_COLUMN_INDEX]),
+            filters: vec![filter_expr],
+            output_ordering: None,
+            limit: None,
+            series_row_selector: None,
+            sequence: None,
+        };
         let record_batch_stream = self
             .mito
             .scan_to_stream(region_id, scan_req)
             .await
             .context(MitoReadOperationSnafu)?;
-        let scan_result = collect(record_batch_stream)
+        let scan_result = common_recordbatch::util::collect(record_batch_stream)
             .await
             .context(CollectRecordBatchStreamSnafu)?;
 
@@ -558,22 +551,19 @@ impl MetadataRegion {
         Ok(val)
     }
 
-    /// Builds a [ScanRequest] to read metadata for a given key.
-    /// The request will contains a EQ filter on the key column.
-    ///
-    /// Only the value column is projected.
-    fn build_read_request(key: &str) -> ScanRequest {
-        let filter_expr = datafusion::prelude::col(METADATA_SCHEMA_KEY_COLUMN_NAME)
-            .eq(datafusion::prelude::lit(key));
-
-        ScanRequest {
-            projection: Some(vec![METADATA_SCHEMA_VALUE_COLUMN_INDEX]),
-            filters: vec![filter_expr],
-            output_ordering: None,
-            limit: None,
-            series_row_selector: None,
-            sequence: None,
-        }
+    /// Check if the given column exists. Return the semantic type if exists.
+    pub async fn column_semantic_type(
+        &self,
+        physical_region_id: RegionId,
+        logical_region_id: RegionId,
+        column_name: &str,
+    ) -> Result<Option<SemanticType>> {
+        let region_id = utils::to_metadata_region_id(physical_region_id);
+        let column_key = Self::concat_column_key(logical_region_id, column_name);
+        let semantic_type = self.get(region_id, &column_key).await?;
+        semantic_type
+            .map(|s| Self::deserialize_column_metadata(&s).map(|c| c.semantic_type))
+            .transpose()
     }
 }
 
@@ -581,7 +571,6 @@ impl MetadataRegion {
 mod test {
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
-    use store_api::region_request::RegionRequest;
 
     use super::*;
     use crate::test_util::TestEnv;
@@ -648,109 +637,6 @@ mod test {
 
         let semantic_type = "\"Invalid Column Metadata\"";
         assert!(MetadataRegion::deserialize_column_metadata(semantic_type).is_err());
-    }
-
-    #[test]
-    fn test_build_read_request() {
-        let key = "test_key";
-        let expected_filter_expr = datafusion::prelude::col(METADATA_SCHEMA_KEY_COLUMN_NAME)
-            .eq(datafusion::prelude::lit(key));
-        let expected_scan_request = ScanRequest {
-            projection: Some(vec![METADATA_SCHEMA_VALUE_COLUMN_INDEX]),
-            filters: vec![expected_filter_expr],
-            output_ordering: None,
-            limit: None,
-            series_row_selector: None,
-            sequence: None,
-        };
-        let actual_scan_request = MetadataRegion::build_read_request(key);
-        assert_eq!(actual_scan_request, expected_scan_request);
-    }
-
-    #[tokio::test]
-    async fn test_put_conditionally() {
-        let env = TestEnv::new().await;
-        env.init_metric_region().await;
-        let metadata_region = env.metadata_region();
-        let region_id = to_metadata_region_id(env.default_physical_region_id());
-
-        // Test inserting a new key-value pair
-        let key = "test_key".to_string();
-        let value = "test_value".to_string();
-        let result = metadata_region
-            .put_if_absent(region_id, key.clone(), value.clone())
-            .await;
-        assert!(result.is_ok());
-        assert!(result.unwrap());
-
-        // Verify that the key-value pair was actually inserted
-        let scan_req = MetadataRegion::build_read_request("test_key");
-        let record_batch_stream = metadata_region
-            .mito
-            .scan_to_stream(region_id, scan_req)
-            .await
-            .unwrap();
-        let scan_result = collect(record_batch_stream).await.unwrap();
-        assert_eq!(scan_result.len(), 1);
-
-        // Test inserting the same key-value pair again
-        let result = metadata_region
-            .put_if_absent(region_id, key.clone(), value.clone())
-            .await;
-        assert!(result.is_ok());
-        assert!(!result.unwrap(),);
-    }
-
-    #[tokio::test]
-    async fn test_exist() {
-        let env = TestEnv::new().await;
-        env.init_metric_region().await;
-        let metadata_region = env.metadata_region();
-        let region_id = to_metadata_region_id(env.default_physical_region_id());
-
-        // Test checking for a non-existent key
-        let key = "test_key".to_string();
-        let result = metadata_region.exists(region_id, &key).await;
-        assert!(result.is_ok());
-        assert!(!result.unwrap());
-
-        // Test inserting a key and then checking for its existence
-        let value = "test_value".to_string();
-        let put_request = MetadataRegion::build_put_request(&key, &value);
-        metadata_region
-            .mito
-            .handle_request(region_id, RegionRequest::Put(put_request))
-            .await
-            .unwrap();
-        let result = metadata_region.exists(region_id, &key).await;
-        assert!(result.is_ok());
-        assert!(result.unwrap(),);
-    }
-
-    #[tokio::test]
-    async fn test_get() {
-        let env = TestEnv::new().await;
-        env.init_metric_region().await;
-        let metadata_region = env.metadata_region();
-        let region_id = to_metadata_region_id(env.default_physical_region_id());
-
-        // Test getting a non-existent key
-        let key = "test_key".to_string();
-        let result = metadata_region.get(region_id, &key).await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
-
-        // Test inserting a key and then getting its value
-        let value = "test_value".to_string();
-        let put_request = MetadataRegion::build_put_request(&key, &value);
-        metadata_region
-            .mito
-            .handle_request(region_id, RegionRequest::Put(put_request))
-            .await
-            .unwrap();
-        let result = metadata_region.get(region_id, &key).await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Some(value));
     }
 
     fn test_column_metadatas() -> HashMap<String, ColumnMetadata> {
@@ -821,17 +707,6 @@ mod test {
             .await
             .unwrap();
         assert_eq!(logical_regions.len(), 2);
-        assert_eq!(logical_regions[1], logical_region_id);
-
-        // Check if the logical region exists.
-        let result = metadata_region
-            .exists(
-                physical_region_id,
-                &MetadataRegion::concat_region_key(logical_region_id),
-            )
-            .await
-            .unwrap();
-        assert!(result);
 
         // Check if the logical region columns are added.
         let logical_columns = metadata_region
