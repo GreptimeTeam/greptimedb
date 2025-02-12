@@ -36,6 +36,10 @@ pub const SPAN_NAME_COLUMN: &str = "span_name";
 pub const SPAN_KIND_COLUMN: &str = "span_kind";
 pub const SPAN_ATTRIBUTES_COLUMN: &str = "span_attributes";
 
+/// The span kind prefix in the database.
+/// If the span kind is `server`, it will be stored as `SPAN_KIND_SERVER` in the database.
+pub const SPAN_KIND_PREFIX: &str = "SPAN_KIND_";
+
 pub mod attributes;
 pub mod span;
 

@@ -35,7 +35,7 @@ use crate::http::HttpRecordsOutput;
 use crate::metrics::METRIC_JAEGER_QUERY_ELAPSED;
 use crate::otlp::trace::{
     DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_ID_COLUMN,
-    SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
+    SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
 };
 use crate::query_handler::JaegerQueryHandlerRef;
 
@@ -826,7 +826,6 @@ fn check_schema(records: &HttpRecordsOutput, expected_schema: &[(&str, &str)]) -
 // By default, the span kind is stored as `SPAN_KIND_<kind>` in GreptimeDB.
 // However, in Jaeger API, the span kind is returned as `<kind>` which is the lowercase of the span kind and without the `SPAN_KIND_` prefix.
 fn normalize_span_kind(span_kind: &str) -> String {
-    const SPAN_KIND_PREFIX: &str = "SPAN_KIND_";
     // If the span_kind starts with `SPAN_KIND_` prefix, remove it and convert to lowercase.
     if let Some(stripped) = span_kind.strip_prefix(SPAN_KIND_PREFIX) {
         stripped.to_lowercase()

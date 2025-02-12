@@ -38,7 +38,8 @@ use servers::error::{
 use servers::http::jaeger::QueryTraceParams;
 use servers::otlp::trace::{
     DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_ID_COLUMN,
-    SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
+    SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
+    TRACE_TABLE_NAME,
 };
 use servers::query_handler::JaegerQueryHandler;
 use session::context::QueryContextRef;
@@ -75,9 +76,11 @@ impl JaegerQueryHandler for Instance {
         let mut filters = vec![col(SERVICE_NAME_COLUMN).eq(lit(service_name))];
 
         if let Some(span_kind) = span_kind {
-            filters.push(
-                col(SPAN_KIND_COLUMN).eq(lit(format!("SPAN_KIND_{}", span_kind.to_uppercase()))),
-            );
+            filters.push(col(SPAN_KIND_COLUMN).eq(lit(format!(
+                "{}{}",
+                SPAN_KIND_PREFIX,
+                span_kind.to_uppercase()
+            ))));
         }
 
         // It's equivalent to `SELECT span_name, span_kind FROM {db}.{trace_table} WHERE service_name = '{service_name}'`.
