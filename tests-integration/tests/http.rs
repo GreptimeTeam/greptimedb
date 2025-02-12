@@ -103,6 +103,7 @@ macro_rules! http_tests {
                 test_elasticsearch_logs,
                 test_elasticsearch_logs_with_index,
                 test_log_query,
+                test_jaeger_query_api,
             );
         )*
     };
@@ -947,6 +948,9 @@ watch = false
 enable = true
 
 [influxdb]
+enable = true
+
+[jaeger]
 enable = true
 
 [prom_store]
@@ -2501,6 +2505,347 @@ pub async fn test_log_query(store_type: StorageType) {
     let resp = res.text().await;
     let v = get_rows_from_output(&resp);
     assert_eq!(v, "[[1730976830000,\"hello\"]]");
+
+    guard.remove_all().await;
+}
+
+pub async fn test_jaeger_query_api(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_jaeger_query_api").await;
+
+    let client = TestClient::new(app).await;
+
+    let content = r#"
+    {
+        "resourceSpans": [
+            {
+                "resource": {
+                    "attributes": [
+                        {
+                            "key": "service.name",
+                            "value": {
+                                "stringValue": "test-jaeger-query-api"
+                            }
+                        }
+                    ]
+                },
+                "scopeSpans": [
+                    {
+                        "scope": {
+                        "name": "test-jaeger-query-api",
+                        "version": "1.0.0"
+                        },
+                        "spans": [
+                            {
+                                "traceId": "5611dce1bc9ebed65352d99a027b08ea",
+                                "spanId": "008421dbbd33a3e9",
+                                "name": "access-mysql",
+                                "kind": 2,
+                                "startTimeUnixNano": "1738726754492422000",
+                                "endTimeUnixNano": "1738726754592422000",
+                                "attributes": [
+                                    {
+                                        "key": "operation.type",
+                                        "value": {
+                                        "stringValue": "access-mysql"
+                                        }
+                                    },
+                                    {
+                                        "key": "net.peer.ip",
+                                        "value": {
+                                        "stringValue": "1.2.3.4"
+                                        }
+                                    },
+                                    {
+                                        "key": "peer.service",
+                                        "value": {
+                                        "stringValue": "test-jaeger-query-api"
+                                        }
+                                    }
+                                ],
+                                "status": {
+                                    "message": "success",
+                                    "code": 0
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "scope": {
+                        "name": "test-jaeger-query-api",
+                        "version": "1.0.0"
+                        },
+                        "spans": [
+                            {
+                                "traceId": "5611dce1bc9ebed65352d99a027b08ea",
+                                "spanId": "ffa03416a7b9ea48",
+                                "name": "access-redis",
+                                "kind": 2,
+                                "startTimeUnixNano": "1738726754492422000",
+                                "endTimeUnixNano": "1738726754592422000",
+                                "attributes": [
+                                    {
+                                        "key": "operation.type",
+                                        "value": {
+                                        "stringValue": "access-redis"
+                                        }
+                                    },
+                                    {
+                                        "key": "net.peer.ip",
+                                        "value": {
+                                        "stringValue": "1.2.3.4"
+                                        }
+                                    },
+                                    {
+                                        "key": "peer.service",
+                                        "value": {
+                                        "stringValue": "test-jaeger-query-api"
+                                        }
+                                    }
+                                ],
+                                "status": {
+                                    "message": "success",
+                                    "code": 0
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "schemaUrl": "https://opentelemetry.io/schemas/1.4.0"
+            }
+        ]
+    }
+    "#;
+
+    let req: ExportTraceServiceRequest = serde_json::from_str(content).unwrap();
+    let body = req.encode_to_vec();
+    // write traces data.
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )],
+        "/v1/otlp/v1/traces",
+        body.clone(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    // Test `/api/services` API.
+    let res = client.get("/v1/jaeger/api/services").send().await;
+    assert_eq!(StatusCode::OK, res.status());
+    let expected = r#"
+    {
+        "data": [
+            "test-jaeger-query-api"
+        ],
+        "total": 1,
+        "limit": 0,
+        "offset": 0,
+        "errors": []
+    }
+    "#;
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
+
+    // Test `/api/operations` API.
+    let res = client
+        .get("/v1/jaeger/api/operations?service=test-jaeger-query-api")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let expected = r#"
+    {
+        "data": [
+            {
+                "name": "access-mysql",
+                "spanKind": "server"
+            },
+            {
+                "name": "access-redis",
+                "spanKind": "server"
+            }
+        ],
+        "total": 2,
+        "limit": 0,
+        "offset": 0,
+        "errors": []
+    }
+    "#;
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
+
+    // Test `/api/services/{service_name}/operations` API.
+    let res = client
+        .get("/v1/jaeger/api/services/test-jaeger-query-api/operations")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let expected = r#"
+    {
+        "data": [
+            "access-mysql",
+            "access-redis"
+        ],
+        "total": 2,
+        "limit": 0,
+        "offset": 0,
+        "errors": []
+    }
+    "#;
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
+
+    // Test `/api/traces/{trace_id}` API.
+    let res = client
+        .get("/v1/jaeger/api/traces/5611dce1bc9ebed65352d99a027b08ea")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let expected = r#"
+    {
+      "data": [
+        {
+          "traceID": "5611dce1bc9ebed65352d99a027b08ea",
+          "spans": [
+            {
+              "traceID": "5611dce1bc9ebed65352d99a027b08ea",
+              "spanID": "008421dbbd33a3e9",
+              "operationName": "access-mysql",
+              "references": [],
+              "startTime": 1738726754492422,
+              "duration": 100000,
+              "tags": [
+                {
+                  "key": "net.peer.ip",
+                  "type": "string",
+                  "value": "1.2.3.4"
+                },
+                {
+                  "key": "operation.type",
+                  "type": "string",
+                  "value": "access-mysql"
+                },
+                {
+                  "key": "peer.service",
+                  "type": "string",
+                  "value": "test-jaeger-query-api"
+                }
+              ],
+              "logs": [],
+              "processID": "p1"
+            },
+            {
+              "traceID": "5611dce1bc9ebed65352d99a027b08ea",
+              "spanID": "ffa03416a7b9ea48",
+              "operationName": "access-redis",
+              "references": [],
+              "startTime": 1738726754492422,
+              "duration": 100000,
+              "tags": [
+                {
+                  "key": "net.peer.ip",
+                  "type": "string",
+                  "value": "1.2.3.4"
+                },
+                {
+                  "key": "operation.type",
+                  "type": "string",
+                  "value": "access-redis"
+                },
+                {
+                  "key": "peer.service",
+                  "type": "string",
+                  "value": "test-jaeger-query-api"
+                }
+              ],
+              "logs": [],
+              "processID": "p1"
+            }
+          ],
+          "processes": {
+            "p1": {
+              "serviceName": "test-jaeger-query-api",
+              "tags": []
+            }
+          }
+        }
+      ],
+      "total": 0,
+      "limit": 0,
+      "offset": 0,
+      "errors": []
+    }
+    "#;
+
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
+
+    // Test `/api/traces` API.
+    let res = client
+        .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&operation=access-mysql&start=1738726754492422&end=1738726754642422&tags=%7B%22operation.type%22%3A%22access-mysql%22%7D")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let expected = r#"
+    {
+      "data": [
+        {
+          "traceID": "5611dce1bc9ebed65352d99a027b08ea",
+          "spans": [
+            {
+              "traceID": "5611dce1bc9ebed65352d99a027b08ea",
+              "spanID": "008421dbbd33a3e9",
+              "operationName": "access-mysql",
+              "references": [],
+              "startTime": 1738726754492422,
+              "duration": 100000,
+              "tags": [
+                {
+                  "key": "net.peer.ip",
+                  "type": "string",
+                  "value": "1.2.3.4"
+                },
+                {
+                  "key": "operation.type",
+                  "type": "string",
+                  "value": "access-mysql"
+                },
+                {
+                  "key": "peer.service",
+                  "type": "string",
+                  "value": "test-jaeger-query-api"
+                }
+              ],
+              "logs": [],
+              "processID": "p1"
+            }
+          ],
+          "processes": {
+            "p1": {
+              "serviceName": "test-jaeger-query-api",
+              "tags": []
+            }
+          }
+        }
+      ],
+      "total": 0,
+      "limit": 0,
+      "offset": 0,
+      "errors": []
+    }
+    "#;
+
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
 
     guard.remove_all().await;
 }

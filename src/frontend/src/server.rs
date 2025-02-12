@@ -112,6 +112,11 @@ where
         if opts.otlp.enable {
             builder = builder.with_otlp_handler(self.instance.clone());
         }
+
+        if opts.jaeger.enable {
+            builder = builder.with_jaeger_handler(self.instance.clone());
+        }
+
         builder
     }
 
