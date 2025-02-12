@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use datatypes::prelude::ConcreteDataType;
+
 use crate::expr::relation::AggregateExprV2;
 use crate::expr::{AggregateExpr, SafeMfpPlan, ScalarExpr};
 
@@ -97,6 +99,8 @@ pub struct AccumulablePlanV2 {
     pub full_aggrs: Vec<AggrWithIndexV2>,
 }
 
+/// This struct basically get useful info from `expr` and store it so no need
+/// to get it repeatly
 /// Invariant: the output index is the index of the aggregation in `full_aggrs`
 /// which means output index is always smaller than the length of `full_aggrs`
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -107,15 +111,24 @@ pub struct AggrWithIndexV2 {
     pub input_idxs: Vec<usize>,
     /// index of aggr output among output row
     pub output_idx: usize,
+    /// The types of intermidate state field
+    pub state_types: Vec<ConcreteDataType>,
 }
 
 impl AggrWithIndexV2 {
     /// Create a new `AggrWithIndex`
-    pub fn new(expr: AggregateExprV2, input_idxs: Vec<usize>, output_idx: usize) -> Self {
-        Self {
+    pub fn new(
+        expr: AggregateExprV2,
+        input_idxs: Vec<usize>,
+        output_idx: usize,
+    ) -> Result<Self, crate::Error> {
+        let mut test_accum = expr.create_accumulator()?;
+        let states = test_accum.state()?;
+        Ok(Self {
             expr,
             input_idxs,
             output_idx,
-        }
+            state_types: states.into_iter().map(|(_, ty)| ty).collect(),
+        })
     }
 }

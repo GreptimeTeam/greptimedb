@@ -504,25 +504,21 @@ impl TypedPlan {
 
         // copy aggr_exprs to full_aggrs, and split them into simple_aggrs and distinct_aggrs
         // also set them input/output column
-        let full_aggrs = aggr_exprs
-            .into_iter()
-            .enumerate()
-            .map(|(idx, aggr)| -> Result<_, Error> {
-                Ok(AggrWithIndexV2 {
-                    output_idx: idx,
-                    input_idxs: aggr
-                        .args
-                        .iter()
-                        .map(|a| {
-                            a.as_column().with_context(|| UnexpectedSnafu {
-                                reason: format!("Expect {:?} to be a column", a),
-                            })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
-                    expr: aggr,
+        let mut full_aggrs = vec![];
+        for (idx, aggr) in aggr_exprs.into_iter().enumerate() {
+            let input_idxs = aggr
+                .args
+                .iter()
+                .map(|a| {
+                    a.as_column().with_context(|| UnexpectedSnafu {
+                        reason: format!("Expect {:?} to be a column", a),
+                    })
                 })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<Vec<_>, _>>()?;
+            let aggr = AggrWithIndexV2::new(aggr, input_idxs, idx)?;
+            full_aggrs.push(aggr);
+        }
+
         let accum_plan = AccumulablePlanV2 { full_aggrs };
         let plan = Plan::Reduce {
             input: Box::new(input),
@@ -1504,11 +1500,7 @@ mod test {
                         .into_safe(),
                 },
                 reduce_plan: ReducePlan::AccumulableV2(AccumulablePlanV2 {
-                    full_aggrs: vec![AggrWithIndexV2 {
-                        expr: aggr_expr,
-                        input_idxs: vec![0],
-                        output_idx: 0,
-                    }],
+                    full_aggrs: vec![AggrWithIndexV2::new(aggr_expr, vec![0], 0).unwrap()],
                 }),
             },
         };

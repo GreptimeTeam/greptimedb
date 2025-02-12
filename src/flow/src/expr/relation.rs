@@ -14,7 +14,6 @@
 
 //! Describes an aggregation function and it's input expression.
 
-pub(crate) use accum::{Accum, Accumulator};
 use datafusion_expr::function::AccumulatorArgs;
 use datafusion_expr::AggregateUDF;
 use datatypes::prelude::{ConcreteDataType, DataType};

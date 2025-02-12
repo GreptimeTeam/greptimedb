@@ -34,7 +34,7 @@ pub(crate) use func::{BinaryFunc, UnaryFunc, UnmaterializableFunc, VariadicFunc}
 pub(crate) use id::{GlobalId, Id, LocalId};
 use itertools::Itertools;
 pub(crate) use linear::{MapFilterProject, MfpPlan, SafeMfpPlan};
-pub(crate) use relation::{Accum, Accumulator, AggregateExpr, AggregateFunc};
+pub(crate) use relation::{AggregateExpr, AggregateFunc};
 pub(crate) use scalar::{ScalarExpr, TypedExpr};
 use snafu::{ensure, ResultExt};
 

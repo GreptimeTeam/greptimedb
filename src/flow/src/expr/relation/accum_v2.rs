@@ -41,7 +41,7 @@ pub trait AccumulatorV2: Send + Sync + std::fmt::Debug {
     /// Returns the intermediate state of the accumulator, consuming the intermediate state.
     ///
     /// note that Value::Null's type is unknown, so (Value, ConcreteDataType) is used instead of just Value
-    fn into_state(self) -> Result<Vec<(Value, CDT)>, EvalError>;
+    fn state(&mut self) -> Result<Vec<(Value, CDT)>, EvalError>;
 
     /// Merges the states of multiple accumulators into this accumulator.
     /// The states array passed was formed by concatenating the results of calling `Self::into_state` on zero or more other Accumulator instances.
@@ -63,6 +63,11 @@ pub trait AccumulatorV2: Send + Sync + std::fmt::Debug {
     /// Does the accumulator support incrementally updating its value by removing values.
     fn supports_retract_batch(&self) -> bool {
         false
+    }
+
+    fn merge_states(&mut self, states: &[Vec<Value>], typs: &[CDT]) -> Result<(), EvalError> {
+        let states = states_to_batch(states, typs)?;
+        self.merge_batch(&states)
     }
 }
 
@@ -118,7 +123,7 @@ impl AccumulatorV2 for DfAccumulatorAdapter {
         self.inner.size()
     }
 
-    fn into_state(mut self) -> Result<Vec<(Value, CDT)>, EvalError> {
+    fn state(&mut self) -> Result<Vec<(Value, CDT)>, EvalError> {
         let state = self.inner.state().context(DatafusionSnafu {
             context: "failed to get state: {}",
         })?;
@@ -149,7 +154,7 @@ impl AccumulatorV2 for DfAccumulatorAdapter {
 
 /// Convert a list of states(from `Accumulator::into_state`)
 /// to a batch of vectors(that can be feed to `Accumulator::merge_batch`)
-fn states_to_batch(states: Vec<Vec<Value>>, dts: Vec<CDT>) -> Result<Vec<VectorRef>, EvalError> {
+fn states_to_batch(states: &[Vec<Value>], dts: &[CDT]) -> Result<Vec<VectorRef>, EvalError> {
     if states.is_empty() || states[0].is_empty() {
         return Ok(vec![]);
     }
@@ -171,7 +176,7 @@ fn states_to_batch(states: Vec<Vec<Value>>, dts: Vec<CDT>) -> Result<Vec<VectorR
         }
     );
     let mut ret = dts
-        .into_iter()
+        .iter()
         .map(|dt| dt.create_mutable_vector(state_len))
         .collect::<Vec<_>>();
     for i in 0..state_len {
