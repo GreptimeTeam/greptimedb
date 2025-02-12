@@ -22,7 +22,7 @@ use common_meta::key::table_info::TableInfoValue;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use itertools::Itertools;
-use operator::expr_factory;
+use operator::expr_helper;
 use session::context::QueryContextBuilder;
 use snafu::{OptionExt, ResultExt};
 use table::table_reference::TableReference;
@@ -65,7 +65,7 @@ impl FlowWorkerManager {
         let proto_schema = column_schemas_to_proto(tys.clone(), &pks)?;
 
         // create sink table
-        let create_expr = expr_factory::create_table_expr_by_column_schemas(
+        let create_expr = expr_helper::create_table_expr_by_column_schemas(
             &TableReference {
                 catalog: &table_name[0],
                 schema: &table_name[1],
