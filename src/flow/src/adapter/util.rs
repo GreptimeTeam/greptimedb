@@ -22,7 +22,7 @@ use common_meta::key::table_info::TableInfoValue;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use itertools::Itertools;
-use operator::expr_factory::CreateExprFactory;
+use operator::expr_factory;
 use session::context::QueryContextBuilder;
 use snafu::{OptionExt, ResultExt};
 use table::table_reference::TableReference;
@@ -32,7 +32,6 @@ use crate::adapter::{TableName, WorkerHandle, AUTO_CREATED_PLACEHOLDER_TS_COL};
 use crate::error::{Error, ExternalSnafu, UnexpectedSnafu};
 use crate::repr::{ColumnType, RelationDesc, RelationType};
 use crate::FlowWorkerManager;
-
 impl FlowWorkerManager {
     /// Get a worker handle for creating flow, using round robin to select a worker
     pub(crate) async fn get_worker_handle_for_create_flow(&self) -> &WorkerHandle {
@@ -66,19 +65,18 @@ impl FlowWorkerManager {
         let proto_schema = column_schemas_to_proto(tys.clone(), &pks)?;
 
         // create sink table
-        let create_expr = CreateExprFactory {}
-            .create_table_expr_by_column_schemas(
-                &TableReference {
-                    catalog: &table_name[0],
-                    schema: &table_name[1],
-                    table: &table_name[2],
-                },
-                &proto_schema,
-                "mito",
-                Some(&format!("Sink table for flow {}", flow_name)),
-            )
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
+        let create_expr = expr_factory::create_table_expr_by_column_schemas(
+            &TableReference {
+                catalog: &table_name[0],
+                schema: &table_name[1],
+                table: &table_name[2],
+            },
+            &proto_schema,
+            "mito",
+            Some(&format!("Sink table for flow {}", flow_name)),
+        )
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?;
 
         self.submit_create_sink_table_ddl(create_expr).await?;
         Ok(true)

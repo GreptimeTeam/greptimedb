@@ -27,7 +27,7 @@ use api::v1::{
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::default_engine;
-use common_grpc_expr::util::{extract_new_columns, ColumnExpr};
+use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
@@ -53,10 +53,10 @@ use table::table_reference::TableReference;
 use table::TableRef;
 
 use crate::error::{
-    CatalogSnafu, FindNewColumnsOnInsertionSnafu, FindRegionLeaderSnafu, InvalidInsertRequestSnafu,
-    JoinTaskSnafu, RequestInsertsSnafu, Result, TableNotFoundSnafu,
+    CatalogSnafu, FindRegionLeaderSnafu, InvalidInsertRequestSnafu, JoinTaskSnafu,
+    RequestInsertsSnafu, Result, TableNotFoundSnafu,
 };
-use crate::expr_factory::CreateExprFactory;
+use crate::expr_factory;
 use crate::region_req_factory::RegionRequestFactory;
 use crate::req_convert::common::preprocess_row_insert_requests;
 use crate::req_convert::insert::{
@@ -690,8 +690,7 @@ impl Inserter {
 
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
         let column_exprs = ColumnExpr::from_column_schemas(request_schema);
-        let add_columns = extract_new_columns(&table.schema(), column_exprs)
-            .context(FindNewColumnsOnInsertionSnafu)?;
+        let add_columns = expr_factory::extract_add_columns_expr(&table.schema(), column_exprs)?;
         let Some(add_columns) = add_columns else {
             return Ok(None);
         };
@@ -807,7 +806,7 @@ fn build_create_table_expr(
     request_schema: &[ColumnSchema],
     engine: &str,
 ) -> Result<CreateTableExpr> {
-    CreateExprFactory.create_table_expr_by_column_schemas(table, request_schema, engine, None)
+    expr_factory::create_table_expr_by_column_schemas(table, request_schema, engine, None)
 }
 
 /// Result of `create_or_alter_tables_on_demand`.
