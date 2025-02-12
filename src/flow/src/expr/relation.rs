@@ -70,6 +70,8 @@ pub struct AggregateExprV2 {
     pub is_nullable: bool,
 }
 
+impl AggregateExprV2 {}
+
 impl AggregateExprV2 {
     pub fn create_accumulator(&self) -> Result<Box<dyn AccumulatorV2>, Error> {
         let data_type = self.return_type.as_arrow_type();

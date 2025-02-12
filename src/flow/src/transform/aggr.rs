@@ -543,6 +543,7 @@ mod test {
 
     use bytes::BytesMut;
     use common_time::{IntervalMonthDayNano, Timestamp};
+    use datafusion::functions_aggregate::sum::sum_udaf;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::value::Value;
     use pretty_assertions::assert_eq;
@@ -1454,10 +1455,22 @@ mod test {
         let mut ctx = create_test_ctx();
         let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).await;
 
-        let aggr_expr = AggregateExpr {
-            func: AggregateFunc::SumUInt64,
-            expr: ScalarExpr::Column(0),
-            distinct: false,
+        let aggr_expr = AggregateExprV2 {
+            func: sum_udaf().as_ref().clone(),
+            args: vec![ScalarExpr::Column(0)],
+            return_type: CDT::uint64_datatype(),
+            name: "sum".to_string(),
+            schema: RelationType::new(vec![ColumnType::new(
+                ConcreteDataType::uint32_datatype(),
+                false,
+            )])
+            .into_named(vec![Some("number".to_string())]),
+            ordering_req: OrderingReq::empty(),
+            ignore_nulls: false,
+            is_distinct: false,
+            is_reversed: false,
+            input_types: vec![CDT::uint64_datatype()],
+            is_nullable: true,
         };
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)])
@@ -1490,10 +1503,12 @@ mod test {
                         .unwrap()
                         .into_safe(),
                 },
-                reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
-                    full_aggrs: vec![aggr_expr.clone()],
-                    simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
-                    distinct_aggrs: vec![],
+                reduce_plan: ReducePlan::AccumulableV2(AccumulablePlanV2 {
+                    full_aggrs: vec![AggrWithIndexV2 {
+                        expr: aggr_expr,
+                        input_idxs: vec![0],
+                        output_idx: 0,
+                    }],
                 }),
             },
         };

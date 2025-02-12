@@ -26,6 +26,9 @@ pub struct OrderingReq {
 }
 
 impl OrderingReq {
+    pub fn empty() -> Self {
+        Self { exprs: vec![] }
+    }
     pub fn to_lex_ordering(&self, schema: &DFSchema) -> Result<LexOrdering> {
         Ok(LexOrdering::new(
             self.exprs
