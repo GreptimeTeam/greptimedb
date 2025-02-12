@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 testing = []
-pg_kvbackend = ["dep:tokio-postgres", "dep:backon"]
+pg_kvbackend = ["dep:tokio-postgres", "dep:backon", "dep:deadpool-postgres", "dep:deadpool"]
 
 [lints]
 workspace = true
