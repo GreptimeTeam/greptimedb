@@ -104,7 +104,7 @@ impl EnvController for Env {
         std::env::set_var("SQLNESS_HOME", self.sqlness_home.display().to_string());
         match mode {
             "standalone" => self.start_standalone(id).await,
-            "distributed" => self.start_distributed().await,
+            "distributed" => self.start_distributed(id).await,
             _ => panic!("Unexpected mode: {mode}"),
         }
     }
@@ -142,7 +142,7 @@ impl Env {
         println!("Starting standalone instance {id}");
 
         if self.server_addrs.server_addr.is_some() {
-            self.connect_db(&self.server_addrs).await
+            self.connect_db(&self.server_addrs, id).await
         } else {
             self.build_db();
             self.setup_wal();
@@ -152,9 +152,9 @@ impl Env {
             let server_mode = ServerMode::random_standalone();
             db_ctx.set_server_mode(server_mode.clone(), SERVER_MODE_STANDALONE_IDX);
             let server_addr = server_mode.server_addr().unwrap();
-            let server_process = self.start_server(server_mode, &db_ctx, true).await;
+            let server_process = self.start_server(server_mode, &db_ctx, id, true).await;
 
-            let mut greptimedb = self.connect_db(&server_addr).await;
+            let mut greptimedb = self.connect_db(&server_addr, id).await;
             greptimedb.server_processes = Some(Arc::new(Mutex::new(vec![server_process])));
             greptimedb.is_standalone = true;
             greptimedb.ctx = db_ctx;
@@ -163,9 +163,9 @@ impl Env {
         }
     }
 
-    async fn start_distributed(&self) -> GreptimeDB {
+    async fn start_distributed(&self, id: usize) -> GreptimeDB {
         if self.server_addrs.server_addr.is_some() {
-            self.connect_db(&self.server_addrs).await
+            self.connect_db(&self.server_addrs, id).await
         } else {
             self.build_db();
             self.setup_wal();
@@ -181,28 +181,28 @@ impl Env {
                 _ => panic!("metasrv mode not set, maybe running in remote mode which doesn't support restart?"),
             };
             db_ctx.set_server_mode(meta_server_mode.clone(), SERVER_MODE_METASRV_IDX);
-            let meta_server = self.start_server(meta_server_mode, &db_ctx, true).await;
+            let meta_server = self.start_server(meta_server_mode, &db_ctx, id, true).await;
 
             let datanode_1_mode = ServerMode::random_datanode(metasrv_port, 0);
             db_ctx.set_server_mode(datanode_1_mode.clone(), SERVER_MODE_DATANODE_START_IDX);
-            let datanode_1 = self.start_server(datanode_1_mode, &db_ctx, true).await;
+            let datanode_1 = self.start_server(datanode_1_mode, &db_ctx, id, true).await;
             let datanode_2_mode = ServerMode::random_datanode(metasrv_port, 1);
             db_ctx.set_server_mode(datanode_2_mode.clone(), SERVER_MODE_DATANODE_START_IDX + 1);
-            let datanode_2 = self.start_server(datanode_2_mode, &db_ctx, true).await;
+            let datanode_2 = self.start_server(datanode_2_mode, &db_ctx, id, true).await;
             let datanode_3_mode = ServerMode::random_datanode(metasrv_port, 2);
             db_ctx.set_server_mode(datanode_3_mode.clone(), SERVER_MODE_DATANODE_START_IDX + 2);
-            let datanode_3 = self.start_server(datanode_3_mode, &db_ctx, true).await;
+            let datanode_3 = self.start_server(datanode_3_mode, &db_ctx, id, true).await;
 
             let frontend_mode = ServerMode::random_frontend(metasrv_port);
             let server_addr = frontend_mode.server_addr().unwrap();
             db_ctx.set_server_mode(frontend_mode.clone(), SERVER_MODE_FRONTEND_IDX);
-            let frontend = self.start_server(frontend_mode, &db_ctx, true).await;
+            let frontend = self.start_server(frontend_mode, &db_ctx, id, true).await;
 
             let flownode_mode = ServerMode::random_flownode(metasrv_port, 0);
             db_ctx.set_server_mode(flownode_mode.clone(), SERVER_MODE_FLOWNODE_IDX);
-            let flownode = self.start_server(flownode_mode, &db_ctx, true).await;
+            let flownode = self.start_server(flownode_mode, &db_ctx, id, true).await;
 
-            let mut greptimedb = self.connect_db(&server_addr).await;
+            let mut greptimedb = self.connect_db(&server_addr, id).await;
 
             greptimedb.metasrv_process = Some(meta_server).into();
             greptimedb.server_processes = Some(Arc::new(Mutex::new(vec![
@@ -264,7 +264,7 @@ impl Env {
         panic!("Failed to connect to MySQL server. Please check if the server is running.")
     }
 
-    async fn connect_db(&self, server_addr: &ServerAddr) -> GreptimeDB {
+    async fn connect_db(&self, server_addr: &ServerAddr, id: usize) -> GreptimeDB {
         let grpc_server_addr = server_addr.server_addr.clone().unwrap();
         let pg_server_addr = server_addr.pg_server_addr.clone().unwrap();
         let mysql_server_addr = server_addr.mysql_server_addr.clone().unwrap();
@@ -291,6 +291,7 @@ impl Env {
             },
             is_standalone: false,
             env: self.clone(),
+            id,
         }
     }
 
@@ -303,21 +304,22 @@ impl Env {
         &self,
         mode: ServerMode,
         db_ctx: &GreptimeDBContext,
+        id: usize,
         truncate_log: bool,
     ) -> Child {
         let log_file_name = match mode {
             ServerMode::Datanode { node_id, .. } => {
                 db_ctx.incr_datanode_id();
-                format!("greptime-sqlness-datanode-{}.log", node_id)
+                format!("greptime-{}-sqlness-datanode-{}.log", id, node_id)
             }
-            ServerMode::Flownode { .. } => "greptime-sqlness-flownode.log".to_string(),
-            ServerMode::Frontend { .. } => "greptime-sqlness-frontend.log".to_string(),
-            ServerMode::Metasrv { .. } => "greptime-sqlness-metasrv.log".to_string(),
-            ServerMode::Standalone { .. } => "greptime-sqlness-standalone.log".to_string(),
+            ServerMode::Flownode { .. } => format!("greptime-{}-sqlness-flownode.log", id),
+            ServerMode::Frontend { .. } => format!("greptime-{}-sqlness-frontend.log", id),
+            ServerMode::Metasrv { .. } => format!("greptime-{}-sqlness-metasrv.log", id),
+            ServerMode::Standalone { .. } => format!("greptime-{}-sqlness-standalone.log", id),
         };
         let stdout_file_name = self.sqlness_home.join(log_file_name).display().to_string();
 
-        println!("{} log file at {stdout_file_name}", mode.name());
+        println!("DB instance {id} log file at {stdout_file_name}");
 
         let stdout_file = OpenOptions::new()
             .create(true)
@@ -327,7 +329,7 @@ impl Env {
             .open(stdout_file_name)
             .unwrap();
 
-        let args = mode.get_args(&self.sqlness_home, self, db_ctx);
+        let args = mode.get_args(&self.sqlness_home, self, db_ctx, id);
         let check_ip_addrs = mode.check_addrs();
 
         for check_ip_addr in &check_ip_addrs {
@@ -407,7 +409,7 @@ impl Env {
                 .cloned()
                 .unwrap();
             let server_addr = server_mode.server_addr().unwrap();
-            let new_server_process = self.start_server(server_mode, &db.ctx, false).await;
+            let new_server_process = self.start_server(server_mode, &db.ctx, db.id, false).await;
 
             *db.pg_client.lock().await = self
                 .create_pg_client(&server_addr.pg_server_addr.unwrap())
@@ -424,7 +426,7 @@ impl Env {
                     .get_server_mode(SERVER_MODE_METASRV_IDX)
                     .cloned()
                     .unwrap();
-                let metasrv = self.start_server(metasrv_mode, &db.ctx, false).await;
+                let metasrv = self.start_server(metasrv_mode, &db.ctx, db.id, false).await;
                 db.metasrv_process
                     .lock()
                     .expect("lock poisoned")
@@ -442,7 +444,9 @@ impl Env {
                     .get_server_mode(SERVER_MODE_DATANODE_START_IDX + i)
                     .cloned()
                     .unwrap();
-                let new_server_process = self.start_server(datanode_mode, &db.ctx, false).await;
+                let new_server_process = self
+                    .start_server(datanode_mode, &db.ctx, db.id, false)
+                    .await;
                 processes.push(new_server_process);
             }
 
@@ -452,7 +456,9 @@ impl Env {
                     .get_server_mode(SERVER_MODE_FRONTEND_IDX)
                     .cloned()
                     .unwrap();
-                let frontend = self.start_server(frontend_mode, &db.ctx, false).await;
+                let frontend = self
+                    .start_server(frontend_mode, &db.ctx, db.id, false)
+                    .await;
                 db.frontend_process
                     .lock()
                     .expect("lock poisoned")
@@ -464,7 +470,9 @@ impl Env {
                 .get_server_mode(SERVER_MODE_FLOWNODE_IDX)
                 .cloned()
                 .unwrap();
-            let flownode = self.start_server(flownode_mode, &db.ctx, false).await;
+            let flownode = self
+                .start_server(flownode_mode, &db.ctx, db.id, false)
+                .await;
             db.flownode_process
                 .lock()
                 .expect("lock poisoned")
@@ -553,6 +561,7 @@ pub struct GreptimeDB {
     ctx: GreptimeDBContext,
     is_standalone: bool,
     env: Env,
+    id: usize,
 }
 
 impl GreptimeDB {

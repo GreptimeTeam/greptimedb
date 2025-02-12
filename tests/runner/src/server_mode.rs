@@ -67,6 +67,7 @@ struct ConfigContext {
     kafka_wal_broker_endpoints: String,
     use_etcd: bool,
     store_addrs: String,
+    instance_id: usize,
     // for following addrs, leave it empty if not needed
     // required for datanode
     metasrv_addr: String,
@@ -219,7 +220,12 @@ impl ServerMode {
         }
     }
 
-    pub fn generate_config_file(&self, sqlness_home: &Path, db_ctx: &GreptimeDBContext) -> String {
+    pub fn generate_config_file(
+        &self,
+        sqlness_home: &Path,
+        db_ctx: &GreptimeDBContext,
+        id: usize,
+    ) -> String {
         let mut tt = TinyTemplate::new();
 
         let mut path = util::sqlness_conf_path();
@@ -227,7 +233,7 @@ impl ServerMode {
         let template = std::fs::read_to_string(path).unwrap();
         tt.add_template(self.name(), &template).unwrap();
 
-        let data_home = sqlness_home.join(format!("greptimedb-{}", self.name()));
+        let data_home = sqlness_home.join(format!("greptimedb-{}-{}", id, self.name()));
         std::fs::create_dir_all(data_home.as_path()).unwrap();
 
         let wal_dir = data_home.join("wal").display().to_string();
@@ -284,6 +290,7 @@ impl ServerMode {
                 .map(|p| format!("\"{p}\""))
                 .collect::<Vec<_>>()
                 .join(","),
+            instance_id: id,
             metasrv_addr,
             grpc_addr,
             mysql_addr,
@@ -293,11 +300,12 @@ impl ServerMode {
         let rendered = tt.render(self.name(), &ctx).unwrap();
 
         let conf_file = data_home
-            .join(format!("{}-{}.toml", self.name(), db_ctx.time()))
+            .join(format!("{}-{}-{}.toml", self.name(), id, db_ctx.time()))
             .display()
             .to_string();
         println!(
-            "Generating {} config file in {conf_file}, full content:\n{rendered}",
+            "Generating id {}, {} config file in {conf_file}, full content:\n{rendered}",
+            id,
             self.name()
         );
         std::fs::write(&conf_file, rendered).unwrap();
@@ -310,6 +318,7 @@ impl ServerMode {
         sqlness_home: &Path,
         _env: &Env,
         db_ctx: &GreptimeDBContext,
+        id: usize,
     ) -> Vec<String> {
         let mut args = vec![
             DEFAULT_LOG_LEVEL.to_string(),
@@ -326,11 +335,12 @@ impl ServerMode {
             } => {
                 args.extend([
                     format!(
-                        "--log-dir={}/greptimedb-flownode/logs",
-                        sqlness_home.display()
+                        "--log-dir={}/greptimedb-{}-standalone/logs",
+                        sqlness_home.display(),
+                        id
                     ),
                     "-c".to_string(),
-                    self.generate_config_file(sqlness_home, db_ctx),
+                    self.generate_config_file(sqlness_home, db_ctx, id),
                     format!("--http-addr={http_addr}"),
                     format!("--rpc-addr={rpc_addr}"),
                     format!("--mysql-addr={mysql_addr}"),
@@ -351,11 +361,12 @@ impl ServerMode {
                     format!("--mysql-addr={mysql_addr}"),
                     format!("--postgres-addr={postgres_addr}"),
                     format!(
-                        "--log-dir={}/greptimedb-frontend/logs",
-                        sqlness_home.display()
+                        "--log-dir={}/greptimedb-{}-frontend/logs",
+                        sqlness_home.display(),
+                        id
                     ),
                     "-c".to_string(),
-                    self.generate_config_file(sqlness_home, db_ctx),
+                    self.generate_config_file(sqlness_home, db_ctx, id),
                 ]);
             }
             ServerMode::Metasrv {
@@ -372,11 +383,12 @@ impl ServerMode {
                     "false".to_string(),
                     format!("--http-addr={http_addr}"),
                     format!(
-                        "--log-dir={}/greptimedb-metasrv/logs",
-                        sqlness_home.display()
+                        "--log-dir={}/greptimedb-{}-metasrv/logs",
+                        sqlness_home.display(),
+                        id
                     ),
                     "-c".to_string(),
-                    self.generate_config_file(sqlness_home, db_ctx),
+                    self.generate_config_file(sqlness_home, db_ctx, id),
                 ]);
 
                 if db_ctx.store_config().setup_pg {
@@ -404,8 +416,11 @@ impl ServerMode {
                 metasrv_addr,
                 node_id,
             } => {
-                let data_home =
-                    sqlness_home.join(format!("greptimedb_datanode_{}_{node_id}", db_ctx.time()));
+                let data_home = sqlness_home.join(format!(
+                    "greptimedb_{}_datanode_{}_{node_id}",
+                    id,
+                    db_ctx.time()
+                ));
                 args.extend([
                     format!("--rpc-addr={rpc_addr}"),
                     format!("--rpc-hostname={rpc_hostname}"),
@@ -414,7 +429,7 @@ impl ServerMode {
                     format!("--log-dir={}/logs", data_home.display()),
                     format!("--node-id={node_id}"),
                     "-c".to_string(),
-                    self.generate_config_file(sqlness_home, db_ctx),
+                    self.generate_config_file(sqlness_home, db_ctx, id),
                     format!("--metasrv-addrs={metasrv_addr}"),
                 ]);
             }
@@ -430,8 +445,9 @@ impl ServerMode {
                     format!("--rpc-hostname={rpc_hostname}"),
                     format!("--node-id={node_id}"),
                     format!(
-                        "--log-dir={}/greptimedb-flownode/logs",
-                        sqlness_home.display()
+                        "--log-dir={}/greptimedb-{}-flownode/logs",
+                        sqlness_home.display(),
+                        id
                     ),
                     format!("--metasrv-addrs={metasrv_addr}"),
                     format!("--http-addr={http_addr}"),

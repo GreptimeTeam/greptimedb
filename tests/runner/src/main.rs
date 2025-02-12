@@ -111,11 +111,15 @@ struct Args {
     /// Whether to setup pg, by default it is false.
     #[clap(long, default_value = "false")]
     setup_pg: bool,
+
+    /// The number of jobs to run in parallel. Default to half of the cores.
+    #[clap(short, long, default_value = "0")]
+    jobs: usize,
 }
 
 #[tokio::main]
 async fn main() {
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     let temp_dir = tempfile::Builder::new()
         .prefix("sqlness")
@@ -134,6 +138,10 @@ async fn main() {
             panic!("{} is not a directory", d.display());
         }
     }
+    if args.jobs == 0 {
+        args.jobs = num_cpus::get() / 2;
+    }
+
     let config = ConfigBuilder::default()
         .case_dir(util::get_case_dir(args.case_dir))
         .fail_fast(args.fail_fast)
@@ -141,6 +149,7 @@ async fn main() {
         .follow_links(true)
         .env_config_file(args.env_config_file)
         .interceptor_registry(interceptor_registry)
+        .parallelism(args.jobs)
         .build()
         .unwrap();
 
