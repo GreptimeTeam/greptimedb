@@ -238,7 +238,9 @@ async fn query_trace_table(
     Ok(output)
 }
 
-// To decouple from the global session context, it will create a new session context and register the necessary UDFs.
+// The current implementation registers UDFs during the planning stage, which makes it difficult
+// to utilize them through DataFrame APIs. To address this limitation, we create a new session
+// context and register the required UDFs, allowing them to be decoupled from the global context.
 fn create_df_context(
     query_engine: &QueryEngineRef,
     ctx: QueryContextRef,
@@ -247,6 +249,7 @@ fn create_df_context(
         SessionStateBuilder::new_from_existing(query_engine.engine_state().session_state()).build(),
     );
 
+    // The following JSON UDFs will be used for tags filters.
     let udfs: Vec<FunctionRef> = vec![
         Arc::new(JsonGetInt),
         Arc::new(JsonGetFloat),
