@@ -106,6 +106,7 @@ pub enum PrometheusResponse {
     BuildInfo(OwnedBuildInfo),
     #[serde(skip_deserializing)]
     ParseResult(promql_parser::parser::Expr),
+    None,
 }
 
 impl PrometheusResponse {
@@ -143,6 +144,10 @@ impl PrometheusResponse {
                 // TODO(dennis): process other cases?
             }
         }
+    }
+
+    pub fn is_none(&self) -> bool {
+        matches!(self, PrometheusResponse::None)
     }
 }
 
