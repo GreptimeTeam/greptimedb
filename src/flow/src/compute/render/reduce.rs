@@ -252,6 +252,7 @@ impl Context<'_, '_> {
     ) -> Option<Vec<ArrangeHandler>> {
         match reduce_plan {
             ReducePlan::Distinct => None,
+            ReducePlan::AccumulableV2(_) => None,
             ReducePlan::Accumulable(AccumulablePlan { distinct_aggrs, .. }) => {
                 (!distinct_aggrs.is_empty()).then(|| {
                     std::iter::repeat_with(|| {
@@ -679,6 +680,7 @@ fn reduce_subgraph(
                 send,
             },
         ),
+        ReducePlan::AccumulableV2(_) => unimplemented!(),
     };
 }
 

@@ -21,12 +21,14 @@ use substrait_proto::proto::aggregate_rel::{Grouping, Measure};
 use substrait_proto::proto::function_argument::ArgType;
 use substrait_proto::proto::sort_field::{SortDirection, SortKind};
 
-use crate::error::{DatafusionSnafu, DatatypesSnafu, Error, NotImplementedSnafu, PlanSnafu};
+use crate::error::{
+    DatafusionSnafu, DatatypesSnafu, Error, NotImplementedSnafu, PlanSnafu, UnexpectedSnafu,
+};
 use crate::expr::relation::{AggregateExprV2, OrderingReq, SortExpr};
 use crate::expr::{
     AggregateExpr, AggregateFunc, MapFilterProject, ScalarExpr, TypedExpr, UnaryFunc,
 };
-use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, Plan, ReducePlan, TypedPlan};
+use crate::plan::{AccumulablePlanV2, AggrWithIndexV2, KeyValPlan, Plan, ReducePlan, TypedPlan};
 use crate::repr::{ColumnType, RelationDesc, RelationType};
 use crate::transform::{substrait_proto, FlownodeContext, FunctionExtensions};
 
@@ -354,7 +356,7 @@ impl KeyValPlan {
     ///
     /// will also change aggregate expr to use column ref if necessary
     fn from_substrait_gen_key_val_plan(
-        aggr_exprs: &mut [AggregateExpr],
+        aggr_exprs: &mut [AggregateExprV2],
         group_exprs: &[TypedExpr],
         input_arity: usize,
     ) -> Result<KeyValPlan, Error> {
@@ -371,23 +373,33 @@ impl KeyValPlan {
         // val_plan is extracted from aggr_exprs to give aggr function it's necessary input
         // and since aggr func need inputs that is column ref, we just add a prefix mfp to transform any expr that is not into a column ref
         let val_plan = {
-            let need_mfp = aggr_exprs.iter().any(|agg| agg.expr.as_column().is_none());
+            let need_mfp = aggr_exprs
+                .iter()
+                .any(|agg| agg.args.iter().any(|e| e.as_column().is_none()));
             if need_mfp {
                 // create mfp from aggr_expr, and modify aggr_expr to use the output column of mfp
-                let input_exprs = aggr_exprs
-                    .iter_mut()
-                    .enumerate()
-                    .map(|(idx, aggr)| {
-                        let ret = aggr.expr.clone();
-                        aggr.expr = ScalarExpr::Column(idx);
-                        ret
-                    })
-                    .collect_vec();
-                let aggr_arity = aggr_exprs.len();
-
+                let mut input_exprs = Vec::new();
+                for aggr_expr in aggr_exprs.iter_mut() {
+                    for arg in aggr_expr.args.iter_mut() {
+                        match arg.as_column() {
+                            Some(idx) => {
+                                // directly refer to column in mfp
+                                *arg = ScalarExpr::Column(input_exprs.len());
+                                input_exprs.push(ScalarExpr::Column(idx));
+                            }
+                            None => {
+                                // create a new expr and let arg ref to that expr's column instead
+                                let ret = arg.clone();
+                                *arg = ScalarExpr::Column(input_exprs.len());
+                                input_exprs.push(ret);
+                            }
+                        }
+                    }
+                }
+                let new_input_len = input_exprs.len();
                 MapFilterProject::new(input_arity)
                     .map(input_exprs)?
-                    .project(input_arity..input_arity + aggr_arity)?
+                    .project(input_arity..input_arity + new_input_len)?
             } else {
                 // simply take all inputs as value
                 MapFilterProject::new(input_arity)
@@ -444,7 +456,7 @@ impl TypedPlan {
 
         let time_index = find_time_index_in_group_exprs(&group_exprs);
 
-        let mut aggr_exprs = AggregateExpr::from_substrait_agg_measures(
+        let mut aggr_exprs = AggregateExprV2::from_substrait_agg_measures(
             ctx,
             &agg.measures,
             &input.schema,
@@ -476,9 +488,7 @@ impl TypedPlan {
             }
 
             for aggr in &aggr_exprs {
-                output_types.push(ColumnType::new_nullable(
-                    aggr.func.signature().output.clone(),
-                ));
+                output_types.push(ColumnType::new_nullable(aggr.return_type.clone()));
                 // TODO(discord9): find a clever way to name them?
                 output_names.push(None);
             }
@@ -494,36 +504,30 @@ impl TypedPlan {
 
         // copy aggr_exprs to full_aggrs, and split them into simple_aggrs and distinct_aggrs
         // also set them input/output column
-        let full_aggrs = aggr_exprs;
-        let mut simple_aggrs = Vec::new();
-        let mut distinct_aggrs = Vec::new();
-        for (output_column, aggr_expr) in full_aggrs.iter().enumerate() {
-            let input_column = aggr_expr.expr.as_column().with_context(|| PlanSnafu {
-                reason: "Expect aggregate argument to be transformed into a column at this point",
-            })?;
-            if aggr_expr.distinct {
-                distinct_aggrs.push(AggrWithIndex::new(
-                    aggr_expr.clone(),
-                    input_column,
-                    output_column,
-                ));
-            } else {
-                simple_aggrs.push(AggrWithIndex::new(
-                    aggr_expr.clone(),
-                    input_column,
-                    output_column,
-                ));
-            }
-        }
-        let accum_plan = AccumulablePlan {
-            full_aggrs,
-            simple_aggrs,
-            distinct_aggrs,
-        };
+        let full_aggrs = aggr_exprs
+            .into_iter()
+            .enumerate()
+            .map(|(idx, aggr)| -> Result<_, Error> {
+                Ok(AggrWithIndexV2 {
+                    output_idx: idx,
+                    input_idxs: aggr
+                        .args
+                        .iter()
+                        .map(|a| {
+                            a.as_column().with_context(|| UnexpectedSnafu {
+                                reason: format!("Expect {:?} to be a column", a),
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    expr: aggr,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let accum_plan = AccumulablePlanV2 { full_aggrs };
         let plan = Plan::Reduce {
             input: Box::new(input),
             key_val_plan,
-            reduce_plan: ReducePlan::Accumulable(accum_plan),
+            reduce_plan: ReducePlan::AccumulableV2(accum_plan),
         };
         // FIX(discord9): deal with key first
         return Ok(TypedPlan {
@@ -545,7 +549,7 @@ mod test {
 
     use super::*;
     use crate::expr::{BinaryFunc, DfScalarFunction, GlobalId, RawDfScalarFn};
-    use crate::plan::{Plan, TypedPlan};
+    use crate::plan::{AccumulablePlan, AggrWithIndex, Plan, TypedPlan};
     use crate::repr::{ColumnType, RelationType};
     use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
     use crate::transform::CDT;

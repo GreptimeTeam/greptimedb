@@ -20,7 +20,7 @@ use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
 use crate::expr::ScalarExpr;
 use crate::Result;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct OrderingReq {
     pub exprs: Vec<SortExpr>,
 }
@@ -36,7 +36,7 @@ impl OrderingReq {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct SortExpr {
     /// expression representing the column to sort
     pub expr: ScalarExpr,

@@ -18,6 +18,7 @@ pub(crate) use accum::{Accum, Accumulator};
 use datafusion_expr::function::AccumulatorArgs;
 use datafusion_expr::AggregateUDF;
 use datatypes::prelude::{ConcreteDataType, DataType};
+use derive_where::derive_where;
 pub(crate) use func::AggregateFunc;
 use snafu::ResultExt;
 pub use udaf::{OrderingReq, SortExpr};
@@ -46,9 +47,13 @@ pub struct AggregateExpr {
     pub distinct: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd)]
+#[derive_where(Ord)]
 pub struct AggregateExprV2 {
+    /// skipping `Ord` impl for func for convenience
+    #[derive_where(skip)]
     pub func: AggregateUDF,
+    /// should only be a simple column ref list
     pub args: Vec<ScalarExpr>,
     /// Output / return type of this aggregate
     pub return_type: ConcreteDataType,

@@ -23,7 +23,9 @@ use std::collections::BTreeSet;
 use crate::error::Error;
 use crate::expr::{GlobalId, Id, LocalId, MapFilterProject, SafeMfpPlan, ScalarExpr, TypedExpr};
 use crate::plan::join::JoinPlan;
-pub(crate) use crate::plan::reduce::{AccumulablePlan, AggrWithIndex, KeyValPlan, ReducePlan};
+pub(crate) use crate::plan::reduce::{
+    AccumulablePlan, AccumulablePlanV2, AggrWithIndex, AggrWithIndexV2, KeyValPlan, ReducePlan,
+};
 use crate::repr::{DiffRow, RelationDesc};
 
 /// A plan for a dataflow component. But with type to indicate the output type of the relation.
