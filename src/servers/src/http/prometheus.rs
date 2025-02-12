@@ -95,7 +95,7 @@ pub struct PromData {
     pub result: PromQueryResult,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum PrometheusResponse {
     PromData(PromData),
@@ -106,6 +106,7 @@ pub enum PrometheusResponse {
     BuildInfo(OwnedBuildInfo),
     #[serde(skip_deserializing)]
     ParseResult(promql_parser::parser::Expr),
+    #[default]
     None,
 }
 
@@ -148,12 +149,6 @@ impl PrometheusResponse {
 
     pub fn is_none(&self) -> bool {
         matches!(self, PrometheusResponse::None)
-    }
-}
-
-impl Default for PrometheusResponse {
-    fn default() -> Self {
-        PrometheusResponse::None
     }
 }
 
