@@ -153,7 +153,7 @@ impl PrometheusResponse {
 
 impl Default for PrometheusResponse {
     fn default() -> Self {
-        PrometheusResponse::PromData(Default::default())
+        PrometheusResponse::None
     }
 }
 

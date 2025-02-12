@@ -43,6 +43,7 @@ use crate::http::prometheus::{
 pub struct PrometheusJsonResponse {
     pub status: String,
     #[serde(skip_serializing_if = "PrometheusResponse::is_none")]
+    #[serde(default)]
     pub data: PrometheusResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
