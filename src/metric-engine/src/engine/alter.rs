@@ -26,7 +26,6 @@ use store_api::region_request::{AffectedRows, AlterKind, RegionAlterRequest};
 use store_api::storage::RegionId;
 use validate::validate_alter_region_requests;
 
-use crate::engine::create::add_columns_to_physical_data_region;
 use crate::engine::MetricEngineInner;
 use crate::error::{
     LogicalRegionNotFoundSnafu, PhysicalRegionNotFoundSnafu, Result, SerializeColumnMetadataSnafu,
@@ -116,13 +115,9 @@ impl MetricEngineInner {
             write_guards.insert(*region_id, _write_guard);
         }
 
-        add_columns_to_physical_data_region(
-            data_region_id,
-            index_options,
-            &mut new_columns_to_add,
-            &self.data_region,
-        )
-        .await?;
+        self.data_region
+            .add_columns(data_region_id, new_columns_to_add, index_options)
+            .await?;
 
         let physical_columns = self.data_region.physical_columns(data_region_id).await?;
         let physical_schema_map = physical_columns
@@ -147,15 +142,10 @@ impl MetricEngineInner {
             )
         });
 
-        let new_add_columns = new_columns_to_add.iter().map(|metadata| {
+        let new_add_columns = new_column_names.iter().map(|name| {
             // Safety: previous steps ensure the physical region exist
-            let column_metadata = *physical_schema_map
-                .get(metadata.column_schema.name.as_str())
-                .unwrap();
-            (
-                metadata.column_schema.name.to_string(),
-                column_metadata.column_id,
-            )
+            let column_metadata = *physical_schema_map.get(name).unwrap();
+            (name.to_string(), column_metadata.column_id)
         });
 
         // Writes logical regions metadata to metadata region

@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod add_columns;
 mod extract_new_columns;
 mod validate;
 
 use std::collections::{HashMap, HashSet};
 
-pub(crate) use add_columns::add_columns_to_physical_data_region;
 use api::v1::SemanticType;
 use common_telemetry::info;
 use common_time::{Timestamp, FOREVER};
@@ -197,13 +195,9 @@ impl MetricEngineInner {
         };
 
         // TODO(weny): we dont need to pass a mutable new_columns here.
-        add_columns_to_physical_data_region(
-            data_region_id,
-            index_option,
-            &mut new_columns,
-            &self.data_region,
-        )
-        .await?;
+        self.data_region
+            .add_columns(data_region_id, new_columns, index_option)
+            .await?;
 
         let physical_columns = self.data_region.physical_columns(data_region_id).await?;
         let physical_schema_map = physical_columns
@@ -231,15 +225,10 @@ impl MetricEngineInner {
             )
         });
 
-        let new_add_columns = new_columns.iter().map(|metadata| {
+        let new_add_columns = new_column_names.iter().map(|name| {
             // Safety: previous steps ensure the physical region exist
-            let column_metadata = *physical_schema_map
-                .get(metadata.column_schema.name.as_str())
-                .unwrap();
-            (
-                metadata.column_schema.name.to_string(),
-                column_metadata.column_id,
-            )
+            let column_metadata = *physical_schema_map.get(name).unwrap();
+            (name.to_string(), column_metadata.column_id)
         });
 
         extension_return_value.insert(
