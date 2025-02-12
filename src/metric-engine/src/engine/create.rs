@@ -13,14 +13,12 @@
 // limitations under the License.
 
 mod add_columns;
-mod add_logical_regions;
 mod extract_new_columns;
 mod validate;
 
 use std::collections::{HashMap, HashSet};
 
 use add_columns::add_columns_to_physical_data_region;
-use add_logical_regions::add_logical_regions_to_meta_region;
 use api::v1::SemanticType;
 use common_telemetry::{info, warn};
 use common_time::{Timestamp, FOREVER};
@@ -250,12 +248,9 @@ impl MetricEngineInner {
         });
 
         // Writes logical regions metadata to metadata region
-        add_logical_regions_to_meta_region(
-            &self.metadata_region,
-            physical_region_id,
-            logical_regions_column_names,
-        )
-        .await?;
+        self.metadata_region
+            .add_logical_regions(physical_region_id, logical_regions_column_names)
+            .await?;
 
         let mut state = self.state.write().unwrap();
         state.add_physical_columns(data_region_id, new_add_columns);

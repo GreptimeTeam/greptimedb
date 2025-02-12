@@ -49,3 +49,126 @@ pub fn extract_new_columns<'a>(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches::assert_matches;
+    use std::collections::{HashMap, HashSet};
+
+    use api::v1::SemanticType;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use store_api::metadata::ColumnMetadata;
+    use store_api::region_request::RegionCreateRequest;
+    use store_api::storage::RegionId;
+
+    use super::*;
+    use crate::error::Error;
+
+    #[test]
+    fn test_extract_new_columns() {
+        let requests = vec![
+            (
+                RegionId::new(1, 1),
+                RegionCreateRequest {
+                    column_metadatas: vec![
+                        ColumnMetadata {
+                            column_schema: ColumnSchema::new(
+                                "existing_column".to_string(),
+                                ConcreteDataType::string_datatype(),
+                                false,
+                            ),
+                            semantic_type: SemanticType::Tag,
+                            column_id: 0,
+                        },
+                        ColumnMetadata {
+                            column_schema: ColumnSchema::new(
+                                "new_column".to_string(),
+                                ConcreteDataType::string_datatype(),
+                                false,
+                            ),
+                            semantic_type: SemanticType::Tag,
+                            column_id: 0,
+                        },
+                    ],
+                    engine: "test".to_string(),
+                    primary_key: vec![],
+                    options: HashMap::new(),
+                    region_dir: "test".to_string(),
+                },
+            ),
+            (
+                RegionId::new(1, 2),
+                RegionCreateRequest {
+                    column_metadatas: vec![ColumnMetadata {
+                        // Duplicate column name
+                        column_schema: ColumnSchema::new(
+                            "new_column".to_string(),
+                            ConcreteDataType::string_datatype(),
+                            false,
+                        ),
+                        semantic_type: SemanticType::Tag,
+                        column_id: 0,
+                    }],
+                    engine: "test".to_string(),
+                    primary_key: vec![],
+                    options: HashMap::new(),
+                    region_dir: "test".to_string(),
+                },
+            ),
+        ];
+
+        let mut physical_columns = HashMap::new();
+        physical_columns.insert("existing_column".to_string(), 0);
+        let mut new_column_names = HashSet::new();
+        let mut new_columns = Vec::new();
+
+        let result = extract_new_columns(
+            &requests,
+            &physical_columns,
+            &mut new_column_names,
+            &mut new_columns,
+        );
+
+        assert!(result.is_ok());
+        assert!(new_column_names.contains("new_column"));
+        assert_eq!(new_columns.len(), 1);
+        assert_eq!(new_columns[0].column_schema.name, "new_column");
+    }
+
+    #[test]
+    fn test_extract_new_columns_with_field_type() {
+        let requests = vec![(
+            RegionId::new(1, 1),
+            RegionCreateRequest {
+                column_metadatas: vec![ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "new_column".to_string(),
+                        ConcreteDataType::string_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Field,
+                    column_id: 0,
+                }],
+                engine: "test".to_string(),
+                primary_key: vec![],
+                options: HashMap::new(),
+                region_dir: "test".to_string(),
+            },
+        )];
+
+        let physical_columns = HashMap::new();
+        let mut new_column_names = HashSet::new();
+        let mut new_columns = Vec::new();
+
+        let err = extract_new_columns(
+            &requests,
+            &physical_columns,
+            &mut new_column_names,
+            &mut new_columns,
+        )
+        .unwrap_err();
+
+        assert_matches!(err, Error::AddingFieldColumn { .. });
+    }
+}

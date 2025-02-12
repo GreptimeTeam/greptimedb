@@ -552,6 +552,44 @@ impl MetadataRegion {
 
         RegionDeleteRequest { rows }
     }
+
+    /// Add logical regions to the metadata region.
+    pub async fn add_logical_regions(
+        &self,
+        physical_region_id: RegionId,
+        logical_regions: impl Iterator<Item = (RegionId, HashMap<&str, &ColumnMetadata>)>,
+    ) -> Result<()> {
+        let region_id = utils::to_metadata_region_id(physical_region_id);
+        let iter = logical_regions
+            .into_iter()
+            .flat_map(|(logical_region_id, column_metadatas)| {
+                Some((
+                    MetadataRegion::concat_region_key(logical_region_id),
+                    String::new(),
+                ))
+                .into_iter()
+                .chain(column_metadatas.into_iter().map(
+                    move |(name, column_metadata)| {
+                        (
+                            MetadataRegion::concat_column_key(logical_region_id, name),
+                            MetadataRegion::serialize_column_metadata(column_metadata),
+                        )
+                    },
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        let put_request = MetadataRegion::build_put_request_from_iter(iter.into_iter());
+        self.mito
+            .handle_request(
+                region_id,
+                store_api::region_request::RegionRequest::Put(put_request),
+            )
+            .await
+            .context(MitoWriteOperationSnafu)?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -769,5 +807,96 @@ mod test {
             .await
             .unwrap();
         assert_eq!(actual_semantic_type, Some(semantic_type));
+    }
+
+    fn test_column_metadatas() -> HashMap<String, ColumnMetadata> {
+        HashMap::from([
+            (
+                "label1".to_string(),
+                ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "label1".to_string(),
+                        ConcreteDataType::string_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 5,
+                },
+            ),
+            (
+                "label2".to_string(),
+                ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "label2".to_string(),
+                        ConcreteDataType::string_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 5,
+                },
+            ),
+        ])
+    }
+
+    #[tokio::test]
+    async fn add_logical_regions_to_meta_region() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let metadata_region = env.metadata_region();
+        let physical_region_id = to_metadata_region_id(env.default_physical_region_id());
+        let column_metadatas = test_column_metadatas();
+        let logical_region_id = RegionId::new(1024, 1);
+
+        let iter = vec![(
+            logical_region_id,
+            column_metadatas
+                .iter()
+                .map(|(k, v)| (k.as_str(), v))
+                .collect::<HashMap<_, _>>(),
+        )];
+        metadata_region
+            .add_logical_regions(physical_region_id, iter.into_iter())
+            .await
+            .unwrap();
+        // Add logical region again.
+        let iter = vec![(
+            logical_region_id,
+            column_metadatas
+                .iter()
+                .map(|(k, v)| (k.as_str(), v))
+                .collect::<HashMap<_, _>>(),
+        )];
+        metadata_region
+            .add_logical_regions(physical_region_id, iter.into_iter())
+            .await
+            .unwrap();
+
+        // Check if the logical region is added.
+        let logical_regions = metadata_region
+            .logical_regions(physical_region_id)
+            .await
+            .unwrap();
+        assert_eq!(logical_regions.len(), 2);
+        assert_eq!(logical_regions[1], logical_region_id);
+
+        // Check if the logical region exists.
+        let result = metadata_region
+            .exists(
+                physical_region_id,
+                &MetadataRegion::concat_region_key(logical_region_id),
+            )
+            .await
+            .unwrap();
+        assert!(result);
+
+        // Check if the logical region columns are added.
+        let logical_columns = metadata_region
+            .logical_columns(physical_region_id, logical_region_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(logical_columns.len(), 2);
+        assert_eq!(column_metadatas, logical_columns);
     }
 }
