@@ -50,13 +50,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Region `{}` already exists", region_id))]
-    RegionAlreadyExists {
-        region_id: RegionId,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to deserialize column metadata from {}", raw))]
     DeserializeColumnMetadata {
         raw: String,
@@ -307,8 +300,6 @@ impl ErrorExt for Error {
             EncodePrimaryKey { source, .. } => source.status_code(),
 
             CollectRecordBatchStream { source, .. } => source.status_code(),
-
-            RegionAlreadyExists { .. } => StatusCode::RegionAlreadyExists,
         }
     }
 
