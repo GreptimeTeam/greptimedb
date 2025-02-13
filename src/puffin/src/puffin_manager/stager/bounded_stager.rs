@@ -335,6 +335,7 @@ impl BoundedStager {
         for (key, value) in elems {
             self.cache.insert(key, value).await;
         }
+        self.cache.run_pending_tasks().await;
 
         Ok(())
     }
