@@ -51,6 +51,7 @@
 //! ```
 
 #![feature(let_chains)]
+#![feature(assert_matches)]
 
 pub mod config;
 mod data_region;

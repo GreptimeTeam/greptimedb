@@ -42,7 +42,7 @@ use store_api::region_engine::{
     RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetRegionRoleStateResponse,
     SettableRegionRoleState,
 };
-use store_api::region_request::RegionRequest;
+use store_api::region_request::{BatchRegionDdlRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 
 use self::state::MetricEngineState;
@@ -127,6 +127,43 @@ impl RegionEngine for MetricEngine {
         METRIC_ENGINE_NAME
     }
 
+    async fn handle_batch_ddl_requests(
+        &self,
+        batch_request: BatchRegionDdlRequest,
+    ) -> Result<RegionResponse, BoxedError> {
+        match batch_request {
+            BatchRegionDdlRequest::Create(requests) => {
+                let mut extension_return_value = HashMap::new();
+                let rows = self
+                    .inner
+                    .create_regions(requests, &mut extension_return_value)
+                    .await
+                    .map_err(BoxedError::new)?;
+
+                Ok(RegionResponse {
+                    affected_rows: rows,
+                    extensions: extension_return_value,
+                })
+            }
+            BatchRegionDdlRequest::Alter(requests) => {
+                self.handle_requests(
+                    requests
+                        .into_iter()
+                        .map(|(region_id, req)| (region_id, RegionRequest::Alter(req))),
+                )
+                .await
+            }
+            BatchRegionDdlRequest::Drop(requests) => {
+                self.handle_requests(
+                    requests
+                        .into_iter()
+                        .map(|(region_id, req)| (region_id, RegionRequest::Drop(req))),
+                )
+                .await
+            }
+        }
+    }
+
     /// Handles non-query request to the region. Returns the count of affected rows.
     async fn handle_request(
         &self,
@@ -139,7 +176,7 @@ impl RegionEngine for MetricEngine {
             RegionRequest::Put(put) => self.inner.put_region(region_id, put).await,
             RegionRequest::Create(create) => {
                 self.inner
-                    .create_region(region_id, create, &mut extension_return_value)
+                    .create_regions(vec![(region_id, create)], &mut extension_return_value)
                     .await
             }
             RegionRequest::Drop(drop) => self.inner.drop_region(region_id, drop).await,
@@ -300,6 +337,24 @@ impl MetricEngine {
             .read_region(region_id, request)
             .await
             .map_err(BoxedError::new)
+    }
+
+    async fn handle_requests(
+        &self,
+        requests: impl IntoIterator<Item = (RegionId, RegionRequest)>,
+    ) -> Result<RegionResponse, BoxedError> {
+        let mut affected_rows = 0;
+        let mut extensions = HashMap::new();
+        for (region_id, request) in requests {
+            let response = self.handle_request(region_id, request).await?;
+            affected_rows += response.affected_rows;
+            extensions.extend(response.extensions);
+        }
+
+        Ok(RegionResponse {
+            affected_rows,
+            extensions,
+        })
     }
 }
 
