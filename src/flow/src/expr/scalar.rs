@@ -29,8 +29,8 @@ use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
-    DatafusionSnafu, Error, InvalidQuerySnafu, NotImplementedSnafu, UnexpectedSnafu,
-    UnsupportedTemporalFilterSnafu,
+    DatafusionSnafu, DatatypesSnafu, Error, InvalidQuerySnafu, NotImplementedSnafu,
+    UnexpectedSnafu, UnsupportedTemporalFilterSnafu,
 };
 use crate::expr::error::{
     ArrowSnafu, DataTypeSnafu, EvalError, InvalidArgumentSnafu, OptimizeSnafu, TypeMismatchSnafu,
@@ -108,6 +108,13 @@ impl ScalarExpr {
                     .with_context(|_| DatafusionSnafu {
                         context: "Failed to create datafusion column expression",
                     })
+            }
+            Self::Literal(val, typ) => {
+                let val = val.try_to_scalar_value(typ).context(DatatypesSnafu {
+                    context: format!("Failed to convert val=:{:?} to literal", val),
+                })?;
+                let ret = datafusion::physical_expr::expressions::lit(val);
+                Ok(ret)
             }
             _ => NotImplementedSnafu {
                 reason: "Not implemented yet".to_string(),

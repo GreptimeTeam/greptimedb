@@ -335,6 +335,8 @@ impl AggregateExprV2 {
         };
 
         // TODO(discord9): determine other options from substrait too instead of default
+        dbg!(&args);
+        dbg!(&input_schema);
         Ok(Self {
             func: fn_impl.as_ref().clone(),
             args: args.into_iter().map(|a| a.expr).collect(),
@@ -371,7 +373,7 @@ impl KeyValPlan {
             .project(input_arity..input_arity + output_arity)?;
 
         // val_plan is extracted from aggr_exprs to give aggr function it's necessary input
-        // and since aggr func need inputs that is column ref, we just add a prefix mfp to transform any expr that is not into a column ref
+        // and since aggr func need inputs that is column ref(or literal), we just add a prefix mfp to transform any expr that is not into a column ref
         let val_plan = {
             let need_mfp = aggr_exprs
                 .iter()
@@ -380,14 +382,22 @@ impl KeyValPlan {
                 // create mfp from aggr_expr, and modify aggr_expr to use the output column of mfp
                 let mut input_exprs = Vec::new();
                 for aggr_expr in aggr_exprs.iter_mut() {
+                    // FIX: also modify input_schema to fit input_exprs, a `new_input_schema` is needed
+                    // so we can separate all scalar compute to a mfp before aggr
                     for arg in aggr_expr.args.iter_mut() {
-                        match arg.as_column() {
-                            Some(idx) => {
+                        match arg.clone() {
+                            ScalarExpr::Column(idx) => {
                                 // directly refer to column in mfp
                                 *arg = ScalarExpr::Column(input_exprs.len());
                                 input_exprs.push(ScalarExpr::Column(idx));
                             }
-                            None => {
+                            ScalarExpr::Literal(_, _) => {
+                                // already literal, but still need to make it ref
+                                let ret = arg.clone();
+                                *arg = ScalarExpr::Column(input_exprs.len());
+                                input_exprs.push(ret);
+                            }
+                            _ => {
                                 // create a new expr and let arg ref to that expr's column instead
                                 let ret = arg.clone();
                                 *arg = ScalarExpr::Column(input_exprs.len());
