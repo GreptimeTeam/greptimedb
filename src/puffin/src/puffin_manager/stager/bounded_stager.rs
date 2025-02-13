@@ -44,6 +44,7 @@ use crate::puffin_manager::{BlobGuard, DirGuard};
 const DELETE_QUEUE_SIZE: usize = 10240;
 const TMP_EXTENSION: &str = "tmp";
 const DELETED_EXTENSION: &str = "deleted";
+const RECYCLE_BIN_TTL: Duration = Duration::from_secs(60);
 
 /// `BoundedStager` is a `Stager` that uses `moka` to manage staging area.
 pub struct BoundedStager {
@@ -74,9 +75,7 @@ impl BoundedStager {
             .await
             .context(CreateSnafu)?;
 
-        let recycle_bin = Cache::builder()
-            .time_to_live(Duration::from_secs(60))
-            .build();
+        let recycle_bin = Cache::builder().time_to_live(RECYCLE_BIN_TTL).build();
 
         let recycle_bin_cloned = recycle_bin.clone();
         let cache = Cache::builder()
@@ -93,7 +92,7 @@ impl BoundedStager {
             .build();
 
         let (delete_queue, rx) = tokio::sync::mpsc::channel(DELETE_QUEUE_SIZE);
-        common_runtime::global_runtime().spawn(Self::delete_routine(rx));
+        common_runtime::global_runtime().spawn(Self::delete_routine(rx, recycle_bin.clone()));
 
         let stager = Self {
             cache,
@@ -358,38 +357,48 @@ impl BoundedStager {
         Ok(size)
     }
 
-    async fn delete_routine(mut receiver: Receiver<DeleteTask>) {
-        while let Some(task) = receiver.recv().await {
-            match task {
-                DeleteTask::File(path) => {
-                    if let Err(err) = fs::remove_file(&path).await {
-                        if err.kind() == std::io::ErrorKind::NotFound {
-                            continue;
-                        }
+    async fn delete_routine(
+        mut receiver: Receiver<DeleteTask>,
+        recycle_bin: Cache<String, CacheValue>,
+    ) {
+        loop {
+            match tokio::time::timeout(RECYCLE_BIN_TTL, receiver.recv()).await {
+                Ok(Some(task)) => match task {
+                    DeleteTask::File(path) => {
+                        if let Err(err) = fs::remove_file(&path).await {
+                            if err.kind() == std::io::ErrorKind::NotFound {
+                                continue;
+                            }
 
-                        warn!(err; "Failed to remove the file.");
+                            warn!(err; "Failed to remove the file.");
+                        }
                     }
-                }
-                DeleteTask::Dir(path) => {
-                    let deleted_path = path.with_extension(DELETED_EXTENSION);
-                    if let Err(err) = fs::rename(&path, &deleted_path).await {
-                        if err.kind() == std::io::ErrorKind::NotFound {
-                            continue;
-                        }
-
-                        // Remove the deleted directory if the rename fails and retry
-                        let _ = fs::remove_dir_all(&deleted_path).await;
+                    DeleteTask::Dir(path) => {
+                        let deleted_path = path.with_extension(DELETED_EXTENSION);
                         if let Err(err) = fs::rename(&path, &deleted_path).await {
-                            warn!(err; "Failed to rename the dangling directory to deleted path.");
-                            continue;
+                            if err.kind() == std::io::ErrorKind::NotFound {
+                                continue;
+                            }
+
+                            // Remove the deleted directory if the rename fails and retry
+                            let _ = fs::remove_dir_all(&deleted_path).await;
+                            if let Err(err) = fs::rename(&path, &deleted_path).await {
+                                warn!(err; "Failed to rename the dangling directory to deleted path.");
+                                continue;
+                            }
+                        }
+                        if let Err(err) = fs::remove_dir_all(&deleted_path).await {
+                            warn!(err; "Failed to remove the dangling directory.");
                         }
                     }
-                    if let Err(err) = fs::remove_dir_all(&deleted_path).await {
-                        warn!(err; "Failed to remove the dangling directory.");
+                    DeleteTask::Terminate => {
+                        break;
                     }
-                }
-                DeleteTask::Terminate => {
-                    break;
+                },
+                Ok(None) => break,
+                Err(_) => {
+                    // Purge recycle bin periodically to reclaim the space quickly.
+                    recycle_bin.run_pending_tasks().await;
                 }
             }
         }
