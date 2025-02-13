@@ -93,7 +93,6 @@ env:
   # Note: The NEXT_RELEASE_VERSION should be modified manually by every formal release.
   NEXT_RELEASE_VERSION: v0.12.0
 
-
 jobs:
   allocate-runners:
     name: Allocate runners
@@ -314,6 +313,7 @@ jobs:
         with:
           image-registry: docker.io
           image-namespace: ${{ vars.IMAGE_NAMESPACE }}
+          image-name: ${{ vars.GREPTIMEDB_IMAGE_NAME }}
           image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
           image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
           version: ${{ needs.allocate-runners.outputs.version }}
@@ -350,7 +350,7 @@ jobs:
         with:
           src-image-registry: docker.io
           src-image-namespace: ${{ vars.IMAGE_NAMESPACE }}
-          src-image-name: greptimedb
+          src-image-name: ${{ vars.GREPTIMEDB_IMAGE_NAME }}
           dst-image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
           dst-image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
           dst-image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
