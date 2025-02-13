@@ -106,6 +106,7 @@ bitflags = "2.4.1"
 bytemuck = "1.12"
 bytes = { version = "1.7", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10.1"
 clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
 crossbeam-utils = "0.8"
