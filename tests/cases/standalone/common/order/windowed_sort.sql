@@ -53,6 +53,16 @@ SELECT * FROM test where i > 2 ORDER BY t DESC LIMIT 4;
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 EXPLAIN ANALYZE SELECT * FROM test where i > 2 ORDER BY t DESC LIMIT 4;
 
+-- Filter on the time index.
+SELECT * FROM test where t > 8 ORDER BY t DESC LIMIT 4;
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE SELECT * FROM test where t > 8 ORDER BY t DESC LIMIT 4;
+
 DROP TABLE test;
 
 -- Test with PK, with a windowed sort query.
