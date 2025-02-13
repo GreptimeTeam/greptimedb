@@ -90,7 +90,7 @@ pub enum BackendImpl {
     PostgresStore,
     #[cfg(feature = "mysql_kvbackend")]
     // MySql as metadata storage.
-    MySqlStore,
+    MysqlStore,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

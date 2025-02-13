@@ -253,7 +253,7 @@ pub async fn metasrv_builder(
             (kv_backend, Some(election))
         }
         #[cfg(feature = "mysql_kvbackend")]
-        (None, BackendImpl::MySqlStore) => {
+        (None, BackendImpl::MysqlStore) => {
             let pool = create_mysql_pool(opts).await?;
             let kv_backend =
                 MySqlStore::with_mysql_pool(pool, &opts.meta_table_name, opts.max_txn_ops)
