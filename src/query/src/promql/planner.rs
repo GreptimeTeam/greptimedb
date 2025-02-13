@@ -951,13 +951,16 @@ impl PromPlanner {
         }
     }
 
-    // TODO(ruihang): ignore `MetricNameLabel` (`__name__`) matcher
+    /// Convert [`Matchers`] to [`DfExpr`]s.
+    ///
+    /// This method will filter out the matchers that don't match the filter function.
     fn matchers_to_expr<F>(label_matchers: Matchers, filter: F) -> Result<Vec<DfExpr>>
     where
         F: Fn(&str) -> bool,
     {
         let mut exprs = Vec::with_capacity(label_matchers.matchers.len());
         for matcher in label_matchers.matchers {
+            // ignores the matchers that don't match the filter function
             if !filter(&matcher.name) {
                 continue;
             }
