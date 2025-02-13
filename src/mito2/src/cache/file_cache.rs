@@ -114,6 +114,9 @@ impl FileCache {
             .with_label_values(&[FILE_TYPE])
             .add(value.file_size.into());
         self.memory_index.insert(key, value).await;
+
+        // Since files are large items, we run the pending tasks immediately.
+        self.memory_index.run_pending_tasks().await;
     }
 
     pub(crate) async fn get(&self, key: IndexKey) -> Option<IndexValue> {
@@ -226,10 +229,15 @@ impl FileCache {
         // The metrics is a signed int gauge so we can updates it finally.
         CACHE_BYTES.with_label_values(&[FILE_TYPE]).add(total_size);
 
+        // Run all pending tasks of the moka cache so that the cache size is updated
+        // and the eviction policy is applied.
+        self.memory_index.run_pending_tasks().await;
+
         info!(
-            "Recovered file cache, num_keys: {}, num_bytes: {}, cost: {:?}",
+            "Recovered file cache, num_keys: {}, num_bytes: {}, total weight: {}, cost: {:?}",
             total_keys,
             total_size,
+            self.memory_index.weighted_size(),
             now.elapsed()
         );
         Ok(())
