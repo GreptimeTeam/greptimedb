@@ -565,7 +565,7 @@ mod test {
 
     use super::*;
     use crate::expr::{BinaryFunc, DfScalarFunction, GlobalId, RawDfScalarFn};
-    use crate::plan::{AccumulablePlan, AggrWithIndex, Plan, TypedPlan};
+    use crate::plan::{Plan, TypedPlan};
     use crate::repr::{ColumnType, RelationType};
     use crate::transform::test::{create_test_ctx, create_test_query_engine, sql_to_substrait};
     use crate::transform::CDT;
