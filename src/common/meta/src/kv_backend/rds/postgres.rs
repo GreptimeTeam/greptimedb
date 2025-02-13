@@ -248,8 +248,12 @@ impl DefaultQueryExecutor for PgClient {
 
     async fn default_query(&mut self, query: &str, params: &[&Vec<u8>]) -> Result<Vec<KeyValue>> {
         let params: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p as _).collect();
+        let stmt = self
+            .prepare(query)
+            .await
+            .context(PostgresExecutionSnafu { sql: query })?;
         let rows = self
-            .query(query, &params)
+            .query(&stmt, &params)
             .await
             .context(PostgresExecutionSnafu { sql: query })?;
         Ok(rows.into_iter().map(key_value_from_row).collect())
@@ -272,8 +276,12 @@ impl DefaultQueryExecutor for PgClient {
 impl<'a> TxnQueryExecutor<'a> for PgTxnClient<'a> {
     async fn txn_query(&mut self, query: &str, params: &[&Vec<u8>]) -> Result<Vec<KeyValue>> {
         let params: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p as _).collect();
+        let stmt = self
+            .prepare(query)
+            .await
+            .context(PostgresExecutionSnafu { sql: query })?;
         let rows = self
-            .query(query, &params)
+            .query(&stmt, &params)
             .await
             .context(PostgresExecutionSnafu { sql: query })?;
         Ok(rows.into_iter().map(key_value_from_row).collect())

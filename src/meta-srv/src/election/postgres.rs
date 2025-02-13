@@ -787,12 +787,12 @@ mod tests {
             .unwrap();
         assert!(res);
 
-        let (value, _, _, prev) = pg_election
+        let (value_get, _, _, prev) = pg_election
             .get_value_with_lease(&key, true)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(value, value);
+        assert_eq!(value_get, value);
 
         let prev = prev.unwrap();
         pg_election
