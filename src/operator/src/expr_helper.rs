@@ -76,7 +76,7 @@ pub fn create_table_expr_by_column_schemas(
     )
     .context(BuildCreateExprOnInsertionSnafu)?;
 
-    validate_create_expr(&expr, true)?;
+    validate_create_expr(&expr)?;
     Ok(expr)
 }
 
@@ -216,12 +216,12 @@ pub fn create_to_expr(
         engine: create.engine.to_string(),
     };
 
-    validate_create_expr(&expr, false)?;
+    validate_create_expr(&expr)?;
     Ok(expr)
 }
 
 /// Validate the [`CreateTableExpr`] request.
-pub fn validate_create_expr(create: &CreateTableExpr, auto_schema: bool) -> Result<()> {
+pub fn validate_create_expr(create: &CreateTableExpr) -> Result<()> {
     // construct column list
     let mut column_to_indices = HashMap::with_capacity(create.column_defs.len());
     for (idx, column) in create.column_defs.iter().enumerate() {
@@ -277,8 +277,9 @@ pub fn validate_create_expr(create: &CreateTableExpr, auto_schema: bool) -> Resu
         }
         .fail();
     }
-    // verify do not contain interval type column issue #3235
+
     for column in &create.column_defs {
+        // verify do not contain interval type column issue #3235
         if is_interval_type(&column.data_type()) {
             return InvalidSqlSnafu {
                 err_msg: format!(
@@ -288,23 +289,17 @@ pub fn validate_create_expr(create: &CreateTableExpr, auto_schema: bool) -> Resu
             }
             .fail();
         }
-    }
-
-    if auto_schema {
-        // `DateTime` type is not supported in auto schema mode.
-        for column in &create.column_defs {
-            if is_date_time_type(&column.data_type()) {
-                return InvalidSqlSnafu {
-                    err_msg: format!(
-                        "column name `{}` is datetime type, which is not supported, please use `timestamp` type instead",
-                        column.name
-                    ),
-                }
-                .fail();
+        // verify do not contain datetime type column issue #5489
+        if is_date_time_type(&column.data_type()) {
+            return InvalidSqlSnafu {
+                err_msg: format!(
+                    "column name `{}` is datetime type, which is not supported, please use `timestamp` type instead",
+                    column.name
+                ),
             }
+            .fail();
         }
     }
-
     Ok(())
 }
 
