@@ -73,9 +73,9 @@ use crate::promql::error::{
     ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, InvalidTimeRangeSnafu,
     MultiFieldsNotSupportedSnafu, MultipleMetricMatchersSnafu, MultipleVectorSnafu,
     NoMetricMatcherSnafu, PromqlPlanNodeSnafu, Result, TableNameNotFoundSnafu,
-    TimeIndexNotFoundSnafu, UnescapeValueSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu,
-    UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedMatcherOpSnafu,
-    UnsupportedVectorMatchSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
+    UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, UnsupportedVectorMatchSnafu,
+    ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
 };
 
 /// `time()` function in PromQL.
@@ -162,6 +162,14 @@ impl PromPlannerContext {
 pub struct PromPlanner {
     table_provider: DfTableSourceProvider,
     ctx: PromPlannerContext,
+}
+
+/// Unescapes the value of the matcher
+pub fn normalize_matcher(mut matcher: Matcher) -> Matcher {
+    if let Some(unescaped_value) = unescape::unescape(&matcher.value) {
+        matcher.value = unescaped_value;
+    }
+    matcher
 }
 
 impl PromPlanner {
@@ -737,7 +745,10 @@ impl PromPlanner {
                 let _ = matchers.insert(matcher.clone());
             }
         }
-        Ok(Matchers::new(matchers.into_iter().collect()))
+
+        Ok(Matchers::new(
+            matchers.into_iter().map(normalize_matcher).collect(),
+        ))
     }
 
     async fn selector_to_series_normalize_plan(
@@ -752,7 +763,7 @@ impl PromPlanner {
             Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
             None => 0,
         };
-        let mut scan_filters = PromPlanner::matchers_to_expr(label_matchers.clone())?;
+        let mut scan_filters = self.matchers_to_expr(label_matchers.clone())?;
         if let Some(time_index_filter) = self.build_time_index_filter(offset_duration)? {
             scan_filters.push(time_index_filter);
         }
@@ -941,15 +952,11 @@ impl PromPlanner {
     }
 
     // TODO(ruihang): ignore `MetricNameLabel` (`__name__`) matcher
-    fn matchers_to_expr(label_matchers: Matchers) -> Result<Vec<DfExpr>> {
+    fn matchers_to_expr(&self, label_matchers: Matchers) -> Result<Vec<DfExpr>> {
         let mut exprs = Vec::with_capacity(label_matchers.matchers.len());
         for matcher in label_matchers.matchers {
             let col = DfExpr::Column(Column::from_name(matcher.name));
-            let unescaped_value: String =
-                unescape::unescape(&matcher.value).context(UnescapeValueSnafu {
-                    value: matcher.value,
-                })?;
-            let lit = DfExpr::Literal(ScalarValue::Utf8(Some(unescaped_value)));
+            let lit = DfExpr::Literal(ScalarValue::Utf8(Some(matcher.value)));
             let expr = match matcher.op {
                 MatchOp::Equal => col.eq(lit),
                 MatchOp::NotEqual => col.not_eq(lit),

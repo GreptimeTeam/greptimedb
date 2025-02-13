@@ -140,13 +140,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Cannot unescape value: {}", value))]
-    UnescapeValue {
-        value: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Cannot find column {col}"))]
     ColumnNotFound {
         col: String,
@@ -218,8 +211,7 @@ impl ErrorExt for Error {
             | UnsupportedVectorMatch { .. }
             | CombineTableColumnMismatch { .. }
             | UnexpectedPlanExpr { .. }
-            | UnsupportedMatcherOp { .. }
-            | UnescapeValue { .. } => StatusCode::InvalidArguments,
+            | UnsupportedMatcherOp { .. } => StatusCode::InvalidArguments,
 
             UnknownTable { .. } => StatusCode::Internal,
 
