@@ -211,7 +211,15 @@ impl Stager for BoundedStager {
             })
             .await
             .map(|_| ())
-            .context(CacheGetSnafu)
+            .context(CacheGetSnafu)?;
+
+        // Dir is usually large.
+        // Runs pending tasks of the cache and recycle bin to free up space
+        // more quickly.
+        self.cache.run_pending_tasks().await;
+        self.recycle_bin.run_pending_tasks().await;
+
+        Ok(())
     }
 }
 
