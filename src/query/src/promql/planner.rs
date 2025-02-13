@@ -99,7 +99,7 @@ const FIELD_COLUMN_MATCHER: &str = "__field__";
 
 /// Special modifier for cross schema query
 const SCHEMA_COLUMN_MATCHER: &str = "__schema__";
-const DB_COLUMN_MATCHER: &str = "__db__";
+const DB_COLUMN_MATCHER: &str = "__database__";
 
 /// Threshold for scatter scan mode
 const MAX_SCATTER_POINTS: i64 = 400;
@@ -3324,7 +3324,7 @@ mod test {
 
         indie_query_plan_compare(query, expected).await;
 
-        let query = "some_alt_metric{__db__=\"greptime_private\"}";
+        let query = "some_alt_metric{__database__=\"greptime_private\"}";
         let expected = String::from(
             "PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n  PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n    PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n      Sort: greptime_private.some_alt_metric.tag_0 DESC NULLS LAST, greptime_private.some_alt_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n        Filter: greptime_private.some_alt_metric.timestamp >= TimestampMillisecond(-1000, None) AND greptime_private.some_alt_metric.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\n          TableScan: greptime_private.some_alt_metric [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
         );
@@ -3342,8 +3342,8 @@ mod test {
         let queries = &[
             "some_alt_metric{__schema__!=\"greptime_private\"}",
             "some_alt_metric{__schema__=~\"lalala\"}",
-            "some_alt_metric{__db__!=\"greptime_private\"}",
-            "some_alt_metric{__db__=~\"lalala\"}",
+            "some_alt_metric{__database__!=\"greptime_private\"}",
+            "some_alt_metric{__database__=~\"lalala\"}",
         ];
 
         for query in queries {

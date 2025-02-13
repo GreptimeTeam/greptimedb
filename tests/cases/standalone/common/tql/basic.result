@@ -50,7 +50,7 @@ TQL EVAL (0, 10, '5s') test{__schema__="greptime_private"};
 Error: 4001(TableNotFound), Table not found: greptime.greptime_private.test
 
 -- SQLNESS SORT_RESULT 2 1
-TQL EVAL (0, 10, '5s') test{__db__="public"};
+TQL EVAL (0, 10, '5s') test{__database__="public"};
 
 +-----+---------------------+---+
 | i   | j                   | k |
@@ -62,7 +62,7 @@ TQL EVAL (0, 10, '5s') test{__db__="public"};
 +-----+---------------------+---+
 
 -- SQLNESS SORT_RESULT 2 1
-TQL EVAL (0, 10, '5s') test{__db__="greptime_private"};
+TQL EVAL (0, 10, '5s') test{__database__="greptime_private"};
 
 Error: 4001(TableNotFound), Table not found: greptime.greptime_private.test
 
@@ -170,4 +170,3 @@ Error: 1004(InvalidArguments), Cannot find column field_i
 drop table test;
 
 Affected Rows: 0
-

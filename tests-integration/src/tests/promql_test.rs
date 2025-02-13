@@ -604,7 +604,7 @@ async fn cross_schema_query(instance: Arc<dyn MockInstance>) {
 
     let query_output = promql_query(
         ins.clone(),
-        r#"http_requests{__db__="greptime_private"}"#,
+        r#"http_requests{__database__="greptime_private"}"#,
         QueryContext::arc(),
         start,
         end,
