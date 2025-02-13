@@ -165,6 +165,14 @@ pub struct PromPlanner {
     ctx: PromPlannerContext,
 }
 
+/// Unescapes the value of the matcher
+pub fn normalize_matcher(mut matcher: Matcher) -> Matcher {
+    if let Ok(unescaped_value) = unescaper::unescape(&matcher.value) {
+        matcher.value = unescaped_value;
+    }
+    matcher
+}
+
 impl PromPlanner {
     pub async fn stmt_to_plan(
         table_provider: DfTableSourceProvider,
@@ -738,7 +746,10 @@ impl PromPlanner {
                 let _ = matchers.insert(matcher.clone());
             }
         }
-        Ok(Matchers::new(matchers.into_iter().collect()))
+
+        Ok(Matchers::new(
+            matchers.into_iter().map(normalize_matcher).collect(),
+        ))
     }
 
     async fn selector_to_series_normalize_plan(
@@ -3553,6 +3564,44 @@ mod test {
             Filter: up.tag_0 = Utf8("a:c") AND up.timestamp >= TimestampMillisecond(-1000, None) AND up.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]
               TableScan: up [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"#;
 
+        assert_eq!(plan.display_indent_schema().to_string(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_matchers_to_expr() {
+        let mut eval_stmt = EvalStmt {
+            expr: PromExpr::NumberLiteral(NumberLiteral { val: 1.0 }),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+        let case = r#"sum(prometheus_tsdb_head_series{tag_1=~"(10\\.0\\.160\\.237:8080|10\\.0\\.160\\.237:9090)"})"#;
+
+        let prom_expr = parser::parse(case).unwrap();
+        eval_stmt.expr = prom_expr;
+        let table_provider = build_test_table_provider(
+            &[(
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "prometheus_tsdb_head_series".to_string(),
+            )],
+            3,
+            3,
+        )
+        .await;
+        let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+            .await
+            .unwrap();
+        let expected = r#"Sort: prometheus_tsdb_head_series.timestamp ASC NULLS LAST [timestamp:Timestamp(Millisecond, None), sum(prometheus_tsdb_head_series.field_0):Float64;N, sum(prometheus_tsdb_head_series.field_1):Float64;N, sum(prometheus_tsdb_head_series.field_2):Float64;N]
+  Aggregate: groupBy=[[prometheus_tsdb_head_series.timestamp]], aggr=[[sum(prometheus_tsdb_head_series.field_0), sum(prometheus_tsdb_head_series.field_1), sum(prometheus_tsdb_head_series.field_2)]] [timestamp:Timestamp(Millisecond, None), sum(prometheus_tsdb_head_series.field_0):Float64;N, sum(prometheus_tsdb_head_series.field_1):Float64;N, sum(prometheus_tsdb_head_series.field_2):Float64;N]
+    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N]
+      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N]
+        PromSeriesDivide: tags=["tag_0", "tag_1", "tag_2"] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N]
+          Sort: prometheus_tsdb_head_series.tag_0 DESC NULLS LAST, prometheus_tsdb_head_series.tag_1 DESC NULLS LAST, prometheus_tsdb_head_series.tag_2 DESC NULLS LAST, prometheus_tsdb_head_series.timestamp DESC NULLS LAST [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N]
+            Filter: prometheus_tsdb_head_series.tag_1 ~ Utf8("(10\.0\.160\.237:8080|10\.0\.160\.237:9090)") AND prometheus_tsdb_head_series.timestamp >= TimestampMillisecond(-1000, None) AND prometheus_tsdb_head_series.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N]
+              TableScan: prometheus_tsdb_head_series [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N]"#;
         assert_eq!(plan.display_indent_schema().to_string(), expected);
     }
 }

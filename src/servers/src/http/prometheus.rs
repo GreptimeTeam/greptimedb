@@ -39,6 +39,7 @@ use promql_parser::parser::{
     UnaryExpr, VectorSelector,
 };
 use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
+use query::promql::planner::normalize_matcher;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -857,6 +858,7 @@ fn find_metric_name_not_equal_matchers(expr: &PromqlExpr) -> Option<Vec<Matcher>
         matchers
             .into_iter()
             .filter(|m| !matches!(m.op, MatchOp::Equal))
+            .map(normalize_matcher)
             .collect::<Vec<_>>()
     })
 }
