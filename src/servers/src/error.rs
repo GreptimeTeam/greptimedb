@@ -25,6 +25,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_telemetry::{error, warn};
+use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use headers::ContentType;
 use http::header::InvalidHeaderValue;
@@ -598,6 +599,21 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid Jaeger query, reason: {}", reason))]
+    InvalidJaegerQuery {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("DataFusion error"))]
+    DataFusion {
+        #[snafu(source)]
+        error: DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -668,7 +684,8 @@ impl ErrorExt for Error {
             | InvalidTableName { .. }
             | PrepareStatementNotFound { .. }
             | FailedToParseQuery { .. }
-            | InvalidElasticsearchInput { .. } => StatusCode::InvalidArguments,
+            | InvalidElasticsearchInput { .. }
+            | InvalidJaegerQuery { .. } => StatusCode::InvalidArguments,
 
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),
@@ -711,7 +728,7 @@ impl ErrorExt for Error {
 
             ConvertScalarValue { source, .. } => source.status_code(),
 
-            ToJson { .. } => StatusCode::Internal,
+            ToJson { .. } | DataFusion { .. } => StatusCode::Internal,
 
             ConvertSqlValue { source, .. } => source.status_code(),
 

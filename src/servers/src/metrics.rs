@@ -272,6 +272,12 @@ lazy_static! {
         vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
+    pub static ref METRIC_JAEGER_QUERY_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_servers_jaeger_query_elapsed",
+        "servers jaeger query elapsed",
+        &[METRIC_DB_LABEL, METRIC_PATH_LABEL]
+    )
+.unwrap();
 }
 
 // Based on https://github.com/hyperium/tonic/blob/master/examples/src/tower/server.rs

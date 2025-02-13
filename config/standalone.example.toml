@@ -142,6 +142,11 @@ enable = true
 ## Whether to enable InfluxDB protocol in HTTP API.
 enable = true
 
+## Jaeger protocol options.
+[jaeger]
+## Whether to enable Jaeger protocol in HTTP API.
+enable = true
+
 ## Prometheus remote storage options
 [prom_store]
 ## Whether to enable Prometheus remote write and read in HTTP API.

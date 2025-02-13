@@ -292,7 +292,7 @@ impl QueryEngineState {
             .unwrap_or(false)
     }
 
-    pub(crate) fn session_state(&self) -> SessionState {
+    pub fn session_state(&self) -> SessionState {
         self.df_context.state()
     }
 
