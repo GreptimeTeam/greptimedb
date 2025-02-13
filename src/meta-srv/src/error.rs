@@ -739,14 +739,6 @@ pub enum Error {
     },
 
     #[cfg(feature = "mysql_kvbackend")]
-    #[snafu(display("Failed to get mysql connection, reason: {}", reason))]
-    GetMySqlConnection {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[cfg(feature = "mysql_kvbackend")]
     #[snafu(display("Failed to create mysql pool"))]
     CreateMySqlPool {
         #[snafu(source)]
@@ -910,7 +902,6 @@ impl ErrorExt for Error {
             #[cfg(feature = "mysql_kvbackend")]
             Error::MySqlExecution { .. }
             | Error::CreateMySqlPool { .. }
-            | Error::GetMySqlConnection { .. }
             | Error::ConnectMySql { .. } => StatusCode::Internal,
         }
     }
