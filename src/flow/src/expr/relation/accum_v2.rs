@@ -27,7 +27,7 @@ use crate::expr::error::{DataTypeSnafu, DatafusionSnafu, InternalSnafu, TryFromV
 use crate::expr::EvalError;
 
 ///  Basically a copy of datafusion's Accumulator, but with a few modifications
-/// to accomodate our needs in flow and keep the upgradability of datafusion
+/// to accommodate our needs in flow and keep the upgradability of datafusion
 pub trait AccumulatorV2: Send + Sync + std::fmt::Debug {
     /// Updates the accumulator’s state from its input.
     fn update_batch(&mut self, values: &[VectorRef]) -> Result<(), EvalError>;

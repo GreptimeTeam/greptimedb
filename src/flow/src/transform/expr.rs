@@ -292,6 +292,7 @@ impl TypedExpr {
             1 if UnaryFunc::is_valid_func_name(fn_name) => {
                 let func = UnaryFunc::from_str_and_type(fn_name, None)?;
                 let arg = arg_exprs[0].clone();
+                // TODO(discord9); forward nullable to return type too?
                 let ret_type = ColumnType::new_nullable(func.signature().output.clone());
 
                 Ok(TypedExpr::new(arg.call_unary(func), ret_type))

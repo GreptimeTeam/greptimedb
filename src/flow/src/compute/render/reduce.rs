@@ -1596,7 +1596,9 @@ mod test {
 
         let aggr_expr = AggregateExprV2 {
             func: sum_udaf().as_ref().clone(),
-            args: vec![ScalarExpr::Column(0)],
+            args: vec![
+                ScalarExpr::Column(0).with_type(ColumnType::new(CDT::int64_datatype(), false))
+            ],
             return_type: CDT::int64_datatype(),
             name: "sum".to_string(),
             schema: RelationType::new(vec![ColumnType::new(

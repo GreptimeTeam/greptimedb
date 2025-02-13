@@ -335,11 +335,9 @@ impl AggregateExprV2 {
         };
 
         // TODO(discord9): determine other options from substrait too instead of default
-        dbg!(&args);
-        dbg!(&input_schema);
         Ok(Self {
             func: fn_impl.as_ref().clone(),
-            args: args.into_iter().map(|a| a.expr).collect(),
+            args,
             return_type,
             name: fn_name,
             schema: input_schema.clone(),
@@ -377,7 +375,7 @@ impl KeyValPlan {
         let val_plan = {
             let need_mfp = aggr_exprs
                 .iter()
-                .any(|agg| agg.args.iter().any(|e| e.as_column().is_none()));
+                .any(|agg| agg.args.iter().any(|e| e.expr.as_column().is_none()));
             if need_mfp {
                 // create mfp from aggr_expr, and modify aggr_expr to use the output column of mfp
                 let mut input_exprs = Vec::new();
@@ -385,31 +383,40 @@ impl KeyValPlan {
                     // FIX: also modify input_schema to fit input_exprs, a `new_input_schema` is needed
                     // so we can separate all scalar compute to a mfp before aggr
                     for arg in aggr_expr.args.iter_mut() {
-                        match arg.clone() {
+                        match arg.expr.clone() {
                             ScalarExpr::Column(idx) => {
                                 // directly refer to column in mfp
-                                *arg = ScalarExpr::Column(input_exprs.len());
+                                arg.expr = ScalarExpr::Column(input_exprs.len());
                                 input_exprs.push(ScalarExpr::Column(idx));
                             }
                             ScalarExpr::Literal(_, _) => {
                                 // already literal, but still need to make it ref
-                                let ret = arg.clone();
-                                *arg = ScalarExpr::Column(input_exprs.len());
+                                let ret = arg.expr.clone();
+                                arg.expr = ScalarExpr::Column(input_exprs.len());
                                 input_exprs.push(ret);
                             }
                             _ => {
                                 // create a new expr and let arg ref to that expr's column instead
-                                let ret = arg.clone();
-                                *arg = ScalarExpr::Column(input_exprs.len());
+                                let ret = arg.expr.clone();
+                                arg.expr = ScalarExpr::Column(input_exprs.len());
                                 input_exprs.push(ret);
                             }
                         }
                     }
                 }
                 let new_input_len = input_exprs.len();
-                MapFilterProject::new(input_arity)
+                let pre_mfp = MapFilterProject::new(input_arity)
                     .map(input_exprs)?
-                    .project(input_arity..input_arity + new_input_len)?
+                    .project(input_arity..input_arity + new_input_len)?;
+                // adjust input schema according to pre_mfp
+                if let Some(first) = aggr_exprs.first() {
+                    let new_input_schema = first.schema.apply_mfp(&pre_mfp.clone().into_safe())?;
+
+                    for aggr in aggr_exprs.iter_mut() {
+                        aggr.schema = new_input_schema.clone();
+                    }
+                }
+                pre_mfp
             } else {
                 // simply take all inputs as value
                 MapFilterProject::new(input_arity)
@@ -520,7 +527,7 @@ impl TypedPlan {
                 .args
                 .iter()
                 .map(|a| {
-                    a.as_column().with_context(|| UnexpectedSnafu {
+                    a.expr.as_column().with_context(|| UnexpectedSnafu {
                         reason: format!("Expect {:?} to be a column", a),
                     })
                 })
@@ -1463,7 +1470,9 @@ mod test {
 
         let aggr_expr = AggregateExprV2 {
             func: sum_udaf().as_ref().clone(),
-            args: vec![ScalarExpr::Column(0)],
+            args: vec![
+                ScalarExpr::Column(0).with_type(ColumnType::new(CDT::uint64_datatype(), true))
+            ],
             return_type: CDT::uint64_datatype(),
             name: "sum".to_string(),
             schema: RelationType::new(vec![ColumnType::new(

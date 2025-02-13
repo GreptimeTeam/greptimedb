@@ -24,7 +24,7 @@ pub use udaf::{OrderingReq, SortExpr};
 
 use crate::error::DatafusionSnafu;
 use crate::expr::relation::accum_v2::{AccumulatorV2, DfAccumulatorAdapter};
-use crate::expr::ScalarExpr;
+use crate::expr::{ScalarExpr, TypedExpr};
 use crate::repr::RelationDesc;
 use crate::Error;
 
@@ -53,7 +53,7 @@ pub struct AggregateExprV2 {
     #[derive_where(skip)]
     pub func: AggregateUDF,
     /// should only be a simple column ref list
-    pub args: Vec<ScalarExpr>,
+    pub args: Vec<TypedExpr>,
     /// Output / return type of this aggregate
     pub return_type: ConcreteDataType,
     pub name: String,
@@ -79,7 +79,7 @@ impl AggregateExprV2 {
         let exprs = self
             .args
             .iter()
-            .map(|e| e.as_physical_expr(&schema))
+            .map(|e| e.expr.as_physical_expr(&schema))
             .collect::<Result<Vec<_>, _>>()?;
         let accum_args = AccumulatorArgs {
             return_type: &data_type,

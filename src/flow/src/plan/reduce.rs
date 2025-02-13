@@ -100,7 +100,7 @@ pub struct AccumulablePlanV2 {
 }
 
 /// This struct basically get useful info from `expr` and store it so no need
-/// to get it repeatly
+/// to get it repeatedly
 /// Invariant: the output index is the index of the aggregation in `full_aggrs`
 /// which means output index is always smaller than the length of `full_aggrs`
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
