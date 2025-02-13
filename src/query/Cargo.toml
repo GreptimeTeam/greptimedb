@@ -65,7 +65,7 @@ store-api.workspace = true
 substrait.workspace = true
 table.workspace = true
 tokio.workspace = true
-unescape = "0.1"
+unescaper = "0.1"
 uuid.workspace = true
 
 [dev-dependencies]

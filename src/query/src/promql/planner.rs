@@ -166,7 +166,7 @@ pub struct PromPlanner {
 
 /// Unescapes the value of the matcher
 pub fn normalize_matcher(mut matcher: Matcher) -> Matcher {
-    if let Some(unescaped_value) = unescape::unescape(&matcher.value) {
+    if let Ok(unescaped_value) = unescaper::unescape(&matcher.value) {
         matcher.value = unescaped_value;
     }
     matcher
