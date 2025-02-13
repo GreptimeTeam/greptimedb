@@ -77,6 +77,7 @@ services:
       - MYSQL_DATABASE=mysql
       - MYSQL_USER=greptimedb
       - MYSQL_PASSWORD=admin
+      - MYSQL_ROOT_PASSWORD=admin
 
 volumes:
   minio_data:
