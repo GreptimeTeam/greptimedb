@@ -543,6 +543,7 @@ impl<I: Iterator<Item = Result<Batch>>> LastNonNullIter<I> {
 
         if let Some(batch) = &self.current_batch {
             let n = batch.num_rows();
+            // Safety: The batch is not empty when accessed.
             let timestamps = batch.timestamps_native().unwrap();
             let mut pos = self.current_index;
             while pos + 1 < n && timestamps[pos] != timestamps[pos + 1] {
