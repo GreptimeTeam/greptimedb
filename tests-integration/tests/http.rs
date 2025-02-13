@@ -766,7 +766,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let data = res.text().await;
-    let expected = "{\"status\":\"error\",\"data\":{\"resultType\":\"\",\"result\":[]},\"error\":\"invalid promql query\",\"errorType\":\"InvalidArguments\"}";
+    let expected = "{\"status\":\"error\",\"error\":\"invalid promql query\",\"errorType\":\"InvalidArguments\"}";
     assert_eq!(expected, data);
 
     // range_query with __name__ not-equal matcher
