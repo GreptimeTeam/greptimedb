@@ -24,6 +24,7 @@ use common_telemetry::{error, info, warn};
 use futures::{FutureExt, TryStreamExt};
 use moka::future::Cache;
 use moka::notification::RemovalCause;
+use moka::policy::EvictionPolicy;
 use object_store::util::join_path;
 use object_store::{ErrorKind, ObjectStore, Reader};
 use parquet::file::metadata::ParquetMetaData;
@@ -65,6 +66,7 @@ impl FileCache {
     ) -> FileCache {
         let cache_store = local_store.clone();
         let mut builder = Cache::builder()
+            .eviction_policy(EvictionPolicy::lru())
             .weigher(|_key, value: &IndexValue| -> u32 {
                 // We only measure space on local store.
                 value.file_size
