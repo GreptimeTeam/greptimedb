@@ -81,6 +81,7 @@ rust.unknown_lints = "deny"
 rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 
 [workspace.dependencies]
+# DO_NOT_REMOVE_THIS: BEGIN_OF_EXTERNAL_DEPENDENCIES
 # We turn off default-features for some dependencies here so the workspaces which inherit them can
 # selectively turn them on if needed, since we can override default-features = true (from false)
 # for the inherited dependency but cannot do the reverse (override from true to false).
@@ -140,7 +141,7 @@ jsonb = { git = "https://github.com/databendlabs/jsonb.git", rev = "8c8d2fc294a3
 lazy_static = "1.4"
 local-ip-address = "0.6"
 loki-proto = { git = "https://github.com/GreptimeTeam/loki-proto.git", rev = "1434ecf23a2654025d86188fb5205e7a74b225d3" }
-meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "5618e779cf2bb4755b499c630fba4c35e91898cb" }
+meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "a10facb353b41460eeb98578868ebf19c2084fac" }
 mockall = "0.11.4"
 moka = "0.12"
 nalgebra = "0.33"
@@ -208,6 +209,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"]
 typetag = "0.2"
 uuid = { version = "1.7", features = ["serde", "v4", "fast-rng"] }
 zstd = "0.13"
+# DO_NOT_REMOVE_THIS: END_OF_EXTERNAL_DEPENDENCIES
 
 ## workspaces members
 api = { path = "src/api" }
@@ -282,7 +284,7 @@ tokio-rustls = { git = "https://github.com/GreptimeTeam/tokio-rustls", rev = "46
 
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"
-rev = "5618e779cf2bb4755b499c630fba4c35e91898cb"
+rev = "a10facb353b41460eeb98578868ebf19c2084fac"
 
 [profile.release]
 debug = 1
