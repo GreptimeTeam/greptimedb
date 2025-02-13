@@ -170,3 +170,4 @@ Error: 1004(InvalidArguments), Cannot find column field_i
 drop table test;
 
 Affected Rows: 0
+
