@@ -502,8 +502,8 @@ pub(crate) struct LastNonNullIter<I> {
     /// fetch a new batch.
     /// The batch is always not empty.
     current_batch: Option<Batch>,
-    // The index of the current row in the current batch.
-    // more to check issue #5229.
+    /// The index of the current row in the current batch.
+    /// more to check issue #5229.
     current_index: usize,
 }
 
