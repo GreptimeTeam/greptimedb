@@ -50,6 +50,23 @@ TQL EVAL (0, 10, '5s') test{__schema__="greptime_private"};
 Error: 4001(TableNotFound), Table not found: greptime.greptime_private.test
 
 -- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 10, '5s') test{__db__="public"};
+
++-----+---------------------+---+
+| i   | j                   | k |
++-----+---------------------+---+
+| 1.0 | 1970-01-01T00:00:05 | b |
+| 1.0 | 1970-01-01T00:00:10 | b |
+| 2.0 | 1970-01-01T00:00:05 | a |
+| 2.0 | 1970-01-01T00:00:10 | a |
++-----+---------------------+---+
+
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 10, '5s') test{__db__="greptime_private"};
+
+Error: 4001(TableNotFound), Table not found: greptime.greptime_private.test
+
+-- SQLNESS SORT_RESULT 2 1
 TQL EVAL (0, 10, '5s') {__name__="test", __field__="i"};
 
 +-----+---+---------------------+
