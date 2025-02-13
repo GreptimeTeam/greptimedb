@@ -257,7 +257,7 @@ impl RegionWriteCtx {
         let mut tasks = Vec::with_capacity(self.wal_entry.mutations.len());
         for mutation in self.wal_entry.mutations.drain(..) {
             let metadata = self.version.metadata.clone();
-            let task = common_runtime::spawn_blocking_global(move || {
+            let task = common_runtime::spawn_global(async move {
                 let encoder = BulkPartEncoder::new(metadata, true, DEFAULT_ROW_GROUP_SIZE);
                 let mutations = [mutation];
                 let part_opt = encoder.encode_mutations(&mutations)?;
