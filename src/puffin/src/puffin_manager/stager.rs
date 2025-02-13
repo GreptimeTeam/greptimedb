@@ -88,3 +88,13 @@ pub trait Stager: Send + Sync {
         dir_size: u64,
     ) -> Result<()>;
 }
+
+/// `StagerNotifier` provides a way to notify the caller of the staging events.
+pub trait StagerNotifier: Send + Sync {
+    fn on_cache_hit(&self, size: u64);
+    fn on_cache_miss(&self, size: u64);
+    fn on_cache_insert(&self, size: u64);
+    fn on_cache_evict(&self, size: u64);
+    fn on_recycle_insert(&self, size: u64);
+    fn on_recycle_clear(&self, size: u64);
+}

@@ -63,7 +63,7 @@ impl PuffinManagerFactory {
         write_buffer_size: Option<usize>,
     ) -> Result<Self> {
         let staging_dir = aux_path.as_ref().join(STAGING_DIR);
-        let stager = BoundedStager::new(staging_dir, staging_capacity)
+        let stager = BoundedStager::new(staging_dir, staging_capacity, None)
             .await
             .context(PuffinInitStagerSnafu)?;
         Ok(Self {

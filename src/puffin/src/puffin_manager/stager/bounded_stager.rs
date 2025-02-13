@@ -34,6 +34,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
+use super::StagerNotifier;
 use crate::error::{
     CacheGetSnafu, CreateSnafu, MetadataSnafu, OpenSnafu, ReadSnafu, RemoveSnafu, RenameSnafu,
     Result, WalkDirSnafu,
@@ -66,10 +67,17 @@ pub struct BoundedStager {
     ///   3. sent the delete task to the delete queue on drop
     ///   4. background routine removes the file or directory
     delete_queue: Sender<DeleteTask>,
+
+    /// Notifier for the stager.
+    notifier: Option<Arc<dyn StagerNotifier>>,
 }
 
 impl BoundedStager {
-    pub async fn new(base_dir: PathBuf, capacity: u64) -> Result<Self> {
+    pub async fn new(
+        base_dir: PathBuf,
+        capacity: u64,
+        notifier: Option<Arc<dyn StagerNotifier>>,
+    ) -> Result<Self> {
         tokio::fs::create_dir_all(&base_dir)
             .await
             .context(CreateSnafu)?;
@@ -79,12 +87,17 @@ impl BoundedStager {
             .build();
 
         let recycle_bin_cloned = recycle_bin.clone();
+        let notifier_cloned = notifier.clone();
         let cache = Cache::builder()
             .max_capacity(capacity)
             .weigher(|_: &String, v: &CacheValue| v.weight())
             .eviction_policy(EvictionPolicy::lru())
             .async_eviction_listener(move |k, v, _| {
                 let recycle_bin = recycle_bin_cloned.clone();
+                if let Some(notifier) = notifier_cloned.as_ref() {
+                    notifier.on_cache_evict(v.size());
+                    notifier.on_recycle_insert(v.size());
+                }
                 async move {
                     recycle_bin.insert(k.as_str().to_string(), v).await;
                 }
@@ -93,13 +106,15 @@ impl BoundedStager {
             .build();
 
         let (delete_queue, rx) = tokio::sync::mpsc::channel(DELETE_QUEUE_SIZE);
-        common_runtime::global_runtime().spawn(Self::delete_routine(rx));
+        let notifier_cloned = notifier.clone();
+        common_runtime::global_runtime().spawn(Self::delete_routine(rx, notifier_cloned));
 
         let stager = Self {
             cache,
             base_dir,
             delete_queue,
             recycle_bin,
+            notifier,
         };
 
         stager.recover().await?;
@@ -121,27 +136,44 @@ impl Stager for BoundedStager {
     ) -> Result<Self::Blob> {
         let cache_key = Self::encode_cache_key(puffin_file_name, key);
 
+        let mut miss = false;
         let v = self
             .cache
-            .try_get_with(cache_key.clone(), async {
+            .try_get_with_by_ref(&cache_key, async {
                 if let Some(v) = self.recycle_bin.remove(&cache_key).await {
+                    if let Some(notifier) = self.notifier.as_ref() {
+                        let size = v.size();
+                        notifier.on_cache_insert(size);
+                        notifier.on_recycle_clear(size);
+                    }
                     return Ok(v);
                 }
 
+                miss = true;
                 let file_name = format!("{}.{}", cache_key, uuid::Uuid::new_v4());
                 let path = self.base_dir.join(&file_name);
 
                 let size = Self::write_blob(&path, init_fn).await?;
-
+                if let Some(notifier) = self.notifier.as_ref() {
+                    notifier.on_cache_insert(size);
+                }
                 let guard = Arc::new(FsBlobGuard {
                     path,
                     delete_queue: self.delete_queue.clone(),
+                    size,
                 });
                 Ok(CacheValue::File { guard, size })
             })
             .await
             .context(CacheGetSnafu)?;
 
+        if let Some(notifier) = self.notifier.as_ref() {
+            if miss {
+                notifier.on_cache_miss(v.size());
+            } else {
+                notifier.on_cache_hit(v.size());
+            }
+        }
         match v {
             CacheValue::File { guard, .. } => Ok(guard),
             _ => unreachable!(),
@@ -156,20 +188,30 @@ impl Stager for BoundedStager {
     ) -> Result<Self::Dir> {
         let cache_key = Self::encode_cache_key(puffin_file_name, key);
 
+        let mut miss = false;
         let v = self
             .cache
-            .try_get_with(cache_key.clone(), async {
+            .try_get_with_by_ref(&cache_key, async {
                 if let Some(v) = self.recycle_bin.remove(&cache_key).await {
+                    if let Some(notifier) = self.notifier.as_ref() {
+                        let size = v.size();
+                        notifier.on_cache_insert(size);
+                        notifier.on_recycle_clear(size);
+                    }
                     return Ok(v);
                 }
 
+                miss = true;
                 let dir_name = format!("{}.{}", cache_key, uuid::Uuid::new_v4());
                 let path = self.base_dir.join(&dir_name);
 
                 let size = Self::write_dir(&path, init_fn).await?;
-
+                if let Some(notifier) = self.notifier.as_ref() {
+                    notifier.on_cache_insert(size);
+                }
                 let guard = Arc::new(FsDirGuard {
                     path,
+                    size,
                     delete_queue: self.delete_queue.clone(),
                 });
                 Ok(CacheValue::Dir { guard, size })
@@ -177,6 +219,13 @@ impl Stager for BoundedStager {
             .await
             .context(CacheGetSnafu)?;
 
+        if let Some(notifier) = self.notifier.as_ref() {
+            if miss {
+                notifier.on_cache_miss(v.size());
+            } else {
+                notifier.on_cache_hit(v.size());
+            }
+        }
         match v {
             CacheValue::Dir { guard, .. } => Ok(guard),
             _ => unreachable!(),
@@ -195,6 +244,11 @@ impl Stager for BoundedStager {
         self.cache
             .try_get_with(cache_key.clone(), async move {
                 if let Some(v) = self.recycle_bin.remove(&cache_key).await {
+                    if let Some(notifier) = self.notifier.as_ref() {
+                        let size = v.size();
+                        notifier.on_cache_insert(size);
+                        notifier.on_recycle_clear(size);
+                    }
                     return Ok(v);
                 }
 
@@ -202,9 +256,12 @@ impl Stager for BoundedStager {
                 let path = self.base_dir.join(&dir_name);
 
                 fs::rename(&dir_path, &path).await.context(RenameSnafu)?;
-
+                if let Some(notifier) = self.notifier.as_ref() {
+                    notifier.on_cache_insert(size);
+                }
                 let guard = Arc::new(FsDirGuard {
                     path,
+                    size,
                     delete_queue: self.delete_queue.clone(),
                 });
                 Ok(CacheValue::Dir { guard, size })
@@ -304,6 +361,7 @@ impl BoundedStager {
                     let v = CacheValue::Dir {
                         guard: Arc::new(FsDirGuard {
                             path,
+                            size,
                             delete_queue: self.delete_queue.clone(),
                         }),
                         size,
@@ -311,12 +369,14 @@ impl BoundedStager {
                     // A duplicate dir will be moved to the delete queue.
                     let _dup_dir = elems.insert(key, v);
                 } else {
+                    let size = meta.len();
                     let v = CacheValue::File {
                         guard: Arc::new(FsBlobGuard {
                             path,
+                            size,
                             delete_queue: self.delete_queue.clone(),
                         }),
-                        size: meta.len(),
+                        size,
                     };
                     // A duplicate file will be moved to the delete queue.
                     let _dup_file = elems.insert(key, v);
@@ -325,6 +385,9 @@ impl BoundedStager {
         }
 
         for (key, value) in elems {
+            if let Some(notifier) = self.notifier.as_ref() {
+                notifier.on_cache_insert(value.size());
+            }
             self.cache.insert(key, value).await;
         }
 
@@ -349,10 +412,13 @@ impl BoundedStager {
         Ok(size)
     }
 
-    async fn delete_routine(mut receiver: Receiver<DeleteTask>) {
+    async fn delete_routine(
+        mut receiver: Receiver<DeleteTask>,
+        notifier: Option<Arc<dyn StagerNotifier>>,
+    ) {
         while let Some(task) = receiver.recv().await {
             match task {
-                DeleteTask::File(path) => {
+                DeleteTask::File(path, size) => {
                     if let Err(err) = fs::remove_file(&path).await {
                         if err.kind() == std::io::ErrorKind::NotFound {
                             continue;
@@ -360,8 +426,11 @@ impl BoundedStager {
 
                         warn!(err; "Failed to remove the file.");
                     }
+                    if let Some(notifier) = notifier.as_ref() {
+                        notifier.on_recycle_clear(size);
+                    }
                 }
-                DeleteTask::Dir(path) => {
+                DeleteTask::Dir(path, size) => {
                     let deleted_path = path.with_extension(DELETED_EXTENSION);
                     if let Err(err) = fs::rename(&path, &deleted_path).await {
                         if err.kind() == std::io::ErrorKind::NotFound {
@@ -377,6 +446,9 @@ impl BoundedStager {
                     }
                     if let Err(err) = fs::remove_dir_all(&deleted_path).await {
                         warn!(err; "Failed to remove the dangling directory.");
+                    }
+                    if let Some(notifier) = notifier.as_ref() {
+                        notifier.on_recycle_clear(size);
                     }
                 }
                 DeleteTask::Terminate => {
@@ -415,8 +487,8 @@ impl CacheValue {
 }
 
 enum DeleteTask {
-    File(PathBuf),
-    Dir(PathBuf),
+    File(PathBuf, u64),
+    Dir(PathBuf, u64),
     Terminate,
 }
 
@@ -425,6 +497,7 @@ enum DeleteTask {
 #[derive(Debug)]
 pub struct FsBlobGuard {
     path: PathBuf,
+    size: u64,
     delete_queue: Sender<DeleteTask>,
 }
 
@@ -441,7 +514,7 @@ impl Drop for FsBlobGuard {
     fn drop(&mut self) {
         if let Err(err) = self
             .delete_queue
-            .try_send(DeleteTask::File(self.path.clone()))
+            .try_send(DeleteTask::File(self.path.clone(), self.size))
         {
             if matches!(err, TrySendError::Closed(_)) {
                 return;
@@ -456,6 +529,7 @@ impl Drop for FsBlobGuard {
 #[derive(Debug)]
 pub struct FsDirGuard {
     path: PathBuf,
+    size: u64,
     delete_queue: Sender<DeleteTask>,
 }
 
@@ -469,7 +543,7 @@ impl Drop for FsDirGuard {
     fn drop(&mut self) {
         if let Err(err) = self
             .delete_queue
-            .try_send(DeleteTask::Dir(self.path.clone()))
+            .try_send(DeleteTask::Dir(self.path.clone(), self.size))
         {
             if matches!(err, TrySendError::Closed(_)) {
                 return;
@@ -532,6 +606,8 @@ impl BoundedStager {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicU64;
+
     use common_base::range_read::RangeReader;
     use common_test_util::temp_dir::create_temp_dir;
     use futures::AsyncWriteExt;
@@ -541,12 +617,120 @@ mod tests {
     use crate::error::BlobNotFoundSnafu;
     use crate::puffin_manager::stager::Stager;
 
+    struct MockNotifier {
+        cache_insert_size: AtomicU64,
+        cache_evict_size: AtomicU64,
+        cache_hit_count: AtomicU64,
+        cache_hit_size: AtomicU64,
+        cache_miss_count: AtomicU64,
+        cache_miss_size: AtomicU64,
+        recycle_insert_size: AtomicU64,
+        recycle_clear_size: AtomicU64,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct Stats {
+        cache_insert_size: u64,
+        cache_evict_size: u64,
+        cache_hit_count: u64,
+        cache_hit_size: u64,
+        cache_miss_count: u64,
+        cache_miss_size: u64,
+        recycle_insert_size: u64,
+        recycle_clear_size: u64,
+    }
+
+    impl MockNotifier {
+        fn build() -> Arc<MockNotifier> {
+            Arc::new(Self {
+                cache_insert_size: AtomicU64::new(0),
+                cache_evict_size: AtomicU64::new(0),
+                cache_hit_count: AtomicU64::new(0),
+                cache_hit_size: AtomicU64::new(0),
+                cache_miss_count: AtomicU64::new(0),
+                cache_miss_size: AtomicU64::new(0),
+                recycle_insert_size: AtomicU64::new(0),
+                recycle_clear_size: AtomicU64::new(0),
+            })
+        }
+
+        fn stats(&self) -> Stats {
+            Stats {
+                cache_insert_size: self
+                    .cache_insert_size
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                cache_evict_size: self
+                    .cache_evict_size
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                cache_hit_count: self
+                    .cache_hit_count
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                cache_hit_size: self
+                    .cache_hit_size
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                cache_miss_count: self
+                    .cache_miss_count
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                cache_miss_size: self
+                    .cache_miss_size
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                recycle_insert_size: self
+                    .recycle_insert_size
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                recycle_clear_size: self
+                    .recycle_clear_size
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            }
+        }
+    }
+
+    impl StagerNotifier for MockNotifier {
+        fn on_cache_insert(&self, size: u64) {
+            self.cache_insert_size
+                .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn on_cache_evict(&self, size: u64) {
+            self.cache_evict_size
+                .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn on_cache_hit(&self, size: u64) {
+            self.cache_hit_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.cache_hit_size
+                .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn on_cache_miss(&self, size: u64) {
+            self.cache_miss_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.cache_miss_size
+                .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn on_recycle_insert(&self, size: u64) {
+            self.recycle_insert_size
+                .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn on_recycle_clear(&self, size: u64) {
+            self.recycle_clear_size
+                .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     #[tokio::test]
     async fn test_get_blob() {
         let tempdir = create_temp_dir("test_get_blob_");
-        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
-            .await
-            .unwrap();
+        let notifier = MockNotifier::build();
+        let stager = BoundedStager::new(
+            tempdir.path().to_path_buf(),
+            u64::MAX,
+            Some(notifier.clone()),
+        )
+        .await
+        .unwrap();
 
         let puffin_file_name = "test_get_blob";
         let key = "key";
@@ -575,14 +759,34 @@ mod tests {
         let mut buf = Vec::new();
         file.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, b"hello world");
+
+        let stats = notifier.stats();
+        assert_eq!(
+            stats,
+            Stats {
+                cache_insert_size: 11,
+                cache_evict_size: 0,
+                cache_hit_count: 0,
+                cache_hit_size: 0,
+                cache_miss_count: 1,
+                cache_miss_size: 11,
+                recycle_insert_size: 0,
+                recycle_clear_size: 0,
+            }
+        );
     }
 
     #[tokio::test]
     async fn test_get_dir() {
         let tempdir = create_temp_dir("test_get_dir_");
-        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
-            .await
-            .unwrap();
+        let notifier = MockNotifier::build();
+        let stager = BoundedStager::new(
+            tempdir.path().to_path_buf(),
+            u64::MAX,
+            Some(notifier.clone()),
+        )
+        .await
+        .unwrap();
 
         let files_in_dir = [
             ("file_a", "Hello, world!".as_bytes()),
@@ -600,11 +804,13 @@ mod tests {
                 key,
                 Box::new(|writer_provider| {
                     Box::pin(async move {
+                        let mut size = 0;
                         for (rel_path, content) in &files_in_dir {
+                            size += content.len();
                             let mut writer = writer_provider.writer(rel_path).await.unwrap();
                             writer.write_all(content).await.unwrap();
                         }
-                        Ok(0)
+                        Ok(size as _)
                     })
                 }),
             )
@@ -627,14 +833,34 @@ mod tests {
             file.read_to_end(&mut buf).await.unwrap();
             assert_eq!(buf, *content);
         }
+
+        let stats = notifier.stats();
+        assert_eq!(
+            stats,
+            Stats {
+                cache_insert_size: 70,
+                cache_evict_size: 0,
+                cache_hit_count: 0,
+                cache_hit_size: 0,
+                cache_miss_count: 1,
+                cache_miss_size: 70,
+                recycle_insert_size: 0,
+                recycle_clear_size: 0
+            }
+        );
     }
 
     #[tokio::test]
     async fn test_recover() {
         let tempdir = create_temp_dir("test_recover_");
-        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
-            .await
-            .unwrap();
+        let notifier = MockNotifier::build();
+        let stager = BoundedStager::new(
+            tempdir.path().to_path_buf(),
+            u64::MAX,
+            Some(notifier.clone()),
+        )
+        .await
+        .unwrap();
 
         // initialize stager
         let puffin_file_name = "test_recover";
@@ -669,11 +895,13 @@ mod tests {
                 dir_key,
                 Box::new(|writer_provider| {
                     Box::pin(async move {
+                        let mut size = 0;
                         for (rel_path, content) in &files_in_dir {
+                            size += content.len();
                             let mut writer = writer_provider.writer(rel_path).await.unwrap();
                             writer.write_all(content).await.unwrap();
                         }
-                        Ok(0)
+                        Ok(size as _)
                     })
                 }),
             )
@@ -683,7 +911,7 @@ mod tests {
 
         // recover stager
         drop(stager);
-        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
+        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX, None)
             .await
             .unwrap();
 
@@ -718,14 +946,31 @@ mod tests {
             file.read_to_end(&mut buf).await.unwrap();
             assert_eq!(buf, *content);
         }
+
+        let stats = notifier.stats();
+        assert_eq!(
+            stats,
+            Stats {
+                cache_insert_size: 81,
+                cache_evict_size: 0,
+                cache_hit_count: 0,
+                cache_hit_size: 0,
+                cache_miss_count: 2,
+                cache_miss_size: 81,
+                recycle_insert_size: 0,
+                recycle_clear_size: 0
+            }
+        );
     }
 
     #[tokio::test]
     async fn test_eviction() {
         let tempdir = create_temp_dir("test_eviction_");
+        let notifier = MockNotifier::build();
         let stager = BoundedStager::new(
             tempdir.path().to_path_buf(),
             1, /* extremely small size */
+            Some(notifier.clone()),
         )
         .await
         .unwrap();
@@ -755,6 +1000,21 @@ mod tests {
         stager.cache.run_pending_tasks().await;
         assert!(!stager.in_cache(puffin_file_name, blob_key));
 
+        let stats = notifier.stats();
+        assert_eq!(
+            stats,
+            Stats {
+                cache_insert_size: 11,
+                cache_evict_size: 11,
+                cache_hit_count: 0,
+                cache_hit_size: 0,
+                cache_miss_count: 1,
+                cache_miss_size: 11,
+                recycle_insert_size: 11,
+                recycle_clear_size: 0
+            }
+        );
+
         let m = reader.metadata().await.unwrap();
         let buf = reader.read(0..m.content_length).await.unwrap();
         assert_eq!(&*buf, b"Hello world");
@@ -775,6 +1035,21 @@ mod tests {
         // The blob should be evicted
         stager.cache.run_pending_tasks().await;
         assert!(!stager.in_cache(puffin_file_name, blob_key));
+
+        let stats = notifier.stats();
+        assert_eq!(
+            stats,
+            Stats {
+                cache_insert_size: 22,
+                cache_evict_size: 22,
+                cache_hit_count: 1,
+                cache_hit_size: 11,
+                cache_miss_count: 1,
+                cache_miss_size: 11,
+                recycle_insert_size: 22,
+                recycle_clear_size: 11
+            }
+        );
 
         let m = reader.metadata().await.unwrap();
         let buf = reader.read(0..m.content_length).await.unwrap();
@@ -821,6 +1096,21 @@ mod tests {
         stager.cache.run_pending_tasks().await;
         assert!(!stager.in_cache(puffin_file_name, dir_key));
 
+        let stats = notifier.stats();
+        assert_eq!(
+            stats,
+            Stats {
+                cache_insert_size: 92,
+                cache_evict_size: 92,
+                cache_hit_count: 1,
+                cache_hit_size: 11,
+                cache_miss_count: 2,
+                cache_miss_size: 81,
+                recycle_insert_size: 92,
+                recycle_clear_size: 11
+            }
+        );
+
         // Second time to get the directory
         let guard_1 = stager
             .get_dir(
@@ -842,6 +1132,21 @@ mod tests {
         // Still hold the guard
         stager.cache.run_pending_tasks().await;
         assert!(!stager.in_cache(puffin_file_name, dir_key));
+
+        let stats = notifier.stats();
+        assert_eq!(
+            stats,
+            Stats {
+                cache_insert_size: 162,
+                cache_evict_size: 162,
+                cache_hit_count: 2,
+                cache_hit_size: 81,
+                cache_miss_count: 2,
+                cache_miss_size: 81,
+                recycle_insert_size: 162,
+                recycle_clear_size: 81
+            }
+        );
 
         // Third time to get the directory and all guards are dropped
         drop(guard_0);
@@ -866,12 +1171,27 @@ mod tests {
             file.read_to_end(&mut buf).await.unwrap();
             assert_eq!(buf, *content);
         }
+
+        let stats = notifier.stats();
+        assert_eq!(
+            stats,
+            Stats {
+                cache_insert_size: 232,
+                cache_evict_size: 232,
+                cache_hit_count: 3,
+                cache_hit_size: 151,
+                cache_miss_count: 2,
+                cache_miss_size: 81,
+                recycle_insert_size: 232,
+                recycle_clear_size: 151
+            }
+        );
     }
 
     #[tokio::test]
     async fn test_get_blob_concurrency_on_fail() {
         let tempdir = create_temp_dir("test_get_blob_concurrency_on_fail_");
-        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
+        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX, None)
             .await
             .unwrap();
 
@@ -908,7 +1228,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_dir_concurrency_on_fail() {
         let tempdir = create_temp_dir("test_get_dir_concurrency_on_fail_");
-        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX)
+        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX, None)
             .await
             .unwrap();
 
