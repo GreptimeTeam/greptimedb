@@ -55,6 +55,7 @@ use tonic::codec::CompressionEncoding;
 use tonic::transport::server::{Router, TcpIncoming};
 
 use crate::election::etcd::EtcdElection;
+#[cfg(feature = "mysql_kvbackend")]
 use crate::election::mysql::MySqlElection;
 #[cfg(feature = "pg_kvbackend")]
 use crate::election::postgres::PgElection;
