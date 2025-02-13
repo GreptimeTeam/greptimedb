@@ -12,20 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
-#![feature(if_let_guard)]
+use serde::{Deserialize, Serialize};
 
-pub mod delete;
-pub mod error;
-pub mod expr_helper;
-pub mod flow;
-pub mod insert;
-pub mod metrics;
-pub mod procedure;
-pub mod region_req_factory;
-pub mod req_convert;
-pub mod request;
-pub mod statement;
-pub mod table;
+/// Options for Jaeger query APIs.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JaegerOptions {
+    /// Whether to enable Jaeger query APIs.
+    pub enable: bool,
+}
+
+impl Default for JaegerOptions {
+    fn default() -> Self {
+        Self { enable: true }
+    }
+}
+
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests {
+    use super::JaegerOptions;
+
+    #[test]
+    fn test_jaeger_options() {
+        let default = JaegerOptions::default();
+        assert!(default.enable);
+    }
+}

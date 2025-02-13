@@ -83,6 +83,18 @@ pub(crate) struct MetricEngineState {
 }
 
 impl MetricEngineState {
+    pub fn logical_region_exists_filter(
+        &self,
+        physical_region_id: RegionId,
+    ) -> impl for<'a> Fn(&'a RegionId) -> bool + use<'_> {
+        let state = self
+            .physical_region_states()
+            .get(&physical_region_id)
+            .unwrap();
+
+        move |logical_region_id| state.logical_regions().contains(logical_region_id)
+    }
+
     pub fn add_physical_region(
         &mut self,
         physical_region_id: RegionId,
@@ -108,6 +120,22 @@ impl MetricEngineState {
         let state = self.physical_regions.get_mut(&physical_region_id).unwrap();
         for (col, id) in physical_columns {
             state.physical_columns.insert(col, id);
+        }
+    }
+
+    /// # Panic
+    /// if the physical region does not exist
+    pub fn add_logical_regions(
+        &mut self,
+        physical_region_id: RegionId,
+        logical_region_ids: impl IntoIterator<Item = RegionId>,
+    ) {
+        let physical_region_id = to_data_region_id(physical_region_id);
+        let state = self.physical_regions.get_mut(&physical_region_id).unwrap();
+        for logical_region_id in logical_region_ids {
+            state.logical_regions.insert(logical_region_id);
+            self.logical_regions
+                .insert(logical_region_id, physical_region_id);
         }
     }
 

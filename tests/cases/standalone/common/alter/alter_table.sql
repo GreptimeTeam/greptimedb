@@ -17,6 +17,8 @@ SELECT * FROM test_alt_table WHERE i = 1;
 -- SQLNESS ARG restart=true
 ALTER TABLE test_alt_table ADD COLUMN m INTEGER;
 
+ALTER TABLE test_alt_table ADD COLUMN dt DATETIME;
+
 -- Should fail issue #5422
 ALTER TABLE test_alt_table ADD COLUMN n interval;
 

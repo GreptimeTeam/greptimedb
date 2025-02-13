@@ -19,4 +19,3 @@ pub mod insert;
 pub mod util;
 
 pub use alter::{alter_expr_to_request, create_table_schema};
-pub use insert::build_create_expr_from_insertion;

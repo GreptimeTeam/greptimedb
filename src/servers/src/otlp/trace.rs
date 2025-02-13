@@ -25,7 +25,20 @@ use crate::otlp::utils::{make_column_data, make_string_column_data};
 use crate::row_writer::{self, MultiTableData, TableData};
 
 const APPROXIMATE_COLUMN_COUNT: usize = 24;
+
 pub const TRACE_TABLE_NAME: &str = "opentelemetry_traces";
+pub const SERVICE_NAME_COLUMN: &str = "service_name";
+pub const TRACE_ID_COLUMN: &str = "trace_id";
+pub const TIMESTAMP_COLUMN: &str = "timestamp";
+pub const DURATION_NANO_COLUMN: &str = "duration_nano";
+pub const SPAN_ID_COLUMN: &str = "span_id";
+pub const SPAN_NAME_COLUMN: &str = "span_name";
+pub const SPAN_KIND_COLUMN: &str = "span_kind";
+pub const SPAN_ATTRIBUTES_COLUMN: &str = "span_attributes";
+
+/// The span kind prefix in the database.
+/// If the span kind is `server`, it will be stored as `SPAN_KIND_SERVER` in the database.
+pub const SPAN_KIND_PREFIX: &str = "SPAN_KIND_";
 
 pub mod attributes;
 pub mod span;

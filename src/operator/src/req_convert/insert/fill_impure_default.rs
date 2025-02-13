@@ -23,7 +23,7 @@ use store_api::storage::{RegionId, TableId};
 use table::metadata::{TableInfo, TableInfoRef};
 
 use crate::error::{ConvertColumnDefaultConstraintSnafu, Result, UnexpectedSnafu};
-use crate::expr_factory::column_schemas_to_defs;
+use crate::expr_helper::column_schemas_to_defs;
 use crate::insert::InstantAndNormalInsertRequests;
 
 /// Find all columns that have impure default values

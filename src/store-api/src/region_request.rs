@@ -48,6 +48,67 @@ use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
 
 #[derive(Debug, IntoStaticStr)]
+pub enum BatchRegionDdlRequest {
+    Create(Vec<(RegionId, RegionCreateRequest)>),
+    Drop(Vec<(RegionId, RegionDropRequest)>),
+    Alter(Vec<(RegionId, RegionAlterRequest)>),
+}
+
+impl BatchRegionDdlRequest {
+    /// Converts [Body](region_request::Body) to [`BatchRegionDdlRequest`].
+    pub fn try_from_request_body(body: region_request::Body) -> Result<Option<Self>> {
+        match body {
+            region_request::Body::Creates(creates) => {
+                let requests = creates
+                    .requests
+                    .into_iter()
+                    .map(parse_region_create)
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Some(Self::Create(requests)))
+            }
+            region_request::Body::Drops(drops) => {
+                let requests = drops
+                    .requests
+                    .into_iter()
+                    .map(parse_region_drop)
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Some(Self::Drop(requests)))
+            }
+            region_request::Body::Alters(alters) => {
+                let requests = alters
+                    .requests
+                    .into_iter()
+                    .map(parse_region_alter)
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Some(Self::Alter(requests)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub fn request_type(&self) -> &'static str {
+        self.into()
+    }
+
+    pub fn into_region_requests(self) -> Vec<(RegionId, RegionRequest)> {
+        match self {
+            Self::Create(requests) => requests
+                .into_iter()
+                .map(|(region_id, request)| (region_id, RegionRequest::Create(request)))
+                .collect(),
+            Self::Drop(requests) => requests
+                .into_iter()
+                .map(|(region_id, request)| (region_id, RegionRequest::Drop(request)))
+                .collect(),
+            Self::Alter(requests) => requests
+                .into_iter()
+                .map(|(region_id, request)| (region_id, RegionRequest::Alter(request)))
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, IntoStaticStr)]
 pub enum RegionRequest {
     Put(RegionPutRequest),
     Delete(RegionDeleteRequest),
@@ -123,7 +184,7 @@ fn make_region_deletes(deletes: DeleteRequests) -> Result<Vec<(RegionId, RegionR
     Ok(requests)
 }
 
-fn make_region_create(create: CreateRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+fn parse_region_create(create: CreateRequest) -> Result<(RegionId, RegionCreateRequest)> {
     let column_metadatas = create
         .column_defs
         .into_iter()
@@ -131,16 +192,21 @@ fn make_region_create(create: CreateRequest) -> Result<Vec<(RegionId, RegionRequ
         .collect::<Result<Vec<_>>>()?;
     let region_id = create.region_id.into();
     let region_dir = region_dir(&create.path, region_id);
-    Ok(vec![(
+    Ok((
         region_id,
-        RegionRequest::Create(RegionCreateRequest {
+        RegionCreateRequest {
             engine: create.engine,
             column_metadatas,
             primary_key: create.primary_key,
             options: create.options,
             region_dir,
-        }),
-    )])
+        },
+    ))
+}
+
+fn make_region_create(create: CreateRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let (region_id, request) = parse_region_create(create)?;
+    Ok(vec![(region_id, RegionRequest::Create(request))])
 }
 
 fn make_region_creates(creates: CreateRequests) -> Result<Vec<(RegionId, RegionRequest)>> {
@@ -151,9 +217,14 @@ fn make_region_creates(creates: CreateRequests) -> Result<Vec<(RegionId, RegionR
     Ok(requests)
 }
 
-fn make_region_drop(drop: DropRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+fn parse_region_drop(drop: DropRequest) -> Result<(RegionId, RegionDropRequest)> {
     let region_id = drop.region_id.into();
-    Ok(vec![(region_id, RegionRequest::Drop(RegionDropRequest {}))])
+    Ok((region_id, RegionDropRequest {}))
+}
+
+fn make_region_drop(drop: DropRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let (region_id, request) = parse_region_drop(drop)?;
+    Ok(vec![(region_id, RegionRequest::Drop(request))])
 }
 
 fn make_region_drops(drops: DropRequests) -> Result<Vec<(RegionId, RegionRequest)>> {
@@ -186,12 +257,15 @@ fn make_region_close(close: CloseRequest) -> Result<Vec<(RegionId, RegionRequest
     )])
 }
 
-fn make_region_alter(alter: AlterRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+fn parse_region_alter(alter: AlterRequest) -> Result<(RegionId, RegionAlterRequest)> {
     let region_id = alter.region_id.into();
-    Ok(vec![(
-        region_id,
-        RegionRequest::Alter(RegionAlterRequest::try_from(alter)?),
-    )])
+    let request = RegionAlterRequest::try_from(alter)?;
+    Ok((region_id, request))
+}
+
+fn make_region_alter(alter: AlterRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let (region_id, request) = parse_region_alter(alter)?;
+    Ok(vec![(region_id, RegionRequest::Alter(request))])
 }
 
 fn make_region_alters(alters: AlterRequests) -> Result<Vec<(RegionId, RegionRequest)>> {

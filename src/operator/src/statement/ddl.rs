@@ -78,7 +78,7 @@ use crate::error::{
     SchemaReadOnlySnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu, TableMetadataManagerSnafu,
     TableNotFoundSnafu, UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
-use crate::expr_factory;
+use crate::expr_helper;
 use crate::statement::show::create_partitions_stmt;
 
 lazy_static! {
@@ -92,7 +92,7 @@ impl StatementExecutor {
 
     #[tracing::instrument(skip_all)]
     pub async fn create_table(&self, stmt: CreateTable, ctx: QueryContextRef) -> Result<TableRef> {
-        let create_expr = &mut expr_factory::create_to_expr(&stmt, &ctx)?;
+        let create_expr = &mut expr_helper::create_to_expr(&stmt, &ctx)?;
         self.create_table_inner(create_expr, stmt.partitions, ctx)
             .await
     }
@@ -146,7 +146,7 @@ impl StatementExecutor {
             }
         });
 
-        let create_expr = &mut expr_factory::create_to_expr(&create_stmt, &ctx)?;
+        let create_expr = &mut expr_helper::create_to_expr(&create_stmt, &ctx)?;
         self.create_table_inner(create_expr, partitions, ctx).await
     }
 
@@ -156,7 +156,7 @@ impl StatementExecutor {
         create_expr: CreateExternalTable,
         ctx: QueryContextRef,
     ) -> Result<TableRef> {
-        let create_expr = &mut expr_factory::create_external_expr(create_expr, &ctx).await?;
+        let create_expr = &mut expr_helper::create_external_expr(create_expr, &ctx).await?;
         self.create_table_inner(create_expr, None, ctx).await
     }
 
@@ -345,7 +345,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<Output> {
         // TODO(ruihang): do some verification
-        let expr = expr_factory::to_create_flow_task_expr(stmt, &query_context)?;
+        let expr = expr_helper::to_create_flow_task_expr(stmt, &query_context)?;
 
         self.create_flow_inner(expr, query_context).await
     }
@@ -450,7 +450,7 @@ impl StatementExecutor {
             .encode(&plan, DefaultSerializer)
             .context(SubstraitCodecSnafu)?;
 
-        let expr = expr_factory::to_create_view_expr(
+        let expr = expr_helper::to_create_view_expr(
             create_view,
             encoded_plan.to_vec(),
             table_names,
@@ -945,7 +945,7 @@ impl StatementExecutor {
         alter_table: AlterTable,
         query_context: QueryContextRef,
     ) -> Result<Output> {
-        let expr = expr_factory::to_alter_table_expr(alter_table, &query_context)?;
+        let expr = expr_helper::to_alter_table_expr(alter_table, &query_context)?;
         self.alter_table_inner(expr, query_context).await
     }
 
@@ -1073,7 +1073,7 @@ impl StatementExecutor {
         alter_expr: AlterDatabase,
         query_context: QueryContextRef,
     ) -> Result<Output> {
-        let alter_expr = expr_factory::to_alter_database_expr(alter_expr, &query_context)?;
+        let alter_expr = expr_helper::to_alter_database_expr(alter_expr, &query_context)?;
         self.alter_database_inner(alter_expr, query_context).await
     }
 
@@ -1595,7 +1595,7 @@ mod test {
     use sql::statements::statement::Statement;
 
     use super::*;
-    use crate::expr_factory;
+    use crate::expr_helper;
 
     #[test]
     fn test_name_is_match() {
@@ -1649,7 +1649,7 @@ ENGINE=mito",
             .unwrap();
             match &result[0] {
                 Statement::CreateTable(c) => {
-                    let expr = expr_factory::create_to_expr(c, &QueryContext::arc()).unwrap();
+                    let expr = expr_helper::create_to_expr(c, &QueryContext::arc()).unwrap();
                     let (partitions, _) =
                         parse_partitions(&expr, c.partitions.clone(), &ctx).unwrap();
                     let json = serde_json::to_string(&partitions).unwrap();

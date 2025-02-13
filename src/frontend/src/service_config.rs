@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod influxdb;
+pub mod jaeger;
 pub mod mysql;
 pub mod opentsdb;
 pub mod otlp;
@@ -20,6 +21,7 @@ pub mod postgres;
 pub mod prom_store;
 
 pub use influxdb::InfluxdbOptions;
+pub use jaeger::JaegerOptions;
 pub use mysql::MysqlOptions;
 pub use opentsdb::OpentsdbOptions;
 pub use otlp::OtlpOptions;
