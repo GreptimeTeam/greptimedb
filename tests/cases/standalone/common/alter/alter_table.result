@@ -55,6 +55,10 @@ ALTER TABLE test_alt_table ADD COLUMN m INTEGER;
 
 Affected Rows: 0
 
+ALTER TABLE test_alt_table ADD COLUMN dt DATETIME;
+
+Affected Rows: 0
+
 -- Should fail issue #5422
 ALTER TABLE test_alt_table ADD COLUMN n interval;
 
@@ -75,6 +79,7 @@ DESC TABLE test_alt_table;
 | j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | k      | String               | PRI | YES  |         | TAG           |
 | m      | Int32                |     | YES  |         | FIELD         |
+| dt     | TimestampMicrosecond |     | YES  |         | FIELD         |
 +--------+----------------------+-----+------+---------+---------------+
 
 DROP TABLE test_alt_table;

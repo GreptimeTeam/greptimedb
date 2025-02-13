@@ -166,7 +166,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         .unwrap();
 
     sqlx::query(
-        "create table demo(i bigint, ts timestamp time index default current_timestamp, d date default null, dt datetime default null, b blob default null, j json default null, v vector(3) default null)",
+        "create table demo(i bigint, ts timestamp time index default current_timestamp, d date default null, dt timestamp(3) default null, b blob default null, j json default null, v vector(3) default null)",
     )
     .execute(&pool)
     .await
@@ -449,7 +449,7 @@ pub async fn test_postgres_crud(store_type: StorageType) {
 
     for i in 0..10 {
         let d = NaiveDate::from_yo_opt(2015, 100).unwrap();
-        let dt = d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
+        let dt = d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_micros();
         let bytes = "hello".as_bytes();
         let json = serde_json::json!({
             "code": i,
