@@ -1084,6 +1084,12 @@ pub struct RegionCatchupRequest {
     pub location_id: Option<u64>,
 }
 
+/// Get sequences of regions by region ids.
+#[derive(Debug, Clone)]
+pub struct RegionSequencesRequest {
+    pub region_ids: Vec<RegionId>,
+}
+
 impl fmt::Display for RegionRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

@@ -234,6 +234,10 @@ impl DummyTableProvider {
         self.scan_request.lock().unwrap().series_row_selector = Some(selector);
     }
 
+    pub fn with_sequence(&self, sequence: u64) {
+        self.scan_request.lock().unwrap().sequence = Some(sequence);
+    }
+
     /// Gets the scan request of the provider.
     #[cfg(test)]
     pub fn scan_request(&self) -> ScanRequest {
@@ -249,6 +253,7 @@ impl TableProviderFactory for DummyTableProviderFactory {
         &self,
         region_id: RegionId,
         engine: RegionEngineRef,
+        ctx: Option<&session::context::QueryContext>,
     ) -> Result<Arc<dyn TableProvider>> {
         let metadata =
             engine
@@ -258,11 +263,20 @@ impl TableProviderFactory for DummyTableProviderFactory {
                     engine: engine.name(),
                     region_id,
                 })?;
+
+        let scan_request = ctx
+            .and_then(|c| c.get_snapshot(region_id.as_u64()))
+            .map(|seq| ScanRequest {
+                sequence: Some(seq),
+                ..Default::default()
+            })
+            .unwrap_or_default();
+
         Ok(Arc::new(DummyTableProvider {
             region_id,
             engine,
             metadata,
-            scan_request: Default::default(),
+            scan_request: Arc::new(Mutex::new(scan_request)),
         }))
     }
 }
@@ -273,6 +287,7 @@ pub trait TableProviderFactory: Send + Sync {
         &self,
         region_id: RegionId,
         engine: RegionEngineRef,
+        ctx: Option<&session::context::QueryContext>,
     ) -> Result<Arc<dyn TableProvider>>;
 }
 

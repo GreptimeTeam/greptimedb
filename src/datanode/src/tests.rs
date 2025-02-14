@@ -37,7 +37,7 @@ use store_api::region_engine::{
     SettableRegionRoleState,
 };
 use store_api::region_request::{AffectedRows, RegionRequest};
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 use table::TableRef;
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -215,6 +215,10 @@ impl RegionEngine for MockRegionEngine {
     }
 
     fn region_statistic(&self, _region_id: RegionId) -> Option<RegionStatistic> {
+        unimplemented!()
+    }
+
+    async fn get_last_seq_num(&self, _: RegionId) -> Result<Option<SequenceNumber>, BoxedError> {
         unimplemented!()
     }
 
