@@ -18,8 +18,8 @@ use std::time::Instant;
 
 use api::v1::value::ValueData;
 use api::v1::{
-    ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
-    Value as GreptimeValue,
+    ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
+    RowInsertRequest, RowInsertRequests, Rows, SemanticType, Value as GreptimeValue,
 };
 use axum::extract::State;
 use axum::Extension;
@@ -30,6 +30,7 @@ use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
 use hashbrown::HashMap;
 use headers::ContentType;
+use jsonb::Value;
 use lazy_static::lazy_static;
 use loki_proto::prost_types::Timestamp;
 use prost::Message;
@@ -53,6 +54,7 @@ use crate::{prom_store, unwrap_or_warn_continue};
 
 const LOKI_TABLE_NAME: &str = "loki_logs";
 const LOKI_LINE_COLUMN: &str = "line";
+const LOKI_STRUCTURED_METADATA_COLUMN: &str = "structured_metadata";
 
 const STREAMS_KEY: &str = "streams";
 const LABEL_KEY: &str = "stream";
@@ -75,6 +77,17 @@ lazy_static! {
             options: None,
         },
     ];
+    static ref LOKI_STRUCTURED_METADATA_COLUMN_SCHEMA: ColumnSchema = ColumnSchema {
+        column_name: LOKI_STRUCTURED_METADATA_COLUMN.to_string(),
+        datatype: ColumnDataType::Binary.into(),
+        semantic_type: SemanticType::Field.into(),
+        datatype_extension: Some(ColumnDataTypeExtension {
+            type_ext: Some(api::v1::column_data_type_extension::TypeExt::JsonType(
+                JsonTypeExtension::JsonBinary.into()
+            ))
+        }),
+        options: None,
+    };
 }
 
 #[axum_macros::debug_handler]
@@ -224,9 +237,28 @@ async fn handle_json_req(
                 stream_index,
                 line_index
             );
-            // TODO(shuiyisong): we'll ignore structured metadata for now
 
             let mut row = init_row(schemas.len(), ts, line_text);
+
+            let structured_metadata = line
+                .get(2)
+                .and_then(|sdata| sdata.as_str())
+                .and_then(|sdata| serde_json::from_str::<BTreeMap<String, String>>(sdata).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(k, v)| (k, Value::String(v.into())))
+                .collect::<BTreeMap<String, Value>>();
+
+            if !structured_metadata.is_empty() {
+                insert_schema_and_value(
+                    LOKI_STRUCTURED_METADATA_COLUMN,
+                    &mut column_indexer,
+                    schemas,
+                    &mut row,
+                    ValueData::BinaryValue(Value::Object(structured_metadata).to_vec()),
+                );
+            }
+
             process_labels(&mut column_indexer, schemas, &mut row, labels.as_ref());
 
             rows.push(row);
@@ -268,6 +300,23 @@ async fn handle_pb_req(
             let line = entry.line;
 
             let mut row = init_row(schemas.len(), prost_ts_to_nano(&ts), line);
+
+            let structured_metadata = entry
+                .structured_metadata
+                .into_iter()
+                .map(|d| (d.name, Value::String(d.value.into())))
+                .collect::<BTreeMap<String, Value>>();
+
+            if !structured_metadata.is_empty() {
+                insert_schema_and_value(
+                    LOKI_STRUCTURED_METADATA_COLUMN,
+                    &mut column_indexer,
+                    schemas,
+                    &mut row,
+                    ValueData::BinaryValue(Value::Object(structured_metadata).to_vec()),
+                );
+            }
+
             process_labels(&mut column_indexer, schemas, &mut row, labels.as_ref());
 
             rows.push(row);
@@ -385,28 +434,44 @@ fn process_labels(
 
     // insert labels
     for (k, v) in labels {
-        if let Some(index) = column_indexer.get(k) {
-            // exist in schema
-            // insert value using index
-            row[*index as usize] = GreptimeValue {
-                value_data: Some(ValueData::StringValue(v.clone())),
-            };
-        } else {
-            // not exist
-            // add schema and append to values
-            schemas.push(ColumnSchema {
-                column_name: k.clone(),
-                datatype: ColumnDataType::String.into(),
-                semantic_type: SemanticType::Tag.into(),
-                datatype_extension: None,
-                options: None,
-            });
-            column_indexer.insert(k.clone(), (schemas.len() - 1) as u16);
+        insert_schema_and_value(
+            k,
+            column_indexer,
+            schemas,
+            row,
+            ValueData::StringValue(v.clone()),
+        );
+    }
+}
 
-            row.push(GreptimeValue {
-                value_data: Some(ValueData::StringValue(v.clone())),
-            });
-        }
+fn insert_schema_and_value(
+    column_name: &str,
+    column_indexer: &mut HashMap<String, u16>,
+    schemas: &mut Vec<ColumnSchema>,
+    row: &mut Vec<GreptimeValue>,
+    value_data: ValueData,
+) {
+    if let Some(index) = column_indexer.get(column_name) {
+        // exist in schema
+        // insert value using index
+        row[*index as usize] = GreptimeValue {
+            value_data: Some(value_data),
+        };
+    } else {
+        // not exist
+        // add schema and append to values
+        schemas.push(ColumnSchema {
+            column_name: column_name.to_string(),
+            datatype: ColumnDataType::String.into(),
+            semantic_type: SemanticType::Tag.into(),
+            datatype_extension: None,
+            options: None,
+        });
+        column_indexer.insert(column_name.to_string(), (schemas.len() - 1) as u16);
+
+        row.push(GreptimeValue {
+            value_data: Some(value_data),
+        });
     }
 }
 
