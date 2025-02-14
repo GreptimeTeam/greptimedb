@@ -206,3 +206,36 @@ tql eval (0, 2000, '400') t2 or on(job) t1;
 drop table t1;
 
 drop table t2;
+
+create table cache_hit (
+    ts timestamp time index,
+    job string,
+    greptime_value double,
+    primary key (job)
+);
+
+create table cache_miss (
+    ts timestamp time index,
+    job string,
+    greptime_value double,
+    primary key (job)
+);
+
+insert into cache_hit values
+    (3000, "read", 1.0),
+    (3000, "write", 2.0),
+    (4000, "read", 3.0),
+    (4000, "write", 4.0);
+
+insert into cache_miss values
+    (3000, "read", 1.0),
+    (3000, "write", 2.0),
+    (4000, "read", 1.0),
+    (4000, "write", 2.0);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3, 4, '1s') cache_hit / (cache_miss + cache_hit);
+
+drop table cache_hit;
+
+drop table cache_miss;
