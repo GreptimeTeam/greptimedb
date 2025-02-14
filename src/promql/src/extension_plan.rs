@@ -36,3 +36,5 @@ pub use series_divide::{SeriesDivide, SeriesDivideExec, SeriesDivideStream};
 pub use union_distinct_on::{UnionDistinctOn, UnionDistinctOnExec, UnionDistinctOnStream};
 
 pub type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
+
+const METRIC_NUM_SERIES: &str = "num_series";

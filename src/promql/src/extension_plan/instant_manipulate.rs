@@ -26,20 +26,23 @@ use datafusion::common::{ColumnStatistics, DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
+use datafusion::physical_plan::metrics::{
+    BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricValue, MetricsSet,
+};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream, Statistics,
 };
 use datatypes::arrow::compute;
 use datatypes::arrow::error::Result as ArrowResult;
-use futures::{Stream, StreamExt};
+use futures::{ready, Stream, StreamExt};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
-use crate::extension_plan::Millisecond;
+use crate::extension_plan::{Millisecond, METRIC_NUM_SERIES};
+use crate::metrics::PROMQL_SERIES_COUNT;
 
 /// Manipulate the input record batch to make it suitable for Instant Operator.
 ///
@@ -242,6 +245,14 @@ impl ExecutionPlan for InstantManipulateExec {
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let baseline_metric = BaselineMetrics::new(&self.metric, partition);
+        let metrics_builder = MetricBuilder::new(&self.metric);
+        let num_series = Count::new();
+        metrics_builder
+            .with_partition(partition)
+            .build(MetricValue::Count {
+                name: METRIC_NUM_SERIES.into(),
+                count: num_series.clone(),
+            });
 
         let input = self.input.execute(partition, context)?;
         let schema = input.schema();
@@ -264,6 +275,7 @@ impl ExecutionPlan for InstantManipulateExec {
             schema,
             input,
             metric: baseline_metric,
+            num_series,
         }))
     }
 
@@ -326,6 +338,8 @@ pub struct InstantManipulateStream {
     schema: SchemaRef,
     input: SendableRecordBatchStream,
     metric: BaselineMetrics,
+    /// Number of series processed.
+    num_series: Count,
 }
 
 impl RecordBatchStream for InstantManipulateStream {
@@ -338,12 +352,19 @@ impl Stream for InstantManipulateStream {
     type Item = DataFusionResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let poll = match self.input.poll_next_unpin(cx) {
-            Poll::Ready(batch) => {
-                let _timer = self.metric.elapsed_compute().timer();
-                Poll::Ready(batch.map(|batch| batch.and_then(|batch| self.manipulate(batch))))
+        let timer = std::time::Instant::now();
+        let poll = match ready!(self.input.poll_next_unpin(cx)) {
+            Some(Ok(batch)) => {
+                self.num_series.add(1);
+                let result = Ok(batch).and_then(|batch| self.manipulate(batch));
+                self.metric.elapsed_compute().add_elapsed(timer);
+                Poll::Ready(Some(result))
             }
-            Poll::Pending => Poll::Pending,
+            None => {
+                PROMQL_SERIES_COUNT.observe(self.num_series.value() as f64);
+                Poll::Ready(None)
+            }
+            Some(Err(e)) => Poll::Ready(Some(Err(e))),
         };
         self.metric.record_poll(poll)
     }
