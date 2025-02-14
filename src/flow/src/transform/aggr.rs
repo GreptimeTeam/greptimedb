@@ -212,7 +212,7 @@ impl AggregateExprV2 {
         typ: &RelationDesc,
         extensions: &FunctionExtensions,
     ) -> Result<Vec<Self>, Error> {
-        let mut all_aggr_exprs = vec![];
+        let mut all_aggr_exprs = Vec::with_capacity(measures.len());
 
         for m in measures {
             let filter = match &m.filter {
@@ -244,7 +244,7 @@ impl AggregateExprV2 {
         // TODO(discord9): impl filter
         let _ = filter;
 
-        let mut args = vec![];
+        let mut args = Vec::with_capacity(f.arguments.len());
         for arg in &f.arguments {
             let arg_expr = match &arg.arg_type {
                 Some(ArgType::Value(e)) => {
@@ -378,7 +378,7 @@ impl KeyValPlan {
                 .any(|agg| agg.args.iter().any(|e| e.expr.as_column().is_none()));
             if need_mfp {
                 // create mfp from aggr_expr, and modify aggr_expr to use the output column of mfp
-                let mut input_exprs = Vec::new();
+                let mut input_exprs = Vec::with_capacity(aggr_exprs.len());
                 for aggr_expr in aggr_exprs.iter_mut() {
                     // FIX: also modify input_schema to fit input_exprs, a `new_input_schema` is needed
                     // so we can separate all scalar compute to a mfp before aggr
@@ -521,7 +521,7 @@ impl TypedPlan {
 
         // copy aggr_exprs to full_aggrs, and split them into simple_aggrs and distinct_aggrs
         // also set them input/output column
-        let mut full_aggrs = vec![];
+        let mut full_aggrs = Vec::with_capacity(aggr_exprs.len());
         for (idx, aggr) in aggr_exprs.into_iter().enumerate() {
             let input_idxs = aggr
                 .args

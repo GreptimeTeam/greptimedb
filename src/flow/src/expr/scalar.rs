@@ -103,8 +103,9 @@ impl ScalarExpr {
     pub fn as_physical_expr(&self, df_schema: &DFSchema) -> Result<Arc<dyn PhysicalExpr>, Error> {
         match self {
             Self::Column(i) => {
-                if *i >= df_schema.fields().len() {
-                    return InvalidQuerySnafu {
+                ensure!(
+                    *i < df_schema.fields().len(),
+                    InvalidQuerySnafu {
                         reason: format!(
                             "column index {} out of range of len={} in df_schema={:?}",
                             i,
@@ -112,8 +113,7 @@ impl ScalarExpr {
                             df_schema
                         ),
                     }
-                    .fail();
-                }
+                );
                 let field = df_schema.field(*i);
                 datafusion::physical_expr::expressions::col(field.name(), df_schema.as_arrow())
                     .with_context(|_| DatafusionSnafu {

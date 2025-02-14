@@ -91,12 +91,9 @@ impl AggregateExprV2 {
             is_distinct: self.is_distinct,
             exprs: &exprs,
         };
-        let acc = self
-            .func
-            .accumulator(accum_args)
-            .with_context(|_| DatafusionSnafu {
-                context: "Fail to build accumulator",
-            })?;
+        let acc = self.func.accumulator(accum_args).context(DatafusionSnafu {
+            context: "Fail to build accumulator",
+        })?;
         let acc = DfAccumulatorAdapter::new_unchecked(acc);
         Ok(Box::new(acc))
     }

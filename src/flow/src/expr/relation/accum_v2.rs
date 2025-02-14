@@ -14,16 +14,13 @@
 
 //! new accumulator trait that is more flexible and can be used in the future for more complex accumulators
 
-use std::any::type_name;
-use std::fmt::Display;
-
 use datafusion::logical_expr::Accumulator as DfAccumulator;
 use datatypes::prelude::{ConcreteDataType as CDT, DataType};
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, ResultExt};
 
-use crate::expr::error::{DataTypeSnafu, DatafusionSnafu, InternalSnafu, TryFromValueSnafu};
+use crate::expr::error::{DataTypeSnafu, DatafusionSnafu, InternalSnafu};
 use crate::expr::EvalError;
 
 ///  Basically a copy of datafusion's Accumulator, but with a few modifications
@@ -65,6 +62,7 @@ pub trait AccumulatorV2: Send + Sync + std::fmt::Debug {
         false
     }
 
+    /// Merge states using `&[Vec<Value>]` instead of `&[VectorRef]`
     fn merge_states(&mut self, states: &[Vec<Value>], typs: &[CDT]) -> Result<(), EvalError> {
         let states = states_to_batch(states, typs)?;
         self.merge_batch(&states)
@@ -135,7 +133,7 @@ impl AccumulatorV2 for DfAccumulatorAdapter {
                 Ok((val, dt))
             })
             .collect::<Result<Vec<_>, _>>()
-            .with_context(|_| DataTypeSnafu {
+            .context(DataTypeSnafu {
                 msg: "failed to convert `ScalarValue` state to `Value`",
             })?;
         Ok(state)
@@ -179,36 +177,13 @@ fn states_to_batch(states: &[Vec<Value>], dts: &[CDT]) -> Result<Vec<VectorRef>,
         .iter()
         .map(|dt| dt.create_mutable_vector(state_len))
         .collect::<Vec<_>>();
-    for i in 0..state_len {
-        for state in states.iter() {
-            // the j-th state's i-th value
-            let val = &state[i];
-            ret.get_mut(i)
-                .with_context(|| InternalSnafu {
-                    reason: format!("failed to get mutable vector at index {}", i),
-                })?
-                .push_value_ref(val.as_value_ref());
+    for (i, vectors) in ret.iter_mut().enumerate() {
+        for state in states {
+            vectors.push_value_ref(state[i].as_value_ref());
         }
     }
     let ret = ret.into_iter().map(|mut v| v.to_vector()).collect();
     Ok(ret)
-}
-
-fn fail_accum<T>() -> EvalError {
-    InternalSnafu {
-        reason: format!(
-            "list of values exhausted before a accum of type {} can be build from it",
-            type_name::<T>()
-        ),
-    }
-    .build()
-}
-
-fn err_try_from_val<T: Display>(reason: T) -> EvalError {
-    TryFromValueSnafu {
-        msg: reason.to_string(),
-    }
-    .build()
 }
 
 #[cfg(test)]
