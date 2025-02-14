@@ -235,7 +235,7 @@ Error: 1004(InvalidArguments), Invalid column option, column name: time, error: 
 -- Test invalid option values
 ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(blabla = 1024, index_type = 'wrong_type');
 
-Error: 1004(InvalidArguments), Invalid column option, column name: value, error: invalid SKIPPING INDEX option: index_type
+Error: 1004(InvalidArguments), Invalid column option, column name: value, error: invalid SKIPPING INDEX option: blabla
 
 -- Test partial options
 ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 4096);

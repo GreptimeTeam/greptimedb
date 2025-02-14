@@ -962,7 +962,7 @@ mod tests {
 
     #[test]
     fn test_parse_alter_column_fulltext() {
-        let sql = "ALTER TABLE test_table MODIFY COLUMN a SET FULLTEXT WITH(analyzer='English',case_sensitive='false')";
+        let sql = "ALTER TABLE test_table MODIFY COLUMN a SET FULLTEXT INDEX WITH(analyzer='English',case_sensitive='false')";
         let mut result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -999,7 +999,7 @@ mod tests {
             _ => unreachable!(),
         }
 
-        let sql = "ALTER TABLE test_table MODIFY COLUMN a UNSET FULLTEXT";
+        let sql = "ALTER TABLE test_table MODIFY COLUMN a UNSET FULLTEXT INDEX";
         let mut result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -1026,7 +1026,8 @@ mod tests {
             _ => unreachable!(),
         }
 
-        let invalid_sql = "ALTER TABLE test_table MODIFY COLUMN a SET FULLTEXT WITH('abcd'='true')";
+        let invalid_sql =
+            "ALTER TABLE test_table MODIFY COLUMN a SET FULLTEXT INDEX WITH('abcd'='true')";
         let result = ParserContext::create_with_dialect(
             invalid_sql,
             &GreptimeDbDialect {},

@@ -96,7 +96,7 @@ pub enum AlterTableOperation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum SetIndexOperation {
-    /// `MODIFY COLUMN <column_name> SET FULLTEXT [WITH <options>]`
+    /// `MODIFY COLUMN <column_name> SET FULLTEXT INDEX [WITH <options>]`
     Fulltext {
         column_name: Ident,
         options: FulltextOptions,
@@ -112,7 +112,7 @@ pub enum SetIndexOperation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum UnsetIndexOperation {
-    /// `MODIFY COLUMN <column_name> UNSET FULLTEXT`
+    /// `MODIFY COLUMN <column_name> UNSET FULLTEXT INDEX`
     Fulltext { column_name: Ident },
     /// `MODIFY COLUMN <column_name> UNSET INVERTED INDEX`
     Inverted { column_name: Ident },
@@ -181,7 +181,7 @@ impl Display for AlterTableOperation {
                     column_name,
                     options,
                 } => {
-                    write!(f, "MODIFY COLUMN {column_name} SET FULLTEXT WITH(analyzer={0}, case_sensitive={1})", options.analyzer, options.case_sensitive)
+                    write!(f, "MODIFY COLUMN {column_name} SET FULLTEXT INDEX WITH(analyzer={0}, case_sensitive={1})", options.analyzer, options.case_sensitive)
                 }
                 SetIndexOperation::Inverted { column_name } => {
                     write!(f, "MODIFY COLUMN {column_name} SET INVERTED INDEX")
@@ -195,7 +195,7 @@ impl Display for AlterTableOperation {
             },
             AlterTableOperation::UnsetIndex { options } => match options {
                 UnsetIndexOperation::Fulltext { column_name } => {
-                    write!(f, "MODIFY COLUMN {column_name} UNSET FULLTEXT")
+                    write!(f, "MODIFY COLUMN {column_name} UNSET FULLTEXT INDEX")
                 }
                 UnsetIndexOperation::Inverted { column_name } => {
                     write!(f, "MODIFY COLUMN {column_name} UNSET INVERTED INDEX")
@@ -425,7 +425,7 @@ ALTER TABLE monitor RENAME monitor_new"#,
             }
         }
 
-        let sql = "ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT WITH(analyzer='English',case_sensitive='false')";
+        let sql = "ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT INDEX WITH(analyzer='English',case_sensitive='false')";
         let stmts =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -437,7 +437,7 @@ ALTER TABLE monitor RENAME monitor_new"#,
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
-ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT WITH(analyzer=English, case_sensitive=false)"#,
+ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT INDEX WITH(analyzer=English, case_sensitive=false)"#,
                     &new_sql
                 );
             }
@@ -446,7 +446,7 @@ ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT WITH(analyzer=English, case_sen
             }
         }
 
-        let sql = "ALTER TABLE monitor MODIFY COLUMN a UNSET FULLTEXT";
+        let sql = "ALTER TABLE monitor MODIFY COLUMN a UNSET FULLTEXT INDEX";
         let stmts =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -458,7 +458,7 @@ ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT WITH(analyzer=English, case_sen
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
-ALTER TABLE monitor MODIFY COLUMN a UNSET FULLTEXT"#,
+ALTER TABLE monitor MODIFY COLUMN a UNSET FULLTEXT INDEX"#,
                     &new_sql
                 );
             }
