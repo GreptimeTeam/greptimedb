@@ -30,7 +30,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::FulltextOptions;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
-use strum::IntoStaticStr;
+use strum::{AsRefStr, IntoStaticStr};
 
 use crate::logstore::entry;
 use crate::metadata::{
@@ -475,7 +475,7 @@ impl TryFrom<AlterRequest> for RegionAlterRequest {
 }
 
 /// Kind of the alteration.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, AsRefStr)]
 pub enum AlterKind {
     /// Add columns to the region.
     AddColumns {

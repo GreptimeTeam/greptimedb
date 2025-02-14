@@ -13,8 +13,6 @@
 // limitations under the License.
 
 use api::v1::SemanticType;
-use common_error::ext::ErrorExt;
-use common_error::status_code::StatusCode;
 use common_telemetry::{debug, info, warn};
 use datatypes::schema::{SkippingIndexOptions, SkippingIndexType};
 use mito2::engine::MitoEngine;
@@ -32,10 +30,8 @@ use crate::error::{
     ColumnTypeMismatchSnafu, ForbiddenPhysicalAlterSnafu, MitoReadOperationSnafu,
     MitoWriteOperationSnafu, Result, SetSkippingIndexOptionSnafu,
 };
-use crate::metrics::{FORBIDDEN_OPERATION_COUNT, MITO_DDL_DURATION};
+use crate::metrics::{FORBIDDEN_OPERATION_COUNT, MITO_DDL_DURATION, PHYSICAL_COLUMN_COUNT};
 use crate::utils;
-
-const MAX_RETRIES: usize = 5;
 
 /// This is a generic handler like [MetricEngine](crate::engine::MetricEngine). It
 /// will handle all the data related operations across physical tables. Thus
@@ -65,33 +61,30 @@ impl DataRegion {
     pub async fn add_columns(
         &self,
         region_id: RegionId,
-        columns: &mut [ColumnMetadata],
+        columns: Vec<ColumnMetadata>,
         index_options: IndexOptions,
     ) -> Result<()> {
+        // Return early if no new columns are added.
+        if columns.is_empty() {
+            return Ok(());
+        }
+
         let region_id = utils::to_data_region_id(region_id);
 
-        let mut retries = 0;
-        // submit alter request
-        while retries < MAX_RETRIES {
-            let request = self
-                .assemble_alter_request(region_id, columns, index_options)
-                .await?;
+        let num_columns = columns.len();
+        let request = self
+            .assemble_alter_request(region_id, columns, index_options)
+            .await?;
 
-            let _timer = MITO_DDL_DURATION.start_timer();
+        let _timer = MITO_DDL_DURATION.start_timer();
 
-            let result = self.mito.handle_request(region_id, request).await;
-            match result {
-                Ok(_) => return Ok(()),
-                Err(e) if e.status_code() == StatusCode::RequestOutdated => {
-                    info!("Retrying alter {region_id} due to outdated schema version, times {retries}");
-                    retries += 1;
-                    continue;
-                }
-                Err(e) => {
-                    return Err(e).context(MitoWriteOperationSnafu)?;
-                }
-            }
-        }
+        let _ = self
+            .mito
+            .handle_request(region_id, request)
+            .await
+            .context(MitoWriteOperationSnafu)?;
+
+        PHYSICAL_COLUMN_COUNT.add(num_columns as _);
 
         Ok(())
     }
@@ -101,7 +94,7 @@ impl DataRegion {
     async fn assemble_alter_request(
         &self,
         region_id: RegionId,
-        columns: &mut [ColumnMetadata],
+        columns: Vec<ColumnMetadata>,
         index_options: IndexOptions,
     ) -> Result<RegionRequest> {
         // retrieve underlying version
@@ -128,9 +121,9 @@ impl DataRegion {
 
         // overwrite semantic type
         let new_columns = columns
-            .iter_mut()
+            .into_iter()
             .enumerate()
-            .map(|(delta, c)| {
+            .map(|(delta, mut c)| {
                 if c.semantic_type == SemanticType::Tag {
                     if !c.column_schema.data_type.is_string() {
                         return ColumnTypeMismatchSnafu {
@@ -254,7 +247,7 @@ mod test {
         // TestEnv will create a logical region which changes the version to 1.
         assert_eq!(current_version, 1);
 
-        let mut new_columns = vec![
+        let new_columns = vec![
             ColumnMetadata {
                 column_id: 0,
                 semantic_type: SemanticType::Tag,
@@ -277,7 +270,7 @@ mod test {
         env.data_region()
             .add_columns(
                 env.default_physical_region_id(),
-                &mut new_columns,
+                new_columns,
                 IndexOptions::Inverted,
             )
             .await
@@ -311,7 +304,7 @@ mod test {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
 
-        let mut new_columns = vec![ColumnMetadata {
+        let new_columns = vec![ColumnMetadata {
             column_id: 0,
             semantic_type: SemanticType::Tag,
             column_schema: ColumnSchema::new("tag2", ConcreteDataType::int64_datatype(), false),
@@ -320,7 +313,7 @@ mod test {
             .data_region()
             .add_columns(
                 env.default_physical_region_id(),
-                &mut new_columns,
+                new_columns,
                 IndexOptions::Inverted,
             )
             .await;

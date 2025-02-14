@@ -146,12 +146,17 @@ impl RegionEngine for MetricEngine {
                 })
             }
             BatchRegionDdlRequest::Alter(requests) => {
-                self.handle_requests(
-                    requests
-                        .into_iter()
-                        .map(|(region_id, req)| (region_id, RegionRequest::Alter(req))),
-                )
-                .await
+                let mut extension_return_value = HashMap::new();
+                let rows = self
+                    .inner
+                    .alter_regions(requests, &mut extension_return_value)
+                    .await
+                    .map_err(BoxedError::new)?;
+
+                Ok(RegionResponse {
+                    affected_rows: rows,
+                    extensions: extension_return_value,
+                })
             }
             BatchRegionDdlRequest::Drop(requests) => {
                 self.handle_requests(
@@ -184,7 +189,7 @@ impl RegionEngine for MetricEngine {
             RegionRequest::Close(close) => self.inner.close_region(region_id, close).await,
             RegionRequest::Alter(alter) => {
                 self.inner
-                    .alter_region(region_id, alter, &mut extension_return_value)
+                    .alter_regions(vec![(region_id, alter)], &mut extension_return_value)
                     .await
             }
             RegionRequest::Compact(_) => {

@@ -139,6 +139,15 @@ impl MetricEngineState {
         }
     }
 
+    pub fn invalid_logical_regions_cache(
+        &mut self,
+        logical_region_ids: impl IntoIterator<Item = RegionId>,
+    ) {
+        for logical_region_id in logical_region_ids {
+            self.logical_columns.remove(&logical_region_id);
+        }
+    }
+
     /// # Panic
     /// if the physical region does not exist
     pub fn add_logical_region(
@@ -231,10 +240,6 @@ impl MetricEngineState {
         self.logical_columns.remove(&logical_region_id);
 
         Ok(())
-    }
-
-    pub fn invalid_logical_column_cache(&mut self, logical_region_id: RegionId) {
-        self.logical_columns.remove(&logical_region_id);
     }
 
     pub fn is_logical_region_exist(&self, logical_region_id: RegionId) -> bool {
