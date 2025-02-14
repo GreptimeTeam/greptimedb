@@ -164,7 +164,7 @@ impl Stager for BoundedStager {
                     delete_queue: self.delete_queue.clone(),
                     size,
                 });
-                Ok(CacheValue::File { guard, size })
+                Ok(CacheValue::File(guard))
             })
             .await
             .context(CacheGetSnafu)?;
@@ -177,7 +177,7 @@ impl Stager for BoundedStager {
             }
         }
         match v {
-            CacheValue::File { guard, .. } => Ok(guard),
+            CacheValue::File(guard) => Ok(guard),
             _ => unreachable!(),
         }
     }
@@ -216,7 +216,7 @@ impl Stager for BoundedStager {
                     size,
                     delete_queue: self.delete_queue.clone(),
                 });
-                Ok(CacheValue::Dir { guard, size })
+                Ok(CacheValue::Dir(guard))
             })
             .await
             .context(CacheGetSnafu)?;
@@ -229,7 +229,7 @@ impl Stager for BoundedStager {
             }
         }
         match v {
-            CacheValue::Dir { guard, .. } => Ok(guard),
+            CacheValue::Dir(guard) => Ok(guard),
             _ => unreachable!(),
         }
     }
@@ -266,7 +266,7 @@ impl Stager for BoundedStager {
                     size,
                     delete_queue: self.delete_queue.clone(),
                 });
-                Ok(CacheValue::Dir { guard, size })
+                Ok(CacheValue::Dir(guard))
             })
             .await
             .map(|_| ())
@@ -368,38 +368,35 @@ impl BoundedStager {
 
                 if meta.is_dir() {
                     let size = Self::get_dir_size(&path).await?;
-                    let v = CacheValue::Dir {
-                        guard: Arc::new(FsDirGuard {
-                            path,
-                            size,
-                            delete_queue: self.delete_queue.clone(),
-                        }),
+                    let v = CacheValue::Dir(Arc::new(FsDirGuard {
+                        path,
                         size,
-                    };
+                        delete_queue: self.delete_queue.clone(),
+                    }));
                     // A duplicate dir will be moved to the delete queue.
                     let _dup_dir = elems.insert(key, v);
                 } else {
                     let size = meta.len();
-                    let v = CacheValue::File {
-                        guard: Arc::new(FsBlobGuard {
-                            path,
-                            size,
-                            delete_queue: self.delete_queue.clone(),
-                        }),
+                    let v = CacheValue::File(Arc::new(FsBlobGuard {
+                        path,
                         size,
-                    };
+                        delete_queue: self.delete_queue.clone(),
+                    }));
                     // A duplicate file will be moved to the delete queue.
                     let _dup_file = elems.insert(key, v);
                 }
             }
         }
 
+        let mut size = 0;
         for (key, value) in elems {
-            if let Some(notifier) = self.notifier.as_ref() {
-                notifier.on_cache_insert(value.size());
-            }
+            size += value.size();
             self.cache.insert(key, value).await;
         }
+        if let Some(notifier) = self.notifier.as_ref() {
+            notifier.on_cache_insert(size);
+        }
+
         self.cache.run_pending_tasks().await;
 
         Ok(())
@@ -490,15 +487,15 @@ impl Drop for BoundedStager {
 
 #[derive(Debug, Clone)]
 enum CacheValue {
-    File { guard: Arc<FsBlobGuard>, size: u64 },
-    Dir { guard: Arc<FsDirGuard>, size: u64 },
+    File(Arc<FsBlobGuard>),
+    Dir(Arc<FsDirGuard>),
 }
 
 impl CacheValue {
     fn size(&self) -> u64 {
         match self {
-            CacheValue::File { size, .. } => *size,
-            CacheValue::Dir { size, .. } => *size,
+            CacheValue::File(guard) => guard.size,
+            CacheValue::Dir(guard) => guard.size,
         }
     }
 
@@ -603,7 +600,7 @@ impl BoundedStager {
         let cache_key = Self::encode_cache_key(puffin_file_name, key);
         let value = self.cache.get(&cache_key).await.unwrap();
         let path = match &value {
-            CacheValue::File { guard, .. } => &guard.path,
+            CacheValue::File(guard) => &guard.path,
             _ => panic!("Expected a file, but got a directory."),
         };
         fs::File::open(path).await.unwrap()
@@ -613,7 +610,7 @@ impl BoundedStager {
         let cache_key = Self::encode_cache_key(puffin_file_name, key);
         let value = self.cache.get(&cache_key).await.unwrap();
         let path = match &value {
-            CacheValue::Dir { guard, .. } => &guard.path,
+            CacheValue::Dir(guard) => &guard.path,
             _ => panic!("Expected a directory, but got a file."),
         };
         path.clone()
