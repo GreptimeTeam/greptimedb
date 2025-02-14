@@ -71,6 +71,7 @@ pub struct StoreConfig {
     pub store_addrs: Vec<String>,
     pub setup_etcd: bool,
     pub setup_pg: bool,
+    pub setup_mysql: bool,
 }
 
 #[derive(Clone)]
@@ -160,7 +161,12 @@ impl Env {
             self.build_db();
             self.setup_wal();
             self.setup_etcd();
-            self.setup_pg();
+            if self.store_config.setup_pg {
+                self.setup_pg();
+            }
+            if self.store_config.setup_mysql {
+                self.setup_mysql();
+            }
 
             let db_ctx = GreptimeDBContext::new(self.wal.clone(), self.store_config.clone());
 
@@ -401,6 +407,21 @@ impl Env {
                     );
                     args.extend(vec!["--backend".to_string(), "postgres-store".to_string()]);
                     args.extend(vec!["--store-addrs".to_string(), pg_server_addr]);
+                } else if db_ctx.store_config().setup_mysql {
+                    let client_ports = self
+                        .store_config
+                        .store_addrs
+                        .iter()
+                        .map(|s| s.split(':').nth(1).unwrap().parse::<u16>().unwrap())
+                        .collect::<Vec<_>>();
+                    let client_port = client_ports.first().unwrap_or(&3306);
+                    let mysql_server_addr = format!(
+                        "
+                        mysql://greptimedb:admin@127.0.0.1:{}/mysql",
+                        client_port
+                    );
+                    args.extend(vec!["--backend".to_string(), "mysql-store".to_string()]);
+                    args.extend(vec!["--store-addrs".to_string(), mysql_server_addr]);
                 } else if db_ctx.store_config().store_addrs.is_empty() {
                     args.extend(vec!["--backend".to_string(), "memory-store".to_string()])
                 }
@@ -607,6 +628,20 @@ impl Env {
         }
     }
 
+    /// Setup MySql if needed.
+    fn setup_mysql(&self) {
+        if self.store_config.setup_mysql {
+            let client_ports = self
+                .store_config
+                .store_addrs
+                .iter()
+                .map(|s| s.split(':').nth(1).unwrap().parse::<u16>().unwrap())
+                .collect::<Vec<_>>();
+            let client_port = client_ports.first().unwrap_or(&3306);
+            util::setup_mysql(*client_port, None);
+        }
+    }
+
     /// Generate config file to `/tmp/{subcommand}-{current_time}.toml`
     fn generate_config_file(&self, subcommand: &str, db_ctx: &GreptimeDBContext) -> String {
         let mut tt = TinyTemplate::new();
@@ -683,7 +718,13 @@ impl Env {
         println!("Going to build the DB...");
         let output = Command::new("cargo")
             .current_dir(util::get_workspace_root())
-            .args(["build", "--bin", "greptime"])
+            .args([
+                "build",
+                "--bin",
+                "greptime",
+                "--features",
+                "\"pg_kvbackend,mysql_kvbackend\"",
+            ])
             .output()
             .expect("Failed to start GreptimeDB");
         if !output.status.success() {

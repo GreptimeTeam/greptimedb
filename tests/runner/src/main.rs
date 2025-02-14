@@ -110,6 +110,10 @@ struct Args {
     /// Whether to setup pg, by default it is false.
     #[clap(long, default_value = "false")]
     setup_pg: bool,
+
+    /// Whether to setup mysql, by default it is false.
+    #[clap(long, default_value = "false")]
+    setup_mysql: bool,
 }
 
 #[tokio::main]
@@ -159,6 +163,7 @@ async fn main() {
         store_addrs: args.store_addrs.clone(),
         setup_etcd: args.setup_etcd,
         setup_pg: args.setup_pg,
+        setup_mysql: args.setup_mysql,
     };
 
     let runner = Runner::new(
