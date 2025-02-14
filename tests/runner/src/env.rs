@@ -162,7 +162,7 @@ impl Env {
             self.setup_wal();
             self.setup_etcd();
             self.setup_pg();
-            self.setup_mysql();
+            self.setup_mysql().await;
 
             let db_ctx = GreptimeDBContext::new(self.wal.clone(), self.store_config.clone());
 
@@ -622,7 +622,7 @@ impl Env {
     }
 
     /// Setup MySql if needed.
-    fn setup_mysql(&self) {
+    async fn setup_mysql(&self) {
         if self.store_config.setup_mysql {
             let client_ports = self
                 .store_config
@@ -632,6 +632,9 @@ impl Env {
                 .collect::<Vec<_>>();
             let client_port = client_ports.first().unwrap_or(&3306);
             util::setup_mysql(*client_port, None);
+
+            // Docker of MySQL starts slowly, so we need to wait for a while
+            tokio::time::sleep(Duration::from_secs(10)).await;
         }
     }
 
