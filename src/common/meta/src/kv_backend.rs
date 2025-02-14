@@ -32,7 +32,7 @@ pub mod chroot;
 pub mod etcd;
 pub mod memory;
 #[cfg(feature = "pg_kvbackend")]
-pub mod postgres;
+pub mod rds;
 pub mod test;
 pub mod txn;
 

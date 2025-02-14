@@ -2516,6 +2516,22 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
 
     let client = TestClient::new(app).await;
 
+    // Test empty response for `/api/services` API before writing any traces.
+    let res = client.get("/v1/jaeger/api/services").send().await;
+    assert_eq!(StatusCode::OK, res.status());
+    let expected = r#"
+    {
+        "data": null,
+        "total": 0,
+        "limit": 0,
+        "offset": 0,
+        "errors": []
+    }
+    "#;
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
+
     let content = r#"
     {
         "resourceSpans": [

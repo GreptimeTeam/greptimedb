@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 testing = []
-pg_kvbackend = ["dep:tokio-postgres", "dep:backon"]
+pg_kvbackend = ["dep:tokio-postgres", "dep:backon", "dep:deadpool-postgres", "dep:deadpool"]
 
 [lints]
 workspace = true
@@ -36,8 +36,8 @@ common-wal.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datatypes.workspace = true
-deadpool.workspace = true
-deadpool-postgres.workspace = true
+deadpool = { workspace = true, optional = true }
+deadpool-postgres = { workspace = true, optional = true }
 derive_builder.workspace = true
 etcd-client.workspace = true
 futures.workspace = true

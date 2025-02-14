@@ -30,7 +30,7 @@ async fn new_bounded_stager(prefix: &str) -> (TempDir, Arc<BoundedStager>) {
     let path = staging_dir.path().to_path_buf();
     (
         staging_dir,
-        Arc::new(BoundedStager::new(path, 102400).await.unwrap()),
+        Arc::new(BoundedStager::new(path, 102400, None).await.unwrap()),
     )
 }
 

@@ -465,3 +465,57 @@ drop table t2;
 
 Affected Rows: 0
 
+create table cache_hit (
+    ts timestamp time index,
+    job string,
+    greptime_value double,
+    primary key (job)
+);
+
+Affected Rows: 0
+
+create table cache_miss (
+    ts timestamp time index,
+    job string,
+    greptime_value double,
+    primary key (job)
+);
+
+Affected Rows: 0
+
+insert into cache_hit values
+    (3000, "read", 1.0),
+    (3000, "write", 2.0),
+    (4000, "read", 3.0),
+    (4000, "write", 4.0);
+
+Affected Rows: 4
+
+insert into cache_miss values
+    (3000, "read", 1.0),
+    (3000, "write", 2.0),
+    (4000, "read", 1.0),
+    (4000, "write", 2.0);
+
+Affected Rows: 4
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3, 4, '1s') cache_hit / (cache_miss + cache_hit);
+
++-------+---------------------+-------------------------------------------------------------------------------+
+| job   | ts                  | lhs.greptime_value / rhs.cache_miss.greptime_value + cache_hit.greptime_value |
++-------+---------------------+-------------------------------------------------------------------------------+
+| read  | 1970-01-01T00:00:03 | 0.5                                                                           |
+| read  | 1970-01-01T00:00:04 | 0.75                                                                          |
+| write | 1970-01-01T00:00:03 | 0.5                                                                           |
+| write | 1970-01-01T00:00:04 | 0.6666666666666666                                                            |
++-------+---------------------+-------------------------------------------------------------------------------+
+
+drop table cache_hit;
+
+Affected Rows: 0
+
+drop table cache_miss;
+
+Affected Rows: 0
+

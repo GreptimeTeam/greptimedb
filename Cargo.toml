@@ -81,6 +81,7 @@ rust.unknown_lints = "deny"
 rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 
 [workspace.dependencies]
+# DO_NOT_REMOVE_THIS: BEGIN_OF_EXTERNAL_DEPENDENCIES
 # We turn off default-features for some dependencies here so the workspaces which inherit them can
 # selectively turn them on if needed, since we can override default-features = true (from false)
 # for the inherited dependency but cannot do the reverse (override from true to false).
@@ -208,6 +209,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"]
 typetag = "0.2"
 uuid = { version = "1.7", features = ["serde", "v4", "fast-rng"] }
 zstd = "0.13"
+# DO_NOT_REMOVE_THIS: END_OF_EXTERNAL_DEPENDENCIES
 
 ## workspaces members
 api = { path = "src/api" }

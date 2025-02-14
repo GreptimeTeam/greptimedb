@@ -33,7 +33,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
-use strum::IntoStaticStr;
+use strum::{AsRefStr, IntoStaticStr};
 
 use crate::logstore::entry;
 use crate::metadata::{
@@ -478,7 +478,7 @@ impl TryFrom<AlterRequest> for RegionAlterRequest {
 }
 
 /// Kind of the alteration.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, AsRefStr)]
 pub enum AlterKind {
     /// Add columns to the region.
     AddColumns {
@@ -1111,6 +1111,12 @@ pub struct RegionCatchupRequest {
     pub entry_id: Option<entry::Id>,
     /// The hint for replaying memtable.
     pub location_id: Option<u64>,
+}
+
+/// Get sequences of regions by region ids.
+#[derive(Debug, Clone)]
+pub struct RegionSequencesRequest {
+    pub region_ids: Vec<RegionId>,
 }
 
 impl fmt::Display for RegionRequest {
