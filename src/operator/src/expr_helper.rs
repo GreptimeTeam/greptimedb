@@ -19,7 +19,12 @@ use api::v1::alter_database_expr::Kind as AlterDatabaseKind;
 use api::v1::alter_table_expr::Kind as AlterTableKind;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{
-    set_index, unset_index, AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer, ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr, DropColumn, DropColumns, ExpireAfter, ModifyColumnType, ModifyColumnTypes, RenameTable, SemanticType, SetDatabaseOptions, SetFulltext, SetIndex, SetInverted, SetSkipping, SetTableOptions, SkippingIndexType as PbSkippingIndexType, TableName, UnsetDatabaseOptions, UnsetFulltext, UnsetIndex, UnsetInverted, UnsetSkipping, UnsetTableOptions
+    set_index, unset_index, AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer,
+    ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
+    DropColumn, DropColumns, ExpireAfter, ModifyColumnType, ModifyColumnTypes, RenameTable,
+    SemanticType, SetDatabaseOptions, SetFulltext, SetIndex, SetInverted, SetSkipping,
+    SetTableOptions, SkippingIndexType as PbSkippingIndexType, TableName, UnsetDatabaseOptions,
+    UnsetFulltext, UnsetIndex, UnsetInverted, UnsetSkipping, UnsetTableOptions,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
