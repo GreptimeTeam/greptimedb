@@ -54,92 +54,98 @@ TQL EVAL (0, 15, '5s') sort_desc(test{host="host1"});
 | 1970-01-01T00:00:15 | 1   | host1 | idc1 |
 +---------------------+-----+-------+------+
 
+-- SQLNESS REPLACE (\s1970-01-01T\d\d:\d\d:\d\d) timestamp
 TQL EVAL (0, 15, '5s') sort(sum(test{host="host2"}) by (idc));
 
 +---------------------+---------------+------+
 | ts                  | sum(test.val) | idc  |
 +---------------------+---------------+------+
-| 1970-01-01T00:00:05 | 2             | idc1 |
-| 1970-01-01T00:00:00 | 2             | idc1 |
-| 1970-01-01T00:00:10 | 2             | idc1 |
-| 1970-01-01T00:00:15 | 2             | idc1 |
-| 1970-01-01T00:00:15 | 4             | idc2 |
-| 1970-01-01T00:00:05 | 4             | idc2 |
-| 1970-01-01T00:00:10 | 4             | idc2 |
-| 1970-01-01T00:00:10 | 6             | idc3 |
-| 1970-01-01T00:00:15 | 6             | idc3 |
-| 1970-01-01T00:00:15 | 8             | idc4 |
+|timestamp | 2             | idc1 |
+|timestamp | 2             | idc1 |
+|timestamp | 2             | idc1 |
+|timestamp | 2             | idc1 |
+|timestamp | 4             | idc2 |
+|timestamp | 4             | idc2 |
+|timestamp | 4             | idc2 |
+|timestamp | 6             | idc3 |
+|timestamp | 6             | idc3 |
+|timestamp | 8             | idc4 |
 +---------------------+---------------+------+
 
+-- SQLNESS REPLACE (\s1970-01-01T\d\d:\d\d:\d\d) timestamp
 TQL EVAL (0, 15, '5s') sort_desc(sum(test{host="host2"}) by (idc));
 
 +---------------------+---------------+------+
 | ts                  | sum(test.val) | idc  |
 +---------------------+---------------+------+
-| 1970-01-01T00:00:15 | 8             | idc4 |
-| 1970-01-01T00:00:10 | 6             | idc3 |
-| 1970-01-01T00:00:15 | 6             | idc3 |
-| 1970-01-01T00:00:15 | 4             | idc2 |
-| 1970-01-01T00:00:05 | 4             | idc2 |
-| 1970-01-01T00:00:10 | 4             | idc2 |
-| 1970-01-01T00:00:05 | 2             | idc1 |
-| 1970-01-01T00:00:00 | 2             | idc1 |
-| 1970-01-01T00:00:10 | 2             | idc1 |
-| 1970-01-01T00:00:15 | 2             | idc1 |
+|timestamp | 8             | idc4 |
+|timestamp | 6             | idc3 |
+|timestamp | 6             | idc3 |
+|timestamp | 4             | idc2 |
+|timestamp | 4             | idc2 |
+|timestamp | 4             | idc2 |
+|timestamp | 2             | idc1 |
+|timestamp | 2             | idc1 |
+|timestamp | 2             | idc1 |
+|timestamp | 2             | idc1 |
 +---------------------+---------------+------+
 
+-- SQLNESS REPLACE (\s1970-01-01T\d\d:\d\d:\d\d) timestamp
+-- SQLNESS REPLACE (\s\d\s) val
 TQL EVAL (0, 15, '5s') sort_by_label(sum(test) by (idc, host), "idc", "host");
 
 +---------------------+---------------+------+-------+
 | ts                  | sum(test.val) | idc  | host  |
 +---------------------+---------------+------+-------+
-| 1970-01-01T00:00:00 | 1             | idc1 | host1 |
-| 1970-01-01T00:00:05 | 1             | idc1 | host1 |
-| 1970-01-01T00:00:10 | 1             | idc1 | host1 |
-| 1970-01-01T00:00:15 | 1             | idc1 | host1 |
-| 1970-01-01T00:00:00 | 2             | idc1 | host2 |
-| 1970-01-01T00:00:05 | 2             | idc1 | host2 |
-| 1970-01-01T00:00:10 | 2             | idc1 | host2 |
-| 1970-01-01T00:00:15 | 2             | idc1 | host2 |
-| 1970-01-01T00:00:05 | 3             | idc2 | host1 |
-| 1970-01-01T00:00:10 | 3             | idc2 | host1 |
-| 1970-01-01T00:00:15 | 3             | idc2 | host1 |
-| 1970-01-01T00:00:05 | 4             | idc2 | host2 |
-| 1970-01-01T00:00:10 | 4             | idc2 | host2 |
-| 1970-01-01T00:00:15 | 4             | idc2 | host2 |
-| 1970-01-01T00:00:10 | 5             | idc3 | host1 |
-| 1970-01-01T00:00:15 | 5             | idc3 | host1 |
-| 1970-01-01T00:00:10 | 6             | idc3 | host2 |
-| 1970-01-01T00:00:15 | 6             | idc3 | host2 |
-| 1970-01-01T00:00:15 | 7             | idc4 | host1 |
-| 1970-01-01T00:00:15 | 8             | idc4 | host2 |
+|timestamp |val            | idc1 | host1 |
+|timestamp |val            | idc1 | host1 |
+|timestamp |val            | idc1 | host1 |
+|timestamp |val            | idc1 | host1 |
+|timestamp |val            | idc1 | host2 |
+|timestamp |val            | idc1 | host2 |
+|timestamp |val            | idc1 | host2 |
+|timestamp |val            | idc1 | host2 |
+|timestamp |val            | idc2 | host1 |
+|timestamp |val            | idc2 | host1 |
+|timestamp |val            | idc2 | host1 |
+|timestamp |val            | idc2 | host2 |
+|timestamp |val            | idc2 | host2 |
+|timestamp |val            | idc2 | host2 |
+|timestamp |val            | idc3 | host1 |
+|timestamp |val            | idc3 | host1 |
+|timestamp |val            | idc3 | host2 |
+|timestamp |val            | idc3 | host2 |
+|timestamp |val            | idc4 | host1 |
+|timestamp |val            | idc4 | host2 |
 +---------------------+---------------+------+-------+
 
+-- SQLNESS REPLACE (\s1970-01-01T\d\d:\d\d:\d\d) timestamp
+-- SQLNESS REPLACE (\s\d\s) val
 TQL EVAL (0, 15, '5s') sort_by_label_desc(sum(test) by (idc, host), "idc", "host");
 
 +---------------------+---------------+------+-------+
 | ts                  | sum(test.val) | idc  | host  |
 +---------------------+---------------+------+-------+
-| 1970-01-01T00:00:15 | 8             | idc4 | host2 |
-| 1970-01-01T00:00:15 | 7             | idc4 | host1 |
-| 1970-01-01T00:00:15 | 6             | idc3 | host2 |
-| 1970-01-01T00:00:10 | 6             | idc3 | host2 |
-| 1970-01-01T00:00:10 | 5             | idc3 | host1 |
-| 1970-01-01T00:00:15 | 5             | idc3 | host1 |
-| 1970-01-01T00:00:10 | 4             | idc2 | host2 |
-| 1970-01-01T00:00:05 | 4             | idc2 | host2 |
-| 1970-01-01T00:00:15 | 4             | idc2 | host2 |
-| 1970-01-01T00:00:15 | 3             | idc2 | host1 |
-| 1970-01-01T00:00:05 | 3             | idc2 | host1 |
-| 1970-01-01T00:00:10 | 3             | idc2 | host1 |
-| 1970-01-01T00:00:00 | 2             | idc1 | host2 |
-| 1970-01-01T00:00:05 | 2             | idc1 | host2 |
-| 1970-01-01T00:00:15 | 2             | idc1 | host2 |
-| 1970-01-01T00:00:10 | 2             | idc1 | host2 |
-| 1970-01-01T00:00:00 | 1             | idc1 | host1 |
-| 1970-01-01T00:00:15 | 1             | idc1 | host1 |
-| 1970-01-01T00:00:05 | 1             | idc1 | host1 |
-| 1970-01-01T00:00:10 | 1             | idc1 | host1 |
+|timestamp |val            | idc4 | host2 |
+|timestamp |val            | idc4 | host1 |
+|timestamp |val            | idc3 | host2 |
+|timestamp |val            | idc3 | host2 |
+|timestamp |val            | idc3 | host1 |
+|timestamp |val            | idc3 | host1 |
+|timestamp |val            | idc2 | host2 |
+|timestamp |val            | idc2 | host2 |
+|timestamp |val            | idc2 | host2 |
+|timestamp |val            | idc2 | host1 |
+|timestamp |val            | idc2 | host1 |
+|timestamp |val            | idc2 | host1 |
+|timestamp |val            | idc1 | host2 |
+|timestamp |val            | idc1 | host2 |
+|timestamp |val            | idc1 | host2 |
+|timestamp |val            | idc1 | host2 |
+|timestamp |val            | idc1 | host1 |
+|timestamp |val            | idc1 | host1 |
+|timestamp |val            | idc1 | host1 |
+|timestamp |val            | idc1 | host1 |
 +---------------------+---------------+------+-------+
 
 drop table test;

@@ -21,12 +21,18 @@ TQL EVAL (0, 15, '5s') sort(test{host="host1"});
 
 TQL EVAL (0, 15, '5s') sort_desc(test{host="host1"});
 
+-- SQLNESS REPLACE (\s1970-01-01T\d\d:\d\d:\d\d) timestamp
 TQL EVAL (0, 15, '5s') sort(sum(test{host="host2"}) by (idc));
 
+-- SQLNESS REPLACE (\s1970-01-01T\d\d:\d\d:\d\d) timestamp
 TQL EVAL (0, 15, '5s') sort_desc(sum(test{host="host2"}) by (idc));
 
+-- SQLNESS REPLACE (\s1970-01-01T\d\d:\d\d:\d\d) timestamp
+-- SQLNESS REPLACE (\s\d\s) val
 TQL EVAL (0, 15, '5s') sort_by_label(sum(test) by (idc, host), "idc", "host");
 
+-- SQLNESS REPLACE (\s1970-01-01T\d\d:\d\d:\d\d) timestamp
+-- SQLNESS REPLACE (\s\d\s) val
 TQL EVAL (0, 15, '5s') sort_by_label_desc(sum(test) by (idc, host), "idc", "host");
 
 drop table test;
