@@ -686,8 +686,8 @@ pub enum Error {
     },
 
     #[cfg(feature = "pg_kvbackend")]
-    #[snafu(display("Postgres transaction retry failed"))]
-    PostgresTransactionRetryFailed {
+    #[snafu(display("Rds transaction retry failed"))]
+    RdsTransactionRetryFailed {
         #[snafu(implicit)]
         location: Location,
     },
@@ -824,7 +824,7 @@ impl ErrorExt for Error {
             | CreatePostgresPool { .. }
             | GetPostgresConnection { .. }
             | PostgresTransaction { .. }
-            | PostgresTransactionRetryFailed { .. } => StatusCode::Internal,
+            | RdsTransactionRetryFailed { .. } => StatusCode::Internal,
             Error::DatanodeTableInfoNotFound { .. } => StatusCode::Internal,
         }
     }
