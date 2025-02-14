@@ -76,18 +76,18 @@ lazy_static! {
             datatype_extension: None,
             options: None,
         },
+        ColumnSchema {
+            column_name: LOKI_STRUCTURED_METADATA_COLUMN.to_string(),
+            datatype: ColumnDataType::Binary.into(),
+            semantic_type: SemanticType::Field.into(),
+            datatype_extension: Some(ColumnDataTypeExtension {
+                type_ext: Some(api::v1::column_data_type_extension::TypeExt::JsonType(
+                    JsonTypeExtension::JsonBinary.into()
+                ))
+            }),
+            options: None,
+        }
     ];
-    static ref LOKI_STRUCTURED_METADATA_COLUMN_SCHEMA: ColumnSchema = ColumnSchema {
-        column_name: LOKI_STRUCTURED_METADATA_COLUMN.to_string(),
-        datatype: ColumnDataType::Binary.into(),
-        semantic_type: SemanticType::Field.into(),
-        datatype_extension: Some(ColumnDataTypeExtension {
-            type_ext: Some(api::v1::column_data_type_extension::TypeExt::JsonType(
-                JsonTypeExtension::JsonBinary.into()
-            ))
-        }),
-        options: None,
-    };
 }
 
 #[axum_macros::debug_handler]
@@ -238,26 +238,19 @@ async fn handle_json_req(
                 line_index
             );
 
-            let mut row = init_row(schemas.len(), ts, line_text);
-
             let structured_metadata = line
                 .get(2)
-                .and_then(|sdata| sdata.as_str())
-                .and_then(|sdata| serde_json::from_str::<BTreeMap<String, String>>(sdata).ok())
+                .and_then(|sdata| sdata.as_object().cloned())
                 .unwrap_or_default()
                 .into_iter()
-                .map(|(k, v)| (k, Value::String(v.into())))
+                .filter_map(|(k, v)| {
+                    v.as_str()
+                        .map(|v| (k.clone(), Value::String(v.to_string().into())))
+                })
                 .collect::<BTreeMap<String, Value>>();
+            let structured_metadata = Value::Object(structured_metadata);
 
-            if !structured_metadata.is_empty() {
-                insert_schema_and_value(
-                    LOKI_STRUCTURED_METADATA_COLUMN,
-                    &mut column_indexer,
-                    schemas,
-                    &mut row,
-                    ValueData::BinaryValue(Value::Object(structured_metadata).to_vec()),
-                );
-            }
+            let mut row = init_row(schemas.len(), ts, line_text, structured_metadata);
 
             process_labels(&mut column_indexer, schemas, &mut row, labels.as_ref());
 
@@ -299,23 +292,19 @@ async fn handle_pb_req(
             };
             let line = entry.line;
 
-            let mut row = init_row(schemas.len(), prost_ts_to_nano(&ts), line);
-
             let structured_metadata = entry
                 .structured_metadata
                 .into_iter()
                 .map(|d| (d.name, Value::String(d.value.into())))
                 .collect::<BTreeMap<String, Value>>();
+            let structured_metadata = Value::Object(structured_metadata);
 
-            if !structured_metadata.is_empty() {
-                insert_schema_and_value(
-                    LOKI_STRUCTURED_METADATA_COLUMN,
-                    &mut column_indexer,
-                    schemas,
-                    &mut row,
-                    ValueData::BinaryValue(Value::Object(structured_metadata).to_vec()),
-                );
-            }
+            let mut row = init_row(
+                schemas.len(),
+                prost_ts_to_nano(&ts),
+                line,
+                structured_metadata,
+            );
 
             process_labels(&mut column_indexer, schemas, &mut row, labels.as_ref());
 
@@ -406,7 +395,12 @@ fn prost_ts_to_nano(ts: &Timestamp) -> i64 {
     ts.seconds * 1_000_000_000 + ts.nanos as i64
 }
 
-fn init_row(schema_len: usize, ts: i64, line: String) -> Vec<GreptimeValue> {
+fn init_row(
+    schema_len: usize,
+    ts: i64,
+    line: String,
+    structured_metadata: Value,
+) -> Vec<GreptimeValue> {
     // create and init row
     let mut row = Vec::with_capacity(schema_len);
     // set ts and line
@@ -416,7 +410,10 @@ fn init_row(schema_len: usize, ts: i64, line: String) -> Vec<GreptimeValue> {
     row.push(GreptimeValue {
         value_data: Some(ValueData::StringValue(line)),
     });
-    for _ in 0..(schema_len - 2) {
+    row.push(GreptimeValue {
+        value_data: Some(ValueData::BinaryValue(structured_metadata.to_vec())),
+    });
+    for _ in 0..(schema_len - 3) {
         row.push(GreptimeValue { value_data: None });
     }
     row
@@ -439,6 +436,13 @@ fn process_labels(
             column_indexer,
             schemas,
             row,
+            ColumnSchema {
+                column_name: k.clone(),
+                datatype: ColumnDataType::String.into(),
+                semantic_type: SemanticType::Tag.into(),
+                datatype_extension: None,
+                options: None,
+            },
             ValueData::StringValue(v.clone()),
         );
     }
@@ -449,28 +453,23 @@ fn insert_schema_and_value(
     column_indexer: &mut HashMap<String, u16>,
     schemas: &mut Vec<ColumnSchema>,
     row: &mut Vec<GreptimeValue>,
-    value_data: ValueData,
+    new_column_schema: ColumnSchema,
+    new_value_data: ValueData,
 ) {
     if let Some(index) = column_indexer.get(column_name) {
         // exist in schema
         // insert value using index
         row[*index as usize] = GreptimeValue {
-            value_data: Some(value_data),
+            value_data: Some(new_value_data),
         };
     } else {
         // not exist
         // add schema and append to values
-        schemas.push(ColumnSchema {
-            column_name: column_name.to_string(),
-            datatype: ColumnDataType::String.into(),
-            semantic_type: SemanticType::Tag.into(),
-            datatype_extension: None,
-            options: None,
-        });
+        schemas.push(new_column_schema);
         column_indexer.insert(column_name.to_string(), (schemas.len() - 1) as u16);
 
         row.push(GreptimeValue {
-            value_data: Some(value_data),
+            value_data: Some(new_value_data),
         });
     }
 }
