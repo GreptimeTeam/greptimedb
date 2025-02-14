@@ -439,7 +439,6 @@ pub trait RegionEngine: Send + Sync {
     ) -> Result<RegionResponse, BoxedError>;
 
     /// Returns the last sequence number of the region.
-    #[allow(unused)]
     async fn get_last_seq_num(
         &self,
         region_id: RegionId,

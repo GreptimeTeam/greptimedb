@@ -344,13 +344,13 @@ impl QueryContext {
     }
 
     pub fn snapshots(&self) -> Option<HashMap<u64, u64>> {
-        self.snapshot_seqs.read().expect("lock poisoned").clone()
+        self.snapshot_seqs.read().unwrap().clone()
     }
 
     pub fn get_snapshot(&self, region_id: u64) -> Option<u64> {
         self.snapshot_seqs
             .read()
-            .expect("lock poisoned")
+            .unwrap()
             .as_ref()?
             .get(&region_id)
             .cloned()

@@ -80,10 +80,7 @@ impl VersionControl {
 
     /// Sequence number of last committed data.
     pub(crate) fn committed_sequence(&self) -> SequenceNumber {
-        self.data
-            .read()
-            .expect("lock is already held by the current thread")
-            .committed_sequence
+        self.data.read().unwrap().committed_sequence
     }
 
     /// Freezes the mutable memtable if it is not empty.
