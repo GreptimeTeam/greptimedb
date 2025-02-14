@@ -431,46 +431,28 @@ fn process_labels(
 
     // insert labels
     for (k, v) in labels {
-        insert_schema_and_value(
-            k,
-            column_indexer,
-            schemas,
-            row,
-            ColumnSchema {
+        if let Some(index) = column_indexer.get(k) {
+            // exist in schema
+            // insert value using index
+            row[*index as usize] = GreptimeValue {
+                value_data: Some(ValueData::StringValue(v.clone())),
+            };
+        } else {
+            // not exist
+            // add schema and append to values
+            schemas.push(ColumnSchema {
                 column_name: k.clone(),
                 datatype: ColumnDataType::String.into(),
                 semantic_type: SemanticType::Tag.into(),
                 datatype_extension: None,
                 options: None,
-            },
-            ValueData::StringValue(v.clone()),
-        );
-    }
-}
+            });
+            column_indexer.insert(k.clone(), (schemas.len() - 1) as u16);
 
-fn insert_schema_and_value(
-    column_name: &str,
-    column_indexer: &mut HashMap<String, u16>,
-    schemas: &mut Vec<ColumnSchema>,
-    row: &mut Vec<GreptimeValue>,
-    new_column_schema: ColumnSchema,
-    new_value_data: ValueData,
-) {
-    if let Some(index) = column_indexer.get(column_name) {
-        // exist in schema
-        // insert value using index
-        row[*index as usize] = GreptimeValue {
-            value_data: Some(new_value_data),
-        };
-    } else {
-        // not exist
-        // add schema and append to values
-        schemas.push(new_column_schema);
-        column_indexer.insert(column_name.to_string(), (schemas.len() - 1) as u16);
-
-        row.push(GreptimeValue {
-            value_data: Some(new_value_data),
-        });
+            row.push(GreptimeValue {
+                value_data: Some(ValueData::StringValue(v.clone())),
+            });
+        }
     }
 }
 
