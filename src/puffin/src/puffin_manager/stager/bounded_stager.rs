@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use async_walkdir::{Filtering, WalkDir};
@@ -152,12 +152,14 @@ impl Stager for BoundedStager {
                 }
 
                 miss = true;
+                let timer = Instant::now();
                 let file_name = format!("{}.{}", cache_key, uuid::Uuid::new_v4());
                 let path = self.base_dir.join(&file_name);
 
                 let size = Self::write_blob(&path, init_fn).await?;
                 if let Some(notifier) = self.notifier.as_ref() {
                     notifier.on_cache_insert(size);
+                    notifier.on_load_blob(timer.elapsed());
                 }
                 let guard = Arc::new(FsBlobGuard {
                     path,
@@ -204,12 +206,14 @@ impl Stager for BoundedStager {
                 }
 
                 miss = true;
+                let timer = Instant::now();
                 let dir_name = format!("{}.{}", cache_key, uuid::Uuid::new_v4());
                 let path = self.base_dir.join(&dir_name);
 
                 let size = Self::write_dir(&path, init_fn).await?;
                 if let Some(notifier) = self.notifier.as_ref() {
                     notifier.on_cache_insert(size);
+                    notifier.on_load_dir(timer.elapsed());
                 }
                 let guard = Arc::new(FsDirGuard {
                     path,
@@ -736,6 +740,10 @@ mod tests {
             self.recycle_clear_size
                 .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
         }
+
+        fn on_load_blob(&self, _duration: Duration) {}
+
+        fn on_load_dir(&self, _duration: Duration) {}
     }
 
     #[tokio::test]
