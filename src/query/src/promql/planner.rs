@@ -613,8 +613,8 @@ impl PromPlanner {
 
         // transform function arguments
         let args = self.create_function_args(&args.args)?;
-        let input = if let Some(prom_expr) = args.input {
-            self.prom_expr_to_plan(&prom_expr, session_state).await?
+        let input = if let Some(prom_expr) = &args.input {
+            self.prom_expr_to_plan(prom_expr, session_state).await?
         } else {
             self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
             self.ctx.reset_table_name_and_schema();
@@ -632,17 +632,43 @@ impl PromPlanner {
                 ),
             })
         };
-        let mut func_exprs = self.create_function_expr(func, args.literals, session_state)?;
+        let mut func_exprs =
+            self.create_function_expr(func, args.literals.clone(), session_state)?;
         func_exprs.insert(0, self.create_time_index_column_expr()?);
         func_exprs.extend_from_slice(&self.create_tag_column_exprs()?);
 
-        LogicalPlanBuilder::from(input)
+        let builder = LogicalPlanBuilder::from(input)
             .project(func_exprs)
             .context(DataFusionPlanningSnafu)?
             .filter(self.create_empty_values_filter_expr()?)
-            .context(DataFusionPlanningSnafu)?
-            .build()
-            .context(DataFusionPlanningSnafu)
+            .context(DataFusionPlanningSnafu)?;
+
+        let builder = match func.name {
+            "sort" => builder
+                .sort(self.create_field_columns_sort_exprs(true))
+                .context(DataFusionPlanningSnafu)?,
+            "sort_desc" => builder
+                .sort(self.create_field_columns_sort_exprs(false))
+                .context(DataFusionPlanningSnafu)?,
+            "sort_by_label" => builder
+                .sort(Self::create_sort_exprs_by_tags(
+                    func.name,
+                    args.literals,
+                    true,
+                )?)
+                .context(DataFusionPlanningSnafu)?,
+            "sort_by_label_desc" => builder
+                .sort(Self::create_sort_exprs_by_tags(
+                    func.name,
+                    args.literals,
+                    false,
+                )?)
+                .context(DataFusionPlanningSnafu)?,
+
+            _ => builder,
+        };
+
+        builder.build().context(DataFusionPlanningSnafu)
     }
 
     async fn prom_ext_expr_to_plan(
@@ -1445,6 +1471,16 @@ impl PromPlanner {
 
                 ScalarFunc::GeneratedExpr
             }
+            "sort" | "sort_desc" | "sort_by_label" | "sort_by_label_desc" => {
+                // These functions are not expression but a part of plan,
+                // they are processed by `prom_call_expr_to_plan`.
+                for value in &self.ctx.field_columns {
+                    let expr = DfExpr::Column(Column::from_name(value));
+                    exprs.push(expr);
+                }
+
+                ScalarFunc::GeneratedExpr
+            }
             _ => {
                 if let Some(f) = session_state.scalar_functions().get(func.name) {
                     ScalarFunc::DataFusionBuiltin(f.clone())
@@ -1702,6 +1738,37 @@ impl PromPlanner {
             .collect::<Vec<_>>();
         result.push(self.create_time_index_column_expr()?.sort(false, false));
         Ok(result)
+    }
+
+    fn create_field_columns_sort_exprs(&self, asc: bool) -> Vec<SortExpr> {
+        self.ctx
+            .field_columns
+            .iter()
+            .map(|col| DfExpr::Column(Column::from_name(col)).sort(asc, false))
+            .collect::<Vec<_>>()
+    }
+
+    fn create_sort_exprs_by_tags(
+        func: &str,
+        tags: Vec<DfExpr>,
+        asc: bool,
+    ) -> Result<Vec<SortExpr>> {
+        ensure!(
+            !tags.is_empty(),
+            FunctionInvalidArgumentSnafu { fn_name: func }
+        );
+
+        tags.iter()
+            .map(|col| match col {
+                DfExpr::Literal(ScalarValue::Utf8(Some(label))) => {
+                    Ok(DfExpr::Column(Column::from_name(label)).sort(asc, false))
+                }
+                other => UnexpectedPlanExprSnafu {
+                    desc: format!("expected label string literal, but found {:?}", other),
+                }
+                .fail(),
+            })
+            .collect::<Result<Vec<_>>>()
     }
 
     fn create_empty_values_filter_expr(&self) -> Result<DfExpr> {
