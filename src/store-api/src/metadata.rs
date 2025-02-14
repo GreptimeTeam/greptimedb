@@ -783,12 +783,12 @@ impl RegionMetadataBuilder {
                     column_meta
                         .column_schema
                         .set_skipping_options(options)
-                        .context(SetSkippingIndexOptionsSnafu {
+                        .context(UnsetSkippingIndexOptionsSnafu {
                             column_name: column_name.clone(),
                         })?;
                 } else {
                     column_meta.column_schema.unset_skipping_options().context(
-                        SetSkippingIndexOptionsSnafu {
+                        UnsetSkippingIndexOptionsSnafu {
                             column_name: column_name.clone(),
                         },
                     )?;
@@ -955,6 +955,14 @@ pub enum MetadataError {
 
     #[snafu(display("Failed to set skipping index options for column {}", column_name))]
     SetSkippingIndexOptions {
+        column_name: String,
+        source: datatypes::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to unset skipping index options for column {}", column_name))]
+    UnsetSkippingIndexOptions {
         column_name: String,
         source: datatypes::Error,
         #[snafu(implicit)]

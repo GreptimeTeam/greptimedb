@@ -320,11 +320,7 @@ impl ParserContext<'_> {
                 self.parse_alter_column_skipping(column_name)
             }
             _ => self.expected(
-                format!(
-                    "{:?} OR INVERTED INDEX OR SKIPPING INDEX OR FULLTEXT INDEX",
-                    Keyword::FULLTEXT
-                )
-                .as_str(),
+                format!("{:?} OR INVERTED OR SKIPPING INDEX", Keyword::FULLTEXT).as_str(),
                 self.parser.peek_token(),
             ),
         }
