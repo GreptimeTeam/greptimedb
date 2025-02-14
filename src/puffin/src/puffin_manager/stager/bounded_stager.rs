@@ -455,20 +455,12 @@ impl BoundedStager {
                             // Remove the deleted directory if the rename fails and retry
                             let _ = fs::remove_dir_all(&deleted_path).await;
                             if let Err(err) = fs::rename(&path, &deleted_path).await {
-                                if err.kind() == std::io::ErrorKind::NotFound {
-                                    continue;
-                                }
-
-                                // Remove the deleted directory if the rename fails and retry
-                                let _ = fs::remove_dir_all(&deleted_path).await;
-                                if let Err(err) = fs::rename(&path, &deleted_path).await {
-                                    warn!(err; "Failed to rename the dangling directory to deleted path.");
-                                    continue;
-                                }
+                                warn!(err; "Failed to rename the dangling directory to deleted path.");
+                                continue;
                             }
-                            if let Err(err) = fs::remove_dir_all(&deleted_path).await {
-                                warn!(err; "Failed to remove the dangling directory.");
-                            }
+                        }
+                        if let Err(err) = fs::remove_dir_all(&deleted_path).await {
+                            warn!(err; "Failed to remove the dangling directory.");
                         }
                         if let Some(notifier) = notifier.as_ref() {
                             notifier.on_recycle_clear(size);
