@@ -64,6 +64,19 @@ pub struct FlownodeContext {
     pub aggregate_functions: HashMap<String, Arc<AggregateUDF>>,
 }
 
+pub fn all_built_in_udaf() -> HashMap<String, Arc<AggregateUDF>> {
+    // sum/min/max/count are built-in aggregate functions
+    use datafusion::functions_aggregate::count::count_udaf;
+    use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
+    use datafusion::functions_aggregate::sum::sum_udaf;
+    HashMap::from([
+        ("sum".to_string(), sum_udaf()),
+        ("min".to_string(), min_udaf()),
+        ("max".to_string(), max_udaf()),
+        ("count".to_string(), count_udaf()),
+    ])
+}
+
 impl FlownodeContext {
     pub fn new(table_source: Box<dyn FlowTableSource>) -> Self {
         let mut ret = Self {
@@ -83,17 +96,7 @@ impl FlownodeContext {
     }
 
     pub fn register_all_built_in_aggr_fns(&mut self) {
-        // sum/min/max/count are built-in aggregate functions
-        use datafusion::functions_aggregate::count::count_udaf;
-        use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
-        use datafusion::functions_aggregate::sum::sum_udaf;
-        let res = HashMap::from([
-            ("sum".to_string(), sum_udaf()),
-            ("min".to_string(), min_udaf()),
-            ("max".to_string(), max_udaf()),
-            ("count".to_string(), count_udaf()),
-        ]);
-        self.aggregate_functions.extend(res);
+        self.aggregate_functions.extend(all_built_in_udaf());
     }
 
     pub fn register_aggr_fn(

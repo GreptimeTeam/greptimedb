@@ -210,3 +210,124 @@ fn err_try_from_val<T: Display>(reason: T) -> EvalError {
     }
     .build()
 }
+
+#[cfg(test)]
+mod test {
+    use std::sync::Arc;
+
+    use datatypes::prelude::ConcreteDataType as CDT;
+    use datatypes::vectors::{UInt32Vector, UInt64Vector, VectorRef};
+
+    use crate::adapter::node_context::all_built_in_udaf;
+    use crate::expr::relation::{AggregateExprV2, OrderingReq};
+    use crate::expr::ScalarExpr;
+    use crate::repr::{ColumnType, RelationType};
+
+    #[test]
+    pub fn test_can_get_state_after_eval() {
+        let udaf_list = all_built_in_udaf();
+        let test_cases = [
+            (
+                AggregateExprV2 {
+                    func: udaf_list.get("sum").unwrap().as_ref().clone(),
+                    args: vec![ScalarExpr::Column(0)
+                        .with_type(ColumnType::new(CDT::uint64_datatype(), true))],
+                    return_type: CDT::uint64_datatype(),
+                    name: "sum".to_string(),
+                    schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)])
+                        .into_named(vec![None]),
+                    ordering_req: OrderingReq::empty(),
+                    ignore_nulls: false,
+                    is_distinct: false,
+                    is_reversed: false,
+                    input_types: vec![CDT::uint64_datatype()],
+                    is_nullable: true,
+                },
+                vec![Arc::new(UInt64Vector::from_slice([1, 2, 3])) as VectorRef],
+            ),
+            (
+                AggregateExprV2 {
+                    func: udaf_list.get("max").unwrap().as_ref().clone(),
+                    args: vec![ScalarExpr::Column(0)
+                        .with_type(ColumnType::new(CDT::uint32_datatype(), false))],
+                    return_type: CDT::uint32_datatype(),
+                    name: "max".to_string(),
+                    schema: RelationType::new(vec![
+                        ColumnType::new(CDT::uint32_datatype(), false),
+                        ColumnType::new(CDT::timestamp_millisecond_datatype(), false),
+                    ])
+                    .into_named(vec![Some("number".to_string()), Some("ts".to_string())]),
+                    ordering_req: OrderingReq::empty(),
+                    ignore_nulls: false,
+                    is_distinct: false,
+                    is_reversed: false,
+                    input_types: vec![CDT::uint32_datatype()],
+                    is_nullable: true,
+                },
+                vec![Arc::new(UInt32Vector::from_slice([1, 2, 3])) as VectorRef],
+            ),
+            (
+                AggregateExprV2 {
+                    func: udaf_list.get("count").unwrap().as_ref().clone(),
+                    args: vec![ScalarExpr::Column(1)
+                        .with_type(ColumnType::new(CDT::uint32_datatype(), false))],
+                    return_type: CDT::int64_datatype(),
+                    name: "count".to_string(),
+                    schema: RelationType::new(vec![
+                        ColumnType::new(CDT::uint64_datatype(), true),
+                        ColumnType::new(CDT::uint32_datatype(), false),
+                    ])
+                    .into_named(vec![None, Some("number".to_string())]),
+                    ordering_req: OrderingReq::empty(),
+                    ignore_nulls: false,
+                    is_distinct: false,
+                    is_reversed: false,
+                    input_types: vec![CDT::uint32_datatype()],
+                    is_nullable: true,
+                },
+                vec![Arc::new(UInt32Vector::from_slice([1, 2, 3])) as VectorRef],
+            ),
+            (
+                AggregateExprV2 {
+                    func: udaf_list.get("min").unwrap().as_ref().clone(),
+                    args: vec![ScalarExpr::Column(0)
+                        .with_type(ColumnType::new(CDT::uint32_datatype(), false))],
+                    return_type: CDT::uint32_datatype(),
+                    name: "min".to_string(),
+                    schema: RelationType::new(vec![
+                        ColumnType::new(CDT::uint32_datatype(), false),
+                        ColumnType::new(CDT::timestamp_millisecond_datatype(), false),
+                    ])
+                    .into_named(vec![Some("number".to_string()), Some("ts".to_string())]),
+                    ordering_req: OrderingReq::empty(),
+                    ignore_nulls: false,
+                    is_distinct: false,
+                    is_reversed: false,
+                    input_types: vec![CDT::uint32_datatype()],
+                    is_nullable: true,
+                },
+                vec![Arc::new(UInt32Vector::from_slice([1, 2, 3])) as VectorRef],
+            ),
+        ];
+
+        for (aggr, input) in test_cases {
+            let mut accum = aggr.create_accumulator().unwrap();
+            accum.update_batch(&input).unwrap();
+            let state1 = accum.state().unwrap();
+            let (state, dt): (Vec<_>, Vec<_>) = state1.clone().into_iter().unzip();
+
+            // merge_states() & state() works in pair as expected
+            let mut accum = aggr.create_accumulator().unwrap();
+            accum.merge_states(&[state.clone()], &dt).unwrap();
+            let state2 = accum.state().unwrap();
+            assert_eq!(state1, state2);
+
+            // call state() after evaluate() works as expected(although this is undefined behavior by datafusion?)
+            let mut accum = aggr.create_accumulator().unwrap();
+            accum.merge_states(&[state.clone()], &dt).unwrap();
+            accum.evaluate().unwrap();
+            let state3 = accum.state().unwrap();
+            assert_eq!(state1, state3);
+        }
+    }
+}
