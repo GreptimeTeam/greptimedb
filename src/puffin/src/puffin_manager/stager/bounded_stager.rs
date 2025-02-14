@@ -45,6 +45,7 @@ use crate::puffin_manager::{BlobGuard, DirGuard};
 const DELETE_QUEUE_SIZE: usize = 10240;
 const TMP_EXTENSION: &str = "tmp";
 const DELETED_EXTENSION: &str = "deleted";
+const RECYCLE_BIN_TTL: Duration = Duration::from_secs(60);
 
 /// `BoundedStager` is a `Stager` that uses `moka` to manage staging area.
 pub struct BoundedStager {
@@ -82,9 +83,7 @@ impl BoundedStager {
             .await
             .context(CreateSnafu)?;
 
-        let recycle_bin = Cache::builder()
-            .time_to_live(Duration::from_secs(60))
-            .build();
+        let recycle_bin = Cache::builder().time_to_live(RECYCLE_BIN_TTL).build();
 
         let recycle_bin_cloned = recycle_bin.clone();
         let notifier_cloned = notifier.clone();
@@ -107,8 +106,11 @@ impl BoundedStager {
 
         let (delete_queue, rx) = tokio::sync::mpsc::channel(DELETE_QUEUE_SIZE);
         let notifier_cloned = notifier.clone();
-        common_runtime::global_runtime().spawn(Self::delete_routine(rx, notifier_cloned));
-
+        common_runtime::global_runtime().spawn(Self::delete_routine(
+            rx,
+            recycle_bin.clone(),
+            notifier_cloned,
+        ));
         let stager = Self {
             cache,
             base_dir,
@@ -268,7 +270,15 @@ impl Stager for BoundedStager {
             })
             .await
             .map(|_| ())
-            .context(CacheGetSnafu)
+            .context(CacheGetSnafu)?;
+
+        // Dir is usually large.
+        // Runs pending tasks of the cache and recycle bin to free up space
+        // more quickly.
+        self.cache.run_pending_tasks().await;
+        self.recycle_bin.run_pending_tasks().await;
+
+        Ok(())
     }
 }
 
@@ -390,6 +400,7 @@ impl BoundedStager {
             }
             self.cache.insert(key, value).await;
         }
+        self.cache.run_pending_tasks().await;
 
         Ok(())
     }
@@ -414,45 +425,63 @@ impl BoundedStager {
 
     async fn delete_routine(
         mut receiver: Receiver<DeleteTask>,
+        recycle_bin: Cache<String, CacheValue>,
         notifier: Option<Arc<dyn StagerNotifier>>,
     ) {
-        while let Some(task) = receiver.recv().await {
-            match task {
-                DeleteTask::File(path, size) => {
-                    if let Err(err) = fs::remove_file(&path).await {
-                        if err.kind() == std::io::ErrorKind::NotFound {
-                            continue;
+        loop {
+            match tokio::time::timeout(RECYCLE_BIN_TTL, receiver.recv()).await {
+                Ok(Some(task)) => match task {
+                    DeleteTask::File(path, size) => {
+                        if let Err(err) = fs::remove_file(&path).await {
+                            if err.kind() == std::io::ErrorKind::NotFound {
+                                continue;
+                            }
+
+                            warn!(err; "Failed to remove the file.");
                         }
 
-                        warn!(err; "Failed to remove the file.");
-                    }
-                    if let Some(notifier) = notifier.as_ref() {
-                        notifier.on_recycle_clear(size);
-                    }
-                }
-                DeleteTask::Dir(path, size) => {
-                    let deleted_path = path.with_extension(DELETED_EXTENSION);
-                    if let Err(err) = fs::rename(&path, &deleted_path).await {
-                        if err.kind() == std::io::ErrorKind::NotFound {
-                            continue;
+                        if let Some(notifier) = notifier.as_ref() {
+                            notifier.on_recycle_clear(size);
                         }
+                    }
 
-                        // Remove the deleted directory if the rename fails and retry
-                        let _ = fs::remove_dir_all(&deleted_path).await;
+                    DeleteTask::Dir(path, size) => {
+                        let deleted_path = path.with_extension(DELETED_EXTENSION);
                         if let Err(err) = fs::rename(&path, &deleted_path).await {
-                            warn!(err; "Failed to rename the dangling directory to deleted path.");
-                            continue;
+                            if err.kind() == std::io::ErrorKind::NotFound {
+                                continue;
+                            }
+
+                            // Remove the deleted directory if the rename fails and retry
+                            let _ = fs::remove_dir_all(&deleted_path).await;
+                            if let Err(err) = fs::rename(&path, &deleted_path).await {
+                                if err.kind() == std::io::ErrorKind::NotFound {
+                                    continue;
+                                }
+
+                                // Remove the deleted directory if the rename fails and retry
+                                let _ = fs::remove_dir_all(&deleted_path).await;
+                                if let Err(err) = fs::rename(&path, &deleted_path).await {
+                                    warn!(err; "Failed to rename the dangling directory to deleted path.");
+                                    continue;
+                                }
+                            }
+                            if let Err(err) = fs::remove_dir_all(&deleted_path).await {
+                                warn!(err; "Failed to remove the dangling directory.");
+                            }
+                        }
+                        if let Some(notifier) = notifier.as_ref() {
+                            notifier.on_recycle_clear(size);
                         }
                     }
-                    if let Err(err) = fs::remove_dir_all(&deleted_path).await {
-                        warn!(err; "Failed to remove the dangling directory.");
+                    DeleteTask::Terminate => {
+                        break;
                     }
-                    if let Some(notifier) = notifier.as_ref() {
-                        notifier.on_recycle_clear(size);
-                    }
-                }
-                DeleteTask::Terminate => {
-                    break;
+                },
+                Ok(None) => break,
+                Err(_) => {
+                    // Purge recycle bin periodically to reclaim the space quickly.
+                    recycle_bin.run_pending_tasks().await;
                 }
             }
         }

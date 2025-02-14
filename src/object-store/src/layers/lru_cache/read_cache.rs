@@ -18,6 +18,7 @@ use common_telemetry::debug;
 use futures::{FutureExt, TryStreamExt};
 use moka::future::Cache;
 use moka::notification::ListenerFuture;
+use moka::policy::EvictionPolicy;
 use opendal::raw::oio::{Read, Reader, Write};
 use opendal::raw::{oio, Access, OpDelete, OpRead, OpStat, OpWrite, RpRead};
 use opendal::{Error as OpendalError, ErrorKind, OperatorBuilder, Result};
@@ -120,6 +121,7 @@ impl<C: Access> ReadCache<C> {
             file_cache,
             mem_cache: Cache::builder()
                 .max_capacity(capacity as u64)
+                .eviction_policy(EvictionPolicy::lru())
                 .weigher(|_key, value: &ReadResult| -> u32 {
                     // TODO(dennis): add key's length to weight?
                     value.size_bytes()
