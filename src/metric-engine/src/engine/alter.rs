@@ -66,6 +66,7 @@ impl MetricEngineInner {
         requests: Vec<(RegionId, RegionAlterRequest)>,
         extension_return_value: &mut HashMap<String, Vec<u8>>,
     ) -> Result<AffectedRows> {
+        // Checks all alter requests are add columns.
         validate_alter_region_requests(&requests)?;
 
         let first_logical_region_id = requests[0].0;
