@@ -284,7 +284,7 @@ tokio-rustls = { git = "https://github.com/GreptimeTeam/tokio-rustls", rev = "46
 
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"
-rev = "a10facb353b41460eeb98578868ebf19c2084fac"
+rev = "5618e779cf2bb4755b499c630fba4c35e91898cb"
 
 [profile.release]
 debug = 1
