@@ -310,7 +310,12 @@ pub enum ContentFilter {
     // Value-based filters
     /// Content exists, a.k.a. not null.
     Exist,
-    Between(String, String),
+    Between {
+        start: String,
+        end: String,
+        start_inclusive: bool,
+        end_inclusive: bool,
+    },
     // TODO(ruihang): arithmetic operations
 
     // Compound filters
