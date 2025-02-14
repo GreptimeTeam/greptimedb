@@ -384,6 +384,8 @@ pub fn setup_mysql(mysql_port: u16, mysql_version: Option<&str>) {
         &mysql_user_env,
         "-e",
         &mysql_root_password_env,
+        "-e",
+        "MYSQL_DATABASE=mysql",
     ]);
     arg_list.extend(["-p", &mysql_port_forward]);
 
