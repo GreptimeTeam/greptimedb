@@ -139,7 +139,7 @@ impl flow_server::Flow for FlowService {
 pub struct FlownodeServer {
     flow_service: FlowService,
     plugins: Plugins,
-    /// The shutdown signal sender. None means the flownode havn't started yet.
+    /// The shutdown signal sender. None means the flownode haven't started yet.
     shutdown_tx: Mutex<Option<broadcast::Sender<()>>>,
 }
 

@@ -15,7 +15,6 @@
 use std::sync::Arc;
 
 use api::v1::SemanticType;
-use common_error::ext::BoxedError;
 use common_telemetry::{error, info, tracing};
 use datafusion::logical_expr::{self, Expr};
 use snafu::{OptionExt, ResultExt};

@@ -863,8 +863,7 @@ impl RegionServerInner {
             | RegionRequest::Alter(_)
             | RegionRequest::Flush(_)
             | RegionRequest::Compact(_)
-            | RegionRequest::Truncate(_)
-            | RegionRequest::Sequences(_) => RegionChange::None,
+            | RegionRequest::Truncate(_) => RegionChange::None,
             RegionRequest::Catchup(_) => RegionChange::Catchup,
         };
 
