@@ -380,6 +380,11 @@ impl ColumnSchema {
         );
         Ok(())
     }
+
+    pub fn unset_skipping_options(&mut self) -> Result<()> {
+        self.metadata.remove(SKIPPING_INDEX_KEY);
+        Ok(())
+    }
 }
 
 /// Column extended type set in column schema's metadata.
