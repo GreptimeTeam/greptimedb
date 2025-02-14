@@ -758,21 +758,26 @@ impl PromPlanner {
         label_matchers: Matchers,
         is_range_selector: bool,
     ) -> Result<LogicalPlan> {
+        // make table scan plan
+        let table_ref = self.table_ref()?;
+        let mut table_scan = self.create_table_scan_plan(table_ref.clone()).await?;
+        let table_schema = table_scan.schema();
+
         // make filter exprs
         let offset_duration = match offset {
             Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
             Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
             None => 0,
         };
-        let mut scan_filters = self.matchers_to_expr(label_matchers.clone())?;
+        let mut scan_filters = self.matchers_to_expr(label_matchers.clone(), table_schema)?;
         if let Some(time_index_filter) = self.build_time_index_filter(offset_duration)? {
             scan_filters.push(time_index_filter);
         }
-        // make table scan with filter exprs
-        let table_ref = self.table_ref()?;
-        let mut table_scan = self
-            .create_table_scan_plan(table_ref.clone(), scan_filters.clone())
-            .await?;
+        table_scan = LogicalPlanBuilder::from(table_scan)
+            .filter(conjunction(scan_filters).unwrap())
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
 
         // make a projection plan if there is any `__field__` matcher
         if let Some(field_matchers) = &self.ctx.field_column_matcher {
@@ -953,10 +958,21 @@ impl PromPlanner {
     }
 
     // TODO(ruihang): ignore `MetricNameLabel` (`__name__`) matcher
-    fn matchers_to_expr(&self, label_matchers: Matchers) -> Result<Vec<DfExpr>> {
+    fn matchers_to_expr(
+        &self,
+        label_matchers: Matchers,
+        table_schema: &DFSchemaRef,
+    ) -> Result<Vec<DfExpr>> {
         let mut exprs = Vec::with_capacity(label_matchers.matchers.len());
         for matcher in label_matchers.matchers {
-            let col = DfExpr::Column(Column::from_name(matcher.name));
+            let col = if table_schema
+                .field_with_unqualified_name(&matcher.name)
+                .is_err()
+            {
+                DfExpr::Literal(ScalarValue::Utf8(Some(String::new()))).alias(matcher.name)
+            } else {
+                DfExpr::Column(Column::from_name(matcher.name))
+            };
             let lit = DfExpr::Literal(ScalarValue::Utf8(Some(matcher.value)));
             let expr = match matcher.op {
                 MatchOp::Equal => col.eq(lit),
@@ -1050,11 +1066,7 @@ impl PromPlanner {
     ///
     /// # Panic
     /// If the filter is empty
-    async fn create_table_scan_plan(
-        &mut self,
-        table_ref: TableReference,
-        filter: Vec<DfExpr>,
-    ) -> Result<LogicalPlan> {
+    async fn create_table_scan_plan(&mut self, table_ref: TableReference) -> Result<LogicalPlan> {
         let provider = self
             .table_provider
             .resolve_table(table_ref.clone())
@@ -1116,8 +1128,6 @@ impl PromPlanner {
 
         // Safety: `scan_filters` is not empty.
         let result = LogicalPlanBuilder::from(scan_plan)
-            .filter(conjunction(filter).unwrap())
-            .context(DataFusionPlanningSnafu)?
             .build()
             .context(DataFusionPlanningSnafu)?;
         Ok(result)
@@ -3498,6 +3508,34 @@ mod test {
         \n              Projection: metrics.field, metrics.tag, CAST(metrics.timestamp AS Timestamp(Millisecond, None)) AS timestamp [field:Float64;N, tag:Utf8, timestamp:Timestamp(Millisecond, None)]\
         \n                TableScan: metrics [tag:Utf8, timestamp:Timestamp(Nanosecond, None), field:Float64;N]"
         );
+    }
+
+    #[tokio::test]
+    async fn test_nonexistent_label() {
+        // template
+        let mut eval_stmt = EvalStmt {
+            expr: PromExpr::NumberLiteral(NumberLiteral { val: 1.0 }),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let case = r#"some_metric{nonexistent="hi"}"#;
+        let prom_expr = parser::parse(case).unwrap();
+        eval_stmt.expr = prom_expr;
+        let table_provider = build_test_table_provider(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            3,
+            3,
+        )
+        .await;
+        // Should be ok
+        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
