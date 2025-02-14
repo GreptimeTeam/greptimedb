@@ -34,7 +34,9 @@ use tokio::sync::Semaphore;
 
 use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
-use crate::region_request::{BatchRegionDdlRequest, RegionOpenRequest,RegionSequencesRequest};
+use crate::region_request::{
+    BatchRegionDdlRequest, RegionOpenRequest, RegionRequest, RegionSequencesRequest,
+};
 use crate::storage::{RegionId, ScanRequest, SequenceNumber};
 
 /// Key for storing the mapping from region id to sequence numbers in the extensions field of the [RegionResponse].
