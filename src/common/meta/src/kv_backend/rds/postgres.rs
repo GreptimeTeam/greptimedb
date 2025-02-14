@@ -26,8 +26,8 @@ use crate::error::{
     PostgresTransactionSnafu, Result,
 };
 use crate::kv_backend::rds::{
-    DefaultQueryExecutor, ExecutorFactory, KvQueryExecutor, RdsQueryExecutor, RdsStore,
-    TxnQueryExecutor, RDS_STORE_TXN_RETRY_COUNT,
+    Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RdsStore, Transaction,
+    RDS_STORE_TXN_RETRY_COUNT,
 };
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::{
@@ -36,8 +36,8 @@ use crate::rpc::store::{
 };
 use crate::rpc::KeyValue;
 
-type PgClient = deadpool::managed::Object<deadpool_postgres::Manager>;
-type PgTxnClient<'a> = deadpool_postgres::Transaction<'a>;
+pub struct PgClient(deadpool::managed::Object<deadpool_postgres::Manager>);
+pub struct PgTxnClient<'a>(deadpool_postgres::Transaction<'a>);
 
 /// Converts a row to a [`KeyValue`].
 fn key_value_from_row(r: Row) -> KeyValue {
@@ -236,8 +236,8 @@ impl PgSqlTemplateSet {
 }
 
 #[async_trait::async_trait]
-impl DefaultQueryExecutor for PgClient {
-    type TxnExecutor<'a>
+impl Executor for PgClient {
+    type Transaction<'a>
         = PgTxnClient<'a>
     where
         Self: 'a;
@@ -246,21 +246,24 @@ impl DefaultQueryExecutor for PgClient {
         "Postgres"
     }
 
-    async fn default_query(&mut self, query: &str, params: &[&Vec<u8>]) -> Result<Vec<KeyValue>> {
+    async fn query(&mut self, query: &str, params: &[&Vec<u8>]) -> Result<Vec<KeyValue>> {
         let params: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p as _).collect();
         let stmt = self
+            .0
             .prepare_cached(query)
             .await
             .context(PostgresExecutionSnafu { sql: query })?;
         let rows = self
+            .0
             .query(&stmt, &params)
             .await
             .context(PostgresExecutionSnafu { sql: query })?;
         Ok(rows.into_iter().map(key_value_from_row).collect())
     }
 
-    async fn txn_executor<'a>(&'a mut self) -> Result<Self::TxnExecutor<'a>> {
+    async fn txn_executor<'a>(&'a mut self) -> Result<Self::Transaction<'a>> {
         let txn = self
+            .0
             .build_transaction()
             .isolation_level(IsolationLevel::Serializable)
             .start()
@@ -268,27 +271,29 @@ impl DefaultQueryExecutor for PgClient {
             .context(PostgresTransactionSnafu {
                 operation: "begin".to_string(),
             })?;
-        Ok(txn)
+        Ok(PgTxnClient(txn))
     }
 }
 
 #[async_trait::async_trait]
-impl<'a> TxnQueryExecutor<'a> for PgTxnClient<'a> {
-    async fn txn_query(&mut self, query: &str, params: &[&Vec<u8>]) -> Result<Vec<KeyValue>> {
+impl<'a> Transaction<'a> for PgTxnClient<'a> {
+    async fn query(&mut self, query: &str, params: &[&Vec<u8>]) -> Result<Vec<KeyValue>> {
         let params: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p as _).collect();
         let stmt = self
+            .0
             .prepare_cached(query)
             .await
             .context(PostgresExecutionSnafu { sql: query })?;
         let rows = self
+            .0
             .query(&stmt, &params)
             .await
             .context(PostgresExecutionSnafu { sql: query })?;
         Ok(rows.into_iter().map(key_value_from_row).collect())
     }
 
-    async fn txn_commit(self) -> Result<()> {
-        self.commit().await.context(PostgresTransactionSnafu {
+    async fn commit(self) -> Result<()> {
+        self.0.commit().await.context(PostgresTransactionSnafu {
             operation: "commit",
         })?;
         Ok(())
@@ -302,7 +307,7 @@ pub struct PgExecutorFactory {
 impl PgExecutorFactory {
     async fn client(&self) -> Result<PgClient> {
         match self.pool.get().await {
-            Ok(client) => Ok(client),
+            Ok(client) => Ok(PgClient(client)),
             Err(e) => GetPostgresConnectionSnafu {
                 reason: e.to_string(),
             }
@@ -333,7 +338,7 @@ pub type PgStore = RdsStore<PgClient, PgExecutorFactory, PgSqlTemplateSet>;
 impl KvQueryExecutor<PgClient> for PgStore {
     async fn range_with_query_executor(
         &self,
-        query_executor: &mut RdsQueryExecutor<'_, PgClient>,
+        query_executor: &mut ExecutorImpl<'_, PgClient>,
         req: RangeRequest,
     ) -> Result<RangeResponse> {
         let template_type = range_template(&req.key, &req.range_end);
@@ -361,7 +366,7 @@ impl KvQueryExecutor<PgClient> for PgStore {
 
     async fn batch_put_with_query_executor(
         &self,
-        query_executor: &mut RdsQueryExecutor<'_, PgClient>,
+        query_executor: &mut ExecutorImpl<'_, PgClient>,
         req: BatchPutRequest,
     ) -> Result<BatchPutResponse> {
         let mut in_params = Vec::with_capacity(req.kvs.len() * 3);
@@ -391,7 +396,7 @@ impl KvQueryExecutor<PgClient> for PgStore {
     /// Batch get with certain client. It's needed for a client with transaction.
     async fn batch_get_with_query_executor(
         &self,
-        query_executor: &mut RdsQueryExecutor<'_, PgClient>,
+        query_executor: &mut ExecutorImpl<'_, PgClient>,
         req: BatchGetRequest,
     ) -> Result<BatchGetResponse> {
         if req.keys.is_empty() {
@@ -407,7 +412,7 @@ impl KvQueryExecutor<PgClient> for PgStore {
 
     async fn delete_range_with_query_executor(
         &self,
-        query_executor: &mut RdsQueryExecutor<'_, PgClient>,
+        query_executor: &mut ExecutorImpl<'_, PgClient>,
         req: DeleteRangeRequest,
     ) -> Result<DeleteRangeResponse> {
         let template_type = range_template(&req.key, &req.range_end);
@@ -424,7 +429,7 @@ impl KvQueryExecutor<PgClient> for PgStore {
 
     async fn batch_delete_with_query_executor(
         &self,
-        query_executor: &mut RdsQueryExecutor<'_, PgClient>,
+        query_executor: &mut ExecutorImpl<'_, PgClient>,
         req: BatchDeleteRequest,
     ) -> Result<BatchDeleteResponse> {
         if req.keys.is_empty() {

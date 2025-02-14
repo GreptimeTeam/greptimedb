@@ -41,49 +41,49 @@ const RDS_STORE_TXN_RETRY_COUNT: usize = 3;
 
 /// Query executor for rds. It can execute queries or generate a transaction executor.
 #[async_trait::async_trait]
-pub trait DefaultQueryExecutor: Send + Sync {
-    type TxnExecutor<'a>: 'a + TxnQueryExecutor<'a>
+pub trait Executor: Send + Sync {
+    type Transaction<'a>: 'a + Transaction<'a>
     where
         Self: 'a;
 
     fn name() -> &'static str;
 
-    async fn default_query(&mut self, query: &str, params: &[&Vec<u8>]) -> Result<Vec<KeyValue>>;
+    async fn query(&mut self, query: &str, params: &[&Vec<u8>]) -> Result<Vec<KeyValue>>;
 
     /// Some queries don't need to return any result, such as `DELETE`.
-    async fn default_execute(&mut self, query: &str, params: &[&Vec<u8>]) -> Result<()> {
-        self.default_query(query, params).await?;
+    async fn execute(&mut self, query: &str, params: &[&Vec<u8>]) -> Result<()> {
+        self.query(query, params).await?;
         Ok(())
     }
 
-    async fn txn_executor<'a>(&'a mut self) -> Result<Self::TxnExecutor<'a>>;
+    async fn txn_executor<'a>(&'a mut self) -> Result<Self::Transaction<'a>>;
 }
 
 /// Transaction query executor for rds. It can execute queries in transaction or commit the transaction.
 #[async_trait::async_trait]
-pub trait TxnQueryExecutor<'a>: Send + Sync {
-    async fn txn_query(&mut self, query: &str, params: &[&Vec<u8>]) -> Result<Vec<KeyValue>>;
+pub trait Transaction<'a>: Send + Sync {
+    async fn query(&mut self, query: &str, params: &[&Vec<u8>]) -> Result<Vec<KeyValue>>;
 
-    async fn txn_execute(&mut self, query: &str, params: &[&Vec<u8>]) -> Result<()> {
-        self.txn_query(query, params).await?;
+    async fn execute(&mut self, query: &str, params: &[&Vec<u8>]) -> Result<()> {
+        self.query(query, params).await?;
         Ok(())
     }
 
-    async fn txn_commit(self) -> Result<()>;
+    async fn commit(self) -> Result<()>;
 }
 
 /// Factory for creating default and transaction query executors.
 #[async_trait::async_trait]
-pub trait ExecutorFactory<T: DefaultQueryExecutor>: Send + Sync {
+pub trait ExecutorFactory<T: Executor>: Send + Sync {
     async fn default_executor(&self) -> Result<T>;
 
-    async fn txn_executor<'a>(&self, default_executor: &'a mut T) -> Result<T::TxnExecutor<'a>>;
+    async fn txn_executor<'a>(&self, default_executor: &'a mut T) -> Result<T::Transaction<'a>>;
 }
 
 /// Rds backed store for metsrv
 pub struct RdsStore<T, S, R>
 where
-    T: DefaultQueryExecutor + Send + Sync,
+    T: Executor + Send + Sync,
     S: ExecutorFactory<T> + Send + Sync,
 {
     max_txn_ops: usize,
@@ -93,38 +93,38 @@ where
     _phantom: PhantomData<T>,
 }
 
-pub enum RdsQueryExecutor<'a, T: DefaultQueryExecutor + 'a> {
+pub enum ExecutorImpl<'a, T: Executor + 'a> {
     Default(T),
-    Txn(T::TxnExecutor<'a>),
+    Txn(T::Transaction<'a>),
 }
 
-impl<T: DefaultQueryExecutor> RdsQueryExecutor<'_, T> {
+impl<T: Executor> ExecutorImpl<'_, T> {
     async fn query(&mut self, query: &str, params: &Vec<&Vec<u8>>) -> Result<Vec<KeyValue>> {
         match self {
-            Self::Default(executor) => executor.default_query(query, params).await,
-            Self::Txn(executor) => executor.txn_query(query, params).await,
+            Self::Default(executor) => executor.query(query, params).await,
+            Self::Txn(executor) => executor.query(query, params).await,
         }
     }
 
     async fn commit(self) -> Result<()> {
         match self {
-            Self::Txn(executor) => executor.txn_commit().await,
+            Self::Txn(executor) => executor.commit().await,
             _ => Ok(()),
         }
     }
 }
 
 #[async_trait::async_trait]
-pub trait KvQueryExecutor<T: DefaultQueryExecutor> {
+pub trait KvQueryExecutor<T: Executor> {
     async fn range_with_query_executor(
         &self,
-        query_executor: &mut RdsQueryExecutor<'_, T>,
+        query_executor: &mut ExecutorImpl<'_, T>,
         req: RangeRequest,
     ) -> Result<RangeResponse>;
 
     async fn put_with_query_executor(
         &self,
-        query_executor: &mut RdsQueryExecutor<'_, T>,
+        query_executor: &mut ExecutorImpl<'_, T>,
         req: PutRequest,
     ) -> Result<PutResponse> {
         let kv = KeyValue {
@@ -152,26 +152,26 @@ pub trait KvQueryExecutor<T: DefaultQueryExecutor> {
 
     async fn batch_put_with_query_executor(
         &self,
-        query_executor: &mut RdsQueryExecutor<'_, T>,
+        query_executor: &mut ExecutorImpl<'_, T>,
         req: BatchPutRequest,
     ) -> Result<BatchPutResponse>;
 
     /// Batch get with certain client. It's needed for a client with transaction.
     async fn batch_get_with_query_executor(
         &self,
-        query_executor: &mut RdsQueryExecutor<'_, T>,
+        query_executor: &mut ExecutorImpl<'_, T>,
         req: BatchGetRequest,
     ) -> Result<BatchGetResponse>;
 
     async fn delete_range_with_query_executor(
         &self,
-        query_executor: &mut RdsQueryExecutor<'_, T>,
+        query_executor: &mut ExecutorImpl<'_, T>,
         req: DeleteRangeRequest,
     ) -> Result<DeleteRangeResponse>;
 
     async fn batch_delete_with_query_executor(
         &self,
-        query_executor: &mut RdsQueryExecutor<'_, T>,
+        query_executor: &mut ExecutorImpl<'_, T>,
         req: BatchDeleteRequest,
     ) -> Result<BatchDeleteResponse>;
 }
@@ -179,12 +179,12 @@ pub trait KvQueryExecutor<T: DefaultQueryExecutor> {
 impl<T, S, R> RdsStore<T, S, R>
 where
     Self: KvQueryExecutor<T> + Send + Sync,
-    T: DefaultQueryExecutor + Send + Sync,
+    T: Executor + Send + Sync,
     S: ExecutorFactory<T> + Send + Sync,
 {
     async fn execute_txn_cmp(
         &self,
-        query_executor: &mut RdsQueryExecutor<'_, T>,
+        query_executor: &mut ExecutorImpl<'_, T>,
         cmp: &[Compare],
     ) -> Result<bool> {
         let batch_get_req = BatchGetRequest {
@@ -211,7 +211,7 @@ where
     /// Execute a batch of transaction operations. This function is only used for transactions with the same operation type.
     async fn try_batch_txn(
         &self,
-        query_executor: &mut RdsQueryExecutor<'_, T>,
+        query_executor: &mut ExecutorImpl<'_, T>,
         txn_ops: &[TxnOp],
     ) -> Result<Option<Vec<TxnOpResponse>>> {
         if !check_txn_ops(txn_ops)? {
@@ -227,7 +227,7 @@ where
 
     async fn handle_batch_delete(
         &self,
-        query_executor: &mut RdsQueryExecutor<'_, T>,
+        query_executor: &mut ExecutorImpl<'_, T>,
         txn_ops: &[TxnOp],
     ) -> Result<Option<Vec<TxnOpResponse>>> {
         let mut batch_del_req = BatchDeleteRequest {
@@ -262,7 +262,7 @@ where
 
     async fn handle_batch_put(
         &self,
-        query_executor: &mut RdsQueryExecutor<'_, T>,
+        query_executor: &mut ExecutorImpl<'_, T>,
         txn_ops: &[TxnOp],
     ) -> Result<Option<Vec<TxnOpResponse>>> {
         let mut batch_put_req = BatchPutRequest {
@@ -291,7 +291,7 @@ where
 
     async fn handle_batch_get(
         &self,
-        query_executor: &mut RdsQueryExecutor<'_, T>,
+        query_executor: &mut ExecutorImpl<'_, T>,
         txn_ops: &[TxnOp],
     ) -> Result<Option<Vec<TxnOpResponse>>> {
         let mut batch_get_req = BatchGetRequest { keys: vec![] };
@@ -330,7 +330,7 @@ where
 
     async fn execute_txn_op(
         &self,
-        query_executor: &mut RdsQueryExecutor<'_, T>,
+        query_executor: &mut ExecutorImpl<'_, T>,
         op: &TxnOp,
     ) -> Result<TxnOpResponse> {
         match op {
@@ -379,7 +379,7 @@ where
 
     async fn txn_inner(&self, txn: &KvTxn) -> Result<KvTxnResponse> {
         let mut default_executor = self.executor_factory.default_executor().await?;
-        let mut txn_executor = RdsQueryExecutor::Txn(
+        let mut txn_executor = ExecutorImpl::Txn(
             self.executor_factory
                 .txn_executor(&mut default_executor)
                 .await?,
@@ -432,7 +432,7 @@ impl<T, S, R> KvBackend for RdsStore<T, S, R>
 where
     R: 'static,
     Self: KvQueryExecutor<T> + Send + Sync,
-    T: DefaultQueryExecutor + 'static,
+    T: Executor + 'static,
     S: ExecutorFactory<T> + 'static,
 {
     fn name(&self) -> &str {
@@ -445,41 +445,41 @@ where
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
         let client = self.executor_factory.default_executor().await?;
-        let mut query_executor = RdsQueryExecutor::Default(client);
+        let mut query_executor = ExecutorImpl::Default(client);
         self.range_with_query_executor(&mut query_executor, req)
             .await
     }
 
     async fn put(&self, req: PutRequest) -> Result<PutResponse> {
         let client = self.executor_factory.default_executor().await?;
-        let mut query_executor = RdsQueryExecutor::Default(client);
+        let mut query_executor = ExecutorImpl::Default(client);
         self.put_with_query_executor(&mut query_executor, req).await
     }
 
     async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
         let client = self.executor_factory.default_executor().await?;
-        let mut query_executor = RdsQueryExecutor::Default(client);
+        let mut query_executor = ExecutorImpl::Default(client);
         self.batch_put_with_query_executor(&mut query_executor, req)
             .await
     }
 
     async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
         let client = self.executor_factory.default_executor().await?;
-        let mut query_executor = RdsQueryExecutor::Default(client);
+        let mut query_executor = ExecutorImpl::Default(client);
         self.batch_get_with_query_executor(&mut query_executor, req)
             .await
     }
 
     async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
         let client = self.executor_factory.default_executor().await?;
-        let mut query_executor = RdsQueryExecutor::Default(client);
+        let mut query_executor = ExecutorImpl::Default(client);
         self.delete_range_with_query_executor(&mut query_executor, req)
             .await
     }
 
     async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
         let client = self.executor_factory.default_executor().await?;
-        let mut query_executor = RdsQueryExecutor::Default(client);
+        let mut query_executor = ExecutorImpl::Default(client);
         self.batch_delete_with_query_executor(&mut query_executor, req)
             .await
     }
@@ -489,7 +489,7 @@ where
 impl<T, S, R> TxnService for RdsStore<T, S, R>
 where
     Self: KvQueryExecutor<T> + Send + Sync,
-    T: DefaultQueryExecutor + 'static,
+    T: Executor + 'static,
     S: ExecutorFactory<T> + 'static,
 {
     type Error = Error;
