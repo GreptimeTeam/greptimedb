@@ -17,6 +17,7 @@ use std::sync::Arc;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
@@ -76,8 +77,9 @@ impl WindowedSortPhysicalRule {
 
                     let preserve_partitioning = sort_exec.preserve_partitioning();
 
-                    let Some(scanner_info) = fetch_partition_range(sort_exec.input().clone())?
-                    else {
+                    let sort_input = remove_repartition(sort_exec.input().clone())?.data;
+                    // Gets scanner info from the input without repartition before filter.
+                    let Some(scanner_info) = fetch_partition_range(sort_input.clone())? else {
                         return Ok(Transformed::no(plan));
                     };
 
@@ -99,13 +101,13 @@ impl WindowedSortPhysicalRule {
                     let new_input = if scanner_info.tag_columns.is_empty()
                         && !first_sort_expr.options.descending
                     {
-                        sort_exec.input().clone()
+                        sort_input
                     } else {
                         Arc::new(PartSortExec::new(
                             first_sort_expr.clone(),
                             sort_exec.fetch(),
                             scanner_info.partition_ranges.clone(),
-                            sort_exec.input().clone(),
+                            sort_input,
                         ))
                     };
 
@@ -193,4 +195,25 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
     };
 
     Ok(result)
+}
+
+/// Removes the repartition plan between the filter and region scan.
+fn remove_repartition(
+    plan: Arc<dyn ExecutionPlan>,
+) -> DataFusionResult<Transformed<Arc<dyn ExecutionPlan>>> {
+    plan.transform_down(|plan| {
+        if plan.as_any().is::<FilterExec>() {
+            // Checks child.
+            let maybe_repartition = plan.children()[0];
+            if maybe_repartition.as_any().is::<RepartitionExec>() {
+                let maybe_scan = maybe_repartition.children()[0];
+                if maybe_scan.as_any().is::<RegionScanExec>() {
+                    let new_filter = plan.clone().with_new_children(vec![maybe_scan.clone()])?;
+                    return Ok(Transformed::yes(new_filter));
+                }
+            }
+        }
+
+        Ok(Transformed::no(plan))
+    })
 }
