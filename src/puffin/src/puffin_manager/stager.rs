@@ -15,6 +15,7 @@
 mod bounded_stager;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use async_trait::async_trait;
 pub use bounded_stager::{BoundedStager, FsBlobGuard, FsDirGuard};
@@ -87,4 +88,41 @@ pub trait Stager: Send + Sync {
         dir_path: PathBuf,
         dir_size: u64,
     ) -> Result<()>;
+}
+
+/// `StagerNotifier` provides a way to notify the caller of the staging events.
+pub trait StagerNotifier: Send + Sync {
+    /// Notifies the caller that a cache hit occurred.
+    /// `size` is the size of the content that was hit in the cache.
+    fn on_cache_hit(&self, size: u64);
+
+    /// Notifies the caller that a cache miss occurred.
+    /// `size` is the size of the content that was missed in the cache.
+    fn on_cache_miss(&self, size: u64);
+
+    /// Notifies the caller that a blob or directory was inserted into the cache.
+    /// `size` is the size of the content that was inserted into the cache.
+    ///
+    /// Note: not only cache misses will trigger this event, but recoveries and recycles as well.
+    fn on_cache_insert(&self, size: u64);
+
+    /// Notifies the caller that a directory was inserted into the cache.
+    /// `duration` is the time it took to load the directory.
+    fn on_load_dir(&self, duration: Duration);
+
+    /// Notifies the caller that a blob was inserted into the cache.
+    /// `duration` is the time it took to load the blob.
+    fn on_load_blob(&self, duration: Duration);
+
+    /// Notifies the caller that a blob or directory was evicted from the cache.
+    /// `size` is the size of the content that was evicted from the cache.
+    fn on_cache_evict(&self, size: u64);
+
+    /// Notifies the caller that a blob or directory was dropped to the recycle bin.
+    /// `size` is the size of the content that was dropped to the recycle bin.
+    fn on_recycle_insert(&self, size: u64);
+
+    /// Notifies the caller that the recycle bin was cleared.
+    /// `size` is the size of the content that was cleared from the recycle bin.
+    fn on_recycle_clear(&self, size: u64);
 }
