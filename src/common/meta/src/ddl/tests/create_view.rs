@@ -219,7 +219,7 @@ async fn test_replace_view_metadata() {
         assert_eq!(err.status_code(), StatusCode::TableAlreadyExists);
     }
 
-    // Set `or_replce` to be `true` and try again
+    // Set `or_replace` to be `true` and try again
     task.create_view.or_replace = true;
     task.create_view.logical_plan = vec![4, 5, 6];
     task.create_view.definition = "new_definition".to_string();
