@@ -16,7 +16,7 @@ use std::fmt::{Debug, Display};
 
 use api::v1;
 use common_query::AddColumnLocation;
-use datatypes::schema::FulltextOptions;
+use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use itertools::Itertools;
 use serde::Serialize;
 use sqlparser::ast::{ColumnDef, DataType, Ident, ObjectName, TableConstraint};
@@ -103,15 +103,21 @@ pub enum SetIndexOperation {
     },
     /// `MODIFY COLUMN <column_name> SET INVERTED INDEX`
     Inverted { column_name: Ident },
+    /// `MODIFY COLUMN <column_name> SET SKIPPING INDEX`
+    Skipping {
+        column_name: Ident,
+        options: SkippingIndexOptions,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum UnsetIndexOperation {
     /// `MODIFY COLUMN <column_name> UNSET FULLTEXT`
     Fulltext { column_name: Ident },
-
     /// `MODIFY COLUMN <column_name> UNSET INVERTED INDEX`
     Inverted { column_name: Ident },
+    /// `MODIFY COLUMN <column_name> UNSET SKIPPING INDEX`
+    Skipping { column_name: Ident },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
@@ -180,6 +186,12 @@ impl Display for AlterTableOperation {
                 SetIndexOperation::Inverted { column_name } => {
                     write!(f, "MODIFY COLUMN {column_name} SET INVERTED INDEX")
                 }
+                SetIndexOperation::Skipping {
+                    column_name,
+                    options,
+                } => {
+                    write!(f, "MODIFY COLUMN {column_name} SET SKIPPING INDEX WITH(granularity={0}, index_type={1})", options.granularity, options.index_type)
+                }
             },
             AlterTableOperation::UnsetIndex { options } => match options {
                 UnsetIndexOperation::Fulltext { column_name } => {
@@ -187,6 +199,9 @@ impl Display for AlterTableOperation {
                 }
                 UnsetIndexOperation::Inverted { column_name } => {
                     write!(f, "MODIFY COLUMN {column_name} UNSET INVERTED INDEX")
+                }
+                UnsetIndexOperation::Skipping { column_name } => {
+                    write!(f, "MODIFY COLUMN {column_name} UNSET SKIPPING INDEX")
                 }
             },
         }

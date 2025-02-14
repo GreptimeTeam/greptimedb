@@ -151,6 +151,7 @@ impl From<QueryContext> for api::v1::QueryContext {
             timezone: mutable_inner.timezone.to_string(),
             extensions,
             channel: channel as u32,
+            snapshot_seqs: None,
         }
     }
 }
