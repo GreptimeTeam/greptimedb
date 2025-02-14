@@ -16,10 +16,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::StatusCode as HttpStatusCode;
 use axum::response::IntoResponse;
 use axum::Extension;
 use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
 use common_recordbatch::util;
 use common_telemetry::{debug, error, tracing, warn};
@@ -36,6 +37,7 @@ use crate::metrics::METRIC_JAEGER_QUERY_ELAPSED;
 use crate::otlp::trace::{
     DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_ID_COLUMN,
     SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
+    TRACE_TABLE_NAME,
 };
 use crate::query_handler::JaegerQueryHandlerRef;
 
@@ -340,7 +342,7 @@ pub async fn handle_get_services(
                 Ok(services) => {
                     let services_num = services.len();
                     (
-                        StatusCode::OK,
+                        HttpStatusCode::OK,
                         axum::Json(JaegerAPIResponse {
                             data: Some(JaegerData::ServiceNames(services)),
                             total: services_num,
@@ -353,13 +355,13 @@ pub async fn handle_get_services(
                     error_response(err)
                 }
             },
-            Ok(None) => (StatusCode::OK, axum::Json(JaegerAPIResponse::default())),
+            Ok(None) => (HttpStatusCode::OK, axum::Json(JaegerAPIResponse::default())),
             Err(err) => {
                 error!("Failed to get services: {:?}", err);
                 error_response(err)
             }
         },
-        Err(err) => error_response(err),
+        Err(err) => handle_query_error(err, "Failed to get services", &db),
     }
 }
 
@@ -389,7 +391,7 @@ pub async fn handle_get_trace(
         Ok(output) => match covert_to_records(output).await {
             Ok(Some(records)) => match traces_from_records(records) {
                 Ok(traces) => (
-                    StatusCode::OK,
+                    HttpStatusCode::OK,
                     axum::Json(JaegerAPIResponse {
                         data: Some(JaegerData::Traces(traces)),
                         ..Default::default()
@@ -400,13 +402,15 @@ pub async fn handle_get_trace(
                     error_response(err)
                 }
             },
-            Ok(None) => (StatusCode::OK, axum::Json(JaegerAPIResponse::default())),
+            Ok(None) => (HttpStatusCode::OK, axum::Json(JaegerAPIResponse::default())),
             Err(err) => {
                 error!("Failed to get trace '{}': {:?}", trace_id, err);
                 error_response(err)
             }
         },
-        Err(err) => error_response(err),
+        Err(err) => {
+            handle_query_error(err, &format!("Failed to get trace for '{}'", trace_id), &db)
+        }
     }
 }
 
@@ -438,7 +442,7 @@ pub async fn handle_find_traces(
                 Ok(output) => match covert_to_records(output).await {
                     Ok(Some(records)) => match traces_from_records(records) {
                         Ok(traces) => (
-                            StatusCode::OK,
+                            HttpStatusCode::OK,
                             axum::Json(JaegerAPIResponse {
                                 data: Some(JaegerData::Traces(traces)),
                                 ..Default::default()
@@ -449,13 +453,10 @@ pub async fn handle_find_traces(
                             error_response(err)
                         }
                     },
-                    Ok(None) => (StatusCode::OK, axum::Json(JaegerAPIResponse::default())),
+                    Ok(None) => (HttpStatusCode::OK, axum::Json(JaegerAPIResponse::default())),
                     Err(err) => error_response(err),
                 },
-                Err(err) => {
-                    error!("Failed to find traces: {:?}", err);
-                    error_response(err)
-                }
+                Err(err) => handle_query_error(err, "Failed to find traces", &db),
             }
         }
         Err(e) => error_response(e),
@@ -493,7 +494,7 @@ pub async fn handle_get_operations(
                     Ok(operations) => {
                         let total = operations.len();
                         (
-                            StatusCode::OK,
+                            HttpStatusCode::OK,
                             axum::Json(JaegerAPIResponse {
                                 data: Some(JaegerData::Operations(operations)),
                                 total,
@@ -506,20 +507,18 @@ pub async fn handle_get_operations(
                         error_response(err)
                     }
                 },
-                Ok(None) => (StatusCode::OK, axum::Json(JaegerAPIResponse::default())),
+                Ok(None) => (HttpStatusCode::OK, axum::Json(JaegerAPIResponse::default())),
                 Err(err) => error_response(err),
             },
-            Err(err) => {
-                error!(
-                    "Failed to get operations for service '{}': {:?}",
-                    service_name, err
-                );
-                error_response(err)
-            }
+            Err(err) => handle_query_error(
+                err,
+                &format!("Failed to get operations for service '{}'", service_name),
+                &db,
+            ),
         }
     } else {
         (
-            StatusCode::BAD_REQUEST,
+            HttpStatusCode::BAD_REQUEST,
             axum::Json(JaegerAPIResponse {
                 errors: vec![JaegerAPIError {
                     code: 400,
@@ -565,7 +564,7 @@ pub async fn handle_get_operations_by_service(
                         operations.into_iter().map(|op| op.name).collect();
                     let total = operations.len();
                     (
-                        StatusCode::OK,
+                        HttpStatusCode::OK,
                         axum::Json(JaegerAPIResponse {
                             data: Some(JaegerData::OperationsNames(operations)),
                             total,
@@ -581,16 +580,14 @@ pub async fn handle_get_operations_by_service(
                     error_response(err)
                 }
             },
-            Ok(None) => (StatusCode::OK, axum::Json(JaegerAPIResponse::default())),
+            Ok(None) => (HttpStatusCode::OK, axum::Json(JaegerAPIResponse::default())),
             Err(err) => error_response(err),
         },
-        Err(err) => {
-            error!(
-                "Failed to get operations for service '{}': {:?}",
-                service_name, err
-            );
-            error_response(err)
-        }
+        Err(err) => handle_query_error(
+            err,
+            &format!("Failed to get operations for service '{}'", service_name),
+            &db,
+        ),
     }
 }
 
@@ -611,7 +608,25 @@ async fn covert_to_records(output: Output) -> Result<Option<HttpRecordsOutput>> 
     }
 }
 
-fn error_response(err: Error) -> (StatusCode, axum::Json<JaegerAPIResponse>) {
+fn handle_query_error(
+    err: Error,
+    prompt: &str,
+    db: &str,
+) -> (HttpStatusCode, axum::Json<JaegerAPIResponse>) {
+    // To compatible with the Jaeger API, if the trace table is not found, return an empty response instead of an error.
+    if err.status_code() == StatusCode::TableNotFound {
+        warn!(
+            "No trace table '{}' found in database '{}'",
+            TRACE_TABLE_NAME, db
+        );
+        (HttpStatusCode::OK, axum::Json(JaegerAPIResponse::default()))
+    } else {
+        error!("{}: {:?}", prompt, err);
+        error_response(err)
+    }
+}
+
+fn error_response(err: Error) -> (HttpStatusCode, axum::Json<JaegerAPIResponse>) {
     (
         status_code_to_http_status(&err.status_code()),
         axum::Json(JaegerAPIResponse {
