@@ -20,7 +20,7 @@ SELECT * FROM test WHERE value > 2.0 ORDER BY time;
 SELECT * FROM test WHERE metric > 200 ORDER BY time;
 
 -- Add skipping index
-ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 1024, index_type = 'BLOOM');
+ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 1024, type = 'BLOOM');
 
 -- Test queries after adding skipping index
 SELECT * FROM test WHERE value > 2.0 ORDER BY time;
@@ -38,7 +38,7 @@ SELECT * FROM test WHERE value > 6.0 ORDER BY time;
 SELECT * FROM test WHERE value < 3.0 ORDER BY time;
 
 -- Test multiple columns with skipping indexes
-ALTER TABLE test MODIFY COLUMN metric SET SKIPPING INDEX WITH(granularity = 1024, index_type = 'BLOOM');
+ALTER TABLE test MODIFY COLUMN metric SET SKIPPING INDEX WITH(granularity = 1024, type = 'BLOOM');
 
 -- Test queries with multiple skipping indexes
 SELECT * FROM test WHERE value > 5.0 AND metric < 700 ORDER BY time;
@@ -49,7 +49,7 @@ SHOW CREATE TABLE test;
 SHOW INDEX FROM test;
 
 -- Test modifying existing skipping index options
-ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 8192, index_type = 'BLOOM');
+ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 8192, type = 'BLOOM');
 SHOW CREATE TABLE test;
 
 -- Test removing skipping index
@@ -57,7 +57,7 @@ ALTER TABLE test MODIFY COLUMN value UNSET SKIPPING INDEX;
 SHOW INDEX FROM test;
 
 -- Test adding back with different options
-ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 2048, index_type = 'BLOOM');
+ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 2048, type = 'BLOOM');
 SHOW CREATE TABLE test;
 
 -- Test removing all skipping indexes
@@ -67,13 +67,13 @@ SHOW INDEX FROM test;
 
 -- Test invalid operations and error cases
 -- Try to set skipping index on string column (should fail)
-ALTER TABLE test MODIFY COLUMN category SET SKIPPING INDEX WITH(granularity = 1024, index_type = 'BLOOM');
+ALTER TABLE test MODIFY COLUMN category SET SKIPPING INDEX WITH(granularity = 1024, type = 'BLOOM');
 
 -- Try to set skipping index on timestamp column (should fail)
-ALTER TABLE test MODIFY COLUMN time SET SKIPPING INDEX WITH(granularity = 1024, index_type = 'BLOOM');
+ALTER TABLE test MODIFY COLUMN time SET SKIPPING INDEX WITH(granularity = 1024, type = 'BLOOM');
 
 -- Test invalid option values
-ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(blabla = 1024, index_type = 'wrong_type');
+ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(blabla = 1024, type = 'BLOOM');
 
 -- Test partial options
 ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 4096);

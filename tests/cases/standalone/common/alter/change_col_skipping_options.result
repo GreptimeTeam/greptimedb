@@ -54,9 +54,9 @@ SELECT * FROM test WHERE metric > 200 ORDER BY time;
 +-------+----------+--------+---------------------+
 
 -- Add skipping index
-ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 1024, index_type = 'BLOOM');
+ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 1024, type = 'BLOOM');
 
-Error: 1004(InvalidArguments), Invalid column option, column name: value, error: invalid SKIPPING INDEX option: index_type
+Affected Rows: 0
 
 -- Test queries after adding skipping index
 SELECT * FROM test WHERE value > 2.0 ORDER BY time;
@@ -107,9 +107,9 @@ SELECT * FROM test WHERE value < 3.0 ORDER BY time;
 +-------+----------+--------+---------------------+
 
 -- Test multiple columns with skipping indexes
-ALTER TABLE test MODIFY COLUMN metric SET SKIPPING INDEX WITH(granularity = 1024, index_type = 'BLOOM');
+ALTER TABLE test MODIFY COLUMN metric SET SKIPPING INDEX WITH(granularity = 1024, type = 'BLOOM');
 
-Error: 1004(InvalidArguments), Invalid column option, column name: metric, error: invalid SKIPPING INDEX option: index_type
+Affected Rows: 0
 
 -- Test queries with multiple skipping indexes
 SELECT * FROM test WHERE value > 5.0 AND metric < 700 ORDER BY time;
@@ -124,50 +124,52 @@ SELECT * FROM test WHERE value > 5.0 AND metric < 700 ORDER BY time;
 -- Verify persistence after restart
 SHOW CREATE TABLE test;
 
-+-------+-------------------------------------+
-| Table | Create Table                        |
-+-------+-------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" ( |
-|       |   "value" DOUBLE NULL,              |
-|       |   "category" STRING NULL,           |
-|       |   "metric" BIGINT NULL,             |
-|       |   "time" TIMESTAMP(3) NOT NULL,     |
-|       |   TIME INDEX ("time")               |
-|       | )                                   |
-|       |                                     |
-|       | ENGINE=mito                         |
-|       |                                     |
-+-------+-------------------------------------+
++-------+-----------------------------------------------------------------------------------+
+| Table | Create Table                                                                      |
++-------+-----------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                               |
+|       |   "value" DOUBLE NULL SKIPPING INDEX WITH(granularity = '1024', type = 'BLOOM'),  |
+|       |   "category" STRING NULL,                                                         |
+|       |   "metric" BIGINT NULL SKIPPING INDEX WITH(granularity = '1024', type = 'BLOOM'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                   |
+|       |   TIME INDEX ("time")                                                             |
+|       | )                                                                                 |
+|       |                                                                                   |
+|       | ENGINE=mito                                                                       |
+|       |                                                                                   |
++-------+-----------------------------------------------------------------------------------+
 
 SHOW INDEX FROM test;
 
-+-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
-| Table | Non_unique | Key_name   | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
-+-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
-| test  | 1          | TIME INDEX | 1            | time        | A         |             |          |        | NO   |            |         |               | YES     |            |
-+-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
+| Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type               | Comment | Index_comment | Visible | Expression |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
+| test  | 1          | SKIPPING INDEX | 3            | metric      | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
+| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                          |         |               | YES     |            |
+| test  | 1          | SKIPPING INDEX | 1            | value       | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 
 -- Test modifying existing skipping index options
-ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 8192, index_type = 'BLOOM');
+ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 8192, type = 'BLOOM');
 
-Error: 1004(InvalidArguments), Invalid column option, column name: value, error: invalid SKIPPING INDEX option: index_type
+Affected Rows: 0
 
 SHOW CREATE TABLE test;
 
-+-------+-------------------------------------+
-| Table | Create Table                        |
-+-------+-------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" ( |
-|       |   "value" DOUBLE NULL,              |
-|       |   "category" STRING NULL,           |
-|       |   "metric" BIGINT NULL,             |
-|       |   "time" TIMESTAMP(3) NOT NULL,     |
-|       |   TIME INDEX ("time")               |
-|       | )                                   |
-|       |                                     |
-|       | ENGINE=mito                         |
-|       |                                     |
-+-------+-------------------------------------+
++-------+-----------------------------------------------------------------------------------+
+| Table | Create Table                                                                      |
++-------+-----------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                               |
+|       |   "value" DOUBLE NULL SKIPPING INDEX WITH(granularity = '8192', type = 'BLOOM'),  |
+|       |   "category" STRING NULL,                                                         |
+|       |   "metric" BIGINT NULL SKIPPING INDEX WITH(granularity = '1024', type = 'BLOOM'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                   |
+|       |   TIME INDEX ("time")                                                             |
+|       | )                                                                                 |
+|       |                                                                                   |
+|       | ENGINE=mito                                                                       |
+|       |                                                                                   |
++-------+-----------------------------------------------------------------------------------+
 
 -- Test removing skipping index
 ALTER TABLE test MODIFY COLUMN value UNSET SKIPPING INDEX;
@@ -176,33 +178,34 @@ Affected Rows: 0
 
 SHOW INDEX FROM test;
 
-+-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
-| Table | Non_unique | Key_name   | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
-+-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
-| test  | 1          | TIME INDEX | 1            | time        | A         |             |          |        | NO   |            |         |               | YES     |            |
-+-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
+| Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type               | Comment | Index_comment | Visible | Expression |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
+| test  | 1          | SKIPPING INDEX | 3            | metric      | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
+| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                          |         |               | YES     |            |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 
 -- Test adding back with different options
-ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 2048, index_type = 'BLOOM');
+ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 2048, type = 'BLOOM');
 
-Error: 1004(InvalidArguments), Invalid column option, column name: value, error: invalid SKIPPING INDEX option: index_type
+Affected Rows: 0
 
 SHOW CREATE TABLE test;
 
-+-------+-------------------------------------+
-| Table | Create Table                        |
-+-------+-------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" ( |
-|       |   "value" DOUBLE NULL,              |
-|       |   "category" STRING NULL,           |
-|       |   "metric" BIGINT NULL,             |
-|       |   "time" TIMESTAMP(3) NOT NULL,     |
-|       |   TIME INDEX ("time")               |
-|       | )                                   |
-|       |                                     |
-|       | ENGINE=mito                         |
-|       |                                     |
-+-------+-------------------------------------+
++-------+-----------------------------------------------------------------------------------+
+| Table | Create Table                                                                      |
++-------+-----------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                               |
+|       |   "value" DOUBLE NULL SKIPPING INDEX WITH(granularity = '2048', type = 'BLOOM'),  |
+|       |   "category" STRING NULL,                                                         |
+|       |   "metric" BIGINT NULL SKIPPING INDEX WITH(granularity = '1024', type = 'BLOOM'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                   |
+|       |   TIME INDEX ("time")                                                             |
+|       | )                                                                                 |
+|       |                                                                                   |
+|       | ENGINE=mito                                                                       |
+|       |                                                                                   |
++-------+-----------------------------------------------------------------------------------+
 
 -- Test removing all skipping indexes
 ALTER TABLE test MODIFY COLUMN value UNSET SKIPPING INDEX;
@@ -223,17 +226,17 @@ SHOW INDEX FROM test;
 
 -- Test invalid operations and error cases
 -- Try to set skipping index on string column (should fail)
-ALTER TABLE test MODIFY COLUMN category SET SKIPPING INDEX WITH(granularity = 1024, index_type = 'BLOOM');
+ALTER TABLE test MODIFY COLUMN category SET SKIPPING INDEX WITH(granularity = 1024, type = 'BLOOM');
 
-Error: 1004(InvalidArguments), Invalid column option, column name: category, error: invalid SKIPPING INDEX option: index_type
+Affected Rows: 0
 
 -- Try to set skipping index on timestamp column (should fail)
-ALTER TABLE test MODIFY COLUMN time SET SKIPPING INDEX WITH(granularity = 1024, index_type = 'BLOOM');
+ALTER TABLE test MODIFY COLUMN time SET SKIPPING INDEX WITH(granularity = 1024, type = 'BLOOM');
 
-Error: 1004(InvalidArguments), Invalid column option, column name: time, error: invalid SKIPPING INDEX option: index_type
+Affected Rows: 0
 
 -- Test invalid option values
-ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(blabla = 1024, index_type = 'wrong_type');
+ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(blabla = 1024, type = 'BLOOM');
 
 Error: 1004(InvalidArguments), Invalid column option, column name: value, error: invalid SKIPPING INDEX option: blabla
 
@@ -247,7 +250,9 @@ SHOW INDEX FROM test;
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 | Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type               | Comment | Index_comment | Visible | Expression |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
+| test  | 1          | SKIPPING INDEX | 2            | category    | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
 | test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                          |         |               | YES     |            |
+| test  | 1          | SKIPPING INDEX | 4            | time        | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
 | test  | 1          | SKIPPING INDEX | 1            | value       | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 
