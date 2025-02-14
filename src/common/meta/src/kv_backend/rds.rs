@@ -115,8 +115,8 @@ impl<T: Executor> ExecutorImpl<'_, T> {
     #[allow(dead_code)]
     async fn execute(&mut self, query: &str, params: &Vec<&Vec<u8>>) -> Result<()> {
         match self {
-            Self::Default(executor) => executor.default_execute(query, params).await,
-            Self::Txn(executor) => executor.txn_execute(query, params).await,
+            Self::Default(executor) => executor.execute(query, params).await,
+            Self::Txn(executor) => executor.execute(query, params).await,
         }
     }
 
