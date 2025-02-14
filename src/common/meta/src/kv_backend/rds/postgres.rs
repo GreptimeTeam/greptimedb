@@ -249,7 +249,7 @@ impl DefaultQueryExecutor for PgClient {
     async fn default_query(&mut self, query: &str, params: &[&Vec<u8>]) -> Result<Vec<KeyValue>> {
         let params: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p as _).collect();
         let stmt = self
-            .prepare(query)
+            .prepare_cached(query)
             .await
             .context(PostgresExecutionSnafu { sql: query })?;
         let rows = self
@@ -277,7 +277,7 @@ impl<'a> TxnQueryExecutor<'a> for PgTxnClient<'a> {
     async fn txn_query(&mut self, query: &str, params: &[&Vec<u8>]) -> Result<Vec<KeyValue>> {
         let params: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p as _).collect();
         let stmt = self
-            .prepare(query)
+            .prepare_cached(query)
             .await
             .context(PostgresExecutionSnafu { sql: query })?;
         let rows = self
