@@ -12,16 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::filter::FilterExec;
+use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
-use datafusion::physical_plan::{displayable, ExecutionPlan};
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::Result as DataFusionResult;
 use datafusion_physical_expr::expressions::Column as PhysicalColumn;
@@ -67,19 +69,11 @@ impl WindowedSortPhysicalRule {
         plan: Arc<dyn ExecutionPlan>,
         _config: &datafusion::config::ConfigOptions,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        common_telemetry::info!(
-            "[DBG] do optimize, plan {}",
-            displayable(plan.as_ref()).indent(false).to_string()
-        );
         let result = plan
             .transform_down(|plan| {
                 if let Some(sort_exec) = plan.as_any().downcast_ref::<SortExec>() {
                     // TODO: support multiple expr in windowed sort
                     if sort_exec.expr().len() != 1 {
-                        common_telemetry::info!(
-                            "[DBG] sort len, plan {}",
-                            displayable(plan.as_ref()).indent(false).to_string()
-                        );
                         return Ok(Transformed::no(plan));
                     }
 
@@ -88,10 +82,6 @@ impl WindowedSortPhysicalRule {
                     let sort_input = remove_repartition(sort_exec.input().clone())?.data;
                     // Gets scanner info from the input without repartition before filter.
                     let Some(scanner_info) = fetch_partition_range(sort_input.clone())? else {
-                        common_telemetry::info!(
-                            "[DBG] no scanner info, plan {}",
-                            displayable(plan.as_ref()).indent(false).to_string()
-                        );
                         return Ok(Transformed::no(plan));
                     };
 
@@ -100,7 +90,7 @@ impl WindowedSortPhysicalRule {
                             .expr
                             .as_any()
                             .downcast_ref::<PhysicalColumn>()
-                        && column_expr.name() == scanner_info.time_index
+                        && scanner_info.time_index.contains(column_expr.name())
                     {
                     } else {
                         return Ok(Transformed::no(plan));
@@ -160,13 +150,13 @@ impl WindowedSortPhysicalRule {
 #[derive(Debug)]
 struct ScannerInfo {
     partition_ranges: Vec<Vec<PartitionRange>>,
-    time_index: String,
+    time_index: HashSet<String>,
     tag_columns: Vec<String>,
 }
 
 fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Option<ScannerInfo>> {
     let mut partition_ranges = None;
-    let mut time_index = None;
+    let mut time_index = HashSet::new();
     let mut tag_columns = None;
     let mut is_batch_coalesced = false;
 
@@ -184,9 +174,21 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
             is_batch_coalesced = true;
         }
 
+        // Collects alias of the time index column.
+        if let Some(projection) = plan.as_any().downcast_ref::<ProjectionExec>() {
+            for (expr, output_name) in projection.expr() {
+                if let Some(column_expr) = expr.as_any().downcast_ref::<PhysicalColumn>() {
+                    if time_index.contains(column_expr.name()) {
+                        time_index.insert(output_name.clone());
+                    }
+                }
+            }
+        }
+
         if let Some(region_scan_exec) = plan.as_any().downcast_ref::<RegionScanExec>() {
             partition_ranges = Some(region_scan_exec.get_uncollapsed_partition_ranges());
-            time_index = Some(region_scan_exec.time_index());
+            // Reset time index column.
+            time_index = HashSet::from([region_scan_exec.time_index()]);
             tag_columns = Some(region_scan_exec.tag_columns());
 
             // set distinguish_partition_ranges to true, this is an incorrect workaround
@@ -201,7 +203,7 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
     let result = try {
         ScannerInfo {
             partition_ranges: partition_ranges?,
-            time_index: time_index?,
+            time_index,
             tag_columns: tag_columns?,
         }
     };
