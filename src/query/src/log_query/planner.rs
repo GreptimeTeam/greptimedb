@@ -123,7 +123,7 @@ impl LogQueryPlanner {
                 }
                 LogExpr::Filter { expr, filter } => {
                     let schema = plan_builder.schema();
-                    let expr = self.log_expr_to_df_expr(expr, &schema)?;
+                    let expr = self.log_expr_to_df_expr(expr, schema)?;
                     let col_name = expr.schema_name().to_string();
                     let filter = self.build_column_filter(&ColumnFilters {
                         column_name: col_name,
