@@ -18,6 +18,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion::error::DataFusionError;
+use log_query::LogExpr;
 use snafu::{Location, Snafu};
 
 #[derive(Snafu)]
@@ -57,6 +58,28 @@ pub enum Error {
         location: Location,
         feature: String,
     },
+
+    #[snafu(display("Unknown aggregate function: {name}"))]
+    UnknownAggregateFunction {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Unknown scalar function: {name}"))]
+    UnknownScalarFunction {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Unexpected log expression: {expr:?}, expected {expected}"))]
+    UnexpectedLogExpr {
+        expr: LogExpr,
+        expected: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -67,6 +90,9 @@ impl ErrorExt for Error {
             DataFusionPlanning { .. } => StatusCode::External,
             UnknownTable { .. } | TimeIndexNotFound { .. } => StatusCode::Internal,
             Unimplemented { .. } => StatusCode::Unsupported,
+            UnknownAggregateFunction { .. }
+            | UnknownScalarFunction { .. }
+            | UnexpectedLogExpr { .. } => StatusCode::InvalidArguments,
         }
     }
 
