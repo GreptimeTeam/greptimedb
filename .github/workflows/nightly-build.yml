@@ -240,6 +240,7 @@ jobs:
           aws-cn-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
           aws-cn-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
           aws-cn-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
+          upload-to-s3: false
           dev-mode: false
           update-version-info: false  # Don't update version info in S3.
           push-latest-tag: true
