@@ -442,6 +442,7 @@ impl StagerNotifier for StagerMetrics {
 
     fn on_cache_evict(&self, _size: u64) {
         self.cache_eviction.inc();
+        self.staging_cache_bytes.sub(size as i64);
     }
 
     fn on_recycle_insert(&self, size: u64) {
