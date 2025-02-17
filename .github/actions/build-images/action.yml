@@ -22,8 +22,8 @@ inputs:
     required: true
   push-latest-tag:
     description: Whether to push the latest tag
-    required: false
-    default: 'true'
+    required: true
+    default: 'false'
   dev-mode:
     description: Enable dev mode, only build standard greptime
     required: false
