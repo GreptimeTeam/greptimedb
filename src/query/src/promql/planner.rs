@@ -2424,6 +2424,7 @@ impl PromPlanner {
         // step 4: update context
         self.ctx.time_index_column = Some(left_time_index_column);
         self.ctx.tag_columns = all_tags.into_iter().collect();
+        self.ctx.field_columns = vec![left_field_col.to_string()];
 
         Ok(result)
     }
@@ -2609,6 +2610,68 @@ mod test {
                 .schema(schema)
                 .primary_key_indices((0..num_tag).collect())
                 .value_indices((num_tag + 1..num_tag + 1 + num_field).collect())
+                .next_column_id(1024)
+                .build()
+                .unwrap();
+            let table_info = TableInfoBuilder::default()
+                .name(table_name.to_string())
+                .meta(table_meta)
+                .build()
+                .unwrap();
+            let table = EmptyTable::from_table_info(&table_info);
+
+            assert!(catalog_list
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: schema_name.to_string(),
+                    table_name: table_name.to_string(),
+                    table_id: 1024,
+                    table,
+                })
+                .is_ok());
+        }
+
+        DfTableSourceProvider::new(
+            catalog_list,
+            false,
+            QueryContext::arc(),
+            DummyDecoder::arc(),
+            false,
+        )
+    }
+
+    async fn build_test_table_provider_with_fields(
+        table_name_tuples: &[(String, String)],
+        tags: &[&str],
+    ) -> DfTableSourceProvider {
+        let catalog_list = MemoryCatalogManager::with_default_setup();
+        for (schema_name, table_name) in table_name_tuples {
+            let mut columns = vec![];
+            let num_tag = tags.len();
+            for tag in tags {
+                columns.push(ColumnSchema::new(
+                    tag.to_string(),
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ));
+            }
+            columns.push(
+                ColumnSchema::new(
+                    "greptime_timestamp".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+            );
+            columns.push(ColumnSchema::new(
+                "greptime_value".to_string(),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ));
+            let schema = Arc::new(Schema::new(columns));
+            let table_meta = TableMetaBuilder::default()
+                .schema(schema)
+                .primary_key_indices((0..num_tag).collect())
                 .next_column_id(1024)
                 .build()
                 .unwrap();
@@ -3215,6 +3278,41 @@ mod test {
         );
 
         indie_query_plan_compare(query, expected).await;
+    }
+
+    #[tokio::test]
+    async fn test_nested_binary_op() {
+        let mut eval_stmt = EvalStmt {
+            expr: PromExpr::NumberLiteral(NumberLiteral { val: 1.0 }),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let case = r#"sum(rate(nginx_ingress_controller_requests{job=~".*"}[2m])) -
+        (
+            sum(rate(nginx_ingress_controller_requests{namespace=~".*"}[2m]))
+            or
+            vector(0)
+        )"#;
+
+        let prom_expr = parser::parse(case).unwrap();
+        eval_stmt.expr = prom_expr;
+        let table_provider = build_test_table_provider_with_fields(
+            &[(
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "nginx_ingress_controller_requests".to_string(),
+            )],
+            &["namespace", "job"],
+        )
+        .await;
+        // Should be ok
+        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
