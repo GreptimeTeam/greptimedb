@@ -203,6 +203,12 @@ tql eval (0, 2000, '400') t2 or on () t1;
 -- SQLNESS SORT_RESULT 3 1
 tql eval (0, 2000, '400') t2 or on(job) t1;
 
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') sum(t1{job="a"});
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') sum(t1{job="a"}) - sum(t1{job="e"} or vector(1));
+
 drop table t1;
 
 drop table t2;
