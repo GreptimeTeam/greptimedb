@@ -13,7 +13,7 @@ jobs:
   sqlness-test:
     name: Run sqlness test
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -133,7 +133,7 @@ jobs:
     name: Check status
     needs: [sqlness-test, sqlness-windows, test-on-windows]
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     outputs:
       check-result: ${{ steps.set-check-result.outputs.check-result }}
     steps:
@@ -146,7 +146,7 @@ jobs:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && always() }} # Not requiring successful dependent jobs, always run.
     name: Send notification to Greptime team
     needs: [check-status]
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     env:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
     steps:
