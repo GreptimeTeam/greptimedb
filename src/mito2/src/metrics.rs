@@ -440,7 +440,7 @@ impl StagerNotifier for StagerMetrics {
         self.staging_miss_read.observe(duration.as_secs_f64());
     }
 
-    fn on_cache_evict(&self, _size: u64) {
+    fn on_cache_evict(&self, size: u64) {
         self.cache_eviction.inc();
         self.staging_cache_bytes.sub(size as i64);
     }
