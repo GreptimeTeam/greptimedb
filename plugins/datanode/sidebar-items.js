@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["setup_datanode_plugins","start_datanode_plugins"]};

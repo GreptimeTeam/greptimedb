@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["extract_table_name"]};

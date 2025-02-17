@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["FlushReason"],"struct":["FlushScheduler","FlushStatus","RegionFlushTask","WriteBufferManagerImpl"],"trait":["WriteBufferManager"],"type":["WriteBufferManagerRef"]};
