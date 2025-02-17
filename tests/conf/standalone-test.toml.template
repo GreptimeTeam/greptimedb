@@ -21,12 +21,12 @@ type = 'File'
 data_home = '{data_home}'
 
 [grpc]
-bind_addr = '127.0.0.1:29401'
+bind_addr = '{grpc_addr}'
 runtime_size = 8
 
 [mysql]
 enable = true
-addr = "127.0.0.1:29402"
+addr = "{mysql_addr}"
 runtime_size = 2
 
 [mysql.tls]
@@ -34,7 +34,7 @@ mode = "disable"
 
 [postgres]
 enable = true
-addr = "127.0.0.1:29403"
+addr = "{postgres_addr}"
 runtime_size = 2
 
 [procedure]

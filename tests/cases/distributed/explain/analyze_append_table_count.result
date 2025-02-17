@@ -49,3 +49,7 @@ EXPLAIN ANALYZE SELECT count(*) FROM test_table;
 |_|_| Total rows: 1_|
 +-+-+-+
 
+DROP TABLE test_table;
+
+Affected Rows: 0
+
