@@ -27,8 +27,8 @@ use snafu::ResultExt;
 
 use crate::error::{PuffinInitStagerSnafu, Result};
 use crate::metrics::{
-    INDEX_PUFFIN_FLUSH_OP_TOTAL, INDEX_PUFFIN_READ_BYTES_TOTAL, INDEX_PUFFIN_READ_OP_TOTAL,
-    INDEX_PUFFIN_WRITE_BYTES_TOTAL, INDEX_PUFFIN_WRITE_OP_TOTAL,
+    StagerMetrics, INDEX_PUFFIN_FLUSH_OP_TOTAL, INDEX_PUFFIN_READ_BYTES_TOTAL,
+    INDEX_PUFFIN_READ_OP_TOTAL, INDEX_PUFFIN_WRITE_BYTES_TOTAL, INDEX_PUFFIN_WRITE_OP_TOTAL,
 };
 use crate::sst::index::store::{self, InstrumentedStore};
 
@@ -63,9 +63,13 @@ impl PuffinManagerFactory {
         write_buffer_size: Option<usize>,
     ) -> Result<Self> {
         let staging_dir = aux_path.as_ref().join(STAGING_DIR);
-        let stager = BoundedStager::new(staging_dir, staging_capacity, None)
-            .await
-            .context(PuffinInitStagerSnafu)?;
+        let stager = BoundedStager::new(
+            staging_dir,
+            staging_capacity,
+            Some(Arc::new(StagerMetrics::default())),
+        )
+        .await
+        .context(PuffinInitStagerSnafu)?;
         Ok(Self {
             stager: Arc::new(stager),
             write_buffer_size,
