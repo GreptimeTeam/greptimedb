@@ -63,7 +63,7 @@ jobs:
 
   release-dev-builder-images-ecr:
     name: Release dev builder images to AWS ECR
-    runs-on: ubuntu-22.04-16-cores
+    runs-on: ubuntu-22.04
     needs: [
       release-dev-builder-images
     ]
@@ -148,7 +148,7 @@ jobs:
 
   release-dev-builder-images-cn: # Note: Be careful issue: https://github.com/containers/skopeo/issues/1874 and we decide to use the latest stable skopeo container.
     name: Release dev builder images to CN region
-    runs-on: ubuntu-22.04-16-cores
+    runs-on: ubuntu-22.04
     needs: [
       release-dev-builder-images
     ]
