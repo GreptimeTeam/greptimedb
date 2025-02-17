@@ -28,7 +28,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::arrow::datatypes::FieldRef;
-use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef};
+use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef, SkippingIndexOptions};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
@@ -586,6 +586,10 @@ impl RegionMetadataBuilder {
                 ApiSetIndexOptions::Inverted { column_name } => {
                     self.change_column_inverted_index_options(column_name, true)?
                 }
+                ApiSetIndexOptions::Skipping {
+                    column_name,
+                    options,
+                } => self.change_column_skipping_index_options(column_name, Some(options))?,
             },
             AlterKind::UnsetIndex { options } => match options {
                 ApiUnsetIndexOptions::Fulltext { column_name } => {
@@ -593,6 +597,9 @@ impl RegionMetadataBuilder {
                 }
                 ApiUnsetIndexOptions::Inverted { column_name } => {
                     self.change_column_inverted_index_options(column_name, false)?
+                }
+                ApiUnsetIndexOptions::Skipping { column_name } => {
+                    self.change_column_skipping_index_options(column_name, None)?
                 }
             },
             AlterKind::SetRegionOptions { options: _ } => {
@@ -764,6 +771,32 @@ impl RegionMetadataBuilder {
         }
         Ok(())
     }
+
+    fn change_column_skipping_index_options(
+        &mut self,
+        column_name: String,
+        options: Option<SkippingIndexOptions>,
+    ) -> Result<()> {
+        for column_meta in self.column_metadatas.iter_mut() {
+            if column_meta.column_schema.name == column_name {
+                if let Some(options) = &options {
+                    column_meta
+                        .column_schema
+                        .set_skipping_options(options)
+                        .context(UnsetSkippingIndexOptionsSnafu {
+                            column_name: column_name.clone(),
+                        })?;
+                } else {
+                    column_meta.column_schema.unset_skipping_options().context(
+                        UnsetSkippingIndexOptionsSnafu {
+                            column_name: column_name.clone(),
+                        },
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Fields skipped in serialization.
@@ -914,6 +947,22 @@ pub enum MetadataError {
 
     #[snafu(display("Failed to set fulltext options for column {}", column_name))]
     SetFulltextOptions {
+        column_name: String,
+        source: datatypes::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to set skipping index options for column {}", column_name))]
+    SetSkippingIndexOptions {
+        column_name: String,
+        source: datatypes::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to unset skipping index options for column {}", column_name))]
+    UnsetSkippingIndexOptions {
         column_name: String,
         source: datatypes::Error,
         #[snafu(implicit)]

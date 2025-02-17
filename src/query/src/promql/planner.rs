@@ -981,11 +981,17 @@ impl PromPlanner {
             let expr = match matcher.op {
                 MatchOp::Equal => col.eq(lit),
                 MatchOp::NotEqual => col.not_eq(lit),
-                MatchOp::Re(_) => DfExpr::BinaryExpr(BinaryExpr {
-                    left: Box::new(col),
-                    op: Operator::RegexMatch,
-                    right: Box::new(lit),
-                }),
+                MatchOp::Re(re) => {
+                    // TODO(ruihang): a more programmatic way to handle this in datafusion
+                    if re.as_str() == ".*" {
+                        continue;
+                    }
+                    DfExpr::BinaryExpr(BinaryExpr {
+                        left: Box::new(col),
+                        op: Operator::RegexMatch,
+                        right: Box::new(lit),
+                    })
+                }
                 MatchOp::NotRe(_) => DfExpr::BinaryExpr(BinaryExpr {
                     left: Box::new(col),
                     op: Operator::RegexNotMatch,
