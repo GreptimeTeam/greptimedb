@@ -16,7 +16,7 @@ local-ip-address.workspace = true
 
 [dependencies]
 api.workspace = true
-async-trait = "0.1"
+async-trait.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 clap.workspace = true
