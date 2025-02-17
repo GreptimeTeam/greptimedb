@@ -17,7 +17,7 @@ inputs:
     default: "greptime/greptimedb"
     description: "Image repository"
   image-tag: 
-    default: "latest"
+    default: "v0.11.3"
     description: 'Image tag'
   etcd-endpoints:
     default: "etcd.etcd-cluster.svc.cluster.local:2379"
