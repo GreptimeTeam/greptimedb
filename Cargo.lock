@@ -8754,7 +8754,7 @@ dependencies = [
 [[package]]
 name = "promql-parser"
 version = "0.4.3"
-source = "git+https://github.com/killme2008/promql-parser.git?rev=7c104f15aa4a124f718c05d32d066b64dfe4a2aa#7c104f15aa4a124f718c05d32d066b64dfe4a2aa"
+source = "git+https://github.com/GreptimeTeam/promql-parser.git?rev=27abb8e16003a50c720f00d6c85f41f5fa2a2a8e#27abb8e16003a50c720f00d6c85f41f5fa2a2a8e"
 dependencies = [
  "cfgrammar",
  "chrono",
