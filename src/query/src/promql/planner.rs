@@ -774,7 +774,7 @@ impl PromPlanner {
             scan_filters.push(time_index_filter);
         }
         table_scan = LogicalPlanBuilder::from(table_scan)
-            .filter(conjunction(scan_filters).unwrap())
+            .filter(conjunction(scan_filters).unwrap()) // Safety: `scan_filters` is not empty.
             .context(DataFusionPlanningSnafu)?
             .build()
             .context(DataFusionPlanningSnafu)?;
@@ -1126,7 +1126,6 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu)?;
         }
 
-        // Safety: `scan_filters` is not empty.
         let result = LogicalPlanBuilder::from(scan_plan)
             .build()
             .context(DataFusionPlanningSnafu)?;
