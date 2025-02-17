@@ -2205,19 +2205,32 @@ impl PromPlanner {
         // Generate join plan.
         // All set operations in PromQL are "distinct"
         match op.id() {
-            token::T_LAND => LogicalPlanBuilder::from(left)
-                .distinct()
-                .context(DataFusionPlanningSnafu)?
-                .join_detailed(
-                    right,
-                    JoinType::LeftSemi,
-                    (join_keys.clone(), join_keys),
-                    None,
-                    true,
-                )
-                .context(DataFusionPlanningSnafu)?
-                .build()
-                .context(DataFusionPlanningSnafu),
+            token::T_LAND => {
+                ensure!(
+                    left_context.field_columns.len() == 1,
+                    MultiFieldsNotSupportedSnafu {
+                        operator: "AND operator"
+                    }
+                );
+                // Update the field column in context.
+                // The AND operator only keep the field column in left input.
+                let left_field_col = left_context.field_columns.first().unwrap();
+                self.ctx.field_columns = vec![left_field_col.clone()];
+
+                LogicalPlanBuilder::from(left)
+                    .distinct()
+                    .context(DataFusionPlanningSnafu)?
+                    .join_detailed(
+                        right,
+                        JoinType::LeftSemi,
+                        (join_keys.clone(), join_keys),
+                        None,
+                        true,
+                    )
+                    .context(DataFusionPlanningSnafu)?
+                    .build()
+                    .context(DataFusionPlanningSnafu)
+            }
             token::T_LUNLESS => LogicalPlanBuilder::from(left)
                 .distinct()
                 .context(DataFusionPlanningSnafu)?
@@ -2460,7 +2473,6 @@ impl PromPlanner {
         let project_fields = non_field_columns_iter
             .chain(field_columns_iter)
             .collect::<Result<Vec<_>>>()?;
-
         LogicalPlanBuilder::from(input)
             .project(project_fields)
             .context(DataFusionPlanningSnafu)?
@@ -3290,6 +3302,47 @@ mod test {
         let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_parse_and_operator() {
+        let mut eval_stmt = EvalStmt {
+            expr: PromExpr::NumberLiteral(NumberLiteral { val: 1.0 }),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let cases = [
+            r#"count (max by (persistentvolumeclaim,namespace) (kubelet_volume_stats_used_bytes{namespace=~".+"} ) and (max by (persistentvolumeclaim,namespace) (kubelet_volume_stats_used_bytes{namespace=~".+"} )) / (max by (persistentvolumeclaim,namespace) (kubelet_volume_stats_capacity_bytes{namespace=~".+"} )) >= (80 / 100)) or vector (0)"#,
+            r#"count (max by (persistentvolumeclaim,namespace) (kubelet_volume_stats_used_bytes{namespace=~".+"} ) unless (max by (persistentvolumeclaim,namespace) (kubelet_volume_stats_used_bytes{namespace=~".+"} )) / (max by (persistentvolumeclaim,namespace) (kubelet_volume_stats_capacity_bytes{namespace=~".+"} )) >= (80 / 100)) or vector (0)"#,
+        ];
+
+        for case in cases {
+            let prom_expr = parser::parse(case).unwrap();
+            eval_stmt.expr = prom_expr;
+            let table_provider = build_test_table_provider_with_fields(
+                &[
+                    (
+                        DEFAULT_SCHEMA_NAME.to_string(),
+                        "kubelet_volume_stats_used_bytes".to_string(),
+                    ),
+                    (
+                        DEFAULT_SCHEMA_NAME.to_string(),
+                        "kubelet_volume_stats_capacity_bytes".to_string(),
+                    ),
+                ],
+                &["namespace", "persistentvolumeclaim"],
+            )
+            .await;
+            // Should be ok
+            let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+                .await
+                .unwrap();
+        }
     }
 
     #[tokio::test]
