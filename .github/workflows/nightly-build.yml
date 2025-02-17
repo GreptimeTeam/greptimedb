@@ -200,7 +200,7 @@ jobs:
           image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
           image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
           version: ${{ needs.allocate-runners.outputs.version }}
-          push-latest-tag: true
+          push-latest-tag: false
 
       - name: Set nightly build result
         id: set-nightly-build-result
@@ -243,7 +243,7 @@ jobs:
           upload-to-s3: false
           dev-mode: false
           update-version-info: false  # Don't update version info in S3.
-          push-latest-tag: true
+          push-latest-tag: false
 
   stop-linux-amd64-runner: # It's always run as the last job in the workflow to make sure that the runner is released.
     name: Stop linux-amd64 runner
