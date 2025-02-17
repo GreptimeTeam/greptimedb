@@ -7,6 +7,7 @@ license.workspace = true
 [features]
 testing = []
 pg_kvbackend = ["dep:tokio-postgres", "dep:backon", "dep:deadpool-postgres", "dep:deadpool"]
+mysql_kvbackend = ["dep:sqlx", "dep:backon"]
 
 [lints]
 workspace = true
@@ -57,6 +58,7 @@ serde_json.workspace = true
 serde_with.workspace = true
 session.workspace = true
 snafu.workspace = true
+sqlx = { workspace = true, optional = true }
 store-api.workspace = true
 strum.workspace = true
 table.workspace = true
