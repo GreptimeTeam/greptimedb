@@ -120,7 +120,7 @@ impl FilePurger for LocalFilePurger {
                 .purge_stager(&puffin_file_name)
                 .await
             {
-                error!(e; "Failed to purge index file, file_id: {}, region: {}",
+                error!(e; "Failed to purge stager with index file, file_id: {}, region: {}",
                     file_meta.file_id, file_meta.region_id);
             }
         })) {
