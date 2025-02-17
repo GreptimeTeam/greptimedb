@@ -39,6 +39,7 @@ datafusion-expr.workspace = true
 datafusion-physical-expr.workspace = true
 datafusion-substrait.workspace = true
 datatypes.workspace = true
+derive-where = "1.2.7"
 enum-as-inner = "0.6.0"
 enum_dispatch = "0.3"
 futures = "0.3"
