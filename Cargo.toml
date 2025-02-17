@@ -161,9 +161,9 @@ paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
 # FIXME: fix it when there is a new version
-promql-parser = { git = "https://github.com/killme2008/promql-parser.git", features = [
+promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", features = [
     "ser",
-], rev = "7c104f15aa4a124f718c05d32d066b64dfe4a2aa" }
+], rev = "27abb8e16003a50c720f00d6c85f41f5fa2a2a8e" }
 prost = "0.13"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.8"
