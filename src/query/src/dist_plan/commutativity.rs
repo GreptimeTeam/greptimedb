@@ -158,8 +158,9 @@ impl Categorizer {
             | Expr::ScalarSubquery(_)
             | Expr::Wildcard { .. } => Commutativity::Unimplemented,
 
-            Expr::Alias(_)
-            | Expr::Unnest(_)
+            Expr::Alias(alias) => Self::check_expr(&alias.expr),
+
+            Expr::Unnest(_)
             | Expr::GroupingSet(_)
             | Expr::Placeholder(_)
             | Expr::OuterReferenceColumn(_, _) => Commutativity::Unimplemented,
