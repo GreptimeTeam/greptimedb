@@ -163,13 +163,30 @@ impl LogQueryPlanner {
                 log_query::ContentFilter::Exist => {
                     Ok(col(&column_filter.column_name).is_not_null())
                 }
-                log_query::ContentFilter::Between(lower, upper) => {
-                    Ok(col(&column_filter.column_name)
-                        .gt_eq(lit(ScalarValue::Utf8(Some(escape_like_pattern(lower)))))
-                        .and(
-                            col(&column_filter.column_name)
-                                .lt_eq(lit(ScalarValue::Utf8(Some(escape_like_pattern(upper))))),
-                        ))
+                log_query::ContentFilter::Between {
+                    start,
+                    end,
+                    start_inclusive,
+                    end_inclusive,
+                } => {
+                    let left = if *start_inclusive {
+                        Expr::gt_eq
+                    } else {
+                        Expr::gt
+                    };
+                    let right = if *end_inclusive {
+                        Expr::lt_eq
+                    } else {
+                        Expr::lt
+                    };
+                    Ok(left(
+                        col(&column_filter.column_name),
+                        lit(ScalarValue::Utf8(Some(escape_like_pattern(start)))),
+                    )
+                    .and(right(
+                        col(&column_filter.column_name),
+                        lit(ScalarValue::Utf8(Some(escape_like_pattern(end)))),
+                    )))
                 }
                 log_query::ContentFilter::Compound(..) => Err::<Expr, _>(
                     UnimplementedSnafu {
@@ -454,5 +471,32 @@ mod tests {
         assert_eq!(escape_like_pattern("te%st"), "te\\%st");
         assert_eq!(escape_like_pattern("te_st"), "te\\_st");
         assert_eq!(escape_like_pattern("te\\st"), "te\\\\st");
+    }
+
+    #[tokio::test]
+    async fn test_build_column_filter_between() {
+        let table_provider =
+            build_test_table_provider(&[("public".to_string(), "test_table".to_string())]).await;
+        let planner = LogQueryPlanner::new(table_provider);
+
+        let column_filter = ColumnFilters {
+            column_name: "message".to_string(),
+            filters: vec![ContentFilter::Between {
+                start: "a".to_string(),
+                end: "z".to_string(),
+                start_inclusive: true,
+                end_inclusive: false,
+            }],
+        };
+
+        let expr_option = planner.build_column_filter(&column_filter).unwrap();
+        assert!(expr_option.is_some());
+
+        let expr = expr_option.unwrap();
+        let expected_expr = col("message")
+            .gt_eq(lit(ScalarValue::Utf8(Some("a".to_string()))))
+            .and(col("message").lt(lit(ScalarValue::Utf8(Some("z".to_string())))));
+
+        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
     }
 }
