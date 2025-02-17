@@ -92,8 +92,8 @@ impl FilePurger for LocalFilePurger {
 
             if let Some(write_cache) = cache_manager.as_ref().and_then(|cache| cache.write_cache())
             {
-                // Removes the inverted index from the cache.
-                if file_meta.inverted_index_available() {
+                // Removes index file from the cache.
+                if file_meta.exists_index() {
                     write_cache
                         .remove(IndexKey::new(
                             file_meta.region_id,
@@ -110,6 +110,18 @@ impl FilePurger for LocalFilePurger {
                         FileType::Parquet,
                     ))
                     .await;
+            }
+
+            // Purges index content in the stager.
+            let puffin_file_name =
+                crate::sst::location::index_file_path(sst_layer.region_dir(), file_meta.file_id);
+            if let Err(e) = sst_layer
+                .puffin_manager_factory()
+                .purge_stager(&puffin_file_name)
+                .await
+            {
+                error!(e; "Failed to purge index file, file_id: {}, region: {}",
+                    file_meta.file_id, file_meta.region_id);
             }
         })) {
             error!(e; "Failed to schedule the file purge request");
