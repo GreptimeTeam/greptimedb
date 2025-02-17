@@ -21,11 +21,11 @@ use object_store::{FuturesAsyncWriter, ObjectStore};
 use puffin::error::{self as puffin_error, Result as PuffinResult};
 use puffin::puffin_manager::file_accessor::PuffinFileAccessor;
 use puffin::puffin_manager::fs_puffin_manager::FsPuffinManager;
-use puffin::puffin_manager::stager::BoundedStager;
+use puffin::puffin_manager::stager::{BoundedStager, Stager};
 use puffin::puffin_manager::{BlobGuard, PuffinManager, PuffinReader};
 use snafu::ResultExt;
 
-use crate::error::{PuffinInitStagerSnafu, Result};
+use crate::error::{PuffinInitStagerSnafu, PuffinPurgeStagerSnafu, Result};
 use crate::metrics::{
     StagerMetrics, INDEX_PUFFIN_FLUSH_OP_TOTAL, INDEX_PUFFIN_READ_BYTES_TOTAL,
     INDEX_PUFFIN_READ_OP_TOTAL, INDEX_PUFFIN_WRITE_BYTES_TOTAL, INDEX_PUFFIN_WRITE_OP_TOTAL,
@@ -80,6 +80,13 @@ impl PuffinManagerFactory {
         let store = InstrumentedStore::new(store).with_write_buffer_size(self.write_buffer_size);
         let puffin_file_accessor = ObjectStorePuffinFileAccessor::new(store);
         SstPuffinManager::new(self.stager.clone(), puffin_file_accessor)
+    }
+
+    pub(crate) async fn purge_stager(&self, puffin_file_name: &str) -> Result<()> {
+        self.stager
+            .purge(puffin_file_name)
+            .await
+            .context(PuffinPurgeStagerSnafu)
     }
 }
 
