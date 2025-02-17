@@ -17,14 +17,13 @@ Currently only local wal entries are purged when flushing, while remote wal does
 
 ```mermaid
 sequenceDiagram
+    Region0->>Kafka: Last entry id of the topic in use
+    Region0->>WALPruner: Heartbeat with last entry id
     WALPruner->>+WALPruner: Time Loop
     WALPruner->>+ProcedureManager: Submit purge procedure
-    ProcedureManager->>+Region0: Flush request && High watermark?
-    ProcedureManager->>+Region1: Flush request && High watermark?
-    Region0-->>-ProcedureManager: Yes.
-    Region1-->>-ProcedureManager: No.
+    ProcedureManager->>Region0: Flush request
     ProcedureManager->>Kafka: Prune WAL entries
-    Region1->>Region1: Flush
+    Region0->>Region0: Flush
 ```
 
 ## Steps
@@ -34,11 +33,14 @@ sequenceDiagram
 Before purging remote WAL, metasrv needs to know:
 
 1. `last_entry_id` of each region.
-2. Kafka topics that each region uses.
+2. `kafka_topic_last_entry_id` which is the last entry id of the topic in use. Can be lazily updated and needed when region has empty memtable.
+3. Kafka topics that each region uses.
 
 The states are maintained through:
-1. Heartbeat: Datanode sends `last_entry_id` to metasrv in heartbeat.
+1. Heartbeat: Datanode sends `last_entry_id` to metasrv in heartbeat. As for regions with empty memtable, `last_entry_id` should equals to `kafka_topic_last_entry_id`.
 2. Metasrv maintains a topic-region map to know which region uses which topic.
+
+`kafka_topic_last_entry_id` will be maintained by the region itself. Region will update the value after `k` heartbeats if the memtable is empty.
 
 ### Purge procedure
 
@@ -55,11 +57,8 @@ The procedure is divided into following stages:
    - Choose regions that have a relatively small `last_entry_id` as candidate regions, which means we need to send a flush request to these regions.
 2. Communication:
    - Send flush requests to candidate regions.
-   - Send high watermarks check requests to candidate regions to check if they have nothing to flush. This is to avoid following case:
-     - The region has been idle for a long time, and the `last_entry_id` is low. Flush request will not take effect for the region but we can still delete the WAL entries.
-   - Wait for responses only for check requests. We don't need to wait for flush requests since it may take a long time and we can handle it in the next purge.
 3. Purge:
-   - Choose proper entry id to delete for each topic. The entry should be the smallest `last_entry_id - 1` among all regions except regions with high watermarks using the topic.
+   - Choose proper entry id to delete for each topic. The entry should be the smallest `last_entry_id - 1` among all regions. 
    - Delete legacy entries in Kafka.
 
 ### After purge
