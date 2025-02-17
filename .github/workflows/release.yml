@@ -317,6 +317,7 @@ jobs:
           image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
           image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
           version: ${{ needs.allocate-runners.outputs.version }}
+          push-latest-tag: true
 
       - name: Set build image result
         id: set-build-image-result
