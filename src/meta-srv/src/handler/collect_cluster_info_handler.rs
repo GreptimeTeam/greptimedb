@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use api::v1::meta::{HeartbeatRequest, NodeInfo as PbNodeInfo, Role};
 use common_meta::cluster;
 use common_meta::cluster::{
@@ -200,9 +203,6 @@ async fn put_into_memory_store(ctx: &mut Context, key: NodeInfoKey, value: NodeI
 
 // Allocate id based on peer address using a hash function
 fn allocate_id_by_peer_addr(peer_addr: &str) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
     let mut hasher = DefaultHasher::new();
     peer_addr.hash(&mut hasher);
     hasher.finish()
