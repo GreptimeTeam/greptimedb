@@ -57,6 +57,8 @@ promql-parser.workspace = true
 prost.workspace = true
 rand.workspace = true
 regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 session.workspace = true
 snafu.workspace = true
 sql.workspace = true
@@ -81,8 +83,6 @@ num-traits = "0.2"
 paste.workspace = true
 pretty_assertions = "1.4.0"
 rand.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 session = { workspace = true, features = ["testing"] }
 statrs = "0.16"
 store-api.workspace = true

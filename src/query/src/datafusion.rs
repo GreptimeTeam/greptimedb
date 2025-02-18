@@ -40,8 +40,9 @@ use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlan, W
 use datatypes::prelude::VectorRef;
 use datatypes::schema::Schema;
 use futures_util::StreamExt;
-use session::context::QueryContextRef;
+use session::context::{QueryContextRef, ANALYZE_FORMAT_HEADER_NAME};
 use snafu::{ensure, OptionExt, ResultExt};
+use sqlparser::ast::AnalyzeFormat;
 use table::requests::{DeleteRequest, InsertRequest};
 use table::TableRef;
 
@@ -347,7 +348,7 @@ impl DatafusionQueryEngine {
     #[tracing::instrument(skip_all)]
     fn optimize_physical_plan(
         &self,
-        _ctx: &mut QueryEngineContext,
+        ctx: &mut QueryEngineContext,
         plan: Arc<dyn ExecutionPlan>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let _timer = metrics::OPTIMIZE_PHYSICAL_ELAPSED.start_timer();
@@ -360,7 +361,15 @@ impl DatafusionQueryEngine {
         // skip optimize AnalyzeExec plan
         let optimized_plan = if let Some(analyze_plan) = plan.as_any().downcast_ref::<AnalyzeExec>()
         {
-            Arc::new(DistAnalyzeExec::new(analyze_plan.input().clone()))
+            let format = if let Some(format) = ctx.query_ctx().extension(ANALYZE_FORMAT_HEADER_NAME)
+                && format.to_lowercase() == "json"
+            {
+                AnalyzeFormat::JSON
+            } else {
+                AnalyzeFormat::TEXT
+            };
+
+            Arc::new(DistAnalyzeExec::new(analyze_plan.input().clone(), format))
             // let mut new_plan = analyze_plan.input().clone();
             // for optimizer in state.physical_optimizers() {
             //     new_plan = optimizer

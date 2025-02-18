@@ -22,9 +22,17 @@ use crate::hint_headers;
 
 pub async fn extract_hints(mut request: Request<Body>, next: Next) -> Response {
     let hints = hint_headers::extract_hints(request.headers());
+    let analyze_format = request
+        .headers()
+        .get(session::context::ANALYZE_FORMAT_HEADER_NAME)
+        .map(|v| v.to_str().unwrap().to_string());
     if let Some(query_ctx) = request.extensions_mut().get_mut::<QueryContext>() {
         for (key, value) in hints {
             query_ctx.set_extension(key, value);
+        }
+
+        if let Some(value) = analyze_format {
+            query_ctx.set_extension(session::context::ANALYZE_FORMAT_HEADER_NAME, value);
         }
     }
     next.run(request).await

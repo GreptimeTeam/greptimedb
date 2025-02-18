@@ -38,6 +38,8 @@ pub type ConnInfoRef = Arc<ConnInfo>;
 
 const CURSOR_COUNT_WARNING_LIMIT: usize = 10;
 
+pub const ANALYZE_FORMAT_HEADER_NAME: &str = "x-greptime-analyze-format";
+
 #[derive(Debug, Builder, Clone)]
 #[builder(pattern = "owned")]
 #[builder(build_fn(skip))]
