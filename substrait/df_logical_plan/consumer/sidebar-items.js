@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["apply_masking","from_substrait_agg_func","from_substrait_extended_expr","from_substrait_func_args","from_substrait_named_struct","from_substrait_plan","from_substrait_rel","from_substrait_rex","from_substrait_rex_vec","from_substrait_sorts","name_to_op","substrait_fun_name"],"struct":["ExprContainer"]};

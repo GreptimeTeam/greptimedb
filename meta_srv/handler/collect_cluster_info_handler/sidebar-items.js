@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["allocate_id_by_peer_addr","extract_base_info","put_into_memory_store"],"struct":["CollectDatanodeClusterInfoHandler","CollectFlownodeClusterInfoHandler","CollectFrontendClusterInfoHandler"]};

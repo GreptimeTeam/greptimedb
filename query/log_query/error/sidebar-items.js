@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Error"],"struct":["CatalogSnafu","DataFusionPlanningSnafu","TimeIndexNotFoundSnafu","UnimplementedSnafu","UnknownTableSnafu"],"type":["Result"]};

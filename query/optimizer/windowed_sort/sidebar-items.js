@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["fetch_partition_range","remove_repartition"],"struct":["ScannerInfo","WindowedSortPhysicalRule"]};
