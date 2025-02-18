@@ -60,6 +60,7 @@ async fn query_flow_state(
 #[derive(Clone)]
 pub struct HeartbeatTask {
     node_id: u64,
+    node_epoch: u64,
     peer_addr: String,
     meta_client: Arc<MetaClient>,
     report_interval: Duration,
@@ -83,6 +84,7 @@ impl HeartbeatTask {
     ) -> Self {
         Self {
             node_id: opts.node_id.unwrap_or(0),
+            node_epoch: common_time::util::current_time_millis() as u64,
             peer_addr: addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),
             meta_client,
             report_interval: heartbeat_opts.interval,
@@ -186,6 +188,7 @@ impl HeartbeatTask {
             id: self.node_id,
             addr: self.peer_addr.clone(),
         });
+        let self_node_epoch = self.node_epoch;
 
         let query_stat_size = self.query_stat_size.clone();
 
