@@ -12,18 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use datatypes::prelude::{ConcreteDataType, DataType};
 use itertools::Itertools;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use substrait_proto::proto;
 use substrait_proto::proto::aggregate_function::AggregationInvocation;
 use substrait_proto::proto::aggregate_rel::{Grouping, Measure};
 use substrait_proto::proto::function_argument::ArgType;
+use substrait_proto::proto::sort_field::{SortDirection, SortKind};
 
-use crate::error::{Error, NotImplementedSnafu, PlanSnafu};
+use crate::error::{
+    DatafusionSnafu, DatatypesSnafu, Error, NotImplementedSnafu, PlanSnafu, UnexpectedSnafu,
+};
+use crate::expr::relation::{AggregateExprV2, OrderingReq, SortExpr};
 use crate::expr::{
     AggregateExpr, AggregateFunc, MapFilterProject, ScalarExpr, TypedExpr, UnaryFunc,
 };
-use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, Plan, ReducePlan, TypedPlan};
+use crate::plan::{AccumulablePlanV2, AggrWithIndexV2, KeyValPlan, Plan, ReducePlan, TypedPlan};
 use crate::repr::{ColumnType, RelationDesc, RelationType};
 use crate::transform::{substrait_proto, FlownodeContext, FunctionExtensions};
 
@@ -86,7 +91,7 @@ impl TypedExpr {
 impl AggregateExpr {
     /// Convert list of `Measure` into Flow's AggregateExpr
     ///
-    /// Return both the AggregateExpr and a MapFilterProject that is the final output of the aggregate function
+    /// Return the AggregateExpr List that is the final output of the aggregate function
     async fn from_substrait_agg_measures(
         ctx: &mut FlownodeContext,
         measures: &[Measure],
@@ -197,12 +202,161 @@ impl AggregateExpr {
     }
 }
 
+impl AggregateExprV2 {
+    /// Convert list of `Measure` into Flow's AggregateExpr
+    ///
+    /// Return the AggregateExpr List that is the final output of the aggregate function
+    async fn from_substrait_agg_measures(
+        ctx: &mut FlownodeContext,
+        measures: &[Measure],
+        typ: &RelationDesc,
+        extensions: &FunctionExtensions,
+    ) -> Result<Vec<Self>, Error> {
+        let mut all_aggr_exprs = Vec::with_capacity(measures.len());
+
+        for m in measures {
+            let filter = match &m.filter {
+                Some(fil) => Some(TypedExpr::from_substrait_rex(fil, typ, extensions).await?),
+                None => None,
+            };
+
+            let Some(f) = &m.measure else {
+                not_impl_err!("Expect aggregate function")?
+            };
+
+            let aggr_expr = Self::from_substrait_agg_func(ctx, f, typ, extensions, &filter).await?;
+            all_aggr_exprs.push(aggr_expr);
+        }
+        Ok(all_aggr_exprs)
+    }
+
+    /// Convert AggregateFunction into Flow's AggregateExpr
+    ///
+    /// the returned value is a tuple of AggregateExpr and a optional ScalarExpr that if exist is the final output of the aggregate function
+    /// since aggr functions like `avg` need to be transform to `sum(x)/cast(count(x) as x_type)`
+    pub async fn from_substrait_agg_func(
+        ctx: &mut FlownodeContext,
+        f: &proto::AggregateFunction,
+        input_schema: &RelationDesc,
+        extensions: &FunctionExtensions,
+        filter: &Option<TypedExpr>,
+    ) -> Result<Self, Error> {
+        // TODO(discord9): impl filter
+        let _ = filter;
+
+        let mut args = Vec::with_capacity(f.arguments.len());
+        for arg in &f.arguments {
+            let arg_expr = match &arg.arg_type {
+                Some(ArgType::Value(e)) => {
+                    TypedExpr::from_substrait_rex(e, input_schema, extensions).await
+                }
+                _ => not_impl_err!("Aggregated function argument non-Value type not supported"),
+            }?;
+            args.push(arg_expr);
+        }
+        let args = args;
+        let distinct = match f.invocation {
+            _ if f.invocation == AggregationInvocation::Distinct as i32 => true,
+            _ if f.invocation == AggregationInvocation::All as i32 => false,
+            _ => false,
+        };
+
+        let fn_name = extensions
+            .get(&f.function_reference)
+            .cloned()
+            .with_context(|| PlanSnafu {
+                reason: format!(
+                    "Aggregated function not found: function anchor = {:?}",
+                    f.function_reference
+                ),
+            })?;
+
+        let fn_impl = ctx
+            .aggregate_functions
+            .get(&fn_name)
+            .with_context(|| PlanSnafu {
+                reason: format!("Aggregate function not found: {:?}", fn_name),
+            })?;
+
+        let input_types = args
+            .iter()
+            .map(|a| a.typ.scalar_type().clone())
+            .collect_vec();
+
+        let return_type = {
+            let arrow_input_types = input_types.iter().map(|t| t.as_arrow_type()).collect_vec();
+            let ret = fn_impl
+                .return_type(&arrow_input_types)
+                .context(DatafusionSnafu {
+                    context: "failed to get return type of aggregate function",
+                })?;
+            ConcreteDataType::try_from(&ret).context(DatatypesSnafu {
+                context: "failed to convert return type to ConcreteDataType",
+            })?
+        };
+
+        let ordering_req = {
+            let mut ret = Vec::with_capacity(f.sorts.len());
+            for sort in &f.sorts {
+                let Some(raw_expr) = sort.expr.as_ref() else {
+                    return not_impl_err!("Sort expression not found in sort");
+                };
+                let expr =
+                    TypedExpr::from_substrait_rex(raw_expr, input_schema, extensions).await?;
+                let sort_dir = sort.sort_kind;
+                let Some(SortKind::Direction(dir)) = sort_dir else {
+                    return not_impl_err!("Sort direction not found in sort");
+                };
+                let dir = SortDirection::try_from(dir).map_err(|e| {
+                    PlanSnafu {
+                        reason: format!("{} is not a valid direction", e.0),
+                    }
+                    .build()
+                })?;
+
+                let (descending, nulls_first) = match dir {
+                    // align with default datafusion option
+                    SortDirection::Unspecified => (false, true),
+                    SortDirection::AscNullsFirst => (false, true),
+                    SortDirection::AscNullsLast => (false, false),
+                    SortDirection::DescNullsFirst => (true, true),
+                    SortDirection::DescNullsLast => (true, false),
+                    SortDirection::Clustered => not_impl_err!("Clustered sort not supported")?,
+                };
+
+                let sort_expr = SortExpr {
+                    expr: expr.expr,
+                    descending,
+                    nulls_first,
+                };
+                ret.push(sort_expr);
+            }
+            OrderingReq { exprs: ret }
+        };
+
+        // TODO(discord9): determine other options from substrait too instead of default
+        Ok(Self {
+            func: fn_impl.as_ref().clone(),
+            args,
+            return_type,
+            name: fn_name,
+            schema: input_schema.clone(),
+            ordering_req,
+            ignore_nulls: false,
+            is_distinct: distinct,
+            is_reversed: false,
+            input_types,
+            is_nullable: true,
+        })
+    }
+}
+
 impl KeyValPlan {
     /// Generate KeyValPlan from AggregateExpr and group_exprs
     ///
     /// will also change aggregate expr to use column ref if necessary
     fn from_substrait_gen_key_val_plan(
-        aggr_exprs: &mut [AggregateExpr],
+        aggr_exprs: &mut [AggregateExprV2],
         group_exprs: &[TypedExpr],
         input_arity: usize,
     ) -> Result<KeyValPlan, Error> {
@@ -217,25 +371,52 @@ impl KeyValPlan {
             .project(input_arity..input_arity + output_arity)?;
 
         // val_plan is extracted from aggr_exprs to give aggr function it's necessary input
-        // and since aggr func need inputs that is column ref, we just add a prefix mfp to transform any expr that is not into a column ref
+        // and since aggr func need inputs that is column ref(or literal), we just add a prefix mfp to transform any expr that is not into a column ref
         let val_plan = {
-            let need_mfp = aggr_exprs.iter().any(|agg| agg.expr.as_column().is_none());
+            let need_mfp = aggr_exprs
+                .iter()
+                .any(|agg| agg.args.iter().any(|e| e.expr.as_column().is_none()));
             if need_mfp {
                 // create mfp from aggr_expr, and modify aggr_expr to use the output column of mfp
-                let input_exprs = aggr_exprs
-                    .iter_mut()
-                    .enumerate()
-                    .map(|(idx, aggr)| {
-                        let ret = aggr.expr.clone();
-                        aggr.expr = ScalarExpr::Column(idx);
-                        ret
-                    })
-                    .collect_vec();
-                let aggr_arity = aggr_exprs.len();
-
-                MapFilterProject::new(input_arity)
+                let mut input_exprs = Vec::with_capacity(aggr_exprs.len());
+                for aggr_expr in aggr_exprs.iter_mut() {
+                    // FIX: also modify input_schema to fit input_exprs, a `new_input_schema` is needed
+                    // so we can separate all scalar compute to a mfp before aggr
+                    for arg in aggr_expr.args.iter_mut() {
+                        match arg.expr.clone() {
+                            ScalarExpr::Column(idx) => {
+                                // directly refer to column in mfp
+                                arg.expr = ScalarExpr::Column(input_exprs.len());
+                                input_exprs.push(ScalarExpr::Column(idx));
+                            }
+                            ScalarExpr::Literal(_, _) => {
+                                // already literal, but still need to make it ref
+                                let ret = arg.expr.clone();
+                                arg.expr = ScalarExpr::Column(input_exprs.len());
+                                input_exprs.push(ret);
+                            }
+                            _ => {
+                                // create a new expr and let arg ref to that expr's column instead
+                                let ret = arg.expr.clone();
+                                arg.expr = ScalarExpr::Column(input_exprs.len());
+                                input_exprs.push(ret);
+                            }
+                        }
+                    }
+                }
+                let new_input_len = input_exprs.len();
+                let pre_mfp = MapFilterProject::new(input_arity)
                     .map(input_exprs)?
-                    .project(input_arity..input_arity + aggr_arity)?
+                    .project(input_arity..input_arity + new_input_len)?;
+                // adjust input schema according to pre_mfp
+                if let Some(first) = aggr_exprs.first() {
+                    let new_input_schema = first.schema.apply_mfp(&pre_mfp.clone().into_safe())?;
+
+                    for aggr in aggr_exprs.iter_mut() {
+                        aggr.schema = new_input_schema.clone();
+                    }
+                }
+                pre_mfp
             } else {
                 // simply take all inputs as value
                 MapFilterProject::new(input_arity)
@@ -292,7 +473,7 @@ impl TypedPlan {
 
         let time_index = find_time_index_in_group_exprs(&group_exprs);
 
-        let mut aggr_exprs = AggregateExpr::from_substrait_agg_measures(
+        let mut aggr_exprs = AggregateExprV2::from_substrait_agg_measures(
             ctx,
             &agg.measures,
             &input.schema,
@@ -324,9 +505,7 @@ impl TypedPlan {
             }
 
             for aggr in &aggr_exprs {
-                output_types.push(ColumnType::new_nullable(
-                    aggr.func.signature().output.clone(),
-                ));
+                output_types.push(ColumnType::new_nullable(aggr.return_type.clone()));
                 // TODO(discord9): find a clever way to name them?
                 output_names.push(None);
             }
@@ -342,36 +521,26 @@ impl TypedPlan {
 
         // copy aggr_exprs to full_aggrs, and split them into simple_aggrs and distinct_aggrs
         // also set them input/output column
-        let full_aggrs = aggr_exprs;
-        let mut simple_aggrs = Vec::new();
-        let mut distinct_aggrs = Vec::new();
-        for (output_column, aggr_expr) in full_aggrs.iter().enumerate() {
-            let input_column = aggr_expr.expr.as_column().with_context(|| PlanSnafu {
-                reason: "Expect aggregate argument to be transformed into a column at this point",
-            })?;
-            if aggr_expr.distinct {
-                distinct_aggrs.push(AggrWithIndex::new(
-                    aggr_expr.clone(),
-                    input_column,
-                    output_column,
-                ));
-            } else {
-                simple_aggrs.push(AggrWithIndex::new(
-                    aggr_expr.clone(),
-                    input_column,
-                    output_column,
-                ));
-            }
+        let mut full_aggrs = Vec::with_capacity(aggr_exprs.len());
+        for (idx, aggr) in aggr_exprs.into_iter().enumerate() {
+            let input_idxs = aggr
+                .args
+                .iter()
+                .map(|a| {
+                    a.expr.as_column().with_context(|| UnexpectedSnafu {
+                        reason: format!("Expect {:?} to be a column", a),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let aggr = AggrWithIndexV2::new(aggr, input_idxs, idx)?;
+            full_aggrs.push(aggr);
         }
-        let accum_plan = AccumulablePlan {
-            full_aggrs,
-            simple_aggrs,
-            distinct_aggrs,
-        };
+
+        let accum_plan = AccumulablePlanV2 { full_aggrs };
         let plan = Plan::Reduce {
             input: Box::new(input),
             key_val_plan,
-            reduce_plan: ReducePlan::Accumulable(accum_plan),
+            reduce_plan: ReducePlan::AccumulableV2(accum_plan),
         };
         // FIX(discord9): deal with key first
         return Ok(TypedPlan {
@@ -387,6 +556,9 @@ mod test {
 
     use bytes::BytesMut;
     use common_time::{IntervalMonthDayNano, Timestamp};
+    use datafusion::functions_aggregate::count::count_udaf;
+    use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
+    use datafusion::functions_aggregate::sum::sum_udaf;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::value::Value;
     use pretty_assertions::assert_eq;
@@ -409,10 +581,24 @@ mod test {
             .await
             .unwrap();
 
-        let aggr_expr = AggregateExpr {
-            func: AggregateFunc::SumUInt64,
-            expr: ScalarExpr::Column(0),
-            distinct: false,
+        let aggr_expr = AggregateExprV2 {
+            func: sum_udaf().as_ref().clone(),
+            args: vec![
+                ScalarExpr::Column(0).with_type(ColumnType::new(CDT::uint64_datatype(), true))
+            ],
+            return_type: CDT::uint64_datatype(),
+            name: "sum".to_string(),
+            schema: RelationType::new(vec![ColumnType::new(
+                ConcreteDataType::uint64_datatype(),
+                true,
+            )])
+            .into_named(vec![None]),
+            ordering_req: OrderingReq::empty(),
+            ignore_nulls: false,
+            is_distinct: false,
+            is_reversed: false,
+            input_types: vec![CDT::uint64_datatype()],
+            is_nullable: true,
         };
         let expected = TypedPlan {
             schema: RelationType::new(vec![
@@ -508,10 +694,8 @@ mod test {
                                 .unwrap()
                                 .into_safe(),
                         },
-                        reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
-                            full_aggrs: vec![aggr_expr.clone()],
-                            simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
-                            distinct_aggrs: vec![],
+                        reduce_plan: ReducePlan::AccumulableV2(AccumulablePlanV2 {
+                            full_aggrs: vec![AggrWithIndexV2::new(aggr_expr, vec![0], 0).unwrap()],
                         }),
                     }
                     .with_types(
@@ -550,10 +734,24 @@ mod test {
             .await
             .unwrap();
 
-        let aggr_expr = AggregateExpr {
-            func: AggregateFunc::SumUInt64,
-            expr: ScalarExpr::Column(0),
-            distinct: false,
+        let aggr_expr = AggregateExprV2 {
+            func: sum_udaf().as_ref().clone(),
+            args: vec![
+                ScalarExpr::Column(0).with_type(ColumnType::new(CDT::uint64_datatype(), true))
+            ],
+            return_type: CDT::uint64_datatype(),
+            name: "sum".to_string(),
+            schema: RelationType::new(vec![ColumnType::new(
+                ConcreteDataType::uint64_datatype(),
+                true,
+            )])
+            .into_named(vec![None]),
+            ordering_req: OrderingReq::empty(),
+            ignore_nulls: false,
+            is_distinct: false,
+            is_reversed: false,
+            input_types: vec![CDT::uint64_datatype()],
+            is_nullable: true,
         };
         let expected = TypedPlan {
             schema: RelationType::new(vec![
@@ -622,10 +820,8 @@ mod test {
                                 .unwrap()
                                 .into_safe(),
                         },
-                        reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
-                            full_aggrs: vec![aggr_expr.clone()],
-                            simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
-                            distinct_aggrs: vec![],
+                        reduce_plan: ReducePlan::AccumulableV2(AccumulablePlanV2 {
+                            full_aggrs: vec![AggrWithIndexV2::new(aggr_expr, vec![0], 0).unwrap()],
                         }),
                     }
                     .with_types(
@@ -688,16 +884,52 @@ mod test {
             .unwrap();
 
         let aggr_exprs = vec![
-            AggregateExpr {
-                func: AggregateFunc::SumUInt64,
-                expr: ScalarExpr::Column(0),
-                distinct: false,
-            },
-            AggregateExpr {
-                func: AggregateFunc::Count,
-                expr: ScalarExpr::Column(1),
-                distinct: false,
-            },
+            AggrWithIndexV2::new(
+                AggregateExprV2 {
+                    func: sum_udaf().as_ref().clone(),
+                    args: vec![ScalarExpr::Column(0)
+                        .with_type(ColumnType::new(CDT::uint64_datatype(), true))],
+                    return_type: CDT::uint64_datatype(),
+                    name: "sum".to_string(),
+                    schema: RelationType::new(vec![
+                        ColumnType::new(ConcreteDataType::uint64_datatype(), true),
+                        ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                    ])
+                    .into_named(vec![None, Some("number".to_string())]),
+                    ordering_req: OrderingReq::empty(),
+                    ignore_nulls: false,
+                    is_distinct: false,
+                    is_reversed: false,
+                    input_types: vec![CDT::uint64_datatype()],
+                    is_nullable: true,
+                },
+                vec![0],
+                0,
+            )
+            .unwrap(),
+            AggrWithIndexV2::new(
+                AggregateExprV2 {
+                    func: count_udaf().as_ref().clone(),
+                    args: vec![ScalarExpr::Column(1)
+                        .with_type(ColumnType::new(CDT::uint32_datatype(), false))],
+                    return_type: CDT::int64_datatype(),
+                    name: "count".to_string(),
+                    schema: RelationType::new(vec![
+                        ColumnType::new(ConcreteDataType::uint64_datatype(), true),
+                        ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                    ])
+                    .into_named(vec![None, Some("number".to_string())]),
+                    ordering_req: OrderingReq::empty(),
+                    ignore_nulls: false,
+                    is_distinct: false,
+                    is_reversed: false,
+                    input_types: vec![CDT::uint32_datatype()],
+                    is_nullable: true,
+                },
+                vec![1],
+                1,
+            )
+            .unwrap(),
         ];
         let avg_expr = ScalarExpr::If {
             cond: Box::new(ScalarExpr::Column(4).call_binary(
@@ -769,13 +1001,8 @@ mod test {
                                 .unwrap()
                                 .into_safe(),
                         },
-                        reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
-                            full_aggrs: aggr_exprs.clone(),
-                            simple_aggrs: vec![
-                                AggrWithIndex::new(aggr_exprs[0].clone(), 0, 0),
-                                AggrWithIndex::new(aggr_exprs[1].clone(), 1, 1),
-                            ],
-                            distinct_aggrs: vec![],
+                        reduce_plan: ReducePlan::AccumulableV2(AccumulablePlanV2 {
+                            full_aggrs: aggr_exprs,
                         }),
                     }
                     .with_types(
@@ -839,11 +1066,26 @@ mod test {
             .await
             .unwrap();
 
-        let aggr_expr = AggregateExpr {
-            func: AggregateFunc::SumUInt64,
-            expr: ScalarExpr::Column(0),
-            distinct: false,
+        let aggr_expr = AggregateExprV2 {
+            func: sum_udaf().as_ref().clone(),
+            args: vec![
+                ScalarExpr::Column(0).with_type(ColumnType::new(CDT::uint64_datatype(), true))
+            ],
+            return_type: CDT::uint64_datatype(),
+            name: "sum".to_string(),
+            schema: RelationType::new(vec![ColumnType::new(
+                ConcreteDataType::uint64_datatype(),
+                true,
+            )])
+            .into_named(vec![None]),
+            ordering_req: OrderingReq::empty(),
+            ignore_nulls: false,
+            is_distinct: false,
+            is_reversed: false,
+            input_types: vec![CDT::uint64_datatype()],
+            is_nullable: true,
         };
+
         let expected = TypedPlan {
             schema: RelationType::new(vec![
                 ColumnType::new(CDT::uint64_datatype(), true), // sum(number)
@@ -907,10 +1149,8 @@ mod test {
                                 .unwrap()
                                 .into_safe(),
                         },
-                        reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
-                            full_aggrs: vec![aggr_expr.clone()],
-                            simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
-                            distinct_aggrs: vec![],
+                        reduce_plan: ReducePlan::AccumulableV2(AccumulablePlanV2 {
+                            full_aggrs: vec![AggrWithIndexV2::new(aggr_expr, vec![0], 0).unwrap()],
                         }),
                     }
                     .with_types(
@@ -949,11 +1189,26 @@ mod test {
             .await
             .unwrap();
 
-        let aggr_expr = AggregateExpr {
-            func: AggregateFunc::SumUInt64,
-            expr: ScalarExpr::Column(0),
-            distinct: false,
+        let aggr_expr = AggregateExprV2 {
+            func: sum_udaf().as_ref().clone(),
+            args: vec![
+                ScalarExpr::Column(0).with_type(ColumnType::new(CDT::uint64_datatype(), true))
+            ],
+            return_type: CDT::uint64_datatype(),
+            name: "sum".to_string(),
+            schema: RelationType::new(vec![ColumnType::new(
+                ConcreteDataType::uint64_datatype(),
+                true,
+            )])
+            .into_named(vec![None]),
+            ordering_req: OrderingReq::empty(),
+            ignore_nulls: false,
+            is_distinct: false,
+            is_reversed: false,
+            input_types: vec![CDT::uint64_datatype()],
+            is_nullable: true,
         };
+
         let expected = TypedPlan {
             schema: RelationType::new(vec![
                 ColumnType::new(CDT::uint64_datatype(), true), // sum(number)
@@ -1021,10 +1276,8 @@ mod test {
                                 .unwrap()
                                 .into_safe(),
                         },
-                        reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
-                            full_aggrs: vec![aggr_expr.clone()],
-                            simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
-                            distinct_aggrs: vec![],
+                        reduce_plan: ReducePlan::AccumulableV2(AccumulablePlanV2 {
+                            full_aggrs: vec![AggrWithIndexV2::new(aggr_expr, vec![0], 0).unwrap()],
                         }),
                     }
                     .with_types(
@@ -1062,16 +1315,52 @@ mod test {
         let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).await;
 
         let aggr_exprs = vec![
-            AggregateExpr {
-                func: AggregateFunc::SumUInt64,
-                expr: ScalarExpr::Column(0),
-                distinct: false,
-            },
-            AggregateExpr {
-                func: AggregateFunc::Count,
-                expr: ScalarExpr::Column(1),
-                distinct: false,
-            },
+            AggrWithIndexV2::new(
+                AggregateExprV2 {
+                    func: sum_udaf().as_ref().clone(),
+                    args: vec![ScalarExpr::Column(0)
+                        .with_type(ColumnType::new(CDT::uint64_datatype(), true))],
+                    return_type: CDT::uint64_datatype(),
+                    name: "sum".to_string(),
+                    schema: RelationType::new(vec![
+                        ColumnType::new(ConcreteDataType::uint64_datatype(), true),
+                        ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                    ])
+                    .into_named(vec![None, Some("number".to_string())]),
+                    ordering_req: OrderingReq::empty(),
+                    ignore_nulls: false,
+                    is_distinct: false,
+                    is_reversed: false,
+                    input_types: vec![CDT::uint64_datatype()],
+                    is_nullable: true,
+                },
+                vec![0],
+                0,
+            )
+            .unwrap(),
+            AggrWithIndexV2::new(
+                AggregateExprV2 {
+                    func: count_udaf().as_ref().clone(),
+                    args: vec![ScalarExpr::Column(1)
+                        .with_type(ColumnType::new(CDT::uint32_datatype(), false))],
+                    return_type: CDT::int64_datatype(),
+                    name: "count".to_string(),
+                    schema: RelationType::new(vec![
+                        ColumnType::new(ConcreteDataType::uint64_datatype(), true),
+                        ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                    ])
+                    .into_named(vec![None, Some("number".to_string())]),
+                    ordering_req: OrderingReq::empty(),
+                    ignore_nulls: false,
+                    is_distinct: false,
+                    is_reversed: false,
+                    input_types: vec![CDT::uint32_datatype()],
+                    is_nullable: true,
+                },
+                vec![1],
+                1,
+            )
+            .unwrap(),
         ];
         let avg_expr = ScalarExpr::If {
             cond: Box::new(ScalarExpr::Column(2).call_binary(
@@ -1137,13 +1426,8 @@ mod test {
                                 .unwrap()
                                 .into_safe(),
                         },
-                        reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
-                            full_aggrs: aggr_exprs.clone(),
-                            simple_aggrs: vec![
-                                AggrWithIndex::new(aggr_exprs[0].clone(), 0, 0),
-                                AggrWithIndex::new(aggr_exprs[1].clone(), 1, 1),
-                            ],
-                            distinct_aggrs: vec![],
+                        reduce_plan: ReducePlan::AccumulableV2(AccumulablePlanV2 {
+                            full_aggrs: aggr_exprs,
                         }),
                     }
                     .with_types(
@@ -1187,16 +1471,52 @@ mod test {
             .unwrap();
 
         let aggr_exprs = vec![
-            AggregateExpr {
-                func: AggregateFunc::SumUInt64,
-                expr: ScalarExpr::Column(0),
-                distinct: false,
-            },
-            AggregateExpr {
-                func: AggregateFunc::Count,
-                expr: ScalarExpr::Column(1),
-                distinct: false,
-            },
+            AggrWithIndexV2::new(
+                AggregateExprV2 {
+                    func: sum_udaf().as_ref().clone(),
+                    args: vec![ScalarExpr::Column(0)
+                        .with_type(ColumnType::new(CDT::uint64_datatype(), true))],
+                    return_type: CDT::uint64_datatype(),
+                    name: "sum".to_string(),
+                    schema: RelationType::new(vec![
+                        ColumnType::new(ConcreteDataType::uint64_datatype(), true),
+                        ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                    ])
+                    .into_named(vec![None, Some("number".to_string())]),
+                    ordering_req: OrderingReq::empty(),
+                    ignore_nulls: false,
+                    is_distinct: false,
+                    is_reversed: false,
+                    input_types: vec![CDT::uint64_datatype()],
+                    is_nullable: true,
+                },
+                vec![0],
+                0,
+            )
+            .unwrap(),
+            AggrWithIndexV2::new(
+                AggregateExprV2 {
+                    func: count_udaf().as_ref().clone(),
+                    args: vec![ScalarExpr::Column(1)
+                        .with_type(ColumnType::new(CDT::uint32_datatype(), false))],
+                    return_type: CDT::int64_datatype(),
+                    name: "count".to_string(),
+                    schema: RelationType::new(vec![
+                        ColumnType::new(ConcreteDataType::uint64_datatype(), true),
+                        ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                    ])
+                    .into_named(vec![None, Some("number".to_string())]),
+                    ordering_req: OrderingReq::empty(),
+                    ignore_nulls: false,
+                    is_distinct: false,
+                    is_reversed: false,
+                    input_types: vec![CDT::uint32_datatype()],
+                    is_nullable: true,
+                },
+                vec![1],
+                1,
+            )
+            .unwrap(),
         ];
         let avg_expr = ScalarExpr::If {
             cond: Box::new(ScalarExpr::Column(1).call_binary(
@@ -1259,13 +1579,8 @@ mod test {
                                 .unwrap()
                                 .into_safe(),
                         },
-                        reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
-                            full_aggrs: aggr_exprs.clone(),
-                            simple_aggrs: vec![
-                                AggrWithIndex::new(aggr_exprs[0].clone(), 0, 0),
-                                AggrWithIndex::new(aggr_exprs[1].clone(), 1, 1),
-                            ],
-                            distinct_aggrs: vec![],
+                        reduce_plan: ReducePlan::AccumulableV2(AccumulablePlanV2 {
+                            full_aggrs: aggr_exprs,
                         }),
                     }
                     .with_types(
@@ -1298,10 +1613,24 @@ mod test {
         let mut ctx = create_test_ctx();
         let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).await;
 
-        let aggr_expr = AggregateExpr {
-            func: AggregateFunc::SumUInt64,
-            expr: ScalarExpr::Column(0),
-            distinct: false,
+        let aggr_expr = AggregateExprV2 {
+            func: sum_udaf().as_ref().clone(),
+            args: vec![
+                ScalarExpr::Column(0).with_type(ColumnType::new(CDT::uint64_datatype(), true))
+            ],
+            return_type: CDT::uint64_datatype(),
+            name: "sum".to_string(),
+            schema: RelationType::new(vec![ColumnType::new(
+                ConcreteDataType::uint64_datatype(),
+                true,
+            )])
+            .into_named(vec![None]),
+            ordering_req: OrderingReq::empty(),
+            ignore_nulls: false,
+            is_distinct: false,
+            is_reversed: false,
+            input_types: vec![CDT::uint64_datatype()],
+            is_nullable: true,
         };
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)])
@@ -1334,10 +1663,8 @@ mod test {
                         .unwrap()
                         .into_safe(),
                 },
-                reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
-                    full_aggrs: vec![aggr_expr.clone()],
-                    simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
-                    distinct_aggrs: vec![],
+                reduce_plan: ReducePlan::AccumulableV2(AccumulablePlanV2 {
+                    full_aggrs: vec![AggrWithIndexV2::new(aggr_expr, vec![0], 0).unwrap()],
                 }),
             },
         };
@@ -1388,11 +1715,7 @@ mod test {
                         .unwrap()
                         .into_safe(),
                 },
-                reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
-                    full_aggrs: vec![],
-                    simple_aggrs: vec![],
-                    distinct_aggrs: vec![],
-                }),
+                reduce_plan: ReducePlan::AccumulableV2(AccumulablePlanV2 { full_aggrs: vec![] }),
             },
         };
 
@@ -1410,10 +1733,24 @@ mod test {
             .await
             .unwrap();
 
-        let aggr_expr = AggregateExpr {
-            func: AggregateFunc::SumUInt64,
-            expr: ScalarExpr::Column(0),
-            distinct: false,
+        let aggr_expr = AggregateExprV2 {
+            func: sum_udaf().as_ref().clone(),
+            args: vec![
+                ScalarExpr::Column(0).with_type(ColumnType::new(CDT::uint64_datatype(), true))
+            ],
+            return_type: CDT::uint64_datatype(),
+            name: "sum".to_string(),
+            schema: RelationType::new(vec![ColumnType::new(
+                ConcreteDataType::uint64_datatype(),
+                true,
+            )])
+            .into_named(vec![None]),
+            ordering_req: OrderingReq::empty(),
+            ignore_nulls: false,
+            is_distinct: false,
+            is_reversed: false,
+            input_types: vec![CDT::uint64_datatype()],
+            is_nullable: true,
         };
         let expected = TypedPlan {
             schema: RelationType::new(vec![
@@ -1457,10 +1794,8 @@ mod test {
                                 .unwrap()
                                 .into_safe(),
                         },
-                        reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
-                            full_aggrs: vec![aggr_expr.clone()],
-                            simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
-                            distinct_aggrs: vec![],
+                        reduce_plan: ReducePlan::AccumulableV2(AccumulablePlanV2 {
+                            full_aggrs: vec![AggrWithIndexV2::new(aggr_expr, vec![0], 0).unwrap()],
                         }),
                     }
                     .with_types(
@@ -1492,10 +1827,24 @@ mod test {
         let mut ctx = create_test_ctx();
         let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).await;
 
-        let aggr_expr = AggregateExpr {
-            func: AggregateFunc::SumUInt64,
-            expr: ScalarExpr::Column(0),
-            distinct: false,
+        let aggr_expr = AggregateExprV2 {
+            func: sum_udaf().as_ref().clone(),
+            args: vec![
+                ScalarExpr::Column(0).with_type(ColumnType::new(CDT::uint64_datatype(), true))
+            ],
+            return_type: CDT::uint64_datatype(),
+            name: "sum".to_string(),
+            schema: RelationType::new(vec![ColumnType::new(
+                ConcreteDataType::uint64_datatype(),
+                true,
+            )])
+            .into_named(vec![None]),
+            ordering_req: OrderingReq::empty(),
+            ignore_nulls: false,
+            is_distinct: false,
+            is_reversed: false,
+            input_types: vec![CDT::uint64_datatype()],
+            is_nullable: true,
         };
         let expected = TypedPlan {
             schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)])
@@ -1541,10 +1890,8 @@ mod test {
                         .unwrap()
                         .into_safe(),
                 },
-                reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
-                    full_aggrs: vec![aggr_expr.clone()],
-                    simple_aggrs: vec![AggrWithIndex::new(aggr_expr.clone(), 0, 0)],
-                    distinct_aggrs: vec![],
+                reduce_plan: ReducePlan::AccumulableV2(AccumulablePlanV2 {
+                    full_aggrs: vec![AggrWithIndexV2::new(aggr_expr, vec![0], 0).unwrap()],
                 }),
             },
         };
@@ -1561,16 +1908,52 @@ mod test {
         let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan).await;
 
         let aggr_exprs = vec![
-            AggregateExpr {
-                func: AggregateFunc::MaxUInt32,
-                expr: ScalarExpr::Column(0),
-                distinct: false,
-            },
-            AggregateExpr {
-                func: AggregateFunc::MinUInt32,
-                expr: ScalarExpr::Column(0),
-                distinct: false,
-            },
+            AggrWithIndexV2::new(
+                AggregateExprV2 {
+                    func: max_udaf().as_ref().clone(),
+                    args: vec![ScalarExpr::Column(0)
+                        .with_type(ColumnType::new(CDT::uint32_datatype(), false))],
+                    return_type: CDT::uint32_datatype(),
+                    name: "max".to_string(),
+                    schema: RelationType::new(vec![
+                        ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                        ColumnType::new(ConcreteDataType::timestamp_millisecond_datatype(), false),
+                    ])
+                    .into_named(vec![Some("number".to_string()), Some("ts".to_string())]),
+                    ordering_req: OrderingReq::empty(),
+                    ignore_nulls: false,
+                    is_distinct: false,
+                    is_reversed: false,
+                    input_types: vec![CDT::uint32_datatype()],
+                    is_nullable: true,
+                },
+                vec![0],
+                0,
+            )
+            .unwrap(),
+            AggrWithIndexV2::new(
+                AggregateExprV2 {
+                    func: min_udaf().as_ref().clone(),
+                    args: vec![ScalarExpr::Column(0)
+                        .with_type(ColumnType::new(CDT::uint32_datatype(), false))],
+                    return_type: CDT::uint32_datatype(),
+                    name: "min".to_string(),
+                    schema: RelationType::new(vec![
+                        ColumnType::new(ConcreteDataType::uint32_datatype(), false),
+                        ColumnType::new(ConcreteDataType::timestamp_millisecond_datatype(), false),
+                    ])
+                    .into_named(vec![Some("number".to_string()), Some("ts".to_string())]),
+                    ordering_req: OrderingReq::empty(),
+                    ignore_nulls: false,
+                    is_distinct: false,
+                    is_reversed: false,
+                    input_types: vec![CDT::uint32_datatype()],
+                    is_nullable: true,
+                },
+                vec![0],
+                1,
+            )
+            .unwrap(),
         ];
         let expected = TypedPlan {
             schema: RelationType::new(vec![
@@ -1648,11 +2031,8 @@ mod test {
                             val_plan: MapFilterProject::new(2)
                                 .into_safe(),
                         },
-                        reduce_plan: ReducePlan::Accumulable(AccumulablePlan {
-                            full_aggrs: aggr_exprs.clone(),
-                            simple_aggrs: vec![AggrWithIndex::new(aggr_exprs[0].clone(), 0, 0),
-                            AggrWithIndex::new(aggr_exprs[1].clone(), 0, 1)],
-                            distinct_aggrs: vec![],
+                        reduce_plan: ReducePlan::AccumulableV2(AccumulablePlanV2 {
+                            full_aggrs: aggr_exprs,
                         }),
                     }
                     .with_types(

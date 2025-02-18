@@ -1,0 +1,308 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! new accumulator trait that is more flexible and can be used in the future for more complex accumulators
+
+use datafusion::logical_expr::Accumulator as DfAccumulator;
+use datatypes::prelude::{ConcreteDataType as CDT, DataType};
+use datatypes::value::Value;
+use datatypes::vectors::VectorRef;
+use snafu::{ensure, ResultExt};
+
+use crate::expr::error::{DataTypeSnafu, DatafusionSnafu, InternalSnafu};
+use crate::expr::EvalError;
+
+///  Basically a copy of datafusion's Accumulator, but with a few modifications
+/// to accommodate our needs in flow and keep the upgradability of datafusion
+pub trait AccumulatorV2: Send + Sync + std::fmt::Debug {
+    /// Updates the accumulator’s state from its input.
+    fn update_batch(&mut self, values: &[VectorRef]) -> Result<(), EvalError>;
+
+    /// Returns the current aggregate value, NOT consuming the internal state, so it can be called multiple times.
+    fn evaluate(&mut self) -> Result<Value, EvalError>;
+
+    /// Returns the allocated size required for this accumulator, in bytes, including Self.
+    fn size(&self) -> usize;
+
+    /// Returns the intermediate state of the accumulator, consuming the intermediate state.
+    ///
+    /// note that Value::Null's type is unknown, so (Value, ConcreteDataType) is used instead of just Value
+    fn state(&mut self) -> Result<Vec<(Value, CDT)>, EvalError>;
+
+    /// Merges the states of multiple accumulators into this accumulator.
+    /// The states array passed was formed by concatenating the results of calling `Self::into_state` on zero or more other Accumulator instances.
+    fn merge_batch(&mut self, states: &[VectorRef]) -> Result<(), EvalError>;
+
+    /// Retracts (removed) an update (caused by the given inputs) to accumulator’s state.
+    ///
+    /// currently unused, but will be used in the future for i.e. windowed aggregates
+    fn retract_batch(&mut self, _values: &[VectorRef]) -> Result<(), EvalError> {
+        InternalSnafu {
+            reason: format!(
+                "retract_batch not implemented for this accumulator {:?}",
+                self
+            ),
+        }
+        .fail()
+    }
+
+    /// Does the accumulator support incrementally updating its value by removing values.
+    fn supports_retract_batch(&self) -> bool {
+        false
+    }
+
+    /// Merge states using `&[Vec<Value>]` instead of `&[VectorRef]`
+    fn merge_states(&mut self, states: &[Vec<Value>], typs: &[CDT]) -> Result<(), EvalError> {
+        let states = states_to_batch(states, typs)?;
+        self.merge_batch(&states)
+    }
+}
+
+/// Adapter for several hand-picked datafusion accumulators that can be used in flow
+///
+/// i.e: can call evaluate multiple times.
+#[derive(Debug)]
+pub struct DfAccumulatorAdapter {
+    /// accumulator that is wrapped in a mutex to allow for evaluation
+    inner: Box<dyn DfAccumulator>,
+}
+
+pub trait AcceptDfAccumulator: DfAccumulator {}
+
+impl AcceptDfAccumulator for datafusion::functions_aggregate::min_max::MaxAccumulator {}
+
+impl AcceptDfAccumulator for datafusion::functions_aggregate::min_max::MinAccumulator {}
+
+impl DfAccumulatorAdapter {
+    /// create a new accumulator from a datafusion accumulator without checking if it is supported in flow
+    pub fn new_unchecked(acc: Box<dyn DfAccumulator>) -> Self {
+        Self { inner: acc }
+    }
+
+    pub fn new<T: AcceptDfAccumulator + 'static>(acc: T) -> Self {
+        Self::new_unchecked(Box::new(acc))
+    }
+}
+
+impl AccumulatorV2 for DfAccumulatorAdapter {
+    fn update_batch(&mut self, values: &[VectorRef]) -> Result<(), EvalError> {
+        let values = values
+            .iter()
+            .map(|v| v.to_arrow_array().clone())
+            .collect::<Vec<_>>();
+        self.inner.update_batch(&values).context(DatafusionSnafu {
+            context: "failed to update batch: {}",
+        })
+    }
+
+    fn evaluate(&mut self) -> Result<Value, EvalError> {
+        // TODO(discord9): find a way to confirm internal state is not consumed
+        let value = self.inner.evaluate().context(DatafusionSnafu {
+            context: "failed to evaluate accumulator: {}",
+        })?;
+        let value = Value::try_from(value).context(DataTypeSnafu {
+            msg: "failed to convert evaluate result from `ScalarValue` to `Value`",
+        })?;
+        Ok(value)
+    }
+
+    fn size(&self) -> usize {
+        self.inner.size()
+    }
+
+    fn state(&mut self) -> Result<Vec<(Value, CDT)>, EvalError> {
+        let state = self.inner.state().context(DatafusionSnafu {
+            context: "failed to get state: {}",
+        })?;
+        let state = state
+            .into_iter()
+            .map(|v| -> Result<_, _> {
+                let dt = CDT::try_from(&v.data_type())?;
+                let val = Value::try_from(v)?;
+                Ok((val, dt))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .context(DataTypeSnafu {
+                msg: "failed to convert `ScalarValue` state to `Value`",
+            })?;
+        Ok(state)
+    }
+
+    fn merge_batch(&mut self, states: &[VectorRef]) -> Result<(), EvalError> {
+        let states = states
+            .iter()
+            .map(|v| v.to_arrow_array().clone())
+            .collect::<Vec<_>>();
+        self.inner.merge_batch(&states).context(DatafusionSnafu {
+            context: "failed to merge batch",
+        })
+    }
+}
+
+/// Convert a list of states(from `Accumulator::into_state`)
+/// to a batch of vectors(that can be feed to `Accumulator::merge_batch`)
+fn states_to_batch(states: &[Vec<Value>], dts: &[CDT]) -> Result<Vec<VectorRef>, EvalError> {
+    if states.is_empty() || states[0].is_empty() {
+        return Ok(vec![]);
+    }
+    ensure!(
+        states.iter().map(|v| v.len()).all(|l| l == states[0].len()),
+        InternalSnafu {
+            reason: "states have different lengths"
+        }
+    );
+    let state_len = states[0].len();
+    ensure!(
+        state_len == dts.len(),
+        InternalSnafu {
+            reason: format!(
+                "states and data types have different lengths: {} != {}",
+                state_len,
+                dts.len()
+            )
+        }
+    );
+    let mut ret = dts
+        .iter()
+        .map(|dt| dt.create_mutable_vector(state_len))
+        .collect::<Vec<_>>();
+    for (i, vectors) in ret.iter_mut().enumerate() {
+        for state in states {
+            vectors.push_value_ref(state[i].as_value_ref());
+        }
+    }
+    let ret = ret.into_iter().map(|mut v| v.to_vector()).collect();
+    Ok(ret)
+}
+
+#[cfg(test)]
+mod test {
+    use std::sync::Arc;
+
+    use datatypes::prelude::ConcreteDataType as CDT;
+    use datatypes::vectors::{UInt32Vector, UInt64Vector, VectorRef};
+
+    use crate::adapter::node_context::all_built_in_udaf;
+    use crate::expr::relation::{AggregateExprV2, OrderingReq};
+    use crate::expr::ScalarExpr;
+    use crate::repr::{ColumnType, RelationType};
+
+    #[test]
+    pub fn test_can_get_state_after_eval() {
+        let udaf_list = all_built_in_udaf();
+        let test_cases = [
+            (
+                AggregateExprV2 {
+                    func: udaf_list.get("sum").unwrap().as_ref().clone(),
+                    args: vec![ScalarExpr::Column(0)
+                        .with_type(ColumnType::new(CDT::uint64_datatype(), true))],
+                    return_type: CDT::uint64_datatype(),
+                    name: "sum".to_string(),
+                    schema: RelationType::new(vec![ColumnType::new(CDT::uint64_datatype(), true)])
+                        .into_named(vec![None]),
+                    ordering_req: OrderingReq::empty(),
+                    ignore_nulls: false,
+                    is_distinct: false,
+                    is_reversed: false,
+                    input_types: vec![CDT::uint64_datatype()],
+                    is_nullable: true,
+                },
+                vec![Arc::new(UInt64Vector::from_slice([1, 2, 3])) as VectorRef],
+            ),
+            (
+                AggregateExprV2 {
+                    func: udaf_list.get("max").unwrap().as_ref().clone(),
+                    args: vec![ScalarExpr::Column(0)
+                        .with_type(ColumnType::new(CDT::uint32_datatype(), false))],
+                    return_type: CDT::uint32_datatype(),
+                    name: "max".to_string(),
+                    schema: RelationType::new(vec![
+                        ColumnType::new(CDT::uint32_datatype(), false),
+                        ColumnType::new(CDT::timestamp_millisecond_datatype(), false),
+                    ])
+                    .into_named(vec![Some("number".to_string()), Some("ts".to_string())]),
+                    ordering_req: OrderingReq::empty(),
+                    ignore_nulls: false,
+                    is_distinct: false,
+                    is_reversed: false,
+                    input_types: vec![CDT::uint32_datatype()],
+                    is_nullable: true,
+                },
+                vec![Arc::new(UInt32Vector::from_slice([1, 2, 3])) as VectorRef],
+            ),
+            (
+                AggregateExprV2 {
+                    func: udaf_list.get("count").unwrap().as_ref().clone(),
+                    args: vec![ScalarExpr::Column(1)
+                        .with_type(ColumnType::new(CDT::uint32_datatype(), false))],
+                    return_type: CDT::int64_datatype(),
+                    name: "count".to_string(),
+                    schema: RelationType::new(vec![
+                        ColumnType::new(CDT::uint64_datatype(), true),
+                        ColumnType::new(CDT::uint32_datatype(), false),
+                    ])
+                    .into_named(vec![None, Some("number".to_string())]),
+                    ordering_req: OrderingReq::empty(),
+                    ignore_nulls: false,
+                    is_distinct: false,
+                    is_reversed: false,
+                    input_types: vec![CDT::uint32_datatype()],
+                    is_nullable: true,
+                },
+                vec![Arc::new(UInt32Vector::from_slice([1, 2, 3])) as VectorRef],
+            ),
+            (
+                AggregateExprV2 {
+                    func: udaf_list.get("min").unwrap().as_ref().clone(),
+                    args: vec![ScalarExpr::Column(0)
+                        .with_type(ColumnType::new(CDT::uint32_datatype(), false))],
+                    return_type: CDT::uint32_datatype(),
+                    name: "min".to_string(),
+                    schema: RelationType::new(vec![
+                        ColumnType::new(CDT::uint32_datatype(), false),
+                        ColumnType::new(CDT::timestamp_millisecond_datatype(), false),
+                    ])
+                    .into_named(vec![Some("number".to_string()), Some("ts".to_string())]),
+                    ordering_req: OrderingReq::empty(),
+                    ignore_nulls: false,
+                    is_distinct: false,
+                    is_reversed: false,
+                    input_types: vec![CDT::uint32_datatype()],
+                    is_nullable: true,
+                },
+                vec![Arc::new(UInt32Vector::from_slice([1, 2, 3])) as VectorRef],
+            ),
+        ];
+
+        for (aggr, input) in test_cases {
+            let mut accum = aggr.create_accumulator().unwrap();
+            accum.update_batch(&input).unwrap();
+            let state1 = accum.state().unwrap();
+            let (state, dt): (Vec<_>, Vec<_>) = state1.clone().into_iter().unzip();
+
+            // merge_states() & state() works in pair as expected
+            let mut accum = aggr.create_accumulator().unwrap();
+            accum.merge_states(&[state.clone()], &dt).unwrap();
+            let state2 = accum.state().unwrap();
+            assert_eq!(state1, state2);
+
+            // call state() after evaluate() works as expected(although this is undefined behavior by datafusion?)
+            let mut accum = aggr.create_accumulator().unwrap();
+            accum.merge_states(&[state.clone()], &dt).unwrap();
+            accum.evaluate().unwrap();
+            let state3 = accum.state().unwrap();
+            assert_eq!(state1, state3);
+        }
+    }
+}
