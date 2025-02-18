@@ -537,6 +537,25 @@ tql eval (0, 2000, '400') count(max by (namespace) (stats_used_bytes{namespace=~
 | 1970-01-01T00:33:20 | 0                                           |
 +---------------------+---------------------------------------------+
 
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') count(max by (namespace) (stats_used_bytes{namespace=~".+"}) and (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100)));
+
++---------------------+---------------------------------------------+
+| ts                  | count(max(stats_used_bytes.greptime_value)) |
++---------------------+---------------------------------------------+
+| 1970-01-01T00:20:00 | 2                                           |
++---------------------+---------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') count(max by (namespace) (stats_used_bytes{namespace=~".+"}) unless (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100)));
+
++---------------------+---------------------------------------------+
+| ts                  | count(max(stats_used_bytes.greptime_value)) |
++---------------------+---------------------------------------------+
+| 1970-01-01T00:00:00 | 2                                           |
+| 1970-01-01T00:13:20 | 2                                           |
++---------------------+---------------------------------------------+
+
 drop table stats_used_bytes;
 
 Affected Rows: 0
