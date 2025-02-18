@@ -60,6 +60,7 @@ async fn query_flow_state(
 #[derive(Clone)]
 pub struct HeartbeatTask {
     node_id: u64,
+    node_epoch: u64,
     peer_addr: String,
     meta_client: Arc<MetaClient>,
     report_interval: Duration,
@@ -83,6 +84,7 @@ impl HeartbeatTask {
     ) -> Self {
         Self {
             node_id: opts.node_id.unwrap_or(0),
+            node_epoch: common_time::util::current_time_millis() as u64,
             peer_addr: addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),
             meta_client,
             report_interval: heartbeat_opts.interval,
@@ -136,6 +138,7 @@ impl HeartbeatTask {
 
     fn create_heartbeat_request(
         message: Option<OutgoingMessage>,
+        node_epoch: u64,
         peer: Option<Peer>,
         start_time_ms: u64,
         latest_report: &Option<FlowStat>,
@@ -162,6 +165,7 @@ impl HeartbeatTask {
         Some(HeartbeatRequest {
             mailbox_message,
             peer,
+            node_epoch,
             info: Self::build_node_info(start_time_ms),
             flow_stat,
             ..Default::default()
@@ -188,6 +192,7 @@ impl HeartbeatTask {
             id: self.node_id,
             addr: self.peer_addr.clone(),
         });
+        let self_node_epoch = self.node_epoch;
 
         let query_stat_size = self.query_stat_size.clone();
 
@@ -202,14 +207,14 @@ impl HeartbeatTask {
                 let req = tokio::select! {
                     message = outgoing_rx.recv() => {
                         if let Some(message) = message {
-                            Self::create_heartbeat_request(Some(message), self_peer.clone(), start_time_ms, &latest_report)
+                            Self::create_heartbeat_request(Some(message), self_node_epoch, self_peer.clone(), start_time_ms, &latest_report)
                         } else {
                             // Receives None that means Sender was dropped, we need to break the current loop
                             break
                         }
                     }
                     _ = interval.tick() => {
-                        Self::create_heartbeat_request(None, self_peer.clone(), start_time_ms, &latest_report)
+                        Self::create_heartbeat_request(None, self_node_epoch, self_peer.clone(), start_time_ms, &latest_report)
                     }
                 };
 
