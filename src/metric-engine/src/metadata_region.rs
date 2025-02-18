@@ -125,7 +125,6 @@ impl MetadataRegion {
         _physical_region_id: RegionId,
         logical_region_id: RegionId,
     ) -> Result<()> {
-
         self.logical_region_lock
             .write()
             .await
