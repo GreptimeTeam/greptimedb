@@ -156,7 +156,7 @@ mod tests {
         let path = location::sst_file_path(sst_dir, sst_file_id);
 
         let index_aux_path = dir.path().join("index_aux");
-        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None)
+        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
             .await
             .unwrap();
         let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
@@ -212,7 +212,7 @@ mod tests {
         let sst_dir = "table1";
 
         let index_aux_path = dir.path().join("index_aux");
-        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None)
+        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
             .await
             .unwrap();
         let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())

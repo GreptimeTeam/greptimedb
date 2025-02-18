@@ -1007,6 +1007,7 @@ min_compaction_interval = "0s"
 [region_engine.mito.index]
 aux_path = ""
 staging_size = "2GiB"
+staging_ttl = "7days"
 write_buffer_size = "8MiB"
 content_cache_page_size = "64KiB"
 

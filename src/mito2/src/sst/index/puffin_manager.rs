@@ -14,6 +14,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
@@ -63,12 +64,14 @@ impl PuffinManagerFactory {
         aux_path: impl AsRef<Path>,
         staging_capacity: u64,
         write_buffer_size: Option<usize>,
+        staging_ttl: Option<Duration>,
     ) -> Result<Self> {
         let staging_dir = aux_path.as_ref().join(STAGING_DIR);
         let stager = BoundedStager::new(
             staging_dir,
             staging_capacity,
             Some(Arc::new(StagerMetrics::default())),
+            staging_ttl,
         )
         .await
         .context(PuffinInitStagerSnafu)?;
@@ -103,7 +106,7 @@ impl PuffinManagerFactory {
         prefix: &str,
     ) -> (common_test_util::temp_dir::TempDir, Self) {
         let tempdir = common_test_util::temp_dir::create_temp_dir(prefix);
-        let factory = Self::new(tempdir.path().to_path_buf(), 1024, None)
+        let factory = Self::new(tempdir.path().to_path_buf(), 1024, None, None)
             .await
             .unwrap();
         (tempdir, factory)
@@ -112,7 +115,7 @@ impl PuffinManagerFactory {
     pub(crate) fn new_for_test_block(prefix: &str) -> (common_test_util::temp_dir::TempDir, Self) {
         let tempdir = common_test_util::temp_dir::create_temp_dir(prefix);
 
-        let f = Self::new(tempdir.path().to_path_buf(), 1024, None);
+        let f = Self::new(tempdir.path().to_path_buf(), 1024, None, None);
         let factory = common_runtime::block_on_global(f).unwrap();
 
         (tempdir, factory)
