@@ -46,7 +46,6 @@ use crate::puffin_manager::{BlobGuard, DirGuard};
 const DELETE_QUEUE_SIZE: usize = 10240;
 const TMP_EXTENSION: &str = "tmp";
 const DELETED_EXTENSION: &str = "deleted";
-const CACHE_TTL: Duration = Duration::from_secs(2 * 24 * 60 * 3600); // 2d
 const RECYCLE_BIN_TTL: Duration = Duration::from_secs(60);
 
 /// `BoundedStager` is a `Stager` that uses `moka` to manage staging area.
@@ -83,6 +82,7 @@ impl BoundedStager {
         base_dir: PathBuf,
         capacity: u64,
         notifier: Option<Arc<dyn StagerNotifier>>,
+        cache_ttl: Option<Duration>,
     ) -> Result<Self> {
         tokio::fs::create_dir_all(&base_dir)
             .await
@@ -94,9 +94,8 @@ impl BoundedStager {
         let file_mapping = FileMapping::new();
         let file_mapping_cloned = file_mapping.clone();
 
-        let cache = Cache::builder()
+        let mut cache_builder = Cache::builder()
             .max_capacity(capacity)
-            .time_to_idle(CACHE_TTL)
             .weigher(|_: &String, v: &CacheValue| v.weight())
             .eviction_policy(EvictionPolicy::lru())
             .async_eviction_listener(move |k, v, _| {
@@ -113,8 +112,13 @@ impl BoundedStager {
                     recycle_bin.insert(k.as_str().to_string(), v).await;
                 }
                 .boxed()
-            })
-            .build();
+            });
+        if let Some(ttl) = cache_ttl {
+            if !ttl.is_zero() {
+                cache_builder = cache_builder.time_to_live(ttl);
+            }
+        }
+        let cache = cache_builder.build();
 
         let (delete_queue, rx) = tokio::sync::mpsc::channel(DELETE_QUEUE_SIZE);
         let notifier_cloned = notifier.clone();
@@ -850,6 +854,7 @@ mod tests {
             tempdir.path().to_path_buf(),
             u64::MAX,
             Some(notifier.clone()),
+            None,
         )
         .await
         .unwrap();
@@ -906,6 +911,7 @@ mod tests {
             tempdir.path().to_path_buf(),
             u64::MAX,
             Some(notifier.clone()),
+            None,
         )
         .await
         .unwrap();
@@ -980,6 +986,7 @@ mod tests {
             tempdir.path().to_path_buf(),
             u64::MAX,
             Some(notifier.clone()),
+            None,
         )
         .await
         .unwrap();
@@ -1033,7 +1040,7 @@ mod tests {
 
         // recover stager
         drop(stager);
-        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX, None)
+        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX, None, None)
             .await
             .unwrap();
 
@@ -1093,6 +1100,7 @@ mod tests {
             tempdir.path().to_path_buf(),
             1, /* extremely small size */
             Some(notifier.clone()),
+            None,
         )
         .await
         .unwrap();
@@ -1313,7 +1321,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_blob_concurrency_on_fail() {
         let tempdir = create_temp_dir("test_get_blob_concurrency_on_fail_");
-        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX, None)
+        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX, None, None)
             .await
             .unwrap();
 
@@ -1350,7 +1358,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_dir_concurrency_on_fail() {
         let tempdir = create_temp_dir("test_get_dir_concurrency_on_fail_");
-        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX, None)
+        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX, None, None)
             .await
             .unwrap();
 
@@ -1392,6 +1400,7 @@ mod tests {
             tempdir.path().to_path_buf(),
             u64::MAX,
             Some(notifier.clone()),
+            None,
         )
         .await
         .unwrap();
