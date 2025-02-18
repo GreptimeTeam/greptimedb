@@ -4692,7 +4692,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=683e9d10ae7f3dfb8aaabd89082fc600c17e3795#683e9d10ae7f3dfb8aaabd89082fc600c17e3795"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=fc09a5696608d2a0aa718cc835d5cb9c4e8e9387#fc09a5696608d2a0aa718cc835d5cb9c4e8e9387"
 dependencies = [
  "prost 0.13.3",
  "serde",
@@ -6737,6 +6737,7 @@ version = "0.12.0"
 dependencies = [
  "api",
  "aquamarine",
+ "async-stream",
  "async-trait",
  "base64 0.21.7",
  "common-base",
@@ -6749,6 +6750,7 @@ dependencies = [
  "common-time",
  "datafusion",
  "datatypes",
+ "futures-util",
  "itertools 0.10.5",
  "lazy_static",
  "mito2",

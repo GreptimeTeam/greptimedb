@@ -22,6 +22,7 @@ use datafusion_expr::TableProviderFilterPushDown;
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
 use datatypes::schema::{
     ColumnSchema, FulltextOptions, RawSchema, Schema, SchemaBuilder, SchemaRef,
+    SkippingIndexOptions,
 };
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
@@ -221,6 +222,14 @@ impl TableMeta {
                 SetIndexOptions::Inverted { column_name } => {
                     self.change_column_modify_inverted_index(table_name, column_name, true)
                 }
+                SetIndexOptions::Skipping {
+                    column_name,
+                    options,
+                } => self.change_column_skipping_index_options(
+                    table_name,
+                    column_name,
+                    Some(options),
+                ),
             },
             AlterKind::UnsetIndex { options } => match options {
                 UnsetIndexOptions::Fulltext { column_name } => {
@@ -228,6 +237,9 @@ impl TableMeta {
                 }
                 UnsetIndexOptions::Inverted { column_name } => {
                     self.change_column_modify_inverted_index(table_name, column_name, false)
+                }
+                UnsetIndexOptions::Skipping { column_name } => {
+                    self.change_column_skipping_index_options(table_name, column_name, None)
                 }
             },
         }
@@ -393,6 +405,56 @@ impl TableMeta {
             msg: format!(
                 "Table {table_name} cannot change fulltext options for column {column_name}",
             ),
+        })?;
+
+        let _ = meta_builder
+            .schema(Arc::new(new_schema))
+            .primary_key_indices(self.primary_key_indices.clone());
+
+        Ok(meta_builder)
+    }
+
+    /// Creates a [TableMetaBuilder] with modified column skipping index options.
+    fn change_column_skipping_index_options(
+        &self,
+        table_name: &str,
+        column_name: &str,
+        options: Option<&SkippingIndexOptions>,
+    ) -> Result<TableMetaBuilder> {
+        let table_schema = &self.schema;
+        let mut meta_builder = self.new_meta_builder();
+
+        let mut columns = Vec::with_capacity(table_schema.column_schemas().len());
+        for column_schema in table_schema.column_schemas() {
+            if column_schema.name == column_name {
+                let mut new_column_schema = column_schema.clone();
+                if let Some(options) = options {
+                    set_column_skipping_index_options(
+                        &mut new_column_schema,
+                        column_name,
+                        options,
+                    )?;
+                } else {
+                    unset_column_skipping_index_options(&mut new_column_schema, column_name)?;
+                }
+                columns.push(new_column_schema);
+            } else {
+                columns.push(column_schema.clone());
+            }
+        }
+
+        let mut builder = SchemaBuilder::try_from_columns(columns)
+            .with_context(|_| error::SchemaBuildSnafu {
+                msg: format!("Failed to convert column schemas into schema for table {table_name}"),
+            })?
+            .version(table_schema.version() + 1);
+
+        for (k, v) in table_schema.metadata().iter() {
+            builder = builder.add_metadata(k, v);
+        }
+
+        let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
+            msg: format!("Failed to convert column schemas into schema for table {table_name}"),
         })?;
 
         let _ = meta_builder
@@ -1128,6 +1190,28 @@ fn unset_column_fulltext_options(
         .set_fulltext_options(&options)
         .context(error::SetFulltextOptionsSnafu { column_name })?;
 
+    Ok(())
+}
+
+fn set_column_skipping_index_options(
+    column_schema: &mut ColumnSchema,
+    column_name: &str,
+    options: &SkippingIndexOptions,
+) -> Result<()> {
+    column_schema
+        .set_skipping_options(options)
+        .context(error::SetSkippingOptionsSnafu { column_name })?;
+
+    Ok(())
+}
+
+fn unset_column_skipping_index_options(
+    column_schema: &mut ColumnSchema,
+    column_name: &str,
+) -> Result<()> {
+    column_schema
+        .unset_skipping_options()
+        .context(error::UnsetSkippingOptionsSnafu { column_name })?;
     Ok(())
 }
 

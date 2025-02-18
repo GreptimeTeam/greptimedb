@@ -24,7 +24,7 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 #[cfg(feature = "pg_kvbackend")]
-use common_meta::kv_backend::postgres::PgStore;
+use common_meta::kv_backend::rds::PgStore;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_telemetry::info;

@@ -44,7 +44,6 @@ use datafusion_expr::utils::conjunction;
 use datafusion_expr::SortExpr;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
 use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::Schema;
 use itertools::Itertools;
 use promql::extension_plan::{
     build_special_time_expr, EmptyMetric, HistogramFold, InstantManipulate, Millisecond,
@@ -385,6 +384,7 @@ impl PromPlanner {
             (None, None) => {
                 let left_input = self.prom_expr_to_plan(lhs, session_state).await?;
                 let left_field_columns = self.ctx.field_columns.clone();
+                let left_time_index_column = self.ctx.time_index_column.clone();
                 let mut left_table_ref = self
                     .table_ref()
                     .unwrap_or_else(|_| TableReference::bare(""));
@@ -392,6 +392,7 @@ impl PromPlanner {
 
                 let right_input = self.prom_expr_to_plan(rhs, session_state).await?;
                 let right_field_columns = self.ctx.field_columns.clone();
+                let right_time_index_column = self.ctx.time_index_column.clone();
                 let mut right_table_ref = self
                     .table_ref()
                     .unwrap_or_else(|_| TableReference::bare(""));
@@ -429,19 +430,17 @@ impl PromPlanner {
                     }
                 }
                 let mut field_columns = left_field_columns.iter().zip(right_field_columns.iter());
-                let has_special_vector_function = (left_field_columns.len() == 1
-                    && left_field_columns[0] == GREPTIME_VALUE)
-                    || (right_field_columns.len() == 1 && right_field_columns[0] == GREPTIME_VALUE);
 
                 let join_plan = self.join_on_non_field_columns(
                     left_input,
                     right_input,
                     left_table_ref.clone(),
                     right_table_ref.clone(),
+                    left_time_index_column,
+                    right_time_index_column,
                     // if left plan or right plan tag is empty, means case like `scalar(...) + host` or `host + scalar(...)`
                     // under this case we only join on time index
                     left_context.tag_columns.is_empty() || right_context.tag_columns.is_empty(),
-                    has_special_vector_function,
                 )?;
                 let join_plan_schema = join_plan.schema().clone();
 
@@ -759,31 +758,26 @@ impl PromPlanner {
         label_matchers: Matchers,
         is_range_selector: bool,
     ) -> Result<LogicalPlan> {
+        // make table scan plan
+        let table_ref = self.table_ref()?;
+        let mut table_scan = self.create_table_scan_plan(table_ref.clone()).await?;
+        let table_schema = table_scan.schema();
+
         // make filter exprs
         let offset_duration = match offset {
             Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
             Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
             None => 0,
         };
-
-        let time_index_filter = self.build_time_index_filter(offset_duration)?;
-        // make table scan with filter exprs
-        let table_ref = self.table_ref()?;
-
-        let moved_label_matchers = label_matchers.clone();
-        let mut table_scan = self
-            .create_table_scan_plan(table_ref.clone(), |schema| {
-                let mut scan_filters =
-                    PromPlanner::matchers_to_expr(moved_label_matchers, |name| {
-                        schema.column_index_by_name(name).is_some()
-                    })?;
-                if let Some(time_index_filter) = time_index_filter {
-                    scan_filters.push(time_index_filter);
-                }
-
-                Ok(scan_filters)
-            })
-            .await?;
+        let mut scan_filters = self.matchers_to_expr(label_matchers.clone(), table_schema)?;
+        if let Some(time_index_filter) = self.build_time_index_filter(offset_duration)? {
+            scan_filters.push(time_index_filter);
+        }
+        table_scan = LogicalPlanBuilder::from(table_scan)
+            .filter(conjunction(scan_filters).unwrap()) // Safety: `scan_filters` is not empty.
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
 
         // make a projection plan if there is any `__field__` matcher
         if let Some(field_matchers) = &self.ctx.field_column_matcher {
@@ -963,29 +957,37 @@ impl PromPlanner {
         }
     }
 
-    /// Convert [`Matchers`] to [`DfExpr`]s.
-    ///
-    /// This method will filter out the matchers that don't match the filter function.
-    fn matchers_to_expr<F>(label_matchers: Matchers, filter: F) -> Result<Vec<DfExpr>>
-    where
-        F: Fn(&str) -> bool,
-    {
+    // TODO(ruihang): ignore `MetricNameLabel` (`__name__`) matcher
+    fn matchers_to_expr(
+        &self,
+        label_matchers: Matchers,
+        table_schema: &DFSchemaRef,
+    ) -> Result<Vec<DfExpr>> {
         let mut exprs = Vec::with_capacity(label_matchers.matchers.len());
         for matcher in label_matchers.matchers {
-            // ignores the matchers that don't match the filter function
-            if !filter(&matcher.name) {
-                continue;
-            }
-            let col = DfExpr::Column(Column::from_name(matcher.name));
+            let col = if table_schema
+                .field_with_unqualified_name(&matcher.name)
+                .is_err()
+            {
+                DfExpr::Literal(ScalarValue::Utf8(Some(String::new()))).alias(matcher.name)
+            } else {
+                DfExpr::Column(Column::from_name(matcher.name))
+            };
             let lit = DfExpr::Literal(ScalarValue::Utf8(Some(matcher.value)));
             let expr = match matcher.op {
                 MatchOp::Equal => col.eq(lit),
                 MatchOp::NotEqual => col.not_eq(lit),
-                MatchOp::Re(_) => DfExpr::BinaryExpr(BinaryExpr {
-                    left: Box::new(col),
-                    op: Operator::RegexMatch,
-                    right: Box::new(lit),
-                }),
+                MatchOp::Re(re) => {
+                    // TODO(ruihang): a more programmatic way to handle this in datafusion
+                    if re.as_str() == ".*" {
+                        continue;
+                    }
+                    DfExpr::BinaryExpr(BinaryExpr {
+                        left: Box::new(col),
+                        op: Operator::RegexMatch,
+                        right: Box::new(lit),
+                    })
+                }
                 MatchOp::NotRe(_) => DfExpr::BinaryExpr(BinaryExpr {
                     left: Box::new(col),
                     op: Operator::RegexNotMatch,
@@ -1070,21 +1072,14 @@ impl PromPlanner {
     ///
     /// # Panic
     /// If the filter is empty
-    async fn create_table_scan_plan<F>(
-        &mut self,
-        table_ref: TableReference,
-        filter_builder: F,
-    ) -> Result<LogicalPlan>
-    where
-        F: FnOnce(&Schema) -> Result<Vec<DfExpr>>,
-    {
+    async fn create_table_scan_plan(&mut self, table_ref: TableReference) -> Result<LogicalPlan> {
         let provider = self
             .table_provider
             .resolve_table(table_ref.clone())
             .await
             .context(CatalogSnafu)?;
 
-        let schema = provider
+        let is_time_index_ms = provider
             .as_any()
             .downcast_ref::<DefaultTableSource>()
             .context(UnknownTableSnafu)?
@@ -1093,9 +1088,7 @@ impl PromPlanner {
             .downcast_ref::<DfTableProviderAdapter>()
             .context(UnknownTableSnafu)?
             .table()
-            .schema();
-
-        let is_time_index_ms = schema
+            .schema()
             .timestamp_column()
             .with_context(|| TimeIndexNotFoundSnafu {
                 table: table_ref.to_quoted_string(),
@@ -1103,7 +1096,6 @@ impl PromPlanner {
             .data_type
             == ConcreteDataType::timestamp_millisecond_datatype();
 
-        let filter = filter_builder(schema.as_ref())?;
         let mut scan_plan = LogicalPlanBuilder::scan(table_ref.clone(), provider, None)
             .context(DataFusionPlanningSnafu)?
             .build()
@@ -1140,14 +1132,9 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu)?;
         }
 
-        let mut builder = LogicalPlanBuilder::from(scan_plan);
-        if !filter.is_empty() {
-            // Safety: filter is not empty, checked above
-            builder = builder
-                .filter(conjunction(filter).unwrap())
-                .context(DataFusionPlanningSnafu)?;
-        }
-        let result = builder.build().context(DataFusionPlanningSnafu)?;
+        let result = LogicalPlanBuilder::from(scan_plan)
+            .build()
+            .context(DataFusionPlanningSnafu)?;
         Ok(result)
     }
 
@@ -2055,16 +2042,18 @@ impl PromPlanner {
 
     /// Build a inner join on time index column and tag columns to concat two logical plans.
     /// When `only_join_time_index == true` we only join on the time index, because these two plan may not have the same tag columns
+    #[allow(clippy::too_many_arguments)]
     fn join_on_non_field_columns(
         &self,
         left: LogicalPlan,
         right: LogicalPlan,
         left_table_ref: TableReference,
         right_table_ref: TableReference,
+        left_time_index_column: Option<String>,
+        right_time_index_column: Option<String>,
         only_join_time_index: bool,
-        has_special_vector_function: bool,
     ) -> Result<LogicalPlan> {
-        let mut tag_columns = if only_join_time_index {
+        let mut left_tag_columns = if only_join_time_index {
             vec![]
         } else {
             self.ctx
@@ -2073,13 +2062,14 @@ impl PromPlanner {
                 .map(Column::from_name)
                 .collect::<Vec<_>>()
         };
+        let mut right_tag_columns = left_tag_columns.clone();
 
         // push time index column if it exists
-        if let Some(time_index_column) = &self.ctx.time_index_column {
-            // issue #5392 if is special vector function
-            if !has_special_vector_function {
-                tag_columns.push(Column::from_name(time_index_column));
-            }
+        if let (Some(left_time_index_column), Some(right_time_index_column)) =
+            (left_time_index_column, right_time_index_column)
+        {
+            left_tag_columns.push(Column::from_name(left_time_index_column));
+            right_tag_columns.push(Column::from_name(right_time_index_column));
         }
 
         let right = LogicalPlanBuilder::from(right)
@@ -2095,7 +2085,7 @@ impl PromPlanner {
             .join(
                 right,
                 JoinType::Inner,
-                (tag_columns.clone(), tag_columns),
+                (left_tag_columns, right_tag_columns),
                 None,
             )
             .context(DataFusionPlanningSnafu)?

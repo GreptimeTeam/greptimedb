@@ -34,8 +34,8 @@ inputs:
     required: true
   push-latest-tag:
     description: Whether to push the latest tag
-    required: false
-    default: 'true'
+    required: true
+    default: 'false'
 runs:
   using: composite
   steps:
