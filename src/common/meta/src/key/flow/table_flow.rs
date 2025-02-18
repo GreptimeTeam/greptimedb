@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use futures::stream::BoxStream;
+use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -196,10 +196,7 @@ impl TableFlowManager {
     /// Retrieves all [TableFlowKey]s of the specified `table_id`.
     ///
     /// TODO(discord9): add cache for it since range request does not support cache.
-    pub fn flows(
-        &self,
-        table_id: TableId,
-    ) -> BoxStream<'static, Result<(TableFlowKey, TableFlowValue)>> {
+    pub async fn flows(&self, table_id: TableId) -> Result<Vec<(TableFlowKey, TableFlowValue)>> {
         let start_key = TableFlowKey::range_start_key(table_id);
         let req = RangeRequest::new().with_prefix(start_key);
         let stream = PaginationStream::new(
@@ -210,7 +207,9 @@ impl TableFlowManager {
         )
         .into_stream();
 
-        Box::pin(stream)
+        let res = stream.try_collect::<Vec<_>>().await?;
+        // TODO: remap the addresses
+        Ok(res)
     }
 
     /// Builds a create table flow transaction.
