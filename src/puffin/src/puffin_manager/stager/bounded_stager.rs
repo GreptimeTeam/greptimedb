@@ -46,7 +46,7 @@ use crate::puffin_manager::{BlobGuard, DirGuard};
 const DELETE_QUEUE_SIZE: usize = 10240;
 const TMP_EXTENSION: &str = "tmp";
 const DELETED_EXTENSION: &str = "deleted";
-const CACHE_TTL: Duration = Duration::from_secs(60 * 3600); // 1h
+const CACHE_TTL: Duration = Duration::from_secs(2 * 24 * 60 * 3600); // 2d
 const RECYCLE_BIN_TTL: Duration = Duration::from_secs(60);
 
 /// `BoundedStager` is a `Stager` that uses `moka` to manage staging area.
