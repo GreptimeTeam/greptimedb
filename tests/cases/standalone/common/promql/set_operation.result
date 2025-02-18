@@ -465,6 +465,105 @@ drop table t2;
 
 Affected Rows: 0
 
+create table stats_used_bytes (
+    ts timestamp time index,
+    namespace string,
+    greptime_value double,
+    primary key (namespace)
+);
+
+Affected Rows: 0
+
+create table stats_capacity_bytes (
+    ts timestamp time index,
+    namespace string,
+    greptime_value double,
+    primary key (namespace)
+);
+
+Affected Rows: 0
+
+insert into stats_used_bytes values
+    (0, "namespace1", 1.0),
+    (0, "namespace2", 2.0),
+    (500000, "namespace1", 10.0),
+    (500000, "namespace2", 20.0),
+    (1000000, "namespace1", 25.0),
+    (1000000, "namespace2", 26.0);
+
+Affected Rows: 6
+
+insert into stats_capacity_bytes values
+    (0, "namespace1", 30.0),
+    (0, "namespace2", 30.0),
+    (500000, "namespace1", 30.0),
+    (500000, "namespace2", 30.0),
+    (1000000, "namespace1", 30.0),
+    (1000000, "namespace2", 30.0);
+
+Affected Rows: 6
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') max by (namespace) (stats_used_bytes{namespace=~".+"}) / max by (namespace) (stats_capacity_bytes{namespace=~".+"}) >= (80 / 100);
+
++------------+---------------------+-----------------------------------------------------------------------------------------------------------------------+
+| namespace  | ts                  | stats_used_bytes.max(stats_used_bytes.greptime_value) / stats_capacity_bytes.max(stats_capacity_bytes.greptime_value) |
++------------+---------------------+-----------------------------------------------------------------------------------------------------------------------+
+| namespace1 | 1970-01-01T00:20:00 | 0.8333333333333334                                                                                                    |
+| namespace2 | 1970-01-01T00:20:00 | 0.8666666666666667                                                                                                    |
++------------+---------------------+-----------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') max by (namespace) (stats_used_bytes{namespace=~".+"}) and (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100));
+
++------------+---------------------+--------------------------------------+
+| namespace  | ts                  | max(stats_used_bytes.greptime_value) |
++------------+---------------------+--------------------------------------+
+| namespace1 | 1970-01-01T00:20:00 | 25.0                                 |
+| namespace2 | 1970-01-01T00:20:00 | 26.0                                 |
++------------+---------------------+--------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') count(max by (namespace) (stats_used_bytes{namespace=~".+"}) and (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100))) or vector(0);
+
++---------------------+---------------------------------------------+
+| ts                  | count(max(stats_used_bytes.greptime_value)) |
++---------------------+---------------------------------------------+
+| 1970-01-01T00:00:00 | 0                                           |
+| 1970-01-01T00:06:40 | 0                                           |
+| 1970-01-01T00:13:20 | 0                                           |
+| 1970-01-01T00:20:00 | 2                                           |
+| 1970-01-01T00:26:40 | 0                                           |
+| 1970-01-01T00:33:20 | 0                                           |
++---------------------+---------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') count(max by (namespace) (stats_used_bytes{namespace=~".+"}) and (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100)));
+
++---------------------+---------------------------------------------+
+| ts                  | count(max(stats_used_bytes.greptime_value)) |
++---------------------+---------------------------------------------+
+| 1970-01-01T00:20:00 | 2                                           |
++---------------------+---------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') count(max by (namespace) (stats_used_bytes{namespace=~".+"}) unless (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100)));
+
++---------------------+---------------------------------------------+
+| ts                  | count(max(stats_used_bytes.greptime_value)) |
++---------------------+---------------------------------------------+
+| 1970-01-01T00:00:00 | 2                                           |
+| 1970-01-01T00:13:20 | 2                                           |
++---------------------+---------------------------------------------+
+
+drop table stats_used_bytes;
+
+Affected Rows: 0
+
+drop table stats_capacity_bytes;
+
+Affected Rows: 0
+
 create table cache_hit (
     ts timestamp time index,
     job string,
