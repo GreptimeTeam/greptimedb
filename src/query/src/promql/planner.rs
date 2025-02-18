@@ -634,6 +634,7 @@ impl PromPlanner {
         let mut func_exprs = self.create_function_expr(func, args.literals, session_state)?;
         func_exprs.insert(0, self.create_time_index_column_expr()?);
         func_exprs.extend_from_slice(&self.create_tag_column_exprs()?);
+
         LogicalPlanBuilder::from(input)
             .project(func_exprs)
             .context(DataFusionPlanningSnafu)?

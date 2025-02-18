@@ -115,6 +115,16 @@ tql eval (3000, 3000, '1s') histogram_quantile(0.8, histogram_bucket);
 | 1970-01-01T00:50:00 | positive | 0.72 |
 +---------------------+----------+------+
 
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') label_replace(histogram_quantile(0.8, histogram_bucket), "s", "$1", "s", "(.*)tive");
+
++---------------------+------+------+
+| ts                  | val  | s    |
++---------------------+------+------+
+| 1970-01-01T00:50:00 | 0.3  | nega |
+| 1970-01-01T00:50:00 | 0.72 | posi |
++---------------------+------+------+
+
 -- More realistic with rates.
 -- This case doesn't contains value because other point are not inserted.
 -- quantile with rate is covered in other cases
