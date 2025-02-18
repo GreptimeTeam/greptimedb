@@ -39,9 +39,13 @@ use crate::puffin_manager::stager::{BoxWriter, DirWriterProviderRef, Stager};
 use crate::puffin_manager::{BlobGuard, PuffinReader};
 
 /// `FsPuffinReader` is a `PuffinReader` that provides fs readers for puffin files.
-pub struct FsPuffinReader<S, F> {
-    /// The name of the puffin file.
-    puffin_file_name: String,
+pub struct FsPuffinReader<S, F>
+where
+    S: Stager + 'static,
+    F: PuffinFileAccessor + Clone,
+{
+    /// The handle of the puffin file.
+    handle: F::FileHandle,
 
     /// The file size hint.
     file_size_hint: Option<u64>,
@@ -56,15 +60,19 @@ pub struct FsPuffinReader<S, F> {
     puffin_file_metadata_cache: Option<PuffinMetadataCacheRef>,
 }
 
-impl<S, F> FsPuffinReader<S, F> {
+impl<S, F> FsPuffinReader<S, F>
+where
+    S: Stager + 'static,
+    F: PuffinFileAccessor + Clone,
+{
     pub(crate) fn new(
-        puffin_file_name: String,
+        handle: F::FileHandle,
         stager: S,
         puffin_file_accessor: F,
         puffin_file_metadata_cache: Option<PuffinMetadataCacheRef>,
     ) -> Self {
         Self {
-            puffin_file_name,
+            handle,
             file_size_hint: None,
             stager,
             puffin_file_accessor,
@@ -76,8 +84,8 @@ impl<S, F> FsPuffinReader<S, F> {
 #[async_trait]
 impl<S, F> PuffinReader for FsPuffinReader<S, F>
 where
-    S: Stager + 'static,
     F: PuffinFileAccessor + Clone,
+    S: Stager<FileHandle = F::FileHandle> + 'static,
 {
     type Blob = Either<RandomReadBlob<F>, S::Blob>;
     type Dir = S::Dir;
@@ -88,19 +96,13 @@ where
     }
 
     async fn metadata(&self) -> Result<Arc<FileMetadata>> {
-        let reader = self
-            .puffin_file_accessor
-            .reader(&self.puffin_file_name)
-            .await?;
+        let reader = self.puffin_file_accessor.reader(&self.handle).await?;
         let mut file = PuffinFileReader::new(reader);
         self.get_puffin_file_metadata(&mut file).await
     }
 
     async fn blob(&self, key: &str) -> Result<Self::Blob> {
-        let mut reader = self
-            .puffin_file_accessor
-            .reader(&self.puffin_file_name)
-            .await?;
+        let mut reader = self.puffin_file_accessor.reader(&self.handle).await?;
         if let Some(file_size_hint) = self.file_size_hint {
             reader.with_file_size_hint(file_size_hint);
         }
@@ -117,16 +119,16 @@ where
         let blob = if blob_metadata.compression_codec.is_none() {
             // If the blob is not compressed, we can directly read it from the puffin file.
             Either::L(RandomReadBlob {
-                file_name: self.puffin_file_name.clone(),
+                handle: self.handle.clone(),
                 accessor: self.puffin_file_accessor.clone(),
                 blob_metadata,
             })
         } else {
             // If the blob is compressed, we need to decompress it into staging space before reading.
-            let staged_blob = self
+            let staged_blob: <S as Stager>::Blob = self
                 .stager
                 .get_blob(
-                    self.puffin_file_name.as_str(),
+                    &self.handle,
                     key,
                     Box::new(|writer| {
                         Box::pin(Self::init_blob_to_stager(file, blob_metadata, writer))
@@ -143,17 +145,18 @@ where
     async fn dir(&self, key: &str) -> Result<Self::Dir> {
         self.stager
             .get_dir(
-                self.puffin_file_name.as_str(),
+                &self.handle,
                 key,
                 Box::new(|writer_provider| {
                     let accessor = self.puffin_file_accessor.clone();
-                    let puffin_file_name = self.puffin_file_name.clone();
+                    let handle = self.handle.clone();
                     let key = key.to_string();
                     Box::pin(Self::init_dir_to_stager(
-                        puffin_file_name,
+                        handle,
                         key,
                         writer_provider,
                         accessor,
+                        self.file_size_hint,
                     ))
                 }),
             )
@@ -170,15 +173,16 @@ where
         &self,
         reader: &mut PuffinFileReader<F::Reader>,
     ) -> Result<Arc<FileMetadata>> {
+        let id = self.handle.to_string();
         if let Some(cache) = self.puffin_file_metadata_cache.as_ref() {
-            if let Some(metadata) = cache.get_metadata(&self.puffin_file_name) {
+            if let Some(metadata) = cache.get_metadata(&id) {
                 return Ok(metadata);
             }
         }
 
         let metadata = Arc::new(reader.metadata().await?);
         if let Some(cache) = self.puffin_file_metadata_cache.as_ref() {
-            cache.put_metadata(self.puffin_file_name.to_string(), metadata.clone());
+            cache.put_metadata(id, metadata.clone());
         }
         Ok(metadata)
     }
@@ -196,12 +200,16 @@ where
     }
 
     async fn init_dir_to_stager(
-        puffin_file_name: String,
+        handle: F::FileHandle,
         key: String,
         writer_provider: DirWriterProviderRef,
         accessor: F,
+        file_size_hint: Option<u64>,
     ) -> Result<u64> {
-        let reader = accessor.reader(&puffin_file_name).await?;
+        let mut reader = accessor.reader(&handle).await?;
+        if let Some(file_size_hint) = file_size_hint {
+            reader.with_file_size_hint(file_size_hint);
+        }
         let mut file = PuffinFileReader::new(reader);
 
         let puffin_metadata = file.metadata().await?;
@@ -237,7 +245,7 @@ where
                 }
             );
 
-            let reader = accessor.reader(&puffin_file_name).await?;
+            let reader = accessor.reader(&handle).await?;
             let writer = writer_provider.writer(&file_meta.relative_path).await?;
             let task = common_runtime::spawn_global(async move {
                 let reader = PuffinFileReader::new(reader).into_blob_reader(&blob_meta);
@@ -284,8 +292,8 @@ where
 }
 
 /// `RandomReadBlob` is a `BlobGuard` that directly reads the blob from the puffin file.
-pub struct RandomReadBlob<F> {
-    file_name: String,
+pub struct RandomReadBlob<F: PuffinFileAccessor> {
+    handle: F::FileHandle,
     accessor: F,
     blob_metadata: BlobMetadata,
 }
@@ -302,7 +310,7 @@ impl<F: PuffinFileAccessor + Clone> BlobGuard for RandomReadBlob<F> {
             }
         );
 
-        let reader = self.accessor.reader(&self.file_name).await?;
+        let reader = self.accessor.reader(&self.handle).await?;
         let blob_reader = PuffinFileReader::new(reader).into_blob_reader(&self.blob_metadata);
         Ok(blob_reader)
     }

@@ -28,6 +28,7 @@ use puffin::puffin_manager::{BlobGuard, PuffinManager, PuffinReader};
 use snafu::ResultExt;
 use store_api::storage::{ColumnId, RegionId};
 
+use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::index::bloom_filter_index::{
     BloomFilterIndexCacheRef, CachedBloomFilterIndexBlobReader,
@@ -43,7 +44,6 @@ use crate::sst::index::bloom_filter::applier::builder::Predicate;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
 use crate::sst::index::TYPE_BLOOM_FILTER_INDEX;
-use crate::sst::location;
 
 pub(crate) type BloomFilterIndexApplierRef = Arc<BloomFilterIndexApplier>;
 
@@ -247,11 +247,12 @@ impl BloomFilterIndexApplier {
             return Ok(None);
         };
 
-        let puffin_manager = self.puffin_manager_factory.build(file_cache.local_store());
-        let puffin_file_name = file_cache.cache_file_path(index_key);
-
+        let puffin_manager = self.puffin_manager_factory.build(
+            file_cache.local_store(),
+            WriteCachePathProvider::new(self.region_id, file_cache.clone()),
+        );
         let reader = puffin_manager
-            .reader(&puffin_file_name)
+            .reader(&file_id)
             .await
             .context(PuffinBuildReaderSnafu)?
             .with_file_size_hint(file_size_hint)
@@ -278,12 +279,14 @@ impl BloomFilterIndexApplier {
     ) -> Result<BlobReader> {
         let puffin_manager = self
             .puffin_manager_factory
-            .build(self.object_store.clone())
+            .build(
+                self.object_store.clone(),
+                RegionFilePathFactory::new(self.region_dir.clone()),
+            )
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
-        let file_path = location::index_file_path(&self.region_dir, file_id);
         puffin_manager
-            .reader(&file_path)
+            .reader(&file_id)
             .await
             .context(PuffinBuildReaderSnafu)?
             .with_file_size_hint(file_size_hint)
@@ -447,7 +450,6 @@ mod tests {
         let memory_usage_threshold = Some(1024);
         let file_id = FileId::random();
         let region_dir = "region_dir".to_string();
-        let path = location::index_file_path(&region_dir, file_id);
 
         let mut indexer =
             BloomFilterIndexer::new(file_id, &region_metadata, intm_mgr, memory_usage_threshold)
@@ -460,9 +462,12 @@ mod tests {
         let mut batch = new_batch("tag2", 10..20);
         indexer.update(&mut batch).await.unwrap();
 
-        let puffin_manager = factory.build(object_store.clone());
+        let puffin_manager = factory.build(
+            object_store.clone(),
+            RegionFilePathFactory::new(region_dir.clone()),
+        );
 
-        let mut puffin_writer = puffin_manager.writer(&path).await.unwrap();
+        let mut puffin_writer = puffin_manager.writer(&file_id).await.unwrap();
         indexer.finish(&mut puffin_writer).await.unwrap();
         puffin_writer.finish().await.unwrap();
 
