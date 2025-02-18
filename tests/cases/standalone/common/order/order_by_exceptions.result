@@ -70,20 +70,16 @@ EXPLAIN SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY 
 | logical_plan  | Sort: Int64(-1) ASC NULLS LAST                                                                            |
 |               |   Aggregate: groupBy=[[test.a % Int64(2), test.b]], aggr=[[]]                                             |
 |               |     Union                                                                                                 |
-|               |       Projection: CAST(test.a AS Int64) % Int64(2) AS test.a % Int64(2), test.b                           |
-|               |         MergeScan [is_placeholder=false]                                                                  |
-|               |       Projection: CAST(test.a AS Int64) % Int64(2) AS test.a % Int64(2), test.b                           |
-|               |         MergeScan [is_placeholder=false]                                                                  |
+|               |       MergeScan [is_placeholder=false]                                                                    |
+|               |       MergeScan [is_placeholder=false]                                                                    |
 | physical_plan | CoalescePartitionsExec                                                                                    |
 |               |   AggregateExec: mode=FinalPartitioned, gby=[test.a % Int64(2)@0 as test.a % Int64(2), b@1 as b], aggr=[] |
 |               |     CoalesceBatchesExec: target_batch_size=8192                                                           |
 |               |       RepartitionExec: REDACTED
 |               |         AggregateExec: mode=Partial, gby=[test.a % Int64(2)@0 as test.a % Int64(2), b@1 as b], aggr=[]    |
 |               |           UnionExec                                                                                       |
-|               |             ProjectionExec: expr=[CAST(a@0 AS Int64) % 2 as test.a % Int64(2), b@1 as b]                  |
-|               |               MergeScanExec: REDACTED
-|               |             ProjectionExec: expr=[CAST(a@0 AS Int64) % 2 as test.a % Int64(2), b@1 as b]                  |
-|               |               MergeScanExec: REDACTED
+|               |             MergeScanExec: REDACTED
+|               |             MergeScanExec: REDACTED
 |               |                                                                                                           |
 +---------------+-----------------------------------------------------------------------------------------------------------+
 
