@@ -336,13 +336,13 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
+    use crate::access_layer::RegionFilePathFactory;
     use crate::cache::index::inverted_index::InvertedIndexCache;
     use crate::metrics::CACHE_BYTES;
     use crate::read::BatchColumn;
     use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
     use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
-    use crate::sst::location;
 
     fn mock_object_store() -> ObjectStore {
         ObjectStore::new(Memory::default()).unwrap().finish()
@@ -438,7 +438,6 @@ mod tests {
         let (d, factory) = PuffinManagerFactory::new_for_test_async(prefix).await;
         let region_dir = "region0".to_string();
         let sst_file_id = FileId::random();
-        let file_path = location::index_file_path(&region_dir, sst_file_id);
         let object_store = mock_object_store();
         let region_metadata = mock_region_metadata();
         let intm_mgr = new_intm_mgr(d.path().to_string_lossy()).await;
@@ -460,8 +459,11 @@ mod tests {
             creator.update(&mut batch).await.unwrap();
         }
 
-        let puffin_manager = factory.build(object_store.clone());
-        let mut writer = puffin_manager.writer(&file_path).await.unwrap();
+        let puffin_manager = factory.build(
+            object_store.clone(),
+            RegionFilePathFactory::new(region_dir.clone()),
+        );
+        let mut writer = puffin_manager.writer(&sst_file_id).await.unwrap();
         let (row_count, _) = creator.finish(&mut writer).await.unwrap();
         assert_eq!(row_count, rows.len() * segment_row_count);
         writer.finish().await.unwrap();

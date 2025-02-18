@@ -50,7 +50,7 @@ const CACHE_TTL: Duration = Duration::from_secs(2 * 24 * 60 * 3600); // 2d
 const RECYCLE_BIN_TTL: Duration = Duration::from_secs(60);
 
 /// `BoundedStager` is a `Stager` that uses `moka` to manage staging area.
-pub struct BoundedStager {
+pub struct BoundedStager<H> {
     /// The base directory of the staging area.
     base_dir: PathBuf,
 
@@ -76,9 +76,11 @@ pub struct BoundedStager {
 
     /// The file mapping between puffin files and keys.
     file_mapping: FileMapping,
+
+    _phantom: std::marker::PhantomData<H>,
 }
 
-impl BoundedStager {
+impl<H: 'static> BoundedStager<H> {
     pub async fn new(
         base_dir: PathBuf,
         capacity: u64,
@@ -107,9 +109,7 @@ impl BoundedStager {
                     notifier.on_recycle_insert(v.size());
                 }
                 async move {
-                    file_mapping
-                        .remove(v.puffin_file_name(), v.blob_key())
-                        .await;
+                    file_mapping.remove(v.handle(), v.blob_key()).await;
                     recycle_bin.insert(k.as_str().to_string(), v).await;
                 }
                 .boxed()
@@ -130,6 +130,7 @@ impl BoundedStager {
             recycle_bin,
             notifier,
             file_mapping,
+            _phantom: std::marker::PhantomData,
         };
 
         stager.recover().await?;
@@ -139,17 +140,19 @@ impl BoundedStager {
 }
 
 #[async_trait]
-impl Stager for BoundedStager {
+impl<H: ToString + Clone + Send + Sync> Stager for BoundedStager<H> {
     type Blob = Arc<FsBlobGuard>;
     type Dir = Arc<FsDirGuard>;
+    type FileHandle = H;
 
     async fn get_blob<'a>(
         &self,
-        puffin_file_name: &str,
+        handle: &Self::FileHandle,
         key: &str,
         init_fn: Box<dyn InitBlobFn + Send + Sync + 'a>,
     ) -> Result<Self::Blob> {
-        let cache_key = Self::encode_cache_key(puffin_file_name, key);
+        let handle_str = handle.to_string();
+        let cache_key = Self::encode_cache_key(&handle_str, key);
 
         let mut miss = false;
         let v = self
@@ -174,9 +177,9 @@ impl Stager for BoundedStager {
                     notifier.on_cache_insert(size);
                     notifier.on_load_blob(timer.elapsed());
                 }
-                self.file_mapping.insert(puffin_file_name, key).await;
+                self.file_mapping.insert(&handle_str, key).await;
                 let guard = Arc::new(FsBlobGuard {
-                    puffin_file_name: puffin_file_name.to_string(),
+                    handle: handle_str.to_string(),
                     blob_key: key.to_string(),
                     path,
                     delete_queue: self.delete_queue.clone(),
@@ -202,11 +205,13 @@ impl Stager for BoundedStager {
 
     async fn get_dir<'a>(
         &self,
-        puffin_file_name: &str,
+        handle: &Self::FileHandle,
         key: &str,
         init_fn: Box<dyn InitDirFn + Send + Sync + 'a>,
     ) -> Result<Self::Dir> {
-        let cache_key = Self::encode_cache_key(puffin_file_name, key);
+        let handle_str = handle.to_string();
+
+        let cache_key = Self::encode_cache_key(&handle_str, key);
 
         let mut miss = false;
         let v = self
@@ -231,9 +236,9 @@ impl Stager for BoundedStager {
                     notifier.on_cache_insert(size);
                     notifier.on_load_dir(timer.elapsed());
                 }
-                self.file_mapping.insert(puffin_file_name, key).await;
+                self.file_mapping.insert(&handle_str, key).await;
                 let guard = Arc::new(FsDirGuard {
-                    puffin_file_name: puffin_file_name.to_string(),
+                    handle: handle_str,
                     blob_key: key.to_string(),
                     path,
                     size,
@@ -259,12 +264,13 @@ impl Stager for BoundedStager {
 
     async fn put_dir(
         &self,
-        puffin_file_name: &str,
+        handle: &Self::FileHandle,
         key: &str,
         dir_path: PathBuf,
         size: u64,
     ) -> Result<()> {
-        let cache_key = Self::encode_cache_key(puffin_file_name, key);
+        let handle_str = handle.to_string();
+        let cache_key = Self::encode_cache_key(&handle_str, key);
 
         self.cache
             .try_get_with(cache_key.clone(), async move {
@@ -284,9 +290,9 @@ impl Stager for BoundedStager {
                 if let Some(notifier) = self.notifier.as_ref() {
                     notifier.on_cache_insert(size);
                 }
-                self.file_mapping.insert(puffin_file_name, key).await;
+                self.file_mapping.insert(&handle_str, key).await;
                 let guard = Arc::new(FsDirGuard {
-                    puffin_file_name: puffin_file_name.to_string(),
+                    handle: handle_str,
                     blob_key: key.to_string(),
                     path,
                     size,
@@ -307,17 +313,18 @@ impl Stager for BoundedStager {
         Ok(())
     }
 
-    async fn purge(&self, puffin_file_name: &str) -> Result<()> {
-        let keys = self.file_mapping.take_keys(puffin_file_name).await;
+    async fn purge(&self, handle: &Self::FileHandle) -> Result<()> {
+        let handle_str = handle.to_string();
+        let keys = self.file_mapping.take_keys(&handle_str).await;
         for key in keys {
-            let cache_key = Self::encode_cache_key(puffin_file_name, &key);
+            let cache_key = Self::encode_cache_key(&handle_str, &key);
             self.cache.invalidate(&cache_key).await;
         }
         Ok(())
     }
 }
 
-impl BoundedStager {
+impl<H> BoundedStager<H> {
     fn encode_cache_key(puffin_file_name: &str, key: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(puffin_file_name);
@@ -412,7 +419,7 @@ impl BoundedStager {
                         delete_queue: self.delete_queue.clone(),
 
                         // placeholder
-                        puffin_file_name: String::new(),
+                        handle: String::new(),
                         blob_key: String::new(),
                     }));
                     // A duplicate dir will be moved to the delete queue.
@@ -425,7 +432,7 @@ impl BoundedStager {
                         delete_queue: self.delete_queue.clone(),
 
                         // placeholder
-                        puffin_file_name: String::new(),
+                        handle: String::new(),
                         blob_key: String::new(),
                     }));
                     // A duplicate file will be moved to the delete queue.
@@ -525,7 +532,7 @@ impl BoundedStager {
     }
 }
 
-impl Drop for BoundedStager {
+impl<H> Drop for BoundedStager<H> {
     fn drop(&mut self) {
         let _ = self.delete_queue.try_send(DeleteTask::Terminate);
     }
@@ -549,10 +556,10 @@ impl CacheValue {
         self.size().try_into().unwrap_or(u32::MAX)
     }
 
-    fn puffin_file_name(&self) -> &str {
+    fn handle(&self) -> &str {
         match self {
-            CacheValue::File(guard) => &guard.puffin_file_name,
-            CacheValue::Dir(guard) => &guard.puffin_file_name,
+            CacheValue::File(guard) => &guard.handle,
+            CacheValue::Dir(guard) => &guard.handle,
         }
     }
 
@@ -574,7 +581,7 @@ enum DeleteTask {
 /// automatically deleting the file on drop.
 #[derive(Debug)]
 pub struct FsBlobGuard {
-    puffin_file_name: String,
+    handle: String,
     blob_key: String,
     path: PathBuf,
     size: u64,
@@ -608,7 +615,7 @@ impl Drop for FsBlobGuard {
 /// automatically deleting the directory on drop.
 #[derive(Debug)]
 pub struct FsDirGuard {
-    puffin_file_name: String,
+    handle: String,
     blob_key: String,
     path: PathBuf,
     size: u64,
@@ -659,7 +666,7 @@ impl DirWriterProvider for MokaDirWriterProvider {
 }
 
 #[cfg(test)]
-impl BoundedStager {
+impl<H> BoundedStager<H> {
     pub async fn must_get_file(&self, puffin_file_name: &str, key: &str) -> fs::File {
         let cache_key = Self::encode_cache_key(puffin_file_name, key);
         let value = self.cache.get(&cache_key).await.unwrap();
@@ -854,11 +861,11 @@ mod tests {
         .await
         .unwrap();
 
-        let puffin_file_name = "test_get_blob";
+        let puffin_file_name = "test_get_blob".to_string();
         let key = "key";
         let reader = stager
             .get_blob(
-                puffin_file_name,
+                &puffin_file_name,
                 key,
                 Box::new(|mut writer| {
                     Box::pin(async move {
@@ -877,7 +884,7 @@ mod tests {
         let buf = reader.read(0..m.content_length).await.unwrap();
         assert_eq!(&*buf, b"hello world");
 
-        let mut file = stager.must_get_file(puffin_file_name, key).await;
+        let mut file = stager.must_get_file(&puffin_file_name, key).await;
         let mut buf = Vec::new();
         file.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, b"hello world");
@@ -918,11 +925,11 @@ mod tests {
             ("subdir/subsubdir/file_e", "¡Hola mundo!".as_bytes()),
         ];
 
-        let puffin_file_name = "test_get_dir";
+        let puffin_file_name = "test_get_dir".to_string();
         let key = "key";
         let dir_path = stager
             .get_dir(
-                puffin_file_name,
+                &puffin_file_name,
                 key,
                 Box::new(|writer_provider| {
                     Box::pin(async move {
@@ -947,7 +954,7 @@ mod tests {
             assert_eq!(buf, *content);
         }
 
-        let dir_path = stager.must_get_dir(puffin_file_name, key).await;
+        let dir_path = stager.must_get_dir(&puffin_file_name, key).await;
         for (rel_path, content) in &files_in_dir {
             let file_path = dir_path.join(rel_path);
             let mut file = tokio::fs::File::open(&file_path).await.unwrap();
@@ -985,11 +992,11 @@ mod tests {
         .unwrap();
 
         // initialize stager
-        let puffin_file_name = "test_recover";
+        let puffin_file_name = "test_recover".to_string();
         let blob_key = "blob_key";
         let guard = stager
             .get_blob(
-                puffin_file_name,
+                &puffin_file_name,
                 blob_key,
                 Box::new(|mut writer| {
                     Box::pin(async move {
@@ -1013,7 +1020,7 @@ mod tests {
         let dir_key = "dir_key";
         let guard = stager
             .get_dir(
-                puffin_file_name,
+                &puffin_file_name,
                 dir_key,
                 Box::new(|writer_provider| {
                     Box::pin(async move {
@@ -1039,7 +1046,7 @@ mod tests {
 
         let reader = stager
             .get_blob(
-                puffin_file_name,
+                &puffin_file_name,
                 blob_key,
                 Box::new(|_| Box::pin(async { Ok(0) })),
             )
@@ -1055,7 +1062,7 @@ mod tests {
 
         let dir_path = stager
             .get_dir(
-                puffin_file_name,
+                &puffin_file_name,
                 dir_key,
                 Box::new(|_| Box::pin(async { Ok(0) })),
             )
@@ -1097,13 +1104,13 @@ mod tests {
         .await
         .unwrap();
 
-        let puffin_file_name = "test_eviction";
+        let puffin_file_name = "test_eviction".to_string();
         let blob_key = "blob_key";
 
         // First time to get the blob
         let reader = stager
             .get_blob(
-                puffin_file_name,
+                &puffin_file_name,
                 blob_key,
                 Box::new(|mut writer| {
                     Box::pin(async move {
@@ -1120,7 +1127,7 @@ mod tests {
 
         // The blob should be evicted
         stager.cache.run_pending_tasks().await;
-        assert!(!stager.in_cache(puffin_file_name, blob_key));
+        assert!(!stager.in_cache(&puffin_file_name, blob_key));
 
         let stats = notifier.stats();
         assert_eq!(
@@ -1144,7 +1151,7 @@ mod tests {
         // Second time to get the blob, get from recycle bin
         let reader = stager
             .get_blob(
-                puffin_file_name,
+                &puffin_file_name,
                 blob_key,
                 Box::new(|_| async { Ok(0) }.boxed()),
             )
@@ -1156,7 +1163,7 @@ mod tests {
 
         // The blob should be evicted
         stager.cache.run_pending_tasks().await;
-        assert!(!stager.in_cache(puffin_file_name, blob_key));
+        assert!(!stager.in_cache(&puffin_file_name, blob_key));
 
         let stats = notifier.stats();
         assert_eq!(
@@ -1189,7 +1196,7 @@ mod tests {
         // First time to get the directory
         let guard_0 = stager
             .get_dir(
-                puffin_file_name,
+                &puffin_file_name,
                 dir_key,
                 Box::new(|writer_provider| {
                     Box::pin(async move {
@@ -1216,7 +1223,7 @@ mod tests {
 
         // The directory should be evicted
         stager.cache.run_pending_tasks().await;
-        assert!(!stager.in_cache(puffin_file_name, dir_key));
+        assert!(!stager.in_cache(&puffin_file_name, dir_key));
 
         let stats = notifier.stats();
         assert_eq!(
@@ -1236,7 +1243,7 @@ mod tests {
         // Second time to get the directory
         let guard_1 = stager
             .get_dir(
-                puffin_file_name,
+                &puffin_file_name,
                 dir_key,
                 Box::new(|_| async { Ok(0) }.boxed()),
             )
@@ -1253,7 +1260,7 @@ mod tests {
 
         // Still hold the guard
         stager.cache.run_pending_tasks().await;
-        assert!(!stager.in_cache(puffin_file_name, dir_key));
+        assert!(!stager.in_cache(&puffin_file_name, dir_key));
 
         let stats = notifier.stats();
         assert_eq!(
@@ -1275,7 +1282,7 @@ mod tests {
         drop(guard_1);
         let guard_2 = stager
             .get_dir(
-                puffin_file_name,
+                &puffin_file_name,
                 dir_key,
                 Box::new(|_| Box::pin(async move { Ok(0) })),
             )
@@ -1284,7 +1291,7 @@ mod tests {
 
         // Still hold the guard, so the directory should not be removed even if it's evicted
         stager.cache.run_pending_tasks().await;
-        assert!(!stager.in_cache(puffin_file_name, blob_key));
+        assert!(!stager.in_cache(&puffin_file_name, blob_key));
 
         for (rel_path, content) in &files_in_dir {
             let file_path = guard_2.path().join(rel_path);
@@ -1317,13 +1324,14 @@ mod tests {
             .await
             .unwrap();
 
-        let puffin_file_name = "test_get_blob_concurrency_on_fail";
+        let puffin_file_name = "test_get_blob_concurrency_on_fail".to_string();
         let key = "key";
 
         let stager = Arc::new(stager);
         let handles = (0..10)
             .map(|_| {
                 let stager = stager.clone();
+                let puffin_file_name = puffin_file_name.clone();
                 let task = async move {
                     let failed_init = Box::new(|_| {
                         async {
@@ -1332,7 +1340,7 @@ mod tests {
                         }
                         .boxed()
                     });
-                    stager.get_blob(puffin_file_name, key, failed_init).await
+                    stager.get_blob(&puffin_file_name, key, failed_init).await
                 };
 
                 tokio::spawn(task)
@@ -1344,7 +1352,7 @@ mod tests {
             assert!(r.is_err());
         }
 
-        assert!(!stager.in_cache(puffin_file_name, key));
+        assert!(!stager.in_cache(&puffin_file_name, key));
     }
 
     #[tokio::test]
@@ -1354,13 +1362,14 @@ mod tests {
             .await
             .unwrap();
 
-        let puffin_file_name = "test_get_dir_concurrency_on_fail";
+        let puffin_file_name = "test_get_dir_concurrency_on_fail".to_string();
         let key = "key";
 
         let stager = Arc::new(stager);
         let handles = (0..10)
             .map(|_| {
                 let stager = stager.clone();
+                let puffin_file_name = puffin_file_name.clone();
                 let task = async move {
                     let failed_init = Box::new(|_| {
                         async {
@@ -1369,7 +1378,7 @@ mod tests {
                         }
                         .boxed()
                     });
-                    stager.get_dir(puffin_file_name, key, failed_init).await
+                    stager.get_dir(&puffin_file_name, key, failed_init).await
                 };
 
                 tokio::spawn(task)
@@ -1381,7 +1390,7 @@ mod tests {
             assert!(r.is_err());
         }
 
-        assert!(!stager.in_cache(puffin_file_name, key));
+        assert!(!stager.in_cache(&puffin_file_name, key));
     }
 
     #[tokio::test]
@@ -1397,11 +1406,11 @@ mod tests {
         .unwrap();
 
         // initialize stager
-        let puffin_file_name = "test_purge";
+        let puffin_file_name = "test_purge".to_string();
         let blob_key = "blob_key";
         let guard = stager
             .get_blob(
-                puffin_file_name,
+                &puffin_file_name,
                 blob_key,
                 Box::new(|mut writer| {
                     Box::pin(async move {
@@ -1425,7 +1434,7 @@ mod tests {
         let dir_key = "dir_key";
         let guard = stager
             .get_dir(
-                puffin_file_name,
+                &puffin_file_name,
                 dir_key,
                 Box::new(|writer_provider| {
                     Box::pin(async move {
@@ -1444,7 +1453,7 @@ mod tests {
         drop(guard);
 
         // purge the stager
-        stager.purge(puffin_file_name).await.unwrap();
+        stager.purge(&puffin_file_name).await.unwrap();
 
         let stats = notifier.stats();
         assert_eq!(
