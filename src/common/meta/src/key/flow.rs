@@ -506,7 +506,6 @@ mod tests {
         let routes = flow_metadata_manager
             .flow_route_manager()
             .routes(flow_id)
-            .try_collect::<Vec<_>>()
             .await
             .unwrap();
         assert_eq!(
@@ -538,7 +537,6 @@ mod tests {
             let nodes = flow_metadata_manager
                 .table_flow_manager()
                 .flows(table_id)
-                .try_collect::<Vec<_>>()
                 .await
                 .unwrap();
             assert_eq!(
@@ -727,7 +725,6 @@ mod tests {
         let routes = flow_metadata_manager
             .flow_route_manager()
             .routes(flow_id)
-            .try_collect::<Vec<_>>()
             .await
             .unwrap();
         assert_eq!(
@@ -759,7 +756,6 @@ mod tests {
             let nodes = flow_metadata_manager
                 .table_flow_manager()
                 .flows(table_id)
-                .try_collect::<Vec<_>>()
                 .await
                 .unwrap();
             assert_eq!(

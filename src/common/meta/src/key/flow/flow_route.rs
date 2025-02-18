@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use futures::stream::BoxStream;
+use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -167,10 +167,7 @@ impl FlowRouteManager {
     }
 
     /// Retrieves all [FlowRouteValue]s of the specified `flow_id`.
-    pub fn routes(
-        &self,
-        flow_id: FlowId,
-    ) -> BoxStream<'static, Result<(FlowRouteKey, FlowRouteValue)>> {
+    pub async fn routes(&self, flow_id: FlowId) -> Result<Vec<(FlowRouteKey, FlowRouteValue)>> {
         let start_key = FlowRouteKey::range_start_key(flow_id);
         let req = RangeRequest::new().with_prefix(start_key);
         let stream = PaginationStream::new(
@@ -181,7 +178,9 @@ impl FlowRouteManager {
         )
         .into_stream();
 
-        Box::pin(stream)
+        let res = stream.try_collect::<Vec<_>>().await?;
+        // TODO: remap the addresses
+        Ok(res)
     }
 
     /// Builds a create flow routes transaction.
