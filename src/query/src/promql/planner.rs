@@ -2202,35 +2202,33 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu)?;
         }
 
+        ensure!(
+            left_context.field_columns.len() == 1,
+            MultiFieldsNotSupportedSnafu {
+                operator: "AND operator"
+            }
+        );
+        // Update the field column in context.
+        // The AND/UNLESS operator only keep the field column in left input.
+        let left_field_col = left_context.field_columns.first().unwrap();
+        self.ctx.field_columns = vec![left_field_col.clone()];
+
         // Generate join plan.
         // All set operations in PromQL are "distinct"
         match op.id() {
-            token::T_LAND => {
-                ensure!(
-                    left_context.field_columns.len() == 1,
-                    MultiFieldsNotSupportedSnafu {
-                        operator: "AND operator"
-                    }
-                );
-                // Update the field column in context.
-                // The AND operator only keep the field column in left input.
-                let left_field_col = left_context.field_columns.first().unwrap();
-                self.ctx.field_columns = vec![left_field_col.clone()];
-
-                LogicalPlanBuilder::from(left)
-                    .distinct()
-                    .context(DataFusionPlanningSnafu)?
-                    .join_detailed(
-                        right,
-                        JoinType::LeftSemi,
-                        (join_keys.clone(), join_keys),
-                        None,
-                        true,
-                    )
-                    .context(DataFusionPlanningSnafu)?
-                    .build()
-                    .context(DataFusionPlanningSnafu)
-            }
+            token::T_LAND => LogicalPlanBuilder::from(left)
+                .distinct()
+                .context(DataFusionPlanningSnafu)?
+                .join_detailed(
+                    right,
+                    JoinType::LeftSemi,
+                    (join_keys.clone(), join_keys),
+                    None,
+                    true,
+                )
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu),
             token::T_LUNLESS => LogicalPlanBuilder::from(left)
                 .distinct()
                 .context(DataFusionPlanningSnafu)?

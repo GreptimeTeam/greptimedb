@@ -246,6 +246,12 @@ tql eval (0, 2000, '400') max by (namespace) (stats_used_bytes{namespace=~".+"})
 -- SQLNESS SORT_RESULT 3 1
 tql eval (0, 2000, '400') count(max by (namespace) (stats_used_bytes{namespace=~".+"}) and (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100))) or vector(0);
 
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') count(max by (namespace) (stats_used_bytes{namespace=~".+"}) and (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100)));
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') count(max by (namespace) (stats_used_bytes{namespace=~".+"}) unless (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100)));
+
 drop table stats_used_bytes;
 
 drop table stats_capacity_bytes;
