@@ -28,6 +28,44 @@ use serde_json::Value;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
 
+/// QueryContextInterceptor can customize query context
+/// at given point.
+pub trait QueryContextInterceptor {
+    type Error: ErrorExt;
+
+    /// Called before a plan is executed.
+    fn pre_execute(
+        &self,
+        logical_plan: &LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> Result<(), Self::Error> {
+        let _ = (logical_plan, query_ctx);
+        Ok(())
+    }
+}
+
+pub type QueryContextInterceptorRef<E> =
+    Arc<dyn QueryContextInterceptor<Error = E> + Send + Sync + 'static>;
+
+impl<E> QueryContextInterceptor for Option<&QueryContextInterceptorRef<E>>
+where
+    E: ErrorExt,
+{
+    type Error = E;
+
+    fn pre_execute(
+        &self,
+        logical_plan: &LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> Result<(), Self::Error> {
+        if let Some(this) = self {
+            this.pre_execute(logical_plan, query_ctx)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// SqlQueryInterceptor can track life cycle of a sql query and customize or
 /// abort its execution at given point.
 pub trait SqlQueryInterceptor {
