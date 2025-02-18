@@ -299,6 +299,11 @@ pub struct IndexConfig {
 
     /// The max capacity of the staging directory.
     pub staging_size: ReadableSize,
+    /// The TTL of the staging directory.
+    /// Defaults to 7 days.
+    /// Setting it to "0s" to disable TTL.
+    #[serde(with = "humantime_serde")]
+    pub staging_ttl: Option<Duration>,
 
     /// Write buffer size for creating the index.
     pub write_buffer_size: ReadableSize,
@@ -316,6 +321,7 @@ impl Default for IndexConfig {
         Self {
             aux_path: String::new(),
             staging_size: ReadableSize::gb(2),
+            staging_ttl: Some(Duration::from_secs(7 * 24 * 60 * 60)),
             write_buffer_size: ReadableSize::mb(8),
             metadata_cache_size: ReadableSize::mb(64),
             content_cache_size: ReadableSize::mb(128),
@@ -350,6 +356,10 @@ impl IndexConfig {
                 "Sanitize index write buffer size to {}",
                 self.write_buffer_size
             );
+        }
+
+        if self.staging_ttl.map(|ttl| ttl.is_zero()).unwrap_or(false) {
+            self.staging_ttl = None;
         }
 
         Ok(())
