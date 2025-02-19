@@ -32,7 +32,6 @@ use snafu::ResultExt;
 use tokio::fs;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::Mutex;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
 use super::StagerNotifier;
@@ -73,9 +72,6 @@ pub struct BoundedStager<H> {
     /// Notifier for the stager.
     notifier: Option<Arc<dyn StagerNotifier>>,
 
-    /// The file mapping between puffin files and keys.
-    file_mapping: FileMapping,
-
     _phantom: std::marker::PhantomData<H>,
 }
 
@@ -93,22 +89,19 @@ impl<H: 'static> BoundedStager<H> {
         let recycle_bin = Cache::builder().time_to_idle(RECYCLE_BIN_TTL).build();
         let recycle_bin_cloned = recycle_bin.clone();
         let notifier_cloned = notifier.clone();
-        let file_mapping = FileMapping::new();
-        let file_mapping_cloned = file_mapping.clone();
 
         let mut cache_builder = Cache::builder()
             .max_capacity(capacity)
             .weigher(|_: &String, v: &CacheValue| v.weight())
             .eviction_policy(EvictionPolicy::lru())
+            .support_invalidation_closures()
             .async_eviction_listener(move |k, v, _| {
                 let recycle_bin = recycle_bin_cloned.clone();
-                let file_mapping = file_mapping_cloned.clone();
                 if let Some(notifier) = notifier_cloned.as_ref() {
                     notifier.on_cache_evict(v.size());
                     notifier.on_recycle_insert(v.size());
                 }
                 async move {
-                    file_mapping.remove(v.handle(), v.blob_key()).await;
                     recycle_bin.insert(k.as_str().to_string(), v).await;
                 }
                 .boxed()
@@ -133,7 +126,6 @@ impl<H: 'static> BoundedStager<H> {
             delete_queue,
             recycle_bin,
             notifier,
-            file_mapping,
             _phantom: std::marker::PhantomData,
         };
 
@@ -181,10 +173,8 @@ impl<H: ToString + Clone + Send + Sync> Stager for BoundedStager<H> {
                     notifier.on_cache_insert(size);
                     notifier.on_load_blob(timer.elapsed());
                 }
-                self.file_mapping.insert(&handle_str, key).await;
                 let guard = Arc::new(FsBlobGuard {
                     handle: handle_str.to_string(),
-                    blob_key: key.to_string(),
                     path,
                     delete_queue: self.delete_queue.clone(),
                     size,
@@ -240,10 +230,8 @@ impl<H: ToString + Clone + Send + Sync> Stager for BoundedStager<H> {
                     notifier.on_cache_insert(size);
                     notifier.on_load_dir(timer.elapsed());
                 }
-                self.file_mapping.insert(&handle_str, key).await;
                 let guard = Arc::new(FsDirGuard {
                     handle: handle_str,
-                    blob_key: key.to_string(),
                     path,
                     size,
                     delete_queue: self.delete_queue.clone(),
@@ -294,10 +282,8 @@ impl<H: ToString + Clone + Send + Sync> Stager for BoundedStager<H> {
                 if let Some(notifier) = self.notifier.as_ref() {
                     notifier.on_cache_insert(size);
                 }
-                self.file_mapping.insert(&handle_str, key).await;
                 let guard = Arc::new(FsDirGuard {
                     handle: handle_str,
-                    blob_key: key.to_string(),
                     path,
                     size,
                     delete_queue: self.delete_queue.clone(),
@@ -319,11 +305,10 @@ impl<H: ToString + Clone + Send + Sync> Stager for BoundedStager<H> {
 
     async fn purge(&self, handle: &Self::FileHandle) -> Result<()> {
         let handle_str = handle.to_string();
-        let keys = self.file_mapping.take_keys(&handle_str).await;
-        for key in keys {
-            let cache_key = Self::encode_cache_key(&handle_str, &key);
-            self.cache.invalidate(&cache_key).await;
-        }
+        self.cache
+            .invalidate_entries_if(move |_k, v| v.handle() == handle_str)
+            .unwrap(); // SAFETY: `support_invalidation_closures` is enabled
+        self.cache.run_pending_tasks().await;
         Ok(())
     }
 }
@@ -424,7 +409,6 @@ impl<H> BoundedStager<H> {
 
                         // placeholder
                         handle: String::new(),
-                        blob_key: String::new(),
                     }));
                     // A duplicate dir will be moved to the delete queue.
                     let _dup_dir = elems.insert(key, v);
@@ -437,7 +421,6 @@ impl<H> BoundedStager<H> {
 
                         // placeholder
                         handle: String::new(),
-                        blob_key: String::new(),
                     }));
                     // A duplicate file will be moved to the delete queue.
                     let _dup_file = elems.insert(key, v);
@@ -566,13 +549,6 @@ impl CacheValue {
             CacheValue::Dir(guard) => &guard.handle,
         }
     }
-
-    fn blob_key(&self) -> &str {
-        match self {
-            CacheValue::File(guard) => &guard.blob_key,
-            CacheValue::Dir(guard) => &guard.blob_key,
-        }
-    }
 }
 
 enum DeleteTask {
@@ -586,7 +562,6 @@ enum DeleteTask {
 #[derive(Debug)]
 pub struct FsBlobGuard {
     handle: String,
-    blob_key: String,
     path: PathBuf,
     size: u64,
     delete_queue: Sender<DeleteTask>,
@@ -620,7 +595,6 @@ impl Drop for FsBlobGuard {
 #[derive(Debug)]
 pub struct FsDirGuard {
     handle: String,
-    blob_key: String,
     path: PathBuf,
     size: u64,
     delete_queue: Sender<DeleteTask>,
@@ -694,42 +668,6 @@ impl<H> BoundedStager<H> {
     pub fn in_cache(&self, puffin_file_name: &str, key: &str) -> bool {
         let cache_key = Self::encode_cache_key(puffin_file_name, key);
         self.cache.contains_key(&cache_key)
-    }
-}
-
-#[derive(Clone)]
-/// `FileMapping` records the mapping between puffin files and keys.
-struct FileMapping {
-    /// puffin file -> keys
-    m: Arc<Mutex<HashMap<String, Vec<String>>>>,
-}
-
-impl FileMapping {
-    fn new() -> Self {
-        Self {
-            m: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    async fn insert(&self, puffin_file: &str, key: &str) {
-        let mut m = self.m.lock().await;
-        let keys = m.entry(puffin_file.to_string()).or_insert_with(Vec::new);
-        keys.push(key.to_string());
-    }
-
-    async fn remove(&self, puffin_file: &str, key: &str) {
-        let mut m = self.m.lock().await;
-        if let Some(keys) = m.get_mut(puffin_file) {
-            keys.retain(|k| k != key);
-            if keys.is_empty() {
-                m.remove(puffin_file);
-            }
-        }
-    }
-
-    async fn take_keys(&self, puffin_file: &str) -> Vec<String> {
-        let mut m = self.m.lock().await;
-        m.remove(puffin_file).unwrap_or_default()
     }
 }
 

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use api::v1::{RowInsertRequest, Rows};
 use pipeline::{
     DispatchedTo, GreptimePipelineParams, GreptimeTransformer, Pipeline, PipelineDefinition,
-    PipelineExecOutput, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
+    PipelineExecOutput, PipelineMap, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -52,7 +52,7 @@ pub(crate) async fn run_pipeline(
     state: &PipelineHandlerRef,
     pipeline_definition: PipelineDefinition,
     pipeline_parameters: &GreptimePipelineParams,
-    array: Vec<BTreeMap<String, pipeline::Value>>,
+    array: Vec<PipelineMap>,
     table_name: String,
     query_ctx: &QueryContextRef,
     is_top_level: bool,
@@ -81,8 +81,7 @@ pub(crate) async fn run_pipeline(
         let transform_timer = std::time::Instant::now();
 
         let mut transformed = Vec::with_capacity(array.len());
-        let mut dispatched: BTreeMap<DispatchedTo, Vec<BTreeMap<String, pipeline::Value>>> =
-            BTreeMap::new();
+        let mut dispatched: BTreeMap<DispatchedTo, Vec<PipelineMap>> = BTreeMap::new();
 
         for mut values in array {
             let r = pipeline

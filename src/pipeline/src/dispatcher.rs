@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
-
 use common_telemetry::debug;
 use snafu::OptionExt;
 use yaml_rust::Yaml;
@@ -22,7 +20,7 @@ use crate::etl::error::{
     Error, FieldRequiredForDispatcherSnafu, Result, TableSuffixRequiredForDispatcherRuleSnafu,
     ValueRequiredForDispatcherRuleSnafu,
 };
-use crate::Value;
+use crate::{PipelineMap, Value};
 
 const FIELD: &str = "field";
 const TABLE_SUFFIX: &str = "table_suffix";
@@ -111,7 +109,7 @@ impl TryFrom<&Yaml> for Dispatcher {
 
 impl Dispatcher {
     /// execute dispatcher and returns matched rule if any
-    pub(crate) fn exec(&self, data: &BTreeMap<String, Value>) -> Option<&Rule> {
+    pub(crate) fn exec(&self, data: &PipelineMap) -> Option<&Rule> {
         if let Some(value) = data.get(&self.field) {
             for rule in &self.rules {
                 if rule.value == *value {

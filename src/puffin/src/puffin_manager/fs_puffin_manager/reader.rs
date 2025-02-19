@@ -125,7 +125,7 @@ where
             })
         } else {
             // If the blob is compressed, we need to decompress it into staging space before reading.
-            let staged_blob: <S as Stager>::Blob = self
+            let staged_blob = self
                 .stager
                 .get_blob(
                     &self.handle,
