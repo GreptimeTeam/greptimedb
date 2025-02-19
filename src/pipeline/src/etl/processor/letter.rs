@@ -14,7 +14,6 @@
 
 use snafu::OptionExt;
 
-use super::IntermediateStatus;
 use crate::etl::error::{
     Error, KeyMustBeStringSnafu, LetterInvalidMethodSnafu, ProcessorExpectStringSnafu,
     ProcessorMissingFieldSnafu, Result,
@@ -25,6 +24,7 @@ use crate::etl::processor::{
     IGNORE_MISSING_NAME, METHOD_NAME,
 };
 use crate::etl::value::Value;
+use crate::etl::PipelineMap;
 
 pub(crate) const PROCESSOR_LETTER: &str = "letter";
 
@@ -126,7 +126,7 @@ impl Processor for LetterProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut IntermediateStatus) -> Result<()> {
+    fn exec_mut(&self, val: &mut PipelineMap) -> Result<()> {
         for field in self.fields.iter() {
             let index = field.input_field();
             match val.get(index) {

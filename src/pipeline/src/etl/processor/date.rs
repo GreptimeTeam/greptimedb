@@ -19,7 +19,6 @@ use chrono_tz::Tz;
 use lazy_static::lazy_static;
 use snafu::{OptionExt, ResultExt};
 
-use super::IntermediateStatus;
 use crate::etl::error::{
     DateFailedToGetLocalTimezoneSnafu, DateFailedToGetTimestampSnafu, DateParseSnafu,
     DateParseTimezoneSnafu, Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu,
@@ -31,6 +30,7 @@ use crate::etl::processor::{
     FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::{Timestamp, Value};
+use crate::etl::PipelineMap;
 
 pub(crate) const PROCESSOR_DATE: &str = "date";
 
@@ -194,7 +194,7 @@ impl Processor for DateProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut IntermediateStatus) -> Result<()> {
+    fn exec_mut(&self, val: &mut PipelineMap) -> Result<()> {
         for field in self.fields.iter() {
             let index = field.input_field();
             match val.get(index) {
