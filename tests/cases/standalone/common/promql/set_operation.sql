@@ -207,6 +207,56 @@ drop table t1;
 
 drop table t2;
 
+create table stats_used_bytes (
+    ts timestamp time index,
+    namespace string,
+    greptime_value double,
+    primary key (namespace)
+);
+
+create table stats_capacity_bytes (
+    ts timestamp time index,
+    namespace string,
+    greptime_value double,
+    primary key (namespace)
+);
+
+insert into stats_used_bytes values
+    (0, "namespace1", 1.0),
+    (0, "namespace2", 2.0),
+    (500000, "namespace1", 10.0),
+    (500000, "namespace2", 20.0),
+    (1000000, "namespace1", 25.0),
+    (1000000, "namespace2", 26.0);
+
+insert into stats_capacity_bytes values
+    (0, "namespace1", 30.0),
+    (0, "namespace2", 30.0),
+    (500000, "namespace1", 30.0),
+    (500000, "namespace2", 30.0),
+    (1000000, "namespace1", 30.0),
+    (1000000, "namespace2", 30.0);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') max by (namespace) (stats_used_bytes{namespace=~".+"}) / max by (namespace) (stats_capacity_bytes{namespace=~".+"}) >= (80 / 100);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') max by (namespace) (stats_used_bytes{namespace=~".+"}) and (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100));
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') count(max by (namespace) (stats_used_bytes{namespace=~".+"}) and (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100))) or vector(0);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') count(max by (namespace) (stats_used_bytes{namespace=~".+"}) and (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100)));
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') count(max by (namespace) (stats_used_bytes{namespace=~".+"}) unless (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100)));
+
+drop table stats_used_bytes;
+
+drop table stats_capacity_bytes;
+
+
 create table cache_hit (
     ts timestamp time index,
     job string,
