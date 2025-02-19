@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{etl::value::Value, PipelineMap};
+use crate::etl::value::Value;
+use crate::PipelineMap;
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Map {
