@@ -238,16 +238,15 @@ async fn handle_json_req(
                 line_index
             );
 
-            let structured_metadata = line
-                .get(2)
-                .and_then(|sdata| sdata.as_object().cloned())
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|(k, v)| {
-                    v.as_str()
-                        .map(|v| (k.clone(), Value::String(v.to_string().into())))
-                })
-                .collect::<BTreeMap<String, Value>>();
+            let structured_metadata = match line.get(2) {
+                Some(sdata) if sdata.is_object() => sdata
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), Value::String(s.into()))))
+                    .collect(),
+                _ => BTreeMap::new(),
+            };
             let structured_metadata = Value::Object(structured_metadata);
 
             let mut row = init_row(schemas.len(), ts, line_text, structured_metadata);
