@@ -28,6 +28,12 @@ lazy_static! {
         &["table_id"]
     )
     .unwrap();
+    pub static ref METRIC_FLOW_RULE_ENGINE_QUERY_TIME: HistogramVec = register_histogram_vec!(
+        "greptime_flow_rule_engine_query_time",
+        "flow rule engine query time",
+        &["flow_id"]
+    )
+    .unwrap();
     pub static ref METRIC_FLOW_RUN_INTERVAL_MS: IntGauge =
         register_int_gauge!("greptime_flow_run_interval_ms", "flow run interval in ms").unwrap();
     pub static ref METRIC_FLOW_ROWS: IntCounterVec = register_int_counter_vec!(
