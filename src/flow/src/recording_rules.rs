@@ -43,6 +43,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use crate::error::{ArrowSnafu, DatafusionSnafu, DatatypesSnafu, ExternalSnafu, UnexpectedSnafu};
 use crate::Error;
 
+/// Convert sql to datafusion logical plan
 pub async fn sql_to_df_plan(
     query_ctx: QueryContextRef,
     engine: QueryEngineRef,
@@ -60,6 +61,25 @@ pub async fn sql_to_df_plan(
     Ok(plan)
 }
 
+/// Find nearest lower bound for time `current` in given `plan` for the time window expr.
+/// i.e. for time window expr being `date_bin(INTERVAL '5 minutes', ts) as time_window` and `current="2021-07-01 00:01:01.000"`,
+/// return `Some("2021-07-01 00:00:00.000")`
+/// if `plan` doesn't contain a `TIME INDEX` column, return `None`
+///
+/// Time window expr is a expr that:
+/// 1. ref only to a time index column
+/// 2. is monotonic increasing
+/// 3. also show up in GROUP BY clause
+fn find_plan_time_window_lower_bound(
+    plan: &LogicalPlan,
+    current: Timestamp,
+    query_ctx: QueryContextRef,
+    engine: QueryEngineRef,
+) -> Result<Option<Timestamp>, Error> {
+    // TODO(discord9): find the expr that do time window
+    todo!()
+}
+
 /// Find the lower bound of time window in given `expr` and `current` timestamp.
 ///
 /// i.e. for `current="2021-07-01 00:01:01.000"` and `expr=date_bin(INTERVAL '5 minutes', ts) as time_window` and `ts_col=ts`,
@@ -67,7 +87,7 @@ pub async fn sql_to_df_plan(
 /// of current time window given the current timestamp
 ///
 /// if return None, meaning this time window have no lower bound
-fn find_time_window_lower_bound(
+fn find_expr_time_window_lower_bound(
     expr: &Expr,
     time_index_col: &str,
     current: Timestamp,
