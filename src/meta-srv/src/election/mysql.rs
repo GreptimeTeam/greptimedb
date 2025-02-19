@@ -29,6 +29,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::election::{
     listen_leader_change, Election, LeaderChangeMessage, LeaderKey, CANDIDATES_ROOT, ELECTION_KEY,
+    IDLE_SESSION_TIMEOUT,
 };
 use crate::error::{
     DeserializeFromJsonSnafu, MySqlExecutionSnafu, NoLeaderSnafu, Result, SerializeToJsonSnafu,
@@ -113,8 +114,8 @@ impl<'a> ElectionSqlFactory<'a> {
 
     // Currently the session timeout is longer than the leader lease time, so the leader lease may expire while the session is still alive.
     // Either the leader reconnects and step down or the session expires and the lock is released.
-    fn set_idle_session_timeout_sql(&self) -> &str {
-        "SET SESSION wait_timeout = 10;"
+    fn set_idle_session_timeout_sql(&self) -> String {
+        format!("SET SESSION wait_timeout = {};", IDLE_SESSION_TIMEOUT,)
     }
 
     fn campaign_sql(&self) -> String {
@@ -242,7 +243,7 @@ impl MySqlElection {
     ) -> Result<ElectionRef> {
         let sql_factory = ElectionSqlFactory::new(table_name, election_sql, step_down_sql);
         // Set idle session timeout to IDLE_SESSION_TIMEOUT to avoid dead advisory lock.
-        sqlx::query(sql_factory.set_idle_session_timeout_sql())
+        sqlx::query(&sql_factory.set_idle_session_timeout_sql())
             .execute(&mut client)
             .await
             .context(MySqlExecutionSnafu)?;
@@ -319,7 +320,9 @@ impl Election for MySqlElection {
                 prev_expire_time > current_time,
                 UnexpectedSnafu {
                     violated: format!(
-                        "Candidate lease expired, key: {:?}",
+                        "Candidate lease expired at {:?} (current time {:?}), key: {:?}",
+                        prev_expire_time,
+                        current_time,
                         String::from_utf8_lossy(&key.into_bytes())
                     ),
                 }
@@ -368,22 +371,25 @@ impl Election for MySqlElection {
         loop {
             let query = sqlx::query(&self.sql_set.campaign);
             let res = self.query(query).await?;
-            if let Some(row) = res.first() {
-                match row.try_get_unchecked(0) {
-                    Ok(true) => self.leader_action().await?,
-                    Ok(false) => self.follower_action().await?,
-                    Err(_) => {
-                        return UnexpectedSnafu {
-                            violated: "Failed to get the result of get lock".to_string(),
-                        }
-                        .fail();
+            let row = match res.first() {
+                Some(row) => row,
+                None => {
+                    return UnexpectedSnafu {
+                        violated: "Failed to get the result of acquiring advisory lock",
                     }
+                    .fail()
                 }
+            };
+            let is_leader = row.try_get(0).map_err(|_| {
+                UnexpectedSnafu {
+                    violated: "Failed to get the result of get lock",
+                }
+                .build()
+            })?;
+            if is_leader {
+                self.leader_action().await?;
             } else {
-                return UnexpectedSnafu {
-                    violated: "Failed to get the result of acquiring advisory lock".to_string(),
-                }
-                .fail();
+                self.follower_action().await?;
             }
             let _ = keep_alive_interval.tick().await;
         }
@@ -444,33 +450,27 @@ impl MySqlElection {
         let res = self.query(query).await?;
 
         if res.is_empty() {
-            Ok(None)
-        } else {
-            // Safety: Checked if res is empty above.
-            let current_time_str = String::from_utf8_lossy(res[0].try_get(1).unwrap());
-            let current_time = match Timestamp::from_str(&current_time_str, None) {
-                Ok(ts) => ts,
-                Err(_) => UnexpectedSnafu {
-                    violated: format!("Invalid timestamp: {}", current_time_str),
-                }
-                .fail()?,
-            };
-            // Safety: Checked if res is empty above.
-            let value_and_expire_time =
-                String::from_utf8_lossy(res[0].try_get(0).unwrap_or_default());
-            let (value, expire_time) = parse_value_and_expire_time(&value_and_expire_time)?;
-
-            if with_origin {
-                Ok(Some((
-                    value,
-                    expire_time,
-                    current_time,
-                    Some(value_and_expire_time.to_string()),
-                )))
-            } else {
-                Ok(Some((value, expire_time, current_time, None)))
-            }
+            return Ok(None);
         }
+        // Safety: Checked if res is empty above.
+        let current_time_str = String::from_utf8_lossy(res[0].try_get(1).unwrap());
+        let current_time = match Timestamp::from_str(&current_time_str, None) {
+            Ok(ts) => ts,
+            Err(_) => UnexpectedSnafu {
+                violated: format!("Invalid timestamp: {}", current_time_str),
+            }
+            .fail()?,
+        };
+        // Safety: Checked if res is empty above.
+        let value_and_expire_time = String::from_utf8_lossy(res[0].try_get(0).unwrap_or_default());
+        let (value, expire_time) = parse_value_and_expire_time(&value_and_expire_time)?;
+
+        let origin = if with_origin {
+            Some(value_and_expire_time.to_string())
+        } else {
+            None
+        };
+        Ok(Some((value, expire_time, current_time, origin)))
     }
 
     /// Returns all values and expire time with the given key prefix. Also returns the current time.
