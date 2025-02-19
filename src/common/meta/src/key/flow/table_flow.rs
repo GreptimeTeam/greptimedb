@@ -252,7 +252,7 @@ impl TableFlowManager {
         for (_, table_flow_value) in table_flows.iter_mut() {
             let flownode_id = table_flow_value.peer.id;
             // If an id lacks a corresponding address in the `flow_node_addrs`,
-            // it means the old address in `table_flow_value`` is still valid,
+            // it means the old address in `table_flow_value` is still valid,
             // which is expected.
             if let Some(flownode_addr) = flownode_addrs.get(&flownode_id) {
                 table_flow_value.peer.addr = flownode_addr.peer.addr.clone();
