@@ -856,7 +856,7 @@ mod tests {
             .unwrap();
 
         let handlers = group.handlers;
-        assert_eq!(12, handlers.len());
+        assert_eq!(13, handlers.len());
 
         let names = [
             "ResponseHeaderHandler",
@@ -871,6 +871,7 @@ mod tests {
             "MailboxHandler",
             "FilterInactiveRegionStatsHandler",
             "CollectStatsHandler",
+            "RemapFlowPeerHandler",
         ];
 
         for (handler, name) in handlers.iter().zip(names.into_iter()) {
@@ -891,7 +892,7 @@ mod tests {
 
         let group = builder.build().unwrap();
         let handlers = group.handlers;
-        assert_eq!(13, handlers.len());
+        assert_eq!(14, handlers.len());
 
         let names = [
             "ResponseHeaderHandler",
@@ -907,6 +908,7 @@ mod tests {
             "CollectStatsHandler",
             "FilterInactiveRegionStatsHandler",
             "CollectStatsHandler",
+            "RemapFlowPeerHandler",
         ];
 
         for (handler, name) in handlers.iter().zip(names.into_iter()) {
@@ -924,7 +926,7 @@ mod tests {
 
         let group = builder.build().unwrap();
         let handlers = group.handlers;
-        assert_eq!(13, handlers.len());
+        assert_eq!(14, handlers.len());
 
         let names = [
             "CollectStatsHandler",
@@ -940,6 +942,7 @@ mod tests {
             "MailboxHandler",
             "FilterInactiveRegionStatsHandler",
             "CollectStatsHandler",
+            "RemapFlowPeerHandler",
         ];
 
         for (handler, name) in handlers.iter().zip(names.into_iter()) {
@@ -957,7 +960,7 @@ mod tests {
 
         let group = builder.build().unwrap();
         let handlers = group.handlers;
-        assert_eq!(13, handlers.len());
+        assert_eq!(14, handlers.len());
 
         let names = [
             "ResponseHeaderHandler",
@@ -973,6 +976,7 @@ mod tests {
             "CollectStatsHandler",
             "FilterInactiveRegionStatsHandler",
             "CollectStatsHandler",
+            "RemapFlowPeerHandler",
         ];
 
         for (handler, name) in handlers.iter().zip(names.into_iter()) {
@@ -990,7 +994,7 @@ mod tests {
 
         let group = builder.build().unwrap();
         let handlers = group.handlers;
-        assert_eq!(13, handlers.len());
+        assert_eq!(14, handlers.len());
 
         let names = [
             "ResponseHeaderHandler",
@@ -1006,6 +1010,7 @@ mod tests {
             "FilterInactiveRegionStatsHandler",
             "CollectStatsHandler",
             "ResponseHeaderHandler",
+            "RemapFlowPeerHandler",
         ];
 
         for (handler, name) in handlers.iter().zip(names.into_iter()) {
@@ -1023,7 +1028,7 @@ mod tests {
 
         let group = builder.build().unwrap();
         let handlers = group.handlers;
-        assert_eq!(12, handlers.len());
+        assert_eq!(13, handlers.len());
 
         let names = [
             "ResponseHeaderHandler",
@@ -1038,6 +1043,7 @@ mod tests {
             "CollectStatsHandler",
             "FilterInactiveRegionStatsHandler",
             "CollectStatsHandler",
+            "RemapFlowPeerHandler",
         ];
 
         for (handler, name) in handlers.iter().zip(names.into_iter()) {
@@ -1055,7 +1061,7 @@ mod tests {
 
         let group = builder.build().unwrap();
         let handlers = group.handlers;
-        assert_eq!(12, handlers.len());
+        assert_eq!(13, handlers.len());
 
         let names = [
             "ResponseHeaderHandler",
@@ -1070,6 +1076,7 @@ mod tests {
             "MailboxHandler",
             "FilterInactiveRegionStatsHandler",
             "ResponseHeaderHandler",
+            "RemapFlowPeerHandler",
         ];
 
         for (handler, name) in handlers.iter().zip(names.into_iter()) {
@@ -1087,7 +1094,7 @@ mod tests {
 
         let group = builder.build().unwrap();
         let handlers = group.handlers;
-        assert_eq!(12, handlers.len());
+        assert_eq!(13, handlers.len());
 
         let names = [
             "CollectStatsHandler",
@@ -1102,6 +1109,7 @@ mod tests {
             "MailboxHandler",
             "FilterInactiveRegionStatsHandler",
             "CollectStatsHandler",
+            "RemapFlowPeerHandler",
         ];
 
         for (handler, name) in handlers.iter().zip(names.into_iter()) {
