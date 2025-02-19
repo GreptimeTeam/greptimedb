@@ -111,6 +111,7 @@ impl MetaClientBuilder {
             .enable_store()
             .enable_heartbeat()
             .enable_procedure()
+            .enable_access_cluster_info()
     }
 
     pub fn enable_heartbeat(self) -> Self {
