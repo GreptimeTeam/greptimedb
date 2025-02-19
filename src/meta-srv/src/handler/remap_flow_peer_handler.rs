@@ -25,7 +25,7 @@ use crate::Result;
 
 #[derive(Debug, Default)]
 pub struct RemapFlowPeerHandler {
-    // flow_node_id -> epoch
+    /// flow_node_id -> epoch
     epoch_cache: DashMap<u64, u64>,
 }
 
