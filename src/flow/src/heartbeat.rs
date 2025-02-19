@@ -130,13 +130,6 @@ impl HeartbeatTask {
 
     pub fn shutdown(&self) {
         info!("Close heartbeat task for flownode");
-        if self
-            .running
-            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            warn!("Call close heartbeat task multiple times");
-        }
     }
 
     fn new_heartbeat_request(
