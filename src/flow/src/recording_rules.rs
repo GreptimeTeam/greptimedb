@@ -14,6 +14,7 @@
 
 //! Run flow as recording rule which is time-window-aware normal query triggered every tick set by user
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use common_error::ext::BoxedError;
@@ -25,11 +26,11 @@ use datafusion::logical_expr::Expr;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 use datafusion::prelude::SessionContext;
 use datafusion::sql::unparser::Unparser;
-use datafusion_common::tree_node::{Transformed, TreeNodeRewriter};
-use datafusion_common::{Column, DFSchema};
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
+use datafusion_common::{Column, DFSchema, TableReference};
 use datafusion_expr::LogicalPlan;
 use datafusion_physical_expr::PhysicalExprRef;
-use datatypes::prelude::DataType;
+use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::value::Value;
 use datatypes::vectors::{
     TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
@@ -40,6 +41,7 @@ use query::QueryEngineRef;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 
+use crate::df_optimizer::apply_df_optimizer;
 use crate::error::{ArrowSnafu, DatafusionSnafu, DatatypesSnafu, ExternalSnafu, UnexpectedSnafu};
 use crate::Error;
 
@@ -48,6 +50,7 @@ pub async fn sql_to_df_plan(
     query_ctx: QueryContextRef,
     engine: QueryEngineRef,
     sql: &str,
+    optimize: bool,
 ) -> Result<LogicalPlan, Error> {
     let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx)
         .map_err(BoxedError::new)
@@ -58,6 +61,11 @@ pub async fn sql_to_df_plan(
         .await
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
+    let plan = if optimize {
+        apply_df_optimizer(plan).await?
+    } else {
+        plan
+    };
     Ok(plan)
 }
 
@@ -69,15 +77,124 @@ pub async fn sql_to_df_plan(
 /// Time window expr is a expr that:
 /// 1. ref only to a time index column
 /// 2. is monotonic increasing
-/// 3. also show up in GROUP BY clause
-fn find_plan_time_window_lower_bound(
+/// 3. show up in GROUP BY clause
+///
+/// note this plan should only contain one TableScan
+async fn find_plan_time_window_lower_bound(
     plan: &LogicalPlan,
     current: Timestamp,
     query_ctx: QueryContextRef,
     engine: QueryEngineRef,
 ) -> Result<Option<Timestamp>, Error> {
     // TODO(discord9): find the expr that do time window
-    todo!()
+    let catalog_man = engine.engine_state().catalog_manager();
+
+    let mut table_name = None;
+    // first find the table source in the logical plan
+    plan.apply(|plan| {
+        let LogicalPlan::TableScan(table_scan) = plan else {
+            return Ok(TreeNodeRecursion::Continue);
+        };
+        table_name = Some(table_scan.table_name.clone());
+        Ok(TreeNodeRecursion::Stop)
+    })
+    .with_context(|_| DatafusionSnafu {
+        context: format!("Can't find table source in plan {plan:?}"),
+    })?;
+    let Some(table_name) = table_name else {
+        UnexpectedSnafu {
+            reason: format!("Can't find table source in plan {plan:?}"),
+        }
+        .fail()?
+    };
+
+    let current_schema = query_ctx.current_schema();
+
+    let catalog_name = table_name.catalog().unwrap_or(query_ctx.current_catalog());
+    let schema_name = table_name.schema().unwrap_or(&current_schema);
+    let table_name = table_name.table();
+
+    let Some(table_ref) = catalog_man
+        .table(catalog_name, schema_name, table_name, Some(&query_ctx))
+        .await
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?
+    else {
+        UnexpectedSnafu {
+            reason: format!(
+                "Can't find table {table_name:?} in catalog {catalog_name:?}/{schema_name:?}"
+            ),
+        }
+        .fail()?
+    };
+
+    let schema = &table_ref.table_info().meta.schema;
+
+    let ts_index = schema.timestamp_column().context(UnexpectedSnafu {
+        reason: format!("Can't find timestamp column in table {table_name:?}"),
+    })?;
+
+    let ts_col_name = ts_index.name.clone();
+
+    let ts_columns: HashSet<_> = HashSet::from_iter(vec![
+        format!("{catalog_name}.{schema_name}.{table_name}.{ts_col_name}"),
+        format!("{schema_name}.{table_name}.{ts_col_name}"),
+        format!("{table_name}.{ts_col_name}"),
+        format!("{ts_col_name}"),
+    ]);
+    let ts_columns: HashSet<_> = ts_columns
+        .into_iter()
+        .map(Column::from_qualified_name)
+        .collect();
+
+    let ts_columns_ref: HashSet<&Column> = ts_columns.iter().collect();
+
+    // find the time window expr which refers to the time index column
+    let mut time_window_expr: Option<Expr> = None;
+    let find_time_window_expr = |plan: &LogicalPlan| {
+        let LogicalPlan::Aggregate(aggregate) = plan else {
+            return Ok(TreeNodeRecursion::Continue);
+        };
+
+        for group_expr in &aggregate.group_expr {
+            let refs = group_expr.column_refs();
+            if refs.len() != 1 {
+                continue;
+            }
+            let ref_col = refs.iter().next().unwrap();
+            if ts_columns_ref.contains(ref_col) {
+                time_window_expr = Some(group_expr.clone());
+                break;
+            }
+        }
+
+        Ok(TreeNodeRecursion::Stop)
+    };
+    plan.apply(find_time_window_expr)
+        .with_context(|_| DatafusionSnafu {
+            context: format!("Can't find time window expr in plan {plan:?}"),
+        })?;
+
+    let arrow_schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+        ts_col_name,
+        ts_index.data_type.as_arrow_type(),
+        false,
+    )]));
+
+    let df_schema = DFSchema::from_field_specific_qualified_schema(
+        vec![Some(TableReference::bare(table_name))],
+        &arrow_schema,
+    )
+    .with_context(|_e| DatafusionSnafu {
+        context: format!("Failed to create DFSchema from arrow schema {arrow_schema:?}"),
+    })?;
+
+    // if no time_window_expr is found, return None
+    if let Some(time_window_expr) = time_window_expr {
+        find_expr_time_window_lower_bound(&time_window_expr, &df_schema, current)
+    } else {
+        Ok(None)
+    }
 }
 
 /// Find the lower bound of time window in given `expr` and `current` timestamp.
@@ -89,54 +206,22 @@ fn find_plan_time_window_lower_bound(
 /// if return None, meaning this time window have no lower bound
 fn find_expr_time_window_lower_bound(
     expr: &Expr,
-    time_index_col: &str,
+    df_schema: &DFSchema,
     current: Timestamp,
 ) -> Result<Option<Timestamp>, Error> {
     use std::cmp::Ordering;
-    let refs = expr.column_refs();
-
-    ensure!(
-        refs.contains(&Column::from_qualified_name(time_index_col)),
-        UnexpectedSnafu {
-            reason: format!(
-                "Expected column {} to be referenced in expression {expr:?}",
-                time_index_col
-            ),
-        }
-    );
-
-    ensure!(
-        refs.len() == 1,
-        UnexpectedSnafu {
-            reason: format!(
-                "Expect only one column to be referenced in expression {expr:?}, found {refs:?}"
-            ),
-        }
-    );
-
-    let ty = Value::from(current).data_type();
-
-    let arrow_schema = arrow_schema::Schema::new(vec![arrow_schema::Field::new(
-        time_index_col,
-        ty.as_arrow_type(),
-        false,
-    )]);
-    let df_schema =
-        DFSchema::try_from(arrow_schema.clone()).with_context(|_e| DatafusionSnafu {
-            context: format!("Failed to create DFSchema from arrow schema {arrow_schema:?}"),
-        })?;
 
     let phy_planner = DefaultPhysicalPlanner::default();
 
     let phy_expr: PhysicalExprRef = phy_planner
-        .create_physical_expr(expr, &df_schema, &SessionContext::new().state())
+        .create_physical_expr(expr, df_schema, &SessionContext::new().state())
         .with_context(|_e| DatafusionSnafu {
             context: format!(
                 "Failed to create physical expression from {expr:?} using {df_schema:?}"
             ),
         })?;
 
-    let cur_time_window = eval_ts_to_ts(&phy_expr, time_index_col, current)?;
+    let cur_time_window = eval_ts_to_ts(&phy_expr, df_schema, current)?;
 
     // search to find the lower bound
     let mut offset: i64 = 1;
@@ -151,7 +236,7 @@ fn find_expr_time_window_lower_bound(
 
         let prev_time_probe = common_time::Timestamp::new(next_val, current.unit());
 
-        let prev_time_window = eval_ts_to_ts(&phy_expr, time_index_col, prev_time_probe)?;
+        let prev_time_window = eval_ts_to_ts(&phy_expr, df_schema, prev_time_probe)?;
 
         match prev_time_window.cmp(&cur_time_window) {
             Ordering::Less => {
@@ -203,7 +288,7 @@ fn find_expr_time_window_lower_bound(
     while low < high {
         let mid = (low + high) / 2;
         let mid_probe = common_time::Timestamp::new(mid, output_unit);
-        let mid_time_window = eval_ts_to_ts(&phy_expr, time_index_col, mid_probe)?;
+        let mid_time_window = eval_ts_to_ts(&phy_expr, df_schema, mid_probe)?;
 
         match mid_time_window.cmp(&cur_time_window) {
             Ordering::Less => low = mid + 1,
@@ -222,7 +307,7 @@ fn find_expr_time_window_lower_bound(
 
 fn eval_ts_to_ts(
     phy: &PhysicalExprRef,
-    time_index_col: &str,
+    df_schema: &DFSchema,
     value: Timestamp,
 ) -> Result<Timestamp, Error> {
     let ts_vector = match value.unit() {
@@ -238,53 +323,57 @@ fn eval_ts_to_ts(
         }
     };
 
-    let ty = Value::from(value).data_type();
-
-    let arrow_schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
-        time_index_col,
-        ty.as_arrow_type(),
-        false,
-    )]));
-
-    let rb = DfRecordBatch::try_new(arrow_schema.clone(), vec![ts_vector.clone()]).with_context(
-        |_| ArrowSnafu {
-            context: format!(
-                "Failed to create record batch from {arrow_schema:?} and {ts_vector:?}"
-            ),
-        },
-    )?;
+    let rb = DfRecordBatch::try_new(df_schema.inner().clone(), vec![ts_vector.clone()])
+        .with_context(|_| ArrowSnafu {
+            context: format!("Failed to create record batch from {df_schema:?} and {ts_vector:?}"),
+        })?;
 
     let eval_res = phy.evaluate(&rb).with_context(|_| DatafusionSnafu {
         context: format!("Failed to evaluate physical expression {phy:?} on {rb:?}"),
     })?;
 
     let val = match eval_res {
-        datafusion_expr::ColumnarValue::Array(array) => match value.unit() {
-            TimeUnit::Second => TimestampSecondVector::try_from_arrow_array(array.clone())
-                .with_context(|_| DatatypesSnafu {
-                    extra: format!("Failed to create vector from arrow array {array:?}"),
-                })?
-                .get(0),
-            TimeUnit::Millisecond => {
-                TimestampMillisecondVector::try_from_arrow_array(array.clone())
+        datafusion_expr::ColumnarValue::Array(array) => {
+            let ty = array.data_type();
+            let ty = ConcreteDataType::from_arrow_type(ty);
+            let time_unit = if let ConcreteDataType::Timestamp(ty) = ty {
+                ty.unit()
+            } else {
+                return UnexpectedSnafu {
+                    reason: format!("Physical expression {phy:?} evaluated to non-timestamp type"),
+                }
+                .fail();
+            };
+
+            match time_unit {
+                TimeUnit::Second => TimestampSecondVector::try_from_arrow_array(array.clone())
                     .with_context(|_| DatatypesSnafu {
                         extra: format!("Failed to create vector from arrow array {array:?}"),
                     })?
-                    .get(0)
+                    .get(0),
+                TimeUnit::Millisecond => {
+                    TimestampMillisecondVector::try_from_arrow_array(array.clone())
+                        .with_context(|_| DatatypesSnafu {
+                            extra: format!("Failed to create vector from arrow array {array:?}"),
+                        })?
+                        .get(0)
+                }
+                TimeUnit::Microsecond => {
+                    TimestampMicrosecondVector::try_from_arrow_array(array.clone())
+                        .with_context(|_| DatatypesSnafu {
+                            extra: format!("Failed to create vector from arrow array {array:?}"),
+                        })?
+                        .get(0)
+                }
+                TimeUnit::Nanosecond => {
+                    TimestampNanosecondVector::try_from_arrow_array(array.clone())
+                        .with_context(|_| DatatypesSnafu {
+                            extra: format!("Failed to create vector from arrow array {array:?}"),
+                        })?
+                        .get(0)
+                }
             }
-            TimeUnit::Microsecond => {
-                TimestampMicrosecondVector::try_from_arrow_array(array.clone())
-                    .with_context(|_| DatatypesSnafu {
-                        extra: format!("Failed to create vector from arrow array {array:?}"),
-                    })?
-                    .get(0)
-            }
-            TimeUnit::Nanosecond => TimestampNanosecondVector::try_from_arrow_array(array.clone())
-                .with_context(|_| DatatypesSnafu {
-                    extra: format!("Failed to create vector from arrow array {array:?}"),
-                })?
-                .get(0),
-        },
+        }
         datafusion_expr::ColumnarValue::Scalar(scalar) => Value::try_from(scalar.clone())
             .with_context(|_| DatatypesSnafu {
                 extra: format!("Failed to convert scalar {scalar:?} to value"),
@@ -356,9 +445,10 @@ fn df_plan_to_sql(plan: &LogicalPlan) -> Result<String, Error> {
 #[cfg(test)]
 mod test {
     use datafusion_common::tree_node::TreeNode;
+    use pretty_assertions::assert_eq;
     use session::context::QueryContext;
 
-    use super::sql_to_df_plan;
+    use super::{sql_to_df_plan, *};
     use crate::recording_rules::{df_plan_to_sql, AddFilterRewriter};
     use crate::test_utils::create_test_query_engine;
 
@@ -368,8 +458,8 @@ mod test {
         let query_engine = create_test_query_engine();
         let ctx = QueryContext::arc();
 
-        let sql = "SELECT number FROM numbers_with_ts";
-        let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql)
+        let sql = "SELECT number FROM numbers_with_ts GROUP BY number";
+        let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, false)
             .await
             .unwrap();
 
@@ -377,16 +467,77 @@ mod test {
         let plan = plan.rewrite(&mut add_filter).unwrap().data;
         let new_sql = df_plan_to_sql(&plan).unwrap();
         assert_eq!(
-            new_sql,
-            "SELECT numbers_with_ts.number FROM numbers_with_ts WHERE (number > 4)"
+            "SELECT numbers_with_ts.number FROM numbers_with_ts WHERE (number > 4) GROUP BY numbers_with_ts.number",
+            new_sql
         );
 
         let sql = "SELECT number FROM numbers_with_ts WHERE number < 2 OR number >10";
-        let plan = sql_to_df_plan(ctx, query_engine, sql).await.unwrap();
+        let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, false)
+            .await
+            .unwrap();
 
         let mut add_filter = AddFilterRewriter::new(col("number").gt(lit(4u32)));
         let plan = plan.rewrite(&mut add_filter).unwrap().data;
         let new_sql = df_plan_to_sql(&plan).unwrap();
-        assert_eq!(new_sql, "SELECT numbers_with_ts.number FROM numbers_with_ts WHERE (((numbers_with_ts.number < 2) OR (numbers_with_ts.number > 10)) AND (number > 4))");
+        assert_eq!("SELECT numbers_with_ts.number FROM numbers_with_ts WHERE (((numbers_with_ts.number < 2) OR (numbers_with_ts.number > 10)) AND (number > 4))", new_sql);
+
+        let sql = "SELECT date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window";
+        let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, false)
+            .await
+            .unwrap();
+
+        let mut add_filter = AddFilterRewriter::new(col("number").gt(lit(4u32)));
+        let plan = plan.rewrite(&mut add_filter).unwrap().data;
+        let new_sql = df_plan_to_sql(&plan).unwrap();
+        assert_eq!("SELECT date_bin('5 minutes', numbers_with_ts.ts) AS time_window FROM numbers_with_ts WHERE (number > 4) GROUP BY date_bin('5 minutes', numbers_with_ts.ts)", new_sql);
+    }
+
+    #[tokio::test]
+    async fn test_plan_time_window_lower_bound() {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+
+        let testcases = [
+            // no time index
+            (
+                "SELECT date_bin('5 minutes', ts) FROM numbers_with_ts;",
+                Timestamp::new(23, TimeUnit::Millisecond),
+                None,
+            ),
+            // time index
+            (
+                "SELECT date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window;",
+                Timestamp::new(23, TimeUnit::Millisecond),
+                Some(Timestamp::new(0, TimeUnit::Millisecond)),
+            ),
+            // time index with other fields
+            (
+                "SELECT sum(number) as sum_up, date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window;",
+                Timestamp::new(23, TimeUnit::Millisecond),
+                Some(Timestamp::new(0, TimeUnit::Millisecond)),
+            ),
+            // time index with other pks
+            (
+                "SELECT number, date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window, number;",
+                Timestamp::new(23, TimeUnit::Millisecond),
+                Some(Timestamp::new(0, TimeUnit::Millisecond)),
+            ),
+        ];
+
+        for (sql, current, expected) in testcases {
+            let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, true)
+                .await
+                .unwrap();
+
+            let real = find_plan_time_window_lower_bound(
+                &plan,
+                current,
+                ctx.clone(),
+                query_engine.clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(real, expected);
+        }
     }
 }
