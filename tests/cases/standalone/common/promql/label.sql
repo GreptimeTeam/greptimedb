@@ -53,3 +53,31 @@ TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "idc", "$2", "idc", "(.
 TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "idc", "", "", "");
 
 DROP TABLE test;
+
+CREATE TABLE test (
+   ts timestamp(3) time index,
+   host STRING,
+   val BIGINT,
+   PRIMARY KEY(host),
+ );
+
+INSERT INTO TABLE test VALUES
+     (0, 'host1', 1),
+     (0, 'host2', 2);
+
+SELECT * FROM test;
+
+-- test the non-existent matchers --
+TQL EVAL (0, 1, '5s') test{job=~"host1|host3"};
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 1, '5s') test{job=~".*"};
+
+TQL EVAL (0, 1, '5s') test{job=~".+"};
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 1, '5s') test{job=""};
+
+TQL EVAL (0, 1, '5s') test{job!=""};
+
+DROP TABLE test;

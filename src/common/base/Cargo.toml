@@ -18,7 +18,7 @@ bytes.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 futures.workspace = true
-paste = "1.0"
+paste.workspace = true
 pin-project.workspace = true
 rand.workspace = true
 serde = { version = "1.0", features = ["derive"] }

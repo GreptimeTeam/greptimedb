@@ -44,7 +44,6 @@ use datafusion_expr::utils::conjunction;
 use datafusion_expr::SortExpr;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
 use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::Schema;
 use itertools::Itertools;
 use promql::extension_plan::{
     build_special_time_expr, EmptyMetric, HistogramFold, InstantManipulate, Millisecond,
@@ -759,31 +758,26 @@ impl PromPlanner {
         label_matchers: Matchers,
         is_range_selector: bool,
     ) -> Result<LogicalPlan> {
+        // make table scan plan
+        let table_ref = self.table_ref()?;
+        let mut table_scan = self.create_table_scan_plan(table_ref.clone()).await?;
+        let table_schema = table_scan.schema();
+
         // make filter exprs
         let offset_duration = match offset {
             Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
             Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
             None => 0,
         };
-
-        let time_index_filter = self.build_time_index_filter(offset_duration)?;
-        // make table scan with filter exprs
-        let table_ref = self.table_ref()?;
-
-        let moved_label_matchers = label_matchers.clone();
-        let mut table_scan = self
-            .create_table_scan_plan(table_ref.clone(), |schema| {
-                let mut scan_filters =
-                    PromPlanner::matchers_to_expr(moved_label_matchers, |name| {
-                        schema.column_index_by_name(name).is_some()
-                    })?;
-                if let Some(time_index_filter) = time_index_filter {
-                    scan_filters.push(time_index_filter);
-                }
-
-                Ok(scan_filters)
-            })
-            .await?;
+        let mut scan_filters = self.matchers_to_expr(label_matchers.clone(), table_schema)?;
+        if let Some(time_index_filter) = self.build_time_index_filter(offset_duration)? {
+            scan_filters.push(time_index_filter);
+        }
+        table_scan = LogicalPlanBuilder::from(table_scan)
+            .filter(conjunction(scan_filters).unwrap()) // Safety: `scan_filters` is not empty.
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
 
         // make a projection plan if there is any `__field__` matcher
         if let Some(field_matchers) = &self.ctx.field_column_matcher {
@@ -963,20 +957,22 @@ impl PromPlanner {
         }
     }
 
-    /// Convert [`Matchers`] to [`DfExpr`]s.
-    ///
-    /// This method will filter out the matchers that don't match the filter function.
-    fn matchers_to_expr<F>(label_matchers: Matchers, filter: F) -> Result<Vec<DfExpr>>
-    where
-        F: Fn(&str) -> bool,
-    {
+    // TODO(ruihang): ignore `MetricNameLabel` (`__name__`) matcher
+    fn matchers_to_expr(
+        &self,
+        label_matchers: Matchers,
+        table_schema: &DFSchemaRef,
+    ) -> Result<Vec<DfExpr>> {
         let mut exprs = Vec::with_capacity(label_matchers.matchers.len());
         for matcher in label_matchers.matchers {
-            // ignores the matchers that don't match the filter function
-            if !filter(&matcher.name) {
-                continue;
-            }
-            let col = DfExpr::Column(Column::from_name(matcher.name));
+            let col = if table_schema
+                .field_with_unqualified_name(&matcher.name)
+                .is_err()
+            {
+                DfExpr::Literal(ScalarValue::Utf8(Some(String::new()))).alias(matcher.name)
+            } else {
+                DfExpr::Column(Column::from_name(matcher.name))
+            };
             let lit = DfExpr::Literal(ScalarValue::Utf8(Some(matcher.value)));
             let expr = match matcher.op {
                 MatchOp::Equal => col.eq(lit),
@@ -1076,21 +1072,14 @@ impl PromPlanner {
     ///
     /// # Panic
     /// If the filter is empty
-    async fn create_table_scan_plan<F>(
-        &mut self,
-        table_ref: TableReference,
-        filter_builder: F,
-    ) -> Result<LogicalPlan>
-    where
-        F: FnOnce(&Schema) -> Result<Vec<DfExpr>>,
-    {
+    async fn create_table_scan_plan(&mut self, table_ref: TableReference) -> Result<LogicalPlan> {
         let provider = self
             .table_provider
             .resolve_table(table_ref.clone())
             .await
             .context(CatalogSnafu)?;
 
-        let schema = provider
+        let is_time_index_ms = provider
             .as_any()
             .downcast_ref::<DefaultTableSource>()
             .context(UnknownTableSnafu)?
@@ -1099,9 +1088,7 @@ impl PromPlanner {
             .downcast_ref::<DfTableProviderAdapter>()
             .context(UnknownTableSnafu)?
             .table()
-            .schema();
-
-        let is_time_index_ms = schema
+            .schema()
             .timestamp_column()
             .with_context(|| TimeIndexNotFoundSnafu {
                 table: table_ref.to_quoted_string(),
@@ -1109,7 +1096,6 @@ impl PromPlanner {
             .data_type
             == ConcreteDataType::timestamp_millisecond_datatype();
 
-        let filter = filter_builder(schema.as_ref())?;
         let mut scan_plan = LogicalPlanBuilder::scan(table_ref.clone(), provider, None)
             .context(DataFusionPlanningSnafu)?
             .build()
@@ -1146,14 +1132,9 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu)?;
         }
 
-        let mut builder = LogicalPlanBuilder::from(scan_plan);
-        if !filter.is_empty() {
-            // Safety: filter is not empty, checked above
-            builder = builder
-                .filter(conjunction(filter).unwrap())
-                .context(DataFusionPlanningSnafu)?;
-        }
-        let result = builder.build().context(DataFusionPlanningSnafu)?;
+        let result = LogicalPlanBuilder::from(scan_plan)
+            .build()
+            .context(DataFusionPlanningSnafu)?;
         Ok(result)
     }
 
@@ -1822,6 +1803,8 @@ impl PromPlanner {
                 fn_name: SPECIAL_HISTOGRAM_QUANTILE.to_string(),
             })?
             .clone();
+        // remove le column from tag columns
+        self.ctx.tag_columns.retain(|col| col != LE_COLUMN_NAME);
 
         Ok(LogicalPlan::Extension(Extension {
             node: Arc::new(
@@ -2639,6 +2622,68 @@ mod test {
         )
     }
 
+    async fn build_test_table_provider_with_fields(
+        table_name_tuples: &[(String, String)],
+        tags: &[&str],
+    ) -> DfTableSourceProvider {
+        let catalog_list = MemoryCatalogManager::with_default_setup();
+        for (schema_name, table_name) in table_name_tuples {
+            let mut columns = vec![];
+            let num_tag = tags.len();
+            for tag in tags {
+                columns.push(ColumnSchema::new(
+                    tag.to_string(),
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ));
+            }
+            columns.push(
+                ColumnSchema::new(
+                    "greptime_timestamp".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+            );
+            columns.push(ColumnSchema::new(
+                "greptime_value".to_string(),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ));
+            let schema = Arc::new(Schema::new(columns));
+            let table_meta = TableMetaBuilder::default()
+                .schema(schema)
+                .primary_key_indices((0..num_tag).collect())
+                .next_column_id(1024)
+                .build()
+                .unwrap();
+            let table_info = TableInfoBuilder::default()
+                .name(table_name.to_string())
+                .meta(table_meta)
+                .build()
+                .unwrap();
+            let table = EmptyTable::from_table_info(&table_info);
+
+            assert!(catalog_list
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: schema_name.to_string(),
+                    table_name: table_name.to_string(),
+                    table_id: 1024,
+                    table,
+                })
+                .is_ok());
+        }
+
+        DfTableSourceProvider::new(
+            catalog_list,
+            false,
+            QueryContext::arc(),
+            DummyDecoder::arc(),
+            false,
+        )
+    }
+
     // {
     //     input: `abs(some_metric{foo!="bar"})`,
     //     expected: &Call{
@@ -3215,6 +3260,36 @@ mod test {
         );
 
         indie_query_plan_compare(query, expected).await;
+    }
+
+    #[tokio::test]
+    async fn test_nested_histogram_quantile() {
+        let mut eval_stmt = EvalStmt {
+            expr: PromExpr::NumberLiteral(NumberLiteral { val: 1.0 }),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let case = r#"label_replace(histogram_quantile(0.99, sum by(pod, le, path, code) (rate(greptime_servers_grpc_requests_elapsed_bucket{container="frontend"}[1m0s]))), "pod", "$1", "pod", "greptimedb-frontend-[0-9a-z]*-(.*)")"#;
+
+        let prom_expr = parser::parse(case).unwrap();
+        eval_stmt.expr = prom_expr;
+        let table_provider = build_test_table_provider_with_fields(
+            &[(
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "greptime_servers_grpc_requests_elapsed_bucket".to_string(),
+            )],
+            &["pod", "le", "path", "code", "container"],
+        )
+        .await;
+        // Should be ok
+        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
