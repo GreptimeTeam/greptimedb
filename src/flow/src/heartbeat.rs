@@ -134,10 +134,9 @@ impl HeartbeatTask {
         }
     }
 
-    fn create_heartbeat_request(
+    fn new_heartbeat_request(
+        heartbeat_request: &HeartbeatRequest,
         message: Option<OutgoingMessage>,
-        peer: Option<Peer>,
-        start_time_ms: u64,
         latest_report: &Option<FlowStat>,
     ) -> Option<HeartbeatRequest> {
         let mailbox_message = match message.map(outgoing_message_to_mailbox_message) {
@@ -161,10 +160,8 @@ impl HeartbeatTask {
 
         Some(HeartbeatRequest {
             mailbox_message,
-            peer,
-            info: Self::build_node_info(start_time_ms),
             flow_stat,
-            ..Default::default()
+            ..heartbeat_request.clone()
         })
     }
 
@@ -174,6 +171,7 @@ impl HeartbeatTask {
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms,
+            cpus: num_cpus::get() as u32,
         })
     }
 
@@ -198,18 +196,24 @@ impl HeartbeatTask {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut latest_report = None;
 
+            let heartbeat_request = HeartbeatRequest {
+                peer: self_peer,
+                info: Self::build_node_info(start_time_ms),
+                ..Default::default()
+            };
+
             loop {
                 let req = tokio::select! {
                     message = outgoing_rx.recv() => {
                         if let Some(message) = message {
-                            Self::create_heartbeat_request(Some(message), self_peer.clone(), start_time_ms, &latest_report)
+                            Self::new_heartbeat_request(&heartbeat_request, Some(message), &latest_report)
                         } else {
                             // Receives None that means Sender was dropped, we need to break the current loop
                             break
                         }
                     }
                     _ = interval.tick() => {
-                        Self::create_heartbeat_request(None, self_peer.clone(), start_time_ms, &latest_report)
+                        Self::new_heartbeat_request(&heartbeat_request, None, &latest_report)
                     }
                 };
 

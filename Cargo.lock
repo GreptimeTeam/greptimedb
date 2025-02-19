@@ -3376,6 +3376,7 @@ dependencies = [
  "meta-client",
  "metric-engine",
  "mito2",
+ "num_cpus",
  "object-store",
  "prometheus",
  "prost 0.13.3",
@@ -4196,6 +4197,7 @@ dependencies = [
  "meta-client",
  "nom",
  "num-traits",
+ "num_cpus",
  "operator",
  "partition",
  "pretty_assertions",
@@ -4302,6 +4304,7 @@ dependencies = [
  "log-query",
  "log-store",
  "meta-client",
+ "num_cpus",
  "opentelemetry-proto 0.27.0",
  "operator",
  "partition",
@@ -4692,7 +4695,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=fc09a5696608d2a0aa718cc835d5cb9c4e8e9387#fc09a5696608d2a0aa718cc835d5cb9c4e8e9387"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=7497581feb1370b4c73606d0c4ad9f5fc42e03e3#7497581feb1370b4c73606d0c4ad9f5fc42e03e3"
 dependencies = [
  "prost 0.13.3",
  "serde",
