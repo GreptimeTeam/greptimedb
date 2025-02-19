@@ -23,7 +23,7 @@ use common_error::status_code::StatusCode as ErrorCode;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use log_query::{Context, Limit, LogQuery, TimeFilter};
-use loki_proto::logproto::{EntryAdapter, PushRequest, StreamAdapter};
+use loki_proto::logproto::{EntryAdapter, LabelPairAdapter, PushRequest, StreamAdapter};
 use loki_proto::prost_types::Timestamp;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
@@ -1007,6 +1007,7 @@ min_compaction_interval = "0s"
 [region_engine.mito.index]
 aux_path = ""
 staging_size = "2GiB"
+staging_ttl = "7days"
 write_buffer_size = "8MiB"
 content_cache_page_size = "64KiB"
 
@@ -2225,12 +2226,30 @@ pub async fn test_loki_pb_logs(store_type: StorageType) {
                 EntryAdapter {
                     timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
                     line: "this is a log message".to_string(),
-                    structured_metadata: vec![],
+                    structured_metadata: vec![
+                        LabelPairAdapter {
+                            name: "key1".to_string(),
+                            value: "value1".to_string(),
+                        },
+                        LabelPairAdapter {
+                            name: "key2".to_string(),
+                            value: "value2".to_string(),
+                        },
+                    ],
                     parsed: vec![],
                 },
                 EntryAdapter {
-                    timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
-                    line: "this is a log message".to_string(),
+                    timestamp: Some(Timestamp::from_str("2024-11-07T10:53:51").unwrap()),
+                    line: "this is a log message 2".to_string(),
+                    structured_metadata: vec![LabelPairAdapter {
+                        name: "key3".to_string(),
+                        value: "value3".to_string(),
+                    }],
+                    parsed: vec![],
+                },
+                EntryAdapter {
+                    timestamp: Some(Timestamp::from_str("2024-11-07T10:53:52").unwrap()),
+                    line: "this is a log message 2".to_string(),
                     structured_metadata: vec![],
                     parsed: vec![],
                 },
@@ -2270,7 +2289,7 @@ pub async fn test_loki_pb_logs(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // test schema
-    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"service\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  \\\"wadaxi\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"service\\\", \\\"source\\\", \\\"wadaxi\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"structured_metadata\\\" JSON NULL,\\n  \\\"service\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  \\\"wadaxi\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"service\\\", \\\"source\\\", \\\"wadaxi\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
     validate_data(
         "loki_pb_schema",
         &client,
@@ -2280,7 +2299,7 @@ pub async fn test_loki_pb_logs(store_type: StorageType) {
     .await;
 
     // test content
-    let expected = r#"[[1730976830000000000,"this is a log message","test","integration","do anything"],[1730976830000000000,"this is a log message","test","integration","do anything"]]"#;
+    let expected = "[[1730976830000000000,\"this is a log message\",{\"key1\":\"value1\",\"key2\":\"value2\"},\"test\",\"integration\",\"do anything\"],[1730976831000000000,\"this is a log message 2\",{\"key3\":\"value3\"},\"test\",\"integration\",\"do anything\"],[1730976832000000000,\"this is a log message 2\",{},\"test\",\"integration\",\"do anything\"]]";
     validate_data(
         "loki_pb_content",
         &client,
@@ -2308,8 +2327,9 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
         "sender": "integration"
       },
       "values": [
-          [ "1735901380059465984", "this is line one" ],
-          [ "1735901398478897920", "this is line two" ]
+          [ "1735901380059465984", "this is line one", {"key1":"value1","key2":"value2"}],
+          [ "1735901398478897920", "this is line two", {"key3":"value3"}],
+          [ "1735901398478897921", "this is line two updated"]
       ]
     }
   ]
@@ -2339,7 +2359,7 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // test schema
-    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"sender\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"sender\\\", \\\"source\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    let expected =  "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"structured_metadata\\\" JSON NULL,\\n  \\\"sender\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"sender\\\", \\\"source\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
     validate_data(
         "loki_json_schema",
         &client,
@@ -2349,7 +2369,7 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
     .await;
 
     // test content
-    let expected = "[[1735901380059465984,\"this is line one\",\"integration\",\"test\"],[1735901398478897920,\"this is line two\",\"integration\",\"test\"]]";
+    let expected = "[[1735901380059465984,\"this is line one\",{\"key1\":\"value1\",\"key2\":\"value2\"},\"integration\",\"test\"],[1735901398478897920,\"this is line two\",{\"key3\":\"value3\"},\"integration\",\"test\"],[1735901398478897921,\"this is line two updated\",{},\"integration\",\"test\"]]";
     validate_data(
         "loki_json_content",
         &client,

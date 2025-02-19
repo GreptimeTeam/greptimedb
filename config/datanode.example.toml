@@ -497,6 +497,11 @@ aux_path = ""
 ## The max capacity of the staging directory.
 staging_size = "2GB"
 
+## The TTL of the staging directory.
+## Defaults to 7 days.
+## Setting it to "0s" to disable TTL.
+staging_ttl = "7d"
+
 ## Cache size for inverted index metadata.
 metadata_cache_size = "64MiB"
 

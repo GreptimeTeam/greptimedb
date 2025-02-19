@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use api::v1::meta::{HeartbeatRequest, NodeInfo as PbNodeInfo, Role};
 use common_meta::cluster;
 use common_meta::cluster::{
@@ -169,7 +172,12 @@ fn extract_base_info(
                 Role::Frontend => cluster::Role::Frontend,
                 Role::Flownode => cluster::Role::Flownode,
             },
-            node_id: peer.id,
+            node_id: match role {
+                Role::Datanode => peer.id,
+                Role::Flownode => peer.id,
+                // The ID is solely for ensuring the key's uniqueness and serves no other purpose.
+                Role::Frontend => allocate_id_by_peer_addr(peer.addr.as_str()),
+            },
         },
         Peer::from(peer.clone()),
         info.clone(),
@@ -191,4 +199,38 @@ async fn put_into_memory_store(ctx: &mut Context, key: NodeInfoKey, value: NodeI
         .context(SaveClusterInfoSnafu)?;
 
     Ok(())
+}
+
+// Allocate id based on peer address using a hash function
+fn allocate_id_by_peer_addr(peer_addr: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    peer_addr.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[cfg(test)]
+mod allocate_id_tests {
+    use super::*;
+
+    #[test]
+    fn test_allocate_id_by_peer_addr() {
+        // Test empty string
+        assert_eq!(allocate_id_by_peer_addr(""), allocate_id_by_peer_addr(""));
+
+        // Test same address returns same id
+        let addr1 = "127.0.0.1:8080";
+        let id1 = allocate_id_by_peer_addr(addr1);
+        let id2 = allocate_id_by_peer_addr(addr1);
+        assert_eq!(id1, id2);
+
+        // Test different addresses return different ids
+        let addr2 = "127.0.0.1:8081";
+        let id3 = allocate_id_by_peer_addr(addr2);
+        assert_ne!(id1, id3);
+
+        // Test long address
+        let long_addr = "very.long.domain.name.example.com:9999";
+        let id4 = allocate_id_by_peer_addr(long_addr);
+        assert!(id4 > 0);
+    }
 }

@@ -18,13 +18,10 @@ const PATTERNS_NAME: &str = "patterns";
 
 pub(crate) const PROCESSOR_REGEX: &str = "regex";
 
-use std::collections::BTreeMap;
-
 use lazy_static::lazy_static;
 use regex::Regex;
 use snafu::{OptionExt, ResultExt};
 
-use super::IntermediateStatus;
 use crate::etl::error::{
     Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu,
     RegexNamedGroupNotFoundSnafu, RegexNoValidFieldSnafu, RegexNoValidPatternSnafu, RegexSnafu,
@@ -36,6 +33,7 @@ use crate::etl::processor::{
     FIELD_NAME, IGNORE_MISSING_NAME, PATTERN_NAME,
 };
 use crate::etl::value::Value;
+use crate::etl::PipelineMap;
 
 lazy_static! {
     static ref GROUPS_NAME_REGEX: Regex = Regex::new(r"\(\?P?<([[:word:]]+)>.+?\)").unwrap();
@@ -169,8 +167,8 @@ impl RegexProcessor {
         Ok(())
     }
 
-    fn process(&self, prefix: &str, val: &str) -> Result<BTreeMap<String, Value>> {
-        let mut result = BTreeMap::new();
+    fn process(&self, prefix: &str, val: &str) -> Result<PipelineMap> {
+        let mut result = PipelineMap::new();
         for gr in self.patterns.iter() {
             if let Some(captures) = gr.regex.captures(val) {
                 for group in gr.groups.iter() {
@@ -194,7 +192,7 @@ impl Processor for RegexProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut IntermediateStatus) -> Result<()> {
+    fn exec_mut(&self, val: &mut PipelineMap) -> Result<()> {
         for field in self.fields.iter() {
             let index = field.input_field();
             let prefix = field.target_or_input_field();
@@ -227,11 +225,10 @@ impl Processor for RegexProcessor {
 }
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use ahash::{HashMap, HashMapExt};
     use itertools::Itertools;
 
+    use super::*;
     use crate::etl::processor::regex::RegexProcessor;
     use crate::etl::value::{Map, Value};
 
@@ -272,7 +269,7 @@ ignore_missing: false"#;
         let cw = "[c=w,n=US_CA_SANJOSE,o=55155]";
         let breadcrumbs_str = [cc, cg, co, cp, cw].iter().join(",");
 
-        let temporary_map: BTreeMap<String, Value> = [
+        let temporary_map: PipelineMap = [
             ("breadcrumbs_parent", Value::String(cc.to_string())),
             ("breadcrumbs_edge", Value::String(cg.to_string())),
             ("breadcrumbs_origin", Value::String(co.to_string())),

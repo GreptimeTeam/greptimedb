@@ -146,6 +146,7 @@ impl WorkerGroup {
             &config.index.aux_path,
             config.index.staging_size.as_bytes(),
             Some(config.index.write_buffer_size.as_bytes() as _),
+            config.index.staging_ttl,
         )
         .await?;
         let intermediate_manager = IntermediateManager::init_fs(&config.index.aux_path)
@@ -295,6 +296,7 @@ impl WorkerGroup {
             &config.index.aux_path,
             config.index.staging_size.as_bytes(),
             Some(config.index.write_buffer_size.as_bytes() as _),
+            config.index.staging_ttl,
         )
         .await?;
         let intermediate_manager = IntermediateManager::init_fs(&config.index.aux_path)
