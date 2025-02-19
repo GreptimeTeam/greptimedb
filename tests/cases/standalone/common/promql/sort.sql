@@ -9,12 +9,12 @@ CREATE TABLE test (
 INSERT INTO TABLE test VALUES
     (0,     'host1', 'idc1', 1),
     (0,     'host2', 'idc1', 2),
-    (5000,  'host1', 'idc2',3),
-    (5000,  'host2', 'idc2',4),
-    (10000, 'host1', 'idc3',5),
-    (10000, 'host2', 'idc3',6),
-    (15000, 'host1', 'idc4',7),
-    (15000, 'host2', 'idc4',8);
+    (5000,  'host1', 'idc2', 3),
+    (5000,  'host2', 'idc2', 4),
+    (10000, 'host1', 'idc3', 5),
+    (10000, 'host2', 'idc3', 6),
+    (15000, 'host1', 'idc4', 7),
+    (15000, 'host2', 'idc4', 8);
 
 
 TQL EVAL (0, 15, '5s') sort(test{host="host1"});
