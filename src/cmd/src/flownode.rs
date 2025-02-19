@@ -32,7 +32,7 @@ use common_meta::key::TableMetadataManager;
 use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use common_version::{short_version, version};
-use flow::{FlownodeBuilder, FlownodeInstance, FrontendInvoker};
+use flow::{FlownodeBuilder, FlownodeInstance, FrontendClient, FrontendInvoker};
 use meta_client::{MetaClientOptions, MetaClientType};
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
@@ -311,6 +311,8 @@ impl StartCommand {
             Arc::new(executor),
         );
 
+        let frontend_client = FrontendClient::from_meta_client(meta_client.clone());
+
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(cached_meta_backend.clone()));
         let flownode_builder = FlownodeBuilder::new(
             opts,
@@ -318,6 +320,7 @@ impl StartCommand {
             table_metadata_manager,
             catalog_manager.clone(),
             flow_metadata_manager,
+            Arc::new(frontend_client),
         )
         .with_heartbeat_task(heartbeat_task);
 
