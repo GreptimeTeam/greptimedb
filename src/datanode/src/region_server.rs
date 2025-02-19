@@ -1218,7 +1218,12 @@ mod tests {
         );
 
         let response = mock_region_server
-            .handle_request(region_id, RegionRequest::Drop(RegionDropRequest {}))
+            .handle_request(
+                region_id,
+                RegionRequest::Drop(RegionDropRequest {
+                    fast_drop_database_path: false,
+                }),
+            )
             .await
             .unwrap();
         assert_eq!(response.affected_rows, 0);
@@ -1310,7 +1315,12 @@ mod tests {
             .insert(region_id, RegionEngineWithStatus::Ready(engine.clone()));
 
         mock_region_server
-            .handle_request(region_id, RegionRequest::Drop(RegionDropRequest {}))
+            .handle_request(
+                region_id,
+                RegionRequest::Drop(RegionDropRequest {
+                    fast_drop_database_path: false,
+                }),
+            )
             .await
             .unwrap_err();
 

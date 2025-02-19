@@ -30,7 +30,7 @@ impl MetricEngineInner {
     pub async fn drop_region(
         &self,
         region_id: RegionId,
-        _req: RegionDropRequest,
+        req: RegionDropRequest,
     ) -> Result<AffectedRows> {
         let data_region_id = utils::to_data_region_id(region_id);
 
@@ -71,7 +71,7 @@ impl MetricEngineInner {
                 .get(&region_id)
                 .copied();
             if let Some(metadata_region_id) = metadata_region_id {
-                self.drop_logical_region(region_id, metadata_region_id)
+                self.drop_logical_region(region_id, metadata_region_id, req.fast_drop_database_path)
                     .await
             } else {
                 Err(LogicalRegionNotFoundSnafu { region_id }.build())
@@ -87,13 +87,20 @@ impl MetricEngineInner {
         // Since the physical regions are going to be dropped, we don't need to
         // update the contents in metadata region.
         self.mito
-            .handle_request(data_region_id, RegionRequest::Drop(RegionDropRequest {}))
+            .handle_request(
+                data_region_id,
+                RegionRequest::Drop(RegionDropRequest {
+                    fast_drop_database_path: false,
+                }),
+            )
             .await
             .with_context(|_| CloseMitoRegionSnafu { region_id })?;
         self.mito
             .handle_request(
                 metadata_region_id,
-                RegionRequest::Drop(RegionDropRequest {}),
+                RegionRequest::Drop(RegionDropRequest {
+                    fast_drop_database_path: false,
+                }),
             )
             .await
             .with_context(|_| CloseMitoRegionSnafu { region_id })?;
@@ -113,10 +120,15 @@ impl MetricEngineInner {
         &self,
         logical_region_id: RegionId,
         physical_region_id: RegionId,
+        fast_drop_database_path: bool,
     ) -> Result<AffectedRows> {
         // Update metadata
         self.metadata_region
-            .remove_logical_region(physical_region_id, logical_region_id)
+            .remove_logical_region(
+                physical_region_id,
+                logical_region_id,
+                fast_drop_database_path,
+            )
             .await?;
 
         // Update engine state

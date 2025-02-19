@@ -128,7 +128,7 @@ impl State for DropDatabaseExecutor {
             .await?;
         executor.invalidate_table_cache(ddl_ctx).await?;
         executor
-            .on_drop_regions(ddl_ctx, &self.physical_region_routes)
+            .on_drop_regions(ddl_ctx, &self.physical_region_routes, true)
             .await?;
         info!("Table: {}({}) is dropped", self.table_name, self.table_id);
 
