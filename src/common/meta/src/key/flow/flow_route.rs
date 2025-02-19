@@ -217,7 +217,7 @@ impl FlowRouteManager {
         for (_, flow_route_value) in flow_routes.iter_mut() {
             let flownode_id = flow_route_value.peer.id;
             // If an id lacks a corresponding address in the `flow_node_addrs`,
-            // it means the old address in `table_flow_value`` is still valid,
+            // it means the old address in `table_flow_value` is still valid,
             // which is expected.
             if let Some(node_addr) = flow_node_addrs.get(&flownode_id) {
                 flow_route_value.peer.addr = node_addr.peer.addr.clone();
