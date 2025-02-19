@@ -22,7 +22,8 @@ use snafu::OptionExt;
 use table::metadata::TableId;
 
 use crate::error::{self, Result};
-use crate::key::flow::FlowScoped;
+use crate::key::flow::{flownode_addr_helper, FlowScoped};
+use crate::key::node_address::NodeAddressKey;
 use crate::key::{BytesAdapter, FlowId, FlowPartitionId, MetadataKey, MetadataValue};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
@@ -207,8 +208,8 @@ impl TableFlowManager {
         )
         .into_stream();
 
-        let res = stream.try_collect::<Vec<_>>().await?;
-        // TODO: remap the addresses
+        let mut res = stream.try_collect::<Vec<_>>().await?;
+        self.remap_table_flow_addresses(&mut res).await?;
         Ok(res)
     }
 
@@ -236,6 +237,25 @@ impl TableFlowManager {
         }
 
         Ok(Txn::new().and_then(txns))
+    }
+
+    async fn remap_table_flow_addresses(
+        &self,
+        table_flows: &mut [(TableFlowKey, TableFlowValue)],
+    ) -> Result<()> {
+        let keys = table_flows
+            .iter()
+            .map(|(_, value)| NodeAddressKey::with_flownode(value.peer.id))
+            .collect::<Vec<_>>();
+        let flownode_addrs =
+            flownode_addr_helper::get_flownode_addresses(self.kv_backend.clone(), keys).await?;
+        for (_, table_flow_value) in table_flows.iter_mut() {
+            let flownode_id = table_flow_value.peer.id;
+            if let Some(flownode_addr) = flownode_addrs.get(&flownode_id) {
+                table_flow_value.peer.addr = flownode_addr.peer.addr.clone();
+            }
+        }
+        Ok(())
     }
 }
 

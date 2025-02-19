@@ -16,9 +16,9 @@ pub mod flow_info;
 pub(crate) mod flow_name;
 pub(crate) mod flow_route;
 pub mod flow_state;
+mod flownode_addr_helper;
 pub(crate) mod flownode_flow;
 pub(crate) mod table_flow;
-
 use std::ops::Deref;
 use std::sync::Arc;
 

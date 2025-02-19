@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
 use crate::error::{self, Result};
-use crate::key::flow::FlowScoped;
+use crate::key::flow::{flownode_addr_helper, FlowScoped};
+use crate::key::node_address::NodeAddressKey;
 use crate::key::{BytesAdapter, FlowId, FlowPartitionId, MetadataKey, MetadataValue};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
@@ -178,8 +179,8 @@ impl FlowRouteManager {
         )
         .into_stream();
 
-        let res = stream.try_collect::<Vec<_>>().await?;
-        // TODO: remap the addresses
+        let mut res = stream.try_collect::<Vec<_>>().await?;
+        self.remap_flow_route_addresses(&mut res).await?;
         Ok(res)
     }
 
@@ -201,6 +202,25 @@ impl FlowRouteManager {
             .collect::<Result<Vec<_>>>()?;
 
         Ok(Txn::new().and_then(txns))
+    }
+
+    async fn remap_flow_route_addresses(
+        &self,
+        flow_routes: &mut [(FlowRouteKey, FlowRouteValue)],
+    ) -> Result<()> {
+        let keys = flow_routes
+            .iter()
+            .map(|(_, value)| NodeAddressKey::with_flownode(value.peer.id))
+            .collect();
+        let flow_node_addrs =
+            flownode_addr_helper::get_flownode_addresses(self.kv_backend.clone(), keys).await?;
+        for (_, flow_route_value) in flow_routes.iter_mut() {
+            let flownode_id = flow_route_value.peer.id;
+            if let Some(node_addr) = flow_node_addrs.get(&flownode_id) {
+                flow_route_value.peer.addr = node_addr.peer.addr.clone();
+            }
+        }
+        Ok(())
     }
 }
 
