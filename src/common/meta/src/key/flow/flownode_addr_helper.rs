@@ -23,7 +23,7 @@ use crate::rpc::store::BatchGetRequest;
 /// Get the addresses of the flownodes.
 /// The result is a map: node_id -> NodeAddressValue
 pub(crate) async fn get_flownode_addresses(
-    kv_backend: KvBackendRef,
+    kv_backend: &KvBackendRef,
     keys: Vec<NodeAddressKey>,
 ) -> Result<HashMap<u64, NodeAddressValue>> {
     if keys.is_empty() {

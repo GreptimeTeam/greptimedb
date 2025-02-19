@@ -248,9 +248,12 @@ impl TableFlowManager {
             .map(|(_, value)| NodeAddressKey::with_flownode(value.peer.id))
             .collect::<Vec<_>>();
         let flownode_addrs =
-            flownode_addr_helper::get_flownode_addresses(self.kv_backend.clone(), keys).await?;
+            flownode_addr_helper::get_flownode_addresses(&self.kv_backend, keys).await?;
         for (_, table_flow_value) in table_flows.iter_mut() {
             let flownode_id = table_flow_value.peer.id;
+            // If an id lacks a corresponding address in the `flow_node_addrs`,
+            // it means the old address in `table_flow_value`` is still valid,
+            // which is expected.
             if let Some(flownode_addr) = flownode_addrs.get(&flownode_id) {
                 table_flow_value.peer.addr = flownode_addr.peer.addr.clone();
             }

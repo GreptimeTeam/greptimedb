@@ -213,9 +213,12 @@ impl FlowRouteManager {
             .map(|(_, value)| NodeAddressKey::with_flownode(value.peer.id))
             .collect();
         let flow_node_addrs =
-            flownode_addr_helper::get_flownode_addresses(self.kv_backend.clone(), keys).await?;
+            flownode_addr_helper::get_flownode_addresses(&self.kv_backend, keys).await?;
         for (_, flow_route_value) in flow_routes.iter_mut() {
             let flownode_id = flow_route_value.peer.id;
+            // If an id lacks a corresponding address in the `flow_node_addrs`,
+            // it means the old address in `table_flow_value`` is still valid,
+            // which is expected.
             if let Some(node_addr) = flow_node_addrs.get(&flownode_id) {
                 flow_route_value.peer.addr = node_addr.peer.addr.clone();
             }

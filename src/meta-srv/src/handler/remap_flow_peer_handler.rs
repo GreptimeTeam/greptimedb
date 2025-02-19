@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cmp::Ordering;
-
 use api::v1::meta::{HeartbeatRequest, Peer, Role};
 use common_meta::key::node_address::{NodeAddressKey, NodeAddressValue};
 use common_meta::key::{MetadataKey, MetadataValue};
