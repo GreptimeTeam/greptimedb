@@ -1804,11 +1804,7 @@ impl PromPlanner {
             })?
             .clone();
         // remove le column from tag columns
-        let tag_columns = std::mem::take(&mut self.ctx.tag_columns);
-        self.ctx.tag_columns = tag_columns
-            .into_iter()
-            .filter(|col| col != LE_COLUMN_NAME)
-            .collect();
+        self.ctx.tag_columns.retain(|col| col != LE_COLUMN_NAME);
 
         Ok(LogicalPlan::Extension(Extension {
             node: Arc::new(
