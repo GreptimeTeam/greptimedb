@@ -494,6 +494,7 @@ mod test {
 
     #[tokio::test]
     async fn test_plan_time_window_lower_bound() {
+        use datafusion_expr::{col, lit};
         let query_engine = create_test_query_engine();
         let ctx = QueryContext::arc();
 
@@ -503,28 +504,32 @@ mod test {
                 "SELECT date_bin('5 minutes', ts) FROM numbers_with_ts;",
                 Timestamp::new(23, TimeUnit::Millisecond),
                 None,
+                "SELECT date_bin('5 minutes', ts) FROM numbers_with_ts;"
             ),
             // time index
             (
                 "SELECT date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window;",
                 Timestamp::new(23, TimeUnit::Millisecond),
                 Some(Timestamp::new(0, TimeUnit::Millisecond)),
+                "SELECT date_bin('5 minutes', numbers_with_ts.ts) AS time_window FROM numbers_with_ts WHERE (ts > CAST('1970-01-01 00:00:00' AS TIMESTAMP)) GROUP BY date_bin('5 minutes', numbers_with_ts.ts)"
             ),
             // time index with other fields
             (
                 "SELECT sum(number) as sum_up, date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window;",
                 Timestamp::new(23, TimeUnit::Millisecond),
                 Some(Timestamp::new(0, TimeUnit::Millisecond)),
+                "SELECT sum(numbers_with_ts.number) AS sum_up, date_bin('5 minutes', numbers_with_ts.ts) AS time_window FROM numbers_with_ts WHERE (ts > CAST('1970-01-01 00:00:00' AS TIMESTAMP)) GROUP BY date_bin('5 minutes', numbers_with_ts.ts)"
             ),
             // time index with other pks
             (
                 "SELECT number, date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window, number;",
                 Timestamp::new(23, TimeUnit::Millisecond),
                 Some(Timestamp::new(0, TimeUnit::Millisecond)),
+                "SELECT numbers_with_ts.number, date_bin('5 minutes', numbers_with_ts.ts) AS time_window FROM numbers_with_ts WHERE (ts > CAST('1970-01-01 00:00:00' AS TIMESTAMP)) GROUP BY date_bin('5 minutes', numbers_with_ts.ts), numbers_with_ts.number"
             ),
         ];
 
-        for (sql, current, expected) in testcases {
+        for (sql, current, expected, unparsed) in testcases {
             let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, true)
                 .await
                 .unwrap();
@@ -538,6 +543,21 @@ mod test {
             .await
             .unwrap();
             assert_eq!(real, expected);
+
+            let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, false)
+                .await
+                .unwrap();
+
+            let new_sql = if let Some(real) = real {
+                let value = Value::from(real);
+                let value = value.try_to_scalar_value(&value.data_type()).unwrap();
+                let mut add_filter = AddFilterRewriter::new(col("ts").gt(lit(value)));
+                let plan = plan.rewrite(&mut add_filter).unwrap().data;
+                df_plan_to_sql(&plan).unwrap()
+            } else {
+                sql.to_string()
+            };
+            assert_eq!(unparsed, new_sql);
         }
     }
 }
