@@ -51,12 +51,11 @@ impl HeartbeatHandler for RemapFlowPeerHandler {
         let flow_node_id = peer.id;
 
         let refresh = if let Some(mut epoch) = self.epoch_cache.get_mut(&flow_node_id) {
-            match current_epoch.cmp(epoch.value()) {
-                Ordering::Greater => {
-                    *epoch.value_mut() = current_epoch;
-                    true
-                }
-                _ => false,
+            if current_epoch > *epoch.value() {
+                *epoch.value_mut() = current_epoch;
+                true
+            } else {
+                false
             }
         } else {
             self.epoch_cache.insert(flow_node_id, current_epoch);
