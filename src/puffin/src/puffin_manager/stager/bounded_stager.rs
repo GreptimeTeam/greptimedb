@@ -300,6 +300,7 @@ impl Stager for BoundedStager {
         self.cache
             .invalidate_entries_if(move |_k, v| v.puffin_file_name() == file_name)
             .unwrap(); // SAFETY: `support_invalidation_closures` is enabled
+        self.cache.run_pending_tasks().await;
         Ok(())
     }
 }
