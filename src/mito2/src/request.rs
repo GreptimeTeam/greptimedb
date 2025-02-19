@@ -690,6 +690,7 @@ impl WorkerRequest {
 #[derive(Debug)]
 pub(crate) enum DdlRequest {
     Create(RegionCreateRequest),
+    #[allow(dead_code)]
     Drop(RegionDropRequest),
     Open((RegionOpenRequest, Option<WalEntryReceiver>)),
     Close(RegionCloseRequest),
