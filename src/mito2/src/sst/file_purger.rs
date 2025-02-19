@@ -92,8 +92,8 @@ impl FilePurger for LocalFilePurger {
 
             if let Some(write_cache) = cache_manager.as_ref().and_then(|cache| cache.write_cache())
             {
-                // Removes the inverted index from the cache.
-                if file_meta.inverted_index_available() {
+                // Removes index file from the cache.
+                if file_meta.exists_index() {
                     write_cache
                         .remove(IndexKey::new(
                             file_meta.region_id,
@@ -110,6 +110,18 @@ impl FilePurger for LocalFilePurger {
                         FileType::Parquet,
                     ))
                     .await;
+            }
+
+            // Purges index content in the stager.
+            let puffin_file_name =
+                crate::sst::location::index_file_path(sst_layer.region_dir(), file_meta.file_id);
+            if let Err(e) = sst_layer
+                .puffin_manager_factory()
+                .purge_stager(&puffin_file_name)
+                .await
+            {
+                error!(e; "Failed to purge stager with index file, file_id: {}, region: {}",
+                    file_meta.file_id, file_meta.region_id);
             }
         })) {
             error!(e; "Failed to schedule the file purge request");
@@ -146,7 +158,7 @@ mod tests {
         let path = location::sst_file_path(sst_dir, sst_file_id);
 
         let index_aux_path = dir.path().join("index_aux");
-        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None)
+        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
             .await
             .unwrap();
         let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
@@ -202,7 +214,7 @@ mod tests {
         let sst_dir = "table1";
 
         let index_aux_path = dir.path().join("index_aux");
-        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None)
+        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
             .await
             .unwrap();
         let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())

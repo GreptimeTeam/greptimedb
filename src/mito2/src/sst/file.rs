@@ -154,6 +154,10 @@ pub enum IndexType {
 }
 
 impl FileMeta {
+    pub fn exists_index(&self) -> bool {
+        !self.available_indexes.is_empty()
+    }
+
     /// Returns true if the file has an inverted index
     pub fn inverted_index_available(&self) -> bool {
         self.available_indexes.contains(&IndexType::InvertedIndex)
