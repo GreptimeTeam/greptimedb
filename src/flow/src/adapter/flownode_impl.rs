@@ -153,7 +153,10 @@ impl Flownode for FlowWorkerManager {
         }
     }
 
+    #[allow(unreachable_code, unused)]
     async fn handle_inserts(&self, request: InsertRequests) -> Result<FlowResponse> {
+        return Ok(Default::default());
+
         // using try_read to ensure two things:
         // 1. flush wouldn't happen until inserts before it is inserted
         // 2. inserts happening concurrently with flush wouldn't be block by flush

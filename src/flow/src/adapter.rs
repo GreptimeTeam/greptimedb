@@ -49,12 +49,13 @@ pub(crate) use crate::adapter::node_context::FlownodeContext;
 use crate::adapter::refill::RefillTask;
 use crate::adapter::table_source::ManagedTableSource;
 use crate::adapter::util::relation_desc_to_column_schemas_with_fallback;
-pub(crate) use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
+pub(crate) use crate::adapter::worker::{create_worker, WorkerHandle};
 use crate::compute::ErrCollector;
 use crate::df_optimizer::sql_to_flow_plan;
 use crate::error::{EvalSnafu, ExternalSnafu, InternalSnafu, InvalidQuerySnafu, UnexpectedSnafu};
 use crate::expr::Batch;
 use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_ROWS, METRIC_FLOW_RUN_INTERVAL_MS};
+use crate::recording_rules::RecordingRuleEngine;
 use crate::repr::{self, DiffRow, RelationDesc, Row, BATCH_SIZE};
 
 mod flownode_impl;
@@ -171,6 +172,8 @@ pub struct FlowWorkerManager {
     flush_lock: RwLock<()>,
     /// receive a oneshot sender to send state size report
     state_report_handler: RwLock<Option<StateReportHandler>>,
+    /// engine for recording rule
+    rule_engine: RecordingRuleEngine,
 }
 
 /// Building FlownodeManager
@@ -185,6 +188,7 @@ impl FlowWorkerManager {
         node_id: Option<u32>,
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
+        rule_engine: RecordingRuleEngine,
     ) -> Self {
         let srv_map = ManagedTableSource::new(
             table_meta.table_info_manager().clone(),
@@ -207,31 +211,13 @@ impl FlowWorkerManager {
             node_id,
             flush_lock: RwLock::new(()),
             state_report_handler: RwLock::new(None),
+            rule_engine,
         }
     }
 
     pub async fn with_state_report_handler(self, handler: StateReportHandler) -> Self {
         *self.state_report_handler.write().await = Some(handler);
         self
-    }
-
-    /// Create a flownode manager with one worker
-    pub fn new_with_workers<'s>(
-        node_id: Option<u32>,
-        query_engine: Arc<dyn QueryEngine>,
-        table_meta: TableMetadataManagerRef,
-        num_workers: usize,
-    ) -> (Self, Vec<Worker<'s>>) {
-        let mut zelf = Self::new(node_id, query_engine, table_meta);
-
-        let workers: Vec<_> = (0..num_workers)
-            .map(|_| {
-                let (handle, worker) = create_worker();
-                zelf.add_worker_handle(handle);
-                worker
-            })
-            .collect();
-        (zelf, workers)
     }
 
     /// add a worker handler to manager, meaning this corresponding worker is under it's manage
@@ -751,7 +737,11 @@ pub struct CreateFlowArgs {
 /// Create&Remove flow
 impl FlowWorkerManager {
     /// remove a flow by it's id
+    #[allow(unreachable_code)]
     pub async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
+        // TODO(discord9): reroute some back to streaming engine later
+        return self.rule_engine.remove_flow(flow_id).await;
+
         for handle in self.worker_handles.iter() {
             if handle.contains_flow(flow_id).await? {
                 handle.remove_flow(flow_id).await?;
@@ -767,8 +757,10 @@ impl FlowWorkerManager {
     /// steps to create task:
     /// 1. parse query into typed plan(and optional parse expire_after expr)
     /// 2. render source/sink with output table id and used input table id
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, unreachable_code)]
     pub async fn create_flow(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
+        // TODO(discord9): reroute some back to streaming engine later
+        return self.rule_engine.create_flow(args).await;
         let CreateFlowArgs {
             flow_id,
             sink_table_name,

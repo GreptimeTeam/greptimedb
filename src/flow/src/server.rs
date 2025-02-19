@@ -57,6 +57,7 @@ use crate::error::{
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::metrics::{METRIC_FLOW_PROCESSING_TIME, METRIC_FLOW_ROWS};
+use crate::recording_rules::{FrontendClient, RecordingRuleEngine};
 use crate::transform::register_function_to_query_engine;
 use crate::utils::{SizeReportSender, StateReportHandler};
 use crate::{Error, FlowWorkerManager, FlownodeOptions};
@@ -271,6 +272,8 @@ pub struct FlownodeBuilder {
     heartbeat_task: Option<HeartbeatTask>,
     /// receive a oneshot sender to send state size report
     state_report_handler: Option<StateReportHandler>,
+    /// Client to send sql to frontend
+    frontend_client: Arc<FrontendClient>,
 }
 
 impl FlownodeBuilder {
@@ -281,6 +284,7 @@ impl FlownodeBuilder {
         table_meta: TableMetadataManagerRef,
         catalog_manager: CatalogManagerRef,
         flow_metadata_manager: FlowMetadataManagerRef,
+        frontend_client: Arc<FrontendClient>,
     ) -> Self {
         Self {
             opts,
@@ -290,6 +294,7 @@ impl FlownodeBuilder {
             flow_metadata_manager,
             heartbeat_task: None,
             state_report_handler: None,
+            frontend_client,
         }
     }
 
@@ -447,7 +452,10 @@ impl FlownodeBuilder {
 
         let node_id = self.opts.node_id.map(|id| id as u32);
 
-        let mut man = FlowWorkerManager::new(node_id, query_engine, table_meta);
+        let rule_engine =
+            RecordingRuleEngine::new(self.frontend_client.clone(), query_engine.clone());
+
+        let mut man = FlowWorkerManager::new(node_id, query_engine, table_meta, rule_engine);
         for worker_id in 0..num_workers {
             let (tx, rx) = oneshot::channel();
 
