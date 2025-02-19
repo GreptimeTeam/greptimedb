@@ -16,12 +16,9 @@
 //!
 //! Refer to [`CmcdProcessor`] for more information.
 
-use std::collections::BTreeMap;
-
 use snafu::{OptionExt, ResultExt};
 use urlencoding::decode;
 
-use super::IntermediateStatus;
 use crate::etl::error::{
     CmcdMissingKeySnafu, CmcdMissingValueSnafu, Error, FailedToParseFloatKeySnafu,
     FailedToParseIntKeySnafu, KeyMustBeStringSnafu, ProcessorExpectStringSnafu,
@@ -33,6 +30,7 @@ use crate::etl::processor::{
     IGNORE_MISSING_NAME,
 };
 use crate::etl::value::Value;
+use crate::etl::PipelineMap;
 
 pub(crate) const PROCESSOR_CMCD: &str = "cmcd";
 
@@ -161,8 +159,8 @@ impl CmcdProcessor {
         format!("{}_{}", prefix, key)
     }
 
-    fn parse(&self, name: &str, value: &str) -> Result<BTreeMap<String, Value>> {
-        let mut working_set = BTreeMap::new();
+    fn parse(&self, name: &str, value: &str) -> Result<PipelineMap> {
+        let mut working_set = PipelineMap::new();
 
         let parts = value.split(',');
 
@@ -251,7 +249,7 @@ impl Processor for CmcdProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut IntermediateStatus) -> Result<()> {
+    fn exec_mut(&self, val: &mut PipelineMap) -> Result<()> {
         for field in self.fields.iter() {
             let name = field.input_field();
 
@@ -285,11 +283,9 @@ impl Processor for CmcdProcessor {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use urlencoding::decode;
 
-    use super::CmcdProcessor;
+    use super::*;
     use crate::etl::field::{Field, Fields};
     use crate::etl::value::Value;
 
@@ -436,7 +432,7 @@ mod tests {
             let expected = vec
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v))
-                .collect::<BTreeMap<String, Value>>();
+                .collect::<PipelineMap>();
 
             let actual = processor.parse("prefix", &decoded).unwrap();
             assert_eq!(actual, expected);

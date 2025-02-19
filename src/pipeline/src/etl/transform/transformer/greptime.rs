@@ -14,7 +14,7 @@
 
 pub mod coerce;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use ahash::{HashMap, HashMapExt};
@@ -34,10 +34,10 @@ use crate::etl::error::{
     UnsupportedNumberTypeSnafu,
 };
 use crate::etl::field::{Field, Fields};
-use crate::etl::processor::IntermediateStatus;
 use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transformer, Transforms};
 use crate::etl::value::{Timestamp, Value};
+use crate::etl::PipelineMap;
 
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
@@ -178,7 +178,7 @@ impl Transformer for GreptimeTransformer {
         }
     }
 
-    fn transform_mut(&self, val: &mut IntermediateStatus) -> Result<Self::VecOutput> {
+    fn transform_mut(&self, val: &mut PipelineMap) -> Result<Self::VecOutput> {
         let mut values = vec![GreptimeValue { value_data: None }; self.schema.len()];
         let mut output_index = 0;
         for transform in self.transforms.iter() {
@@ -327,7 +327,7 @@ fn resolve_number_schema(
     )
 }
 
-fn values_to_row(schema_info: &mut SchemaInfo, values: BTreeMap<String, Value>) -> Result<Row> {
+fn values_to_row(schema_info: &mut SchemaInfo, values: PipelineMap) -> Result<Row> {
     let mut row: Vec<GreptimeValue> = Vec::with_capacity(schema_info.schema.len());
     for _ in 0..schema_info.schema.len() {
         row.push(GreptimeValue { value_data: None });
@@ -513,7 +513,7 @@ fn values_to_row(schema_info: &mut SchemaInfo, values: BTreeMap<String, Value>) 
 }
 
 fn identity_pipeline_inner<'a>(
-    array: Vec<BTreeMap<String, Value>>,
+    array: Vec<PipelineMap>,
     tag_column_names: Option<impl Iterator<Item = &'a String>>,
     _params: &GreptimePipelineParams,
 ) -> Result<Rows> {
@@ -569,7 +569,7 @@ fn identity_pipeline_inner<'a>(
 /// 4. The pipeline will return an error if the same column datatype is mismatched
 /// 5. The pipeline will analyze the schema of each json record and merge them to get the final schema.
 pub fn identity_pipeline(
-    array: Vec<BTreeMap<String, Value>>,
+    array: Vec<PipelineMap>,
     table: Option<Arc<table::Table>>,
     params: &GreptimePipelineParams,
 ) -> Result<Rows> {
@@ -577,7 +577,7 @@ pub fn identity_pipeline(
         array
             .into_iter()
             .map(|item| flatten_object(item, DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING))
-            .collect::<Result<Vec<BTreeMap<String, Value>>>>()?
+            .collect::<Result<Vec<PipelineMap>>>()?
     } else {
         array
     };
@@ -596,11 +596,8 @@ pub fn identity_pipeline(
 ///
 /// The `max_nested_levels` parameter is used to limit the nested levels of the JSON object.
 /// The error will be returned if the nested levels is greater than the `max_nested_levels`.
-pub fn flatten_object(
-    object: BTreeMap<String, Value>,
-    max_nested_levels: usize,
-) -> Result<BTreeMap<String, Value>> {
-    let mut flattened = BTreeMap::new();
+pub fn flatten_object(object: PipelineMap, max_nested_levels: usize) -> Result<PipelineMap> {
+    let mut flattened = PipelineMap::new();
 
     if !object.is_empty() {
         // it will use recursion to flatten the object.
@@ -611,9 +608,9 @@ pub fn flatten_object(
 }
 
 fn do_flatten_object(
-    dest: &mut BTreeMap<String, Value>,
+    dest: &mut PipelineMap,
     base: Option<&str>,
-    object: BTreeMap<String, Value>,
+    object: PipelineMap,
     current_level: usize,
     max_nested_levels: usize,
 ) -> Result<()> {

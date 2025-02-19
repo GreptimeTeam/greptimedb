@@ -15,7 +15,6 @@
 use regex::Regex;
 use snafu::{OptionExt, ResultExt};
 
-use super::IntermediateStatus;
 use crate::etl::error::{
     Error, GsubPatternRequiredSnafu, GsubReplacementRequiredSnafu, KeyMustBeStringSnafu,
     ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, RegexSnafu, Result,
@@ -26,6 +25,7 @@ use crate::etl::processor::{
     IGNORE_MISSING_NAME, PATTERN_NAME,
 };
 use crate::etl::value::Value;
+use crate::etl::PipelineMap;
 
 pub(crate) const PROCESSOR_GSUB: &str = "gsub";
 
@@ -118,7 +118,7 @@ impl crate::etl::processor::Processor for GsubProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut IntermediateStatus) -> Result<()> {
+    fn exec_mut(&self, val: &mut PipelineMap) -> Result<()> {
         for field in self.fields.iter() {
             let index = field.input_field();
             match val.get(index) {
