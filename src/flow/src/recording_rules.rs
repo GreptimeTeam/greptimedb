@@ -80,7 +80,7 @@ pub async fn sql_to_df_plan(
 /// 3. show up in GROUP BY clause
 ///
 /// note this plan should only contain one TableScan
-async fn find_plan_time_window_lower_bound(
+pub async fn find_plan_time_window_lower_bound(
     plan: &LogicalPlan,
     current: Timestamp,
     query_ctx: QueryContextRef,
