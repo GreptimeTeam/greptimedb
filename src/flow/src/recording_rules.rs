@@ -454,42 +454,34 @@ mod test {
 
     #[tokio::test]
     async fn test_add_filter() {
+        let testcases = vec![
+            (
+                "SELECT number FROM numbers_with_ts GROUP BY number","SELECT numbers_with_ts.number FROM numbers_with_ts WHERE (number > 4) GROUP BY numbers_with_ts.number"
+            ),
+            (
+                "SELECT number FROM numbers_with_ts WHERE number < 2 OR number >10",
+                "SELECT numbers_with_ts.number FROM numbers_with_ts WHERE (((numbers_with_ts.number < 2) OR (numbers_with_ts.number > 10)) AND (number > 4))"
+            ),
+            (
+                "SELECT date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window",
+                "SELECT date_bin('5 minutes', numbers_with_ts.ts) AS time_window FROM numbers_with_ts WHERE (number > 4) GROUP BY date_bin('5 minutes', numbers_with_ts.ts)"
+            )
+        ];
         use datafusion_expr::{col, lit};
         let query_engine = create_test_query_engine();
         let ctx = QueryContext::arc();
 
-        let sql = "SELECT number FROM numbers_with_ts GROUP BY number";
-        let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, false)
-            .await
-            .unwrap();
+        for (before, after) in testcases {
+            let sql = before;
+            let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, false)
+                .await
+                .unwrap();
 
-        let mut add_filter = AddFilterRewriter::new(col("number").gt(lit(4u32)));
-        let plan = plan.rewrite(&mut add_filter).unwrap().data;
-        let new_sql = df_plan_to_sql(&plan).unwrap();
-        assert_eq!(
-            "SELECT numbers_with_ts.number FROM numbers_with_ts WHERE (number > 4) GROUP BY numbers_with_ts.number",
-            new_sql
-        );
-
-        let sql = "SELECT number FROM numbers_with_ts WHERE number < 2 OR number >10";
-        let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, false)
-            .await
-            .unwrap();
-
-        let mut add_filter = AddFilterRewriter::new(col("number").gt(lit(4u32)));
-        let plan = plan.rewrite(&mut add_filter).unwrap().data;
-        let new_sql = df_plan_to_sql(&plan).unwrap();
-        assert_eq!("SELECT numbers_with_ts.number FROM numbers_with_ts WHERE (((numbers_with_ts.number < 2) OR (numbers_with_ts.number > 10)) AND (number > 4))", new_sql);
-
-        let sql = "SELECT date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window";
-        let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, false)
-            .await
-            .unwrap();
-
-        let mut add_filter = AddFilterRewriter::new(col("number").gt(lit(4u32)));
-        let plan = plan.rewrite(&mut add_filter).unwrap().data;
-        let new_sql = df_plan_to_sql(&plan).unwrap();
-        assert_eq!("SELECT date_bin('5 minutes', numbers_with_ts.ts) AS time_window FROM numbers_with_ts WHERE (number > 4) GROUP BY date_bin('5 minutes', numbers_with_ts.ts)", new_sql);
+            let mut add_filter = AddFilterRewriter::new(col("number").gt(lit(4u32)));
+            let plan = plan.rewrite(&mut add_filter).unwrap().data;
+            let new_sql = df_plan_to_sql(&plan).unwrap();
+            assert_eq!(after, new_sql);
+        }
     }
 
     #[tokio::test]
