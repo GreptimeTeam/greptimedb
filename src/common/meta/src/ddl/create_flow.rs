@@ -29,7 +29,6 @@ use common_procedure::{
 use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
 use futures::future::join_all;
-use futures::TryStreamExt;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -131,9 +130,10 @@ impl CreateFlowProcedure {
                 .flow_metadata_manager
                 .flow_route_manager()
                 .routes(flow_id)
-                .map_ok(|(_, value)| value.peer)
-                .try_collect::<Vec<_>>()
-                .await?;
+                .await?
+                .into_iter()
+                .map(|(_, value)| value.peer)
+                .collect::<Vec<_>>();
             self.data.flow_id = Some(flow_id);
             self.data.peers = peers;
             info!("Replacing flow, flow_id: {}", flow_id);
