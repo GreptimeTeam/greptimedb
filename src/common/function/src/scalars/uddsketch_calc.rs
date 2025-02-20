@@ -143,11 +143,16 @@ mod tests {
 
         // Create a test sketch
         let mut sketch = UDDSketch::new(128, 0.01);
-        sketch.add_value(1.0);
-        sketch.add_value(2.0);
-        sketch.add_value(3.0);
-        sketch.add_value(4.0);
-        sketch.add_value(5.0);
+        sketch.add_value(10.0);
+        sketch.add_value(20.0);
+        sketch.add_value(30.0);
+        sketch.add_value(40.0);
+        sketch.add_value(50.0);
+        sketch.add_value(60.0);
+        sketch.add_value(70.0);
+        sketch.add_value(80.0);
+        sketch.add_value(90.0);
+        sketch.add_value(100.0);
 
         // Get expected values directly from the sketch
         let expected_p50 = sketch.estimate_quantile(0.5);

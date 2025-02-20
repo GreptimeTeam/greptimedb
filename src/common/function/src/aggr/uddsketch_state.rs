@@ -61,7 +61,9 @@ impl UddSketchState {
 
     fn merge(&mut self, raw: &[u8]) {
         if let Ok(uddsketch) = bincode::deserialize::<UDDSketch>(raw) {
-            self.uddsketch.merge_sketch(&uddsketch);
+            if uddsketch.count() != 0 {
+                self.uddsketch.merge_sketch(&uddsketch);
+            }
         } else {
             trace!("Warning: Failed to deserialize UDDSketch from {:?}", raw);
         }
@@ -104,7 +106,7 @@ fn downcast_accumulator_args(args: AccumulatorArgs) -> DfResult<(u64, f64)> {
 
 impl DfAccumulator for UddSketchState {
     fn update_batch(&mut self, values: &[ArrayRef]) -> DfResult<()> {
-        let array = &values[2];
+        let array = &values[2]; // the third column is data value
         let f64_array = as_primitive_array::<Float64Type>(array)?;
         for v in f64_array.iter().flatten() {
             self.update(v);
