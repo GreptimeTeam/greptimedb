@@ -66,7 +66,6 @@ pub struct HeartbeatTask {
     report_interval: Duration,
     retry_interval: Duration,
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
-    start_time_ms: u64,
     running: Arc<AtomicBool>,
     query_stat_size: Option<SizeReportSender>,
 }
@@ -90,7 +89,6 @@ impl HeartbeatTask {
             report_interval: heartbeat_opts.interval,
             retry_interval: heartbeat_opts.retry_interval,
             resp_handler_executor,
-            start_time_ms: common_time::util::current_time_millis() as u64,
             running: Arc::new(AtomicBool::new(false)),
             query_stat_size: None,
         }
@@ -183,12 +181,11 @@ impl HeartbeatTask {
         mut outgoing_rx: mpsc::Receiver<OutgoingMessage>,
     ) {
         let report_interval = self.report_interval;
-        let start_time_ms = self.start_time_ms;
+        let node_epoch = self.node_epoch;
         let self_peer = Some(Peer {
             id: self.node_id,
             addr: self.peer_addr.clone(),
         });
-        let self_node_epoch = self.node_epoch;
 
         let query_stat_size = self.query_stat_size.clone();
 
@@ -201,7 +198,8 @@ impl HeartbeatTask {
 
             let heartbeat_request = HeartbeatRequest {
                 peer: self_peer,
-                info: Self::build_node_info(start_time_ms),
+                node_epoch,
+                info: Self::build_node_info(node_epoch),
                 ..Default::default()
             };
 
