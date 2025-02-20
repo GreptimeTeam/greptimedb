@@ -40,7 +40,7 @@ use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlan, W
 use datatypes::prelude::VectorRef;
 use datatypes::schema::Schema;
 use futures_util::StreamExt;
-use session::context::{QueryContextRef, ANALYZE_FORMAT_HEADER_NAME};
+use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sqlparser::ast::AnalyzeFormat;
 use table::requests::{DeleteRequest, InsertRequest};
@@ -361,7 +361,7 @@ impl DatafusionQueryEngine {
         // skip optimize AnalyzeExec plan
         let optimized_plan = if let Some(analyze_plan) = plan.as_any().downcast_ref::<AnalyzeExec>()
         {
-            let format = if let Some(format) = ctx.query_ctx().extension(ANALYZE_FORMAT_HEADER_NAME)
+            let format = if let Some(format) = ctx.query_ctx().explain_format()
                 && format.to_lowercase() == "json"
             {
                 AnalyzeFormat::JSON

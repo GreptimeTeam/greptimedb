@@ -237,6 +237,13 @@ impl Instance {
 
         let output = match stmt {
             Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
+                // TODO: remove this when format is supported in datafusion
+                if let Statement::Explain(explain) = &stmt {
+                    if let Some(format) = explain.format() {
+                        query_ctx.set_explain_format(format.to_string());
+                    }
+                }
+
                 let stmt = QueryStatement::Sql(stmt);
                 let plan = self
                     .statement_executor

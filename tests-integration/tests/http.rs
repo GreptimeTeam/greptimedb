@@ -40,7 +40,6 @@ use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Respon
 use servers::http::test_helpers::{TestClient, TestResponse};
 use servers::http::GreptimeQueryOutput;
 use servers::prom_store;
-use session::context::ANALYZE_FORMAT_HEADER_NAME;
 use table::table_name::TableName;
 use tests_integration::test_util::{
     setup_test_http_app, setup_test_http_app_with_frontend,
@@ -416,8 +415,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
     // test analyze format
     let res = client
-        .get("/v1/sql?sql=explain analyze select cpu, ts from demo limit 1")
-        .header(ANALYZE_FORMAT_HEADER_NAME, "json")
+        .get("/v1/sql?sql=explain analyze format json select cpu, ts from demo limit 1")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
