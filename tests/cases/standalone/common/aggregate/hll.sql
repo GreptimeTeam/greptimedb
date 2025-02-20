@@ -30,4 +30,20 @@ INSERT INTO test_hll (`id`, `value`) VALUES
 
 select hll_calc(hll_state(`value`)) from test_hll;
 
-drop table test_hll; 
+create table test_hll_merge (
+    `id` INT PRIMARY KEY,
+    `state` BINARY,
+    `ts` timestamp time index default now()
+);
+
+insert into test_hll_merge (`id`, `state`)
+select 1, hll_state(`value`) from test_hll;
+
+insert into test_hll_merge (`id`, `state`)
+select 2, hll_state(`value`) from test_hll;
+
+select hll_calc(hll_merge(`state`)) from test_hll_merge;
+
+drop table test_hll;
+
+drop table test_hll_merge;

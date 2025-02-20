@@ -16,5 +16,5 @@ mod hll_state;
 mod uddsketch_state;
 
 pub(crate) use hll_state::HllStateType;
-pub use hll_state::{HllState, HLL_STATE_NAME};
+pub use hll_state::{HllState, HLL_MERGE_NAME, HLL_STATE_NAME};
 pub use uddsketch_state::{UddSketchState, UDDSKETCH_STATE_NAME};

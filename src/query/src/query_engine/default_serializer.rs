@@ -127,7 +127,8 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
                 .register_udf(udf)
                 .context(RegisterUdfSnafu { name: func.name() })?;
             let _ = session_state.register_udaf(Arc::new(UddSketchState::udf_impl()));
-            let _ = session_state.register_udaf(Arc::new(HllState::udf_impl()));
+            let _ = session_state.register_udaf(Arc::new(HllState::state_udf_impl()));
+            let _ = session_state.register_udaf(Arc::new(HllState::merge_udf_impl()));
         }
         let logical_plan = DFLogicalSubstraitConvertor
             .decode(message, session_state)

@@ -48,3 +48,37 @@ select hll_calc(hll_state(`value`)) from test_hll;
 | 12                                  |
 +-------------------------------------+
 
+create table test_hll_merge (
+    `id` INT PRIMARY KEY,
+    `state` BINARY,
+    `ts` timestamp time index default now()
+);
+
+Affected Rows: 0
+
+insert into test_hll_merge (`id`, `state`)
+select 1, hll_state(`value`) from test_hll;
+
+Affected Rows: 1
+
+insert into test_hll_merge (`id`, `state`)
+select 2, hll_state(`value`) from test_hll;
+
+Affected Rows: 1
+
+select hll_calc(hll_merge(`state`)) from test_hll_merge;
+
++-------------------------------------------+
+| hll_calc(hll_merge(test_hll_merge.state)) |
++-------------------------------------------+
+| 12                                        |
++-------------------------------------------+
+
+drop table test_hll;
+
+Affected Rows: 0
+
+drop table test_hll_merge;
+
+Affected Rows: 0
+
