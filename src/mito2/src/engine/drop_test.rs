@@ -59,7 +59,7 @@ async fn test_engine_drop_region() {
         .handle_request(
             region_id,
             RegionRequest::Drop(RegionDropRequest {
-                fast_drop_database_path: false,
+                fast_drop_path: false,
             }),
         )
         .await
@@ -94,7 +94,7 @@ async fn test_engine_drop_region() {
         .handle_request(
             region_id,
             RegionRequest::Drop(RegionDropRequest {
-                fast_drop_database_path: false,
+                fast_drop_path: false,
             }),
         )
         .await
@@ -205,7 +205,7 @@ async fn test_engine_drop_region_for_custom_store() {
         .handle_request(
             custom_region_id,
             RegionRequest::Drop(RegionDropRequest {
-                fast_drop_database_path: false,
+                fast_drop_path: false,
             }),
         )
         .await
