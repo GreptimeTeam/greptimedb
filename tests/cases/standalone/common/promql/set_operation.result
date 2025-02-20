@@ -638,3 +638,78 @@ drop table cache_miss;
 
 Affected Rows: 0
 
+create table cache_hit_with_null_label (
+    ts timestamp time index,
+    job string,
+    null_label string null,
+    greptime_value double,
+    primary key (job, null_label)
+);
+
+Affected Rows: 0
+
+create table cache_miss_with_null_label (
+    ts timestamp time index,
+    job string,
+    null_label string null,
+    greptime_value double,
+    primary key (job, null_label)
+);
+
+Affected Rows: 0
+
+insert into cache_hit_with_null_label values
+    (3000, "read", null, 1.0),
+    (3000, "write", null, 2.0),
+    (4000, "read", null, 3.0),
+    (4000, "write", null, 4.0);
+
+Affected Rows: 4
+
+insert into cache_miss_with_null_label values
+    (3000, "read", null, 1.0),
+    (3000, "write", null, 2.0),
+    (4000, "read", null, 1.0),
+    (4000, "write", null, 2.0);
+
+Affected Rows: 4
+
+-- SQLNESS SORT_RESULT 3 1
+-- null!=null, so it will returns the empty set.
+tql eval (3, 4, '1s') cache_hit_with_null_label / (cache_miss_with_null_label + cache_hit_with_null_label);
+
+++
+++
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3, 4, '1s') cache_hit_with_null_label / ignoring(null_label) (cache_miss_with_null_label + ignoring(null_label) cache_hit_with_null_label);
+
++-------+------------+---------------------+---------------------------------------------------------------------------------------------------------------+
+| job   | null_label | ts                  | lhs.greptime_value / rhs.cache_miss_with_null_label.greptime_value + cache_hit_with_null_label.greptime_value |
++-------+------------+---------------------+---------------------------------------------------------------------------------------------------------------+
+| read  |            | 1970-01-01T00:00:03 | 0.5                                                                                                           |
+| read  |            | 1970-01-01T00:00:04 | 0.75                                                                                                          |
+| write |            | 1970-01-01T00:00:03 | 0.5                                                                                                           |
+| write |            | 1970-01-01T00:00:04 | 0.6666666666666666                                                                                            |
++-------+------------+---------------------+---------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3, 4, '1s') cache_hit_with_null_label / on(job) (cache_miss_with_null_label + on(job) cache_hit_with_null_label);
+
++-------+------------+---------------------+---------------------------------------------------------------------------------------------------------------+
+| job   | null_label | ts                  | lhs.greptime_value / rhs.cache_miss_with_null_label.greptime_value + cache_hit_with_null_label.greptime_value |
++-------+------------+---------------------+---------------------------------------------------------------------------------------------------------------+
+| read  |            | 1970-01-01T00:00:03 | 0.5                                                                                                           |
+| read  |            | 1970-01-01T00:00:04 | 0.75                                                                                                          |
+| write |            | 1970-01-01T00:00:03 | 0.5                                                                                                           |
+| write |            | 1970-01-01T00:00:04 | 0.6666666666666666                                                                                            |
++-------+------------+---------------------+---------------------------------------------------------------------------------------------------------------+
+
+drop table cache_hit_with_null_label;
+
+Affected Rows: 0
+
+drop table cache_miss_with_null_label;
+
+Affected Rows: 0
+
