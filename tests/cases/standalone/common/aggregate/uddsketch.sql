@@ -16,8 +16,6 @@ INSERT INTO test_uddsketch (`id`, `value`) VALUES
     (9, 90.0),
     (10, 100.0);
 
-select uddsketch_state(128, 0.01, `value`) from test_uddsketch;
-
 select uddsketch_calc(0.1, uddsketch_state(128, 0.01, `value`)) from test_uddsketch;
 
 select uddsketch_calc(0.5, uddsketch_state(128, 0.01, `value`)) from test_uddsketch;

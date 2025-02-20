@@ -18,14 +18,14 @@ use common_query::prelude::*;
 use common_telemetry::trace;
 use datafusion::common::cast::{as_binary_array, as_primitive_array};
 use datafusion::common::not_impl_err;
-use datafusion::error::Result as DfResult;
+use datafusion::error::{DataFusionError, Result as DfResult};
 use datafusion::logical_expr::function::AccumulatorArgs;
 use datafusion::logical_expr::{Accumulator as DfAccumulator, AggregateUDF};
 use datafusion::physical_plan::expressions::Literal;
 use datafusion::prelude::create_udaf;
 use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::datatypes::{DataType, Float64Type};
-use uddsketch::UDDSketch;
+use uddsketch::{SketchHashKey, UDDSketch};
 
 pub const UDDSKETCH_STATE_NAME: &str = "uddsketch_state";
 
@@ -117,17 +117,36 @@ impl DfAccumulator for UddSketchState {
 
     fn evaluate(&mut self) -> DfResult<ScalarValue> {
         Ok(ScalarValue::Binary(Some(
-            bincode::serialize(&self.uddsketch).unwrap(),
+            bincode::serialize(&self.uddsketch).map_err(|e| {
+                DataFusionError::Internal(format!("Failed to serialize UDDSketch: {}", e))
+            })?,
         )))
     }
 
     fn size(&self) -> usize {
-        0
+        // Base size of UDDSketch struct fields
+        let mut total_size = std::mem::size_of::<f64>() * 3 + // alpha, gamma, values_sum
+                            std::mem::size_of::<u32>() +      // compactions
+                            std::mem::size_of::<u64>() * 2; // max_buckets, num_values
+
+        // Size of buckets (SketchHashMap)
+        // Each bucket entry contains:
+        // - SketchHashKey (enum with i64/Zero/Invalid variants)
+        // - SketchHashEntry (count: u64, next: SketchHashKey)
+        let bucket_entry_size = std::mem::size_of::<SketchHashKey>() + // key
+                               std::mem::size_of::<u64>() +            // count
+                               std::mem::size_of::<SketchHashKey>(); // next
+
+        total_size += self.uddsketch.current_buckets_count() * bucket_entry_size;
+
+        total_size
     }
 
     fn state(&mut self) -> DfResult<Vec<ScalarValue>> {
         Ok(vec![ScalarValue::Binary(Some(
-            bincode::serialize(&self.uddsketch).unwrap(),
+            bincode::serialize(&self.uddsketch).map_err(|e| {
+                DataFusionError::Internal(format!("Failed to serialize UDDSketch: {}", e))
+            })?,
         ))])
     }
 
@@ -178,9 +197,30 @@ mod tests {
         if let ScalarValue::Binary(Some(bytes)) = &serialized {
             new_state.merge(bytes);
 
-            // Verify the merged state matches original
+            // Verify the merged state matches original by comparing deserialized values
+            let original_sketch: UDDSketch = bincode::deserialize(bytes).unwrap();
             let new_result = new_state.evaluate().unwrap();
-            assert_eq!(serialized, new_result);
+            if let ScalarValue::Binary(Some(new_bytes)) = new_result {
+                let new_sketch: UDDSketch = bincode::deserialize(&new_bytes).unwrap();
+                assert_eq!(original_sketch.count(), new_sketch.count());
+                assert_eq!(original_sketch.sum(), new_sketch.sum());
+                assert_eq!(original_sketch.mean(), new_sketch.mean());
+                assert_eq!(original_sketch.max_error(), new_sketch.max_error());
+                // Compare a few quantiles to ensure statistical equivalence
+                for q in [0.1, 0.5, 0.9].iter() {
+                    assert!(
+                        (original_sketch.estimate_quantile(*q) - new_sketch.estimate_quantile(*q))
+                            .abs()
+                            < 1e-10,
+                        "Quantile {} mismatch: original={}, new={}",
+                        q,
+                        original_sketch.estimate_quantile(*q),
+                        new_sketch.estimate_quantile(*q)
+                    );
+                }
+            } else {
+                panic!("Expected binary scalar value");
+            }
         } else {
             panic!("Expected binary scalar value");
         }
@@ -235,5 +275,33 @@ mod tests {
         } else {
             panic!("Expected binary scalar values");
         }
+    }
+
+    #[test]
+    fn test_uddsketch_state_size() {
+        let mut state = UddSketchState::new(10, 0.01);
+        let initial_size = state.size();
+
+        // Add some values to create buckets
+        state.update(1.0);
+        state.update(2.0);
+        state.update(3.0);
+
+        let size_with_values = state.size();
+        assert!(
+            size_with_values > initial_size,
+            "Size should increase after adding values: initial={}, with_values={}",
+            initial_size,
+            size_with_values
+        );
+
+        // Verify size increases with more buckets
+        state.update(10.0); // This should create a new bucket
+        assert!(
+            state.size() > size_with_values,
+            "Size should increase after adding new bucket: prev={}, new={}",
+            size_with_values,
+            state.size()
+        );
     }
 }

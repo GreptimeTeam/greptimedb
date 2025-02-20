@@ -108,7 +108,8 @@ impl Function for UddSketchCalcFunction {
             // Deserialize the UDDSketch from its bincode representation
             let sketch: UDDSketch = match bincode::deserialize(sketch_bytes) {
                 Ok(s) => s,
-                Err(_) => {
+                Err(e) => {
+                    common_telemetry::trace!("Failed to deserialize UDDSketch: {}", e);
                     builder.push_null();
                     continue;
                 }
