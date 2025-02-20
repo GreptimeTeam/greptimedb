@@ -129,7 +129,7 @@ etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "fc09a5696608d2a0aa718cc835d5cb9c4e8e9387" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "a25adc8a01340231121646d8f0a29d0e92f45461" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -160,7 +160,9 @@ parquet = { version = "53.0.0", default-features = false, features = ["arrow", "
 paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
-promql-parser = { version = "0.4.3", features = ["ser"] }
+promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", features = [
+    "ser",
+], rev = "27abb8e16003a50c720f00d6c85f41f5fa2a2a8e" }
 prost = "0.13"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.8"

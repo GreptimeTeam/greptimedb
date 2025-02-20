@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
-
 use snafu::{OptionExt, ResultExt};
 use urlencoding::{decode, encode};
 
@@ -27,6 +25,7 @@ use crate::etl::processor::{
     IGNORE_MISSING_NAME, METHOD_NAME,
 };
 use crate::etl::value::Value;
+use crate::PipelineMap;
 
 pub(crate) const PROCESSOR_URL_ENCODING: &str = "urlencoding";
 
@@ -127,7 +126,7 @@ impl crate::etl::processor::Processor for UrlEncodingProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut BTreeMap<String, Value>) -> Result<()> {
+    fn exec_mut(&self, val: &mut PipelineMap) -> Result<()> {
         for field in self.fields.iter() {
             let index = field.input_field();
             match val.get(index) {

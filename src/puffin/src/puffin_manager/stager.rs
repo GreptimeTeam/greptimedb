@@ -88,6 +88,9 @@ pub trait Stager: Send + Sync {
         dir_path: PathBuf,
         dir_size: u64,
     ) -> Result<()>;
+
+    /// Purges all content for the given puffin file from the staging area.
+    async fn purge(&self, puffin_file_name: &str) -> Result<()>;
 }
 
 /// `StagerNotifier` provides a way to notify the caller of the staging events.

@@ -823,6 +823,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to purge puffin stager"))]
+    PuffinPurgeStager {
+        source: puffin::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to build puffin reader"))]
     PuffinBuildReader {
         source: puffin::error::Error,
@@ -1062,7 +1069,8 @@ impl ErrorExt for Error {
             PuffinReadBlob { source, .. }
             | PuffinAddBlob { source, .. }
             | PuffinInitStager { source, .. }
-            | PuffinBuildReader { source, .. } => source.status_code(),
+            | PuffinBuildReader { source, .. }
+            | PuffinPurgeStager { source, .. } => source.status_code(),
             CleanDir { .. } => StatusCode::Unexpected,
             InvalidConfig { .. } => StatusCode::InvalidArguments,
             StaleLogEntry { .. } => StatusCode::Unexpected,

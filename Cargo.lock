@@ -3380,6 +3380,7 @@ dependencies = [
  "meta-client",
  "metric-engine",
  "mito2",
+ "num_cpus",
  "object-store",
  "prometheus",
  "prost 0.13.3",
@@ -4200,6 +4201,7 @@ dependencies = [
  "meta-client",
  "nom",
  "num-traits",
+ "num_cpus",
  "operator",
  "partition",
  "pretty_assertions",
@@ -4306,6 +4308,7 @@ dependencies = [
  "log-query",
  "log-store",
  "meta-client",
+ "num_cpus",
  "opentelemetry-proto 0.27.0",
  "operator",
  "partition",
@@ -4696,7 +4699,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=fc09a5696608d2a0aa718cc835d5cb9c4e8e9387#fc09a5696608d2a0aa718cc835d5cb9c4e8e9387"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=a25adc8a01340231121646d8f0a29d0e92f45461#a25adc8a01340231121646d8f0a29d0e92f45461"
 dependencies = [
  "prost 0.13.3",
  "serde",
@@ -8769,8 +8772,7 @@ dependencies = [
 [[package]]
 name = "promql-parser"
 version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fe99e6f80a79abccf1e8fb48dd63473a36057e600cc6ea36147c8318698ae6f"
+source = "git+https://github.com/GreptimeTeam/promql-parser.git?rev=27abb8e16003a50c720f00d6c85f41f5fa2a2a8e#27abb8e16003a50c720f00d6c85f41f5fa2a2a8e"
 dependencies = [
  "cfgrammar",
  "chrono",

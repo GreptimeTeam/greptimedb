@@ -53,6 +53,7 @@ lazy_static.workspace = true
 meta-client.workspace = true
 nom = "7.1.3"
 num-traits = "0.2"
+num_cpus.workspace = true
 operator.workspace = true
 partition.workspace = true
 prometheus.workspace = true
