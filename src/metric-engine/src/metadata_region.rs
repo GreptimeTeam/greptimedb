@@ -124,26 +124,23 @@ impl MetadataRegion {
         &self,
         physical_region_id: RegionId,
         logical_region_id: RegionId,
-        fast_drop_path: bool,
     ) -> Result<()> {
-        if !fast_drop_path {
-            // concat region key
-            let region_id = utils::to_metadata_region_id(physical_region_id);
-            let region_key = Self::concat_region_key(logical_region_id);
+        // concat region key
+        let region_id = utils::to_metadata_region_id(physical_region_id);
+        let region_key = Self::concat_region_key(logical_region_id);
 
-            // concat column keys
-            let logical_columns = self
-                .logical_columns(physical_region_id, logical_region_id)
-                .await?;
-            let mut column_keys = logical_columns
-                .into_iter()
-                .map(|(col, _)| Self::concat_column_key(logical_region_id, &col))
-                .collect::<Vec<_>>();
+        // concat column keys
+        let logical_columns = self
+            .logical_columns(physical_region_id, logical_region_id)
+            .await?;
+        let mut column_keys = logical_columns
+            .into_iter()
+            .map(|(col, _)| Self::concat_column_key(logical_region_id, &col))
+            .collect::<Vec<_>>();
 
-            // remove region key and column keys
-            column_keys.push(region_key);
-            self.delete(region_id, &column_keys).await?;
-        }
+        // remove region key and column keys
+        column_keys.push(region_key);
+        self.delete(region_id, &column_keys).await?;
 
         self.logical_region_lock
             .write()
