@@ -35,8 +35,8 @@ use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{
     AffectedRows, RegionAlterRequest, RegionCatchupRequest, RegionCloseRequest,
-    RegionCompactRequest, RegionCreateRequest, RegionDropRequest, RegionFlushRequest,
-    RegionOpenRequest, RegionRequest, RegionTruncateRequest,
+    RegionCompactRequest, RegionCreateRequest, RegionFlushRequest, RegionOpenRequest,
+    RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::{RegionId, SequenceNumber};
 use tokio::sync::oneshot::{self, Receiver, Sender};
@@ -624,10 +624,10 @@ impl WorkerRequest {
                 sender: sender.into(),
                 request: DdlRequest::Create(v),
             }),
-            RegionRequest::Drop(v) => WorkerRequest::Ddl(SenderDdlRequest {
+            RegionRequest::Drop(_) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
                 sender: sender.into(),
-                request: DdlRequest::Drop(v),
+                request: DdlRequest::Drop(()),
             }),
             RegionRequest::Open(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
@@ -690,8 +690,7 @@ impl WorkerRequest {
 #[derive(Debug)]
 pub(crate) enum DdlRequest {
     Create(RegionCreateRequest),
-    #[allow(dead_code)]
-    Drop(RegionDropRequest),
+    Drop(()), // 修改：原来为 RegionDropRequest
     Open((RegionOpenRequest, Option<WalEntryReceiver>)),
     Close(RegionCloseRequest),
     Alter(RegionAlterRequest),

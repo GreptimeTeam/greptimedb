@@ -1221,7 +1221,7 @@ mod tests {
             .handle_request(
                 region_id,
                 RegionRequest::Drop(RegionDropRequest {
-                    fast_drop_path: false,
+                    force_drop_all_logical_tables: false,
                 }),
             )
             .await
@@ -1318,7 +1318,7 @@ mod tests {
             .handle_request(
                 region_id,
                 RegionRequest::Drop(RegionDropRequest {
-                    fast_drop_path: false,
+                    force_drop_all_logical_tables: false,
                 }),
             )
             .await
