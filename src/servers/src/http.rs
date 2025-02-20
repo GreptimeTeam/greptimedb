@@ -991,7 +991,7 @@ impl HttpServer {
                 "/label/{label_name}/values",
                 routing::get(label_values_query),
             )
-            .layer(ServiceBuilder::new().layer(CompressionLayer::new().gzip(true)))
+            .layer(ServiceBuilder::new().layer(CompressionLayer::new()))
             .with_state(prometheus_handler)
     }
 
