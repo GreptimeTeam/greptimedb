@@ -26,31 +26,31 @@ const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafus
 pub enum ServerMode {
     Standalone {
         http_addr: String,
-        rpc_addr: String,
+        rpc_bind_addr: String,
         mysql_addr: String,
         postgres_addr: String,
     },
     Frontend {
         http_addr: String,
-        rpc_addr: String,
+        rpc_bind_addr: String,
         mysql_addr: String,
         postgres_addr: String,
         metasrv_addr: String,
     },
     Metasrv {
         bind_addr: String,
-        server_addr: String,
+        rpc_server_addr: String,
         http_addr: String,
     },
     Datanode {
-        rpc_addr: String,
+        rpc_bind_addr: String,
         rpc_hostname: String,
         http_addr: String,
         metasrv_addr: String,
         node_id: u32,
     },
     Flownode {
-        rpc_addr: String,
+        rpc_bind_addr: String,
         rpc_hostname: String,
         http_addr: String,
         metasrv_addr: String,
@@ -88,7 +88,7 @@ impl ServerMode {
 
         ServerMode::Standalone {
             http_addr: format!("127.0.0.1:{http_port}"),
-            rpc_addr: format!("127.0.0.1:{rpc_port}"),
+            rpc_bind_addr: format!("127.0.0.1:{rpc_port}"),
             mysql_addr: format!("127.0.0.1:{mysql_port}"),
             postgres_addr: format!("127.0.0.1:{postgres_port}"),
         }
@@ -102,7 +102,7 @@ impl ServerMode {
 
         ServerMode::Frontend {
             http_addr: format!("127.0.0.1:{http_port}"),
-            rpc_addr: format!("127.0.0.1:{rpc_port}"),
+            rpc_bind_addr: format!("127.0.0.1:{rpc_port}"),
             mysql_addr: format!("127.0.0.1:{mysql_port}"),
             postgres_addr: format!("127.0.0.1:{postgres_port}"),
             metasrv_addr: format!("127.0.0.1:{metasrv_port}"),
@@ -115,7 +115,7 @@ impl ServerMode {
 
         ServerMode::Metasrv {
             bind_addr: format!("127.0.0.1:{bind_port}"),
-            server_addr: format!("127.0.0.1:{bind_port}"),
+            rpc_server_addr: format!("127.0.0.1:{bind_port}"),
             http_addr: format!("127.0.0.1:{http_port}"),
         }
     }
@@ -125,7 +125,7 @@ impl ServerMode {
         let http_port = util::get_random_port();
 
         ServerMode::Datanode {
-            rpc_addr: format!("127.0.0.1:{rpc_port}"),
+            rpc_bind_addr: format!("127.0.0.1:{rpc_port}"),
             rpc_hostname: format!("127.0.0.1:{rpc_port}"),
             http_addr: format!("127.0.0.1:{http_port}"),
             metasrv_addr: format!("127.0.0.1:{metasrv_port}"),
@@ -138,7 +138,7 @@ impl ServerMode {
         let http_port = util::get_random_port();
 
         ServerMode::Flownode {
-            rpc_addr: format!("127.0.0.1:{rpc_port}"),
+            rpc_bind_addr: format!("127.0.0.1:{rpc_port}"),
             rpc_hostname: format!("127.0.0.1:{rpc_port}"),
             http_addr: format!("127.0.0.1:{http_port}"),
             metasrv_addr: format!("127.0.0.1:{metasrv_port}"),
@@ -160,35 +160,39 @@ impl ServerMode {
     pub fn check_addrs(&self) -> Vec<String> {
         match self {
             ServerMode::Standalone {
-                rpc_addr,
+                rpc_bind_addr,
                 mysql_addr,
                 postgres_addr,
                 http_addr,
                 ..
             } => {
                 vec![
-                    rpc_addr.clone(),
+                    rpc_bind_addr.clone(),
                     mysql_addr.clone(),
                     postgres_addr.clone(),
                     http_addr.clone(),
                 ]
             }
             ServerMode::Frontend {
-                rpc_addr,
+                rpc_bind_addr,
                 mysql_addr,
                 postgres_addr,
                 ..
             } => {
-                vec![rpc_addr.clone(), mysql_addr.clone(), postgres_addr.clone()]
+                vec![
+                    rpc_bind_addr.clone(),
+                    mysql_addr.clone(),
+                    postgres_addr.clone(),
+                ]
             }
             ServerMode::Metasrv { bind_addr, .. } => {
                 vec![bind_addr.clone()]
             }
-            ServerMode::Datanode { rpc_addr, .. } => {
-                vec![rpc_addr.clone()]
+            ServerMode::Datanode { rpc_bind_addr, .. } => {
+                vec![rpc_bind_addr.clone()]
             }
-            ServerMode::Flownode { rpc_addr, .. } => {
-                vec![rpc_addr.clone()]
+            ServerMode::Flownode { rpc_bind_addr, .. } => {
+                vec![rpc_bind_addr.clone()]
             }
         }
     }
@@ -197,22 +201,22 @@ impl ServerMode {
     pub fn server_addr(&self) -> Option<ServerAddr> {
         match self {
             ServerMode::Standalone {
-                rpc_addr,
+                rpc_bind_addr,
                 mysql_addr,
                 postgres_addr,
                 ..
             } => Some(ServerAddr {
-                server_addr: Some(rpc_addr.clone()),
+                server_addr: Some(rpc_bind_addr.clone()),
                 pg_server_addr: Some(postgres_addr.clone()),
                 mysql_server_addr: Some(mysql_addr.clone()),
             }),
             ServerMode::Frontend {
-                rpc_addr,
+                rpc_bind_addr,
                 mysql_addr,
                 postgres_addr,
                 ..
             } => Some(ServerAddr {
-                server_addr: Some(rpc_addr.clone()),
+                server_addr: Some(rpc_bind_addr.clone()),
                 pg_server_addr: Some(postgres_addr.clone()),
                 mysql_server_addr: Some(mysql_addr.clone()),
             }),
@@ -242,34 +246,34 @@ impl ServerMode {
         // Get the required addresses based on server mode
         let (metasrv_addr, grpc_addr, mysql_addr, postgres_addr) = match self {
             ServerMode::Standalone {
-                rpc_addr,
+                rpc_bind_addr,
                 mysql_addr,
                 postgres_addr,
                 ..
             } => (
                 String::new(),
-                rpc_addr.clone(),
+                rpc_bind_addr.clone(),
                 mysql_addr.clone(),
                 postgres_addr.clone(),
             ),
             ServerMode::Frontend {
-                rpc_addr,
+                rpc_bind_addr,
                 mysql_addr,
                 postgres_addr,
                 ..
             } => (
                 String::new(),
-                rpc_addr.clone(),
+                rpc_bind_addr.clone(),
                 mysql_addr.clone(),
                 postgres_addr.clone(),
             ),
             ServerMode::Datanode {
-                rpc_addr,
+                rpc_bind_addr,
                 metasrv_addr,
                 ..
             } => (
                 metasrv_addr.clone(),
-                rpc_addr.clone(),
+                rpc_bind_addr.clone(),
                 String::new(),
                 String::new(),
             ),
@@ -329,7 +333,7 @@ impl ServerMode {
         match self {
             ServerMode::Standalone {
                 http_addr,
-                rpc_addr,
+                rpc_bind_addr,
                 mysql_addr,
                 postgres_addr,
             } => {
@@ -342,14 +346,14 @@ impl ServerMode {
                     "-c".to_string(),
                     self.generate_config_file(sqlness_home, db_ctx, id),
                     format!("--http-addr={http_addr}"),
-                    format!("--rpc-addr={rpc_addr}"),
+                    format!("--rpc-addr={rpc_bind_addr}"),
                     format!("--mysql-addr={mysql_addr}"),
                     format!("--postgres-addr={postgres_addr}"),
                 ]);
             }
             ServerMode::Frontend {
                 http_addr,
-                rpc_addr,
+                rpc_bind_addr,
                 mysql_addr,
                 postgres_addr,
                 metasrv_addr,
@@ -357,7 +361,7 @@ impl ServerMode {
                 args.extend([
                     format!("--metasrv-addrs={metasrv_addr}"),
                     format!("--http-addr={http_addr}"),
-                    format!("--rpc-addr={rpc_addr}"),
+                    format!("--rpc-addr={rpc_bind_addr}"),
                     format!("--mysql-addr={mysql_addr}"),
                     format!("--postgres-addr={postgres_addr}"),
                     format!(
@@ -371,14 +375,14 @@ impl ServerMode {
             }
             ServerMode::Metasrv {
                 bind_addr,
-                server_addr,
+                rpc_server_addr,
                 http_addr,
             } => {
                 args.extend([
                     "--bind-addr".to_string(),
                     bind_addr.clone(),
                     "--server-addr".to_string(),
-                    server_addr.clone(),
+                    rpc_server_addr.clone(),
                     "--enable-region-failover".to_string(),
                     "false".to_string(),
                     format!("--http-addr={http_addr}"),
@@ -410,7 +414,7 @@ impl ServerMode {
                 }
             }
             ServerMode::Datanode {
-                rpc_addr,
+                rpc_bind_addr,
                 rpc_hostname,
                 http_addr,
                 metasrv_addr,
@@ -422,7 +426,7 @@ impl ServerMode {
                     db_ctx.time()
                 ));
                 args.extend([
-                    format!("--rpc-addr={rpc_addr}"),
+                    format!("--rpc-addr={rpc_bind_addr}"),
                     format!("--rpc-hostname={rpc_hostname}"),
                     format!("--http-addr={http_addr}"),
                     format!("--data-home={}", data_home.display()),
@@ -434,14 +438,14 @@ impl ServerMode {
                 ]);
             }
             ServerMode::Flownode {
-                rpc_addr,
+                rpc_bind_addr,
                 rpc_hostname,
                 http_addr,
                 metasrv_addr,
                 node_id,
             } => {
                 args.extend([
-                    format!("--rpc-addr={rpc_addr}"),
+                    format!("--rpc-addr={rpc_bind_addr}"),
                     format!("--rpc-hostname={rpc_hostname}"),
                     format!("--node-id={node_id}"),
                     format!(

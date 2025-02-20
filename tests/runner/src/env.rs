@@ -177,7 +177,12 @@ impl Env {
             // start a distributed GreptimeDB
             let meta_server_mode = ServerMode::random_metasrv();
             let metasrv_port = match &meta_server_mode {
-                ServerMode::Metasrv {server_addr,.. } => server_addr.split(':').nth(1).unwrap().parse::<u16>().unwrap(),
+                ServerMode::Metasrv { rpc_server_addr, .. } => rpc_server_addr
+                    .split(':')
+                    .nth(1)
+                    .unwrap()
+                    .parse::<u16>()
+                    .unwrap(),
                 _ => panic!("metasrv mode not set, maybe running in remote mode which doesn't support restart?"),
             };
             db_ctx.set_server_mode(meta_server_mode.clone(), SERVER_MODE_METASRV_IDX);
