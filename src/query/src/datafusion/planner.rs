@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use arrow_schema::DataType;
 use catalog::table_source::DfTableSourceProvider;
-use common_function::aggr::{UddSketchState, UDDSKETCH_STATE_NAME};
+use common_function::aggr::{HllState, UddSketchState, HLL_STATE_NAME, UDDSKETCH_STATE_NAME};
 use common_function::scalars::udf::create_udf;
 use common_query::logical_plan::create_aggregate_function;
 use datafusion::common::TableReference;
@@ -168,6 +168,9 @@ impl ContextProvider for DfContextProviderAdapter {
     fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
         if name == UDDSKETCH_STATE_NAME {
             return Some(Arc::new(UddSketchState::udf_impl()));
+        }
+        if name == HLL_STATE_NAME {
+            return Some(Arc::new(HllState::udf_impl()));
         }
 
         self.engine_state.aggregate_function(name).map_or_else(

@@ -1,0 +1,50 @@
+CREATE TABLE test_hll (
+    `id` INT PRIMARY KEY,
+    `value` STRING,
+    `ts` timestamp time index default now()
+);
+
+Affected Rows: 0
+
+INSERT INTO test_hll (`id`, `value`) VALUES
+    (1, "a"),
+    (2, "b"),
+    (5, "e"),
+    (6, "f"),
+    (7, "g"),
+    (8, "h"),
+    (9, "i"),
+    (10, "j"),
+    (11, "i"),
+    (12, "j"),
+    (13, "i"),
+    (14, "n"),
+    (15, "o");
+
+Affected Rows: 13
+
+select hll_calc(hll_state(`value`)) from test_hll;
+
++-------------------------------------+
+| hll_calc(hll_state(test_hll.value)) |
++-------------------------------------+
+| 10                                  |
++-------------------------------------+
+
+INSERT INTO test_hll (`id`, `value`) VALUES
+    (16, "b"),
+    (17, "i"),
+    (18, "j"),
+    (19, "s"),
+    (20, "t");
+
+Affected Rows: 5
+
+select hll_calc(hll_state(`value`)) from test_hll;
+
++-------------------------------------+
+| hll_calc(hll_state(test_hll.value)) |
++-------------------------------------+
+| 12                                  |
++-------------------------------------+
+

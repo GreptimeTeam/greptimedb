@@ -2009,6 +2009,7 @@ dependencies = [
 name = "common-function"
 version = "0.12.0"
 dependencies = [
+ "ahash 0.8.11",
  "api",
  "approx 0.5.1",
  "arc-swap",
@@ -2031,6 +2032,7 @@ dependencies = [
  "geo-types",
  "geohash",
  "h3o",
+ "hyperloglogplus",
  "jsonb",
  "nalgebra 0.33.2",
  "num",
@@ -5284,6 +5286,15 @@ dependencies = [
  "tokio",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "hyperloglogplus"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "621debdf94dcac33e50475fdd76d34d5ea9c0362a834b9db08c3024696c1fbe3"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

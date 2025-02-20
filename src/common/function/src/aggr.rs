@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod hll_state;
 mod uddsketch_state;
 
+pub(crate) use hll_state::HllStateType;
+pub use hll_state::{HllState, HLL_STATE_NAME};
 pub use uddsketch_state::{UddSketchState, UDDSKETCH_STATE_NAME};
