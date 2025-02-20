@@ -24,6 +24,7 @@ use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
+use crate::memtable::bulk::context::BulkIterContext;
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtableBuilder};
@@ -31,7 +32,8 @@ use crate::memtable::{
     AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
     MemtableRanges, MemtableRef, MemtableStats,
 };
-use crate::read::Batch;
+use crate::read::dedup::{LastNonNull, LastRow};
+use crate::read::sync::dedup::DedupReader;
 use crate::region::options::MergeMode;
 
 #[allow(unused)]
@@ -123,16 +125,6 @@ impl BulkMemtable {
     }
 }
 
-struct EmptyIter;
-
-impl Iterator for EmptyIter {
-    type Item = Result<Batch>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        None
-    }
-}
-
 impl Memtable for BulkMemtable {
     fn id(&self) -> MemtableId {
         self.id
@@ -170,13 +162,33 @@ impl Memtable for BulkMemtable {
 
     fn iter(
         &self,
-        _projection: Option<&[ColumnId]>,
-        _predicate: Option<Predicate>,
-        _sequence: Option<SequenceNumber>,
+        projection: Option<&[ColumnId]>,
+        predicate: Option<Predicate>,
+        sequence: Option<SequenceNumber>,
     ) -> Result<BoxedBatchIterator> {
-        //todo(hl): temporarily disable reads.
-        //todo(hl): we should also consider dedup and merge mode when reading bulk parts,
-        Ok(Box::new(EmptyIter))
+        let mut readers = Vec::new();
+        let parts = self.parts.read().unwrap();
+
+        let ctx = Arc::new(BulkIterContext::new(
+            self.region_metadata.clone(),
+            &projection,
+            predicate.clone(),
+        ));
+        for part in parts.as_slice() {
+            if let Some(reader) = part.read(ctx.clone(), sequence).unwrap() {
+                readers.push(reader);
+            }
+        }
+        let merge_reader = crate::read::sync::merge::MergeReader::new(readers)?;
+        let reader = match self.merge_mode {
+            MergeMode::LastRow => {
+                Box::new(DedupReader::new(merge_reader, LastRow::new(self.dedup))) as BoxedBatchIterator
+            }
+            MergeMode::LastNonNull => {
+                Box::new(DedupReader::new(merge_reader, LastNonNull::new(self.dedup))) as BoxedBatchIterator
+            }
+        };
+        Ok(reader )
     }
 
     fn ranges(
@@ -238,5 +250,130 @@ impl Memtable for BulkMemtable {
             self.dedup,
             self.merge_mode,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use api::helper::ColumnDataTypeWrapper;
+    use api::v1::value::ValueData;
+    use api::v1::{OpType, Row, Rows, SemanticType};
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use std::sync::Arc;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
+    use store_api::storage::RegionId;
+
+    use crate::memtable::bulk::part::BulkPartEncoder;
+    use crate::memtable::bulk::BulkMemtable;
+    use crate::memtable::{BulkPart, Memtable};
+    use crate::region::options::MergeMode;
+
+    fn metrics_region_metadata() -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("k0", ConcreteDataType::binary_datatype(), false),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("v0", ConcreteDataType::float64_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("v1", ConcreteDataType::float64_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .primary_key(vec![0]);
+        let region_metadata = builder.build().unwrap();
+        Arc::new(region_metadata)
+    }
+
+    fn metrics_column_schema() -> Vec<api::v1::ColumnSchema> {
+        let schema = metrics_region_metadata();
+        schema
+            .column_metadatas
+            .iter()
+            .map(|c| api::v1::ColumnSchema {
+                column_name: c.column_schema.name.clone(),
+                datatype: ColumnDataTypeWrapper::try_from(c.column_schema.data_type.clone())
+                    .unwrap()
+                    .datatype() as i32,
+                semantic_type: c.semantic_type as i32,
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    fn build_metrics_bulk_part(
+        k: &str,
+        ts: &[i64],
+        v0: &[Option<f64>],
+        v1: &[Option<f64>],
+        seq: u64,
+    ) -> BulkPart {
+        assert_eq!(ts.len(), v0.len());
+        assert_eq!(ts.len(), v1.len());
+
+        let rows = ts
+            .iter()
+            .zip(v0.iter())
+            .zip(v1.iter())
+            .map(|((ts, v0), v1)| Row {
+                values: vec![
+                    api::v1::Value {
+                        value_data: Some(ValueData::BinaryValue(k.as_bytes().to_vec())),
+                    },
+                    api::v1::Value {
+                        value_data: Some(ValueData::TimestampMillisecondValue(*ts as i64)),
+                    },
+                    api::v1::Value {
+                        value_data: v0.map(ValueData::F64Value),
+                    },
+                    api::v1::Value {
+                        value_data: v1.map(ValueData::F64Value),
+                    },
+                ],
+            })
+            .collect::<Vec<_>>();
+
+        let mutation = api::v1::Mutation {
+            op_type: OpType::Put as i32,
+            sequence: seq,
+            rows: Some(Rows {
+                schema: metrics_column_schema(),
+                rows,
+            }),
+            write_hint: None,
+            bulk: Vec::new(),
+        };
+        let encoder = BulkPartEncoder::new(metrics_region_metadata(), true, 1024);
+        encoder.encode_mutations(&[mutation]).unwrap().unwrap()
+    }
+
+    #[test]
+    fn test_bulk_iter() {
+        let schema = metrics_region_metadata();
+        let memtable = BulkMemtable::new(schema, 0, None, true, MergeMode::LastRow);
+        memtable.write_bulk(build_metrics_bulk_part("a", &[1], &[None], &[Some(1.0)], 0)).unwrap();
+        // write duplicated rows
+        memtable.write_bulk(build_metrics_bulk_part("a", &[1], &[None], &[Some(1.0)], 0)).unwrap();
+        let iter = memtable.iter(None, None, None).unwrap();
+        let total_rows = iter.map(|b| {
+            b.unwrap().num_rows()
+        }).sum::<usize>();
+        assert_eq!(1, total_rows);
     }
 }

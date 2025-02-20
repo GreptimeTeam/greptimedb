@@ -912,7 +912,7 @@ impl IterBuilder for TimeSeriesIterBuilder {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::{HashMap, HashSet};
 
     use api::helper::ColumnDataTypeWrapper;
@@ -929,7 +929,7 @@ mod tests {
     use super::*;
     use crate::row_converter::SortField;
 
-    fn schema_for_test() -> RegionMetadataRef {
+    pub(crate) fn schema_for_test() -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
         builder
             .push_column_metadata(ColumnMetadata {
@@ -1143,7 +1143,7 @@ mod tests {
         )
     }
 
-    fn build_key_values(schema: &RegionMetadataRef, k0: String, k1: i64, len: usize) -> KeyValues {
+    pub(crate) fn build_key_values(schema: &RegionMetadataRef, k0: String, k1: i64, len: usize) -> KeyValues {
         let column_schema = schema
             .column_metadatas
             .iter()

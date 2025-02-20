@@ -26,6 +26,8 @@ pub(crate) mod scan_util;
 pub(crate) mod seq_scan;
 pub(crate) mod unordered_scan;
 
+pub(crate) mod sync;
+
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;

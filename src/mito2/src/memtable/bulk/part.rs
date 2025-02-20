@@ -56,7 +56,7 @@ use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::to_sst_arrow_schema;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BulkPart {
     pub(crate) data: Bytes,
     metadata: BulkPartMeta,
@@ -95,7 +95,7 @@ impl BulkPart {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BulkPartMeta {
     /// Total rows in part.
     pub num_rows: usize,
@@ -219,7 +219,6 @@ fn mutations_to_record_batch(
 
         for row in key_values.iter() {
             assert_eq!(1, row.num_primary_keys());
-            assert_eq!(1, row.num_fields());
             let first_primary_key_col = row.primary_keys().next().unwrap();
 
             let bytes = match first_primary_key_col {
@@ -282,7 +281,7 @@ struct ArraysSorter<I> {
 
 impl<I> ArraysSorter<I>
 where
-    I: Iterator<Item = ArrayRef>,
+    I: Iterator<Item=ArrayRef>,
 {
     /// Converts arrays to record batch.
     fn sort(self) -> Result<(RecordBatch, i64, i64)> {
@@ -330,10 +329,10 @@ where
                     check_bounds: false,
                 }),
             )
-            .context(ComputeArrowSnafu)?
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .unwrap(),
+                .context(ComputeArrowSnafu)?
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .unwrap(),
         )?) as ArrayRef;
 
         let mut arrays = Vec::with_capacity(self.arrow_schema.fields.len());
@@ -346,7 +345,7 @@ where
                         check_bounds: false,
                     }),
                 )
-                .context(ComputeArrowSnafu)?,
+                    .context(ComputeArrowSnafu)?,
             );
         }
 
@@ -357,7 +356,7 @@ where
                 check_bounds: false,
             }),
         )
-        .context(ComputeArrowSnafu)?;
+            .context(ComputeArrowSnafu)?;
 
         arrays.push(timestamp);
         arrays.push(pk_dictionary);
@@ -369,7 +368,7 @@ where
                     check_bounds: false,
                 }),
             )
-            .context(ComputeArrowSnafu)?,
+                .context(ComputeArrowSnafu)?,
         );
 
         arrays.push(
@@ -380,7 +379,7 @@ where
                     check_bounds: false,
                 }),
             )
-            .context(ComputeArrowSnafu)?,
+                .context(ComputeArrowSnafu)?,
         );
 
         let batch = RecordBatch::try_new(self.arrow_schema, arrays).context(NewRecordBatchSnafu)?;
@@ -392,7 +391,7 @@ where
 fn timestamp_array_to_iter(
     timestamp_unit: TimeUnit,
     timestamp: &ArrayRef,
-) -> impl Iterator<Item = &i64> {
+) -> impl Iterator<Item=&i64> {
     match timestamp_unit {
         // safety: timestamp column must be valid.
         TimeUnit::Second => timestamp
@@ -454,7 +453,7 @@ fn binary_array_to_dictionary(input: &BinaryArray) -> Result<PrimaryKeyArray> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::VecDeque;
 
     use datafusion_common::ScalarValue;
@@ -520,19 +519,19 @@ mod tests {
         );
     }
 
-    struct MutationInput<'a> {
-        k0: &'a str,
-        k1: u32,
-        timestamps: &'a [i64],
-        v1: &'a [Option<f64>],
-        sequence: u64,
+    pub(crate) struct MutationInput<'a> {
+        pub(crate) k0: &'a str,
+        pub(crate) k1: u32,
+        pub(crate) timestamps: &'a [i64],
+        pub(crate) v1: &'a [Option<f64>],
+        pub(crate) sequence: u64,
     }
 
     #[derive(Debug, PartialOrd, PartialEq)]
-    struct BatchOutput<'a> {
-        pk_values: &'a [Value],
-        timestamps: &'a [i64],
-        v1: &'a [Option<f64>],
+    pub(crate) struct BatchOutput<'a> {
+        pub(crate) pk_values: &'a [Value],
+        pub(crate) timestamps: &'a [i64],
+        pub(crate) v1: &'a [Option<f64>],
     }
 
     fn check_mutations_to_record_batches(
@@ -553,7 +552,7 @@ mod tests {
                     m.v1.iter().copied(),
                     m.sequence,
                 )
-                .mutation
+                    .mutation
             })
             .collect::<Vec<_>>();
         let total_rows: usize = mutations
@@ -761,7 +760,7 @@ mod tests {
         );
     }
 
-    fn encode(input: &[MutationInput]) -> BulkPart {
+    pub(crate) fn encode(input: &[MutationInput]) -> BulkPart {
         let metadata = metadata_for_test();
         let mutations = input
             .iter()
@@ -774,7 +773,7 @@ mod tests {
                     m.v1.iter().copied(),
                     m.sequence,
                 )
-                .mutation
+                    .mutation
             })
             .collect::<Vec<_>>();
         let encoder = BulkPartEncoder::new(metadata, true, 1024);
