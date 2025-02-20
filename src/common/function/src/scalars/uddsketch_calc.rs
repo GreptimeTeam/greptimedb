@@ -37,6 +37,7 @@ const NAME: &str = "uddsketch_calc";
 /// It accepts two arguments:
 /// 1. A percentile (as f64) for which to compute the estimated quantile (e.g. 0.95 for p95).
 /// 2. The serialized UDDSketch state, as produced by the aggregator (binary).
+///
 /// For each row, it deserializes the sketch and returns the computed quantile value.
 #[derive(Debug, Default)]
 pub struct UddSketchCalcFunction;
@@ -132,7 +133,7 @@ mod tests {
 
     #[test]
     fn test_uddsketch_calc_function() {
-        let function = UddSketchCalcFunction::default();
+        let function = UddSketchCalcFunction;
         assert_eq!("uddsketch_calc", function.name());
         assert_eq!(
             ConcreteDataType::float64_datatype(),
@@ -186,7 +187,7 @@ mod tests {
 
     #[test]
     fn test_uddsketch_calc_function_errors() {
-        let function = UddSketchCalcFunction::default();
+        let function = UddSketchCalcFunction;
 
         // Test with invalid number of arguments
         let args: Vec<VectorRef> = vec![Arc::new(Float64Vector::from_vec(vec![0.95]))];
