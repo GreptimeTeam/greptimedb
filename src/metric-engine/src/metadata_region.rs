@@ -124,9 +124,9 @@ impl MetadataRegion {
         &self,
         physical_region_id: RegionId,
         logical_region_id: RegionId,
-        fast_drop_database_path: bool,
+        fast_drop_path: bool,
     ) -> Result<()> {
-        if !fast_drop_database_path {
+        if !fast_drop_path {
             // concat region key
             let region_id = utils::to_metadata_region_id(physical_region_id);
             let region_key = Self::concat_region_key(logical_region_id);

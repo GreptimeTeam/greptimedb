@@ -71,7 +71,7 @@ impl MetricEngineInner {
                 .get(&region_id)
                 .copied();
             if let Some(metadata_region_id) = metadata_region_id {
-                self.drop_logical_region(region_id, metadata_region_id, req.fast_drop_database_path)
+                self.drop_logical_region(region_id, metadata_region_id, req.fast_drop_path)
                     .await
             } else {
                 Err(LogicalRegionNotFoundSnafu { region_id }.build())
@@ -90,7 +90,7 @@ impl MetricEngineInner {
             .handle_request(
                 data_region_id,
                 RegionRequest::Drop(RegionDropRequest {
-                    fast_drop_database_path: false,
+                    fast_drop_path: false,
                 }),
             )
             .await
@@ -99,7 +99,7 @@ impl MetricEngineInner {
             .handle_request(
                 metadata_region_id,
                 RegionRequest::Drop(RegionDropRequest {
-                    fast_drop_database_path: false,
+                    fast_drop_path: false,
                 }),
             )
             .await
@@ -120,15 +120,11 @@ impl MetricEngineInner {
         &self,
         logical_region_id: RegionId,
         physical_region_id: RegionId,
-        fast_drop_database_path: bool,
+        fast_drop_path: bool,
     ) -> Result<AffectedRows> {
         // Update metadata
         self.metadata_region
-            .remove_logical_region(
-                physical_region_id,
-                logical_region_id,
-                fast_drop_database_path,
-            )
+            .remove_logical_region(physical_region_id, logical_region_id, fast_drop_path)
             .await?;
 
         // Update engine state
