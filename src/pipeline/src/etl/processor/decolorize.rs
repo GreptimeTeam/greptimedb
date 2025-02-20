@@ -22,7 +22,6 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use snafu::OptionExt;
 
-use super::IntermediateStatus;
 use crate::etl::error::{
     Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, Result,
 };
@@ -31,6 +30,7 @@ use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::Value;
+use crate::etl::PipelineMap;
 
 pub(crate) const PROCESSOR_DECOLORIZE: &str = "decolorize";
 
@@ -102,7 +102,7 @@ impl crate::etl::processor::Processor for DecolorizeProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut IntermediateStatus) -> Result<()> {
+    fn exec_mut(&self, val: &mut PipelineMap) -> Result<()> {
         for field in self.fields.iter() {
             let index = field.input_field();
             match val.get(index) {

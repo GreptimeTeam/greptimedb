@@ -42,7 +42,7 @@ pub struct Instance {
 }
 
 impl Instance {
-    fn new(instance: MetasrvInstance, guard: Vec<WorkerGuard>) -> Self {
+    pub fn new(instance: MetasrvInstance, guard: Vec<WorkerGuard>) -> Self {
         Self {
             instance,
             _guard: guard,

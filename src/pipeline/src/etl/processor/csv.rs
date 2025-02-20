@@ -14,8 +14,6 @@
 
 // Reference: https://www.elastic.co/guide/en/elasticsearch/reference/current/csv-processor.html
 
-use std::collections::BTreeMap;
-
 use csv::{ReaderBuilder, Trim};
 use itertools::EitherOrBoth::{Both, Left, Right};
 use itertools::Itertools;
@@ -31,6 +29,7 @@ use crate::etl::processor::{
     IGNORE_MISSING_NAME,
 };
 use crate::etl::value::Value;
+use crate::etl::PipelineMap;
 
 pub(crate) const PROCESSOR_CSV: &str = "csv";
 
@@ -60,7 +59,7 @@ pub struct CsvProcessor {
 
 impl CsvProcessor {
     // process the csv format string to a map with target_fields as keys
-    fn process(&self, val: &str) -> Result<BTreeMap<String, Value>> {
+    fn process(&self, val: &str) -> Result<PipelineMap> {
         let mut reader = self.reader.from_reader(val.as_bytes());
 
         if let Some(result) = reader.records().next() {
@@ -190,7 +189,7 @@ impl Processor for CsvProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut BTreeMap<String, Value>) -> Result<()> {
+    fn exec_mut(&self, val: &mut PipelineMap) -> Result<()> {
         for field in self.fields.iter() {
             let name = field.input_field();
 
@@ -240,7 +239,7 @@ mod tests {
 
         let result = processor.process("1,2").unwrap();
 
-        let values = [
+        let values: PipelineMap = [
             ("a".into(), Value::String("1".into())),
             ("b".into(), Value::String("2".into())),
         ]
@@ -266,7 +265,7 @@ mod tests {
 
             let result = processor.process("1,2").unwrap();
 
-            let values = [
+            let values: PipelineMap = [
                 ("a".into(), Value::String("1".into())),
                 ("b".into(), Value::String("2".into())),
                 ("c".into(), Value::Null),
@@ -291,7 +290,7 @@ mod tests {
 
             let result = processor.process("1,2").unwrap();
 
-            let values = [
+            let values: PipelineMap = [
                 ("a".into(), Value::String("1".into())),
                 ("b".into(), Value::String("2".into())),
                 ("c".into(), Value::String("default".into())),
@@ -317,7 +316,7 @@ mod tests {
 
         let result = processor.process("1,2").unwrap();
 
-        let values = [
+        let values: PipelineMap = [
             ("a".into(), Value::String("1".into())),
             ("b".into(), Value::String("2".into())),
         ]

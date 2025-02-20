@@ -47,6 +47,7 @@ log-store.workspace = true
 meta-client.workspace = true
 metric-engine.workspace = true
 mito2.workspace = true
+num_cpus.workspace = true
 object-store.workspace = true
 prometheus.workspace = true
 prost.workspace = true

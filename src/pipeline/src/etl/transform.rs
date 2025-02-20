@@ -15,8 +15,6 @@
 pub mod index;
 pub mod transformer;
 
-use std::collections::BTreeMap;
-
 use snafu::OptionExt;
 
 use crate::etl::error::{Error, Result};
@@ -39,6 +37,7 @@ use super::error::{
 use super::field::Fields;
 use super::processor::{yaml_new_field, yaml_new_fields, yaml_string};
 use super::value::Timestamp;
+use super::PipelineMap;
 
 pub trait Transformer: std::fmt::Debug + Sized + Send + Sync + 'static {
     type Output;
@@ -48,7 +47,7 @@ pub trait Transformer: std::fmt::Debug + Sized + Send + Sync + 'static {
     fn schemas(&self) -> &Vec<greptime_proto::v1::ColumnSchema>;
     fn transforms(&self) -> &Transforms;
     fn transforms_mut(&mut self) -> &mut Transforms;
-    fn transform_mut(&self, val: &mut BTreeMap<String, Value>) -> Result<Self::VecOutput>;
+    fn transform_mut(&self, val: &mut PipelineMap) -> Result<Self::VecOutput>;
 }
 
 /// On Failure behavior when transform fails

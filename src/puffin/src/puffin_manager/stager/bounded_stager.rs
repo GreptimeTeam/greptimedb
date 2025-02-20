@@ -78,19 +78,21 @@ impl BoundedStager {
         base_dir: PathBuf,
         capacity: u64,
         notifier: Option<Arc<dyn StagerNotifier>>,
+        cache_ttl: Option<Duration>,
     ) -> Result<Self> {
         tokio::fs::create_dir_all(&base_dir)
             .await
             .context(CreateSnafu)?;
 
-        let recycle_bin = Cache::builder().time_to_live(RECYCLE_BIN_TTL).build();
-
+        let recycle_bin = Cache::builder().time_to_idle(RECYCLE_BIN_TTL).build();
         let recycle_bin_cloned = recycle_bin.clone();
         let notifier_cloned = notifier.clone();
-        let cache = Cache::builder()
+
+        let mut cache_builder = Cache::builder()
             .max_capacity(capacity)
             .weigher(|_: &String, v: &CacheValue| v.weight())
             .eviction_policy(EvictionPolicy::lru())
+            .support_invalidation_closures()
             .async_eviction_listener(move |k, v, _| {
                 let recycle_bin = recycle_bin_cloned.clone();
                 if let Some(notifier) = notifier_cloned.as_ref() {
@@ -101,8 +103,13 @@ impl BoundedStager {
                     recycle_bin.insert(k.as_str().to_string(), v).await;
                 }
                 .boxed()
-            })
-            .build();
+            });
+        if let Some(ttl) = cache_ttl {
+            if !ttl.is_zero() {
+                cache_builder = cache_builder.time_to_live(ttl);
+            }
+        }
+        let cache = cache_builder.build();
 
         let (delete_queue, rx) = tokio::sync::mpsc::channel(DELETE_QUEUE_SIZE);
         let notifier_cloned = notifier.clone();
@@ -162,6 +169,7 @@ impl Stager for BoundedStager {
                     notifier.on_load_blob(timer.elapsed());
                 }
                 let guard = Arc::new(FsBlobGuard {
+                    puffin_file_name: puffin_file_name.to_string(),
                     path,
                     delete_queue: self.delete_queue.clone(),
                     size,
@@ -216,6 +224,7 @@ impl Stager for BoundedStager {
                     notifier.on_load_dir(timer.elapsed());
                 }
                 let guard = Arc::new(FsDirGuard {
+                    puffin_file_name: puffin_file_name.to_string(),
                     path,
                     size,
                     delete_queue: self.delete_queue.clone(),
@@ -266,6 +275,7 @@ impl Stager for BoundedStager {
                     notifier.on_cache_insert(size);
                 }
                 let guard = Arc::new(FsDirGuard {
+                    puffin_file_name: puffin_file_name.to_string(),
                     path,
                     size,
                     delete_queue: self.delete_queue.clone(),
@@ -282,6 +292,15 @@ impl Stager for BoundedStager {
         self.cache.run_pending_tasks().await;
         self.recycle_bin.run_pending_tasks().await;
 
+        Ok(())
+    }
+
+    async fn purge(&self, puffin_file_name: &str) -> Result<()> {
+        let file_name = puffin_file_name.to_string();
+        self.cache
+            .invalidate_entries_if(move |_k, v| v.puffin_file_name() == file_name)
+            .unwrap(); // SAFETY: `support_invalidation_closures` is enabled
+        self.cache.run_pending_tasks().await;
         Ok(())
     }
 }
@@ -337,6 +356,9 @@ impl BoundedStager {
     }
 
     /// Recovers the staging area by iterating through the staging directory.
+    ///
+    /// Note: It can't recover the mapping between puffin files and keys, so TTL
+    ///       is configured to purge the dangling files and directories.
     async fn recover(&self) -> Result<()> {
         let mut read_dir = fs::read_dir(&self.base_dir).await.context(ReadSnafu)?;
 
@@ -376,6 +398,9 @@ impl BoundedStager {
                         path,
                         size,
                         delete_queue: self.delete_queue.clone(),
+
+                        // placeholder
+                        puffin_file_name: String::new(),
                     }));
                     // A duplicate dir will be moved to the delete queue.
                     let _dup_dir = elems.insert(key, v);
@@ -385,6 +410,9 @@ impl BoundedStager {
                         path,
                         size,
                         delete_queue: self.delete_queue.clone(),
+
+                        // placeholder
+                        puffin_file_name: String::new(),
                     }));
                     // A duplicate file will be moved to the delete queue.
                     let _dup_file = elems.insert(key, v);
@@ -506,6 +534,13 @@ impl CacheValue {
     fn weight(&self) -> u32 {
         self.size().try_into().unwrap_or(u32::MAX)
     }
+
+    fn puffin_file_name(&self) -> &str {
+        match self {
+            CacheValue::File(guard) => &guard.puffin_file_name,
+            CacheValue::Dir(guard) => &guard.puffin_file_name,
+        }
+    }
 }
 
 enum DeleteTask {
@@ -518,6 +553,7 @@ enum DeleteTask {
 /// automatically deleting the file on drop.
 #[derive(Debug)]
 pub struct FsBlobGuard {
+    puffin_file_name: String,
     path: PathBuf,
     size: u64,
     delete_queue: Sender<DeleteTask>,
@@ -550,6 +586,7 @@ impl Drop for FsBlobGuard {
 /// automatically deleting the directory on drop.
 #[derive(Debug)]
 pub struct FsDirGuard {
+    puffin_file_name: String,
     path: PathBuf,
     size: u64,
     delete_queue: Sender<DeleteTask>,
@@ -754,6 +791,7 @@ mod tests {
             tempdir.path().to_path_buf(),
             u64::MAX,
             Some(notifier.clone()),
+            None,
         )
         .await
         .unwrap();
@@ -810,6 +848,7 @@ mod tests {
             tempdir.path().to_path_buf(),
             u64::MAX,
             Some(notifier.clone()),
+            None,
         )
         .await
         .unwrap();
@@ -884,6 +923,7 @@ mod tests {
             tempdir.path().to_path_buf(),
             u64::MAX,
             Some(notifier.clone()),
+            None,
         )
         .await
         .unwrap();
@@ -937,7 +977,7 @@ mod tests {
 
         // recover stager
         drop(stager);
-        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX, None)
+        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX, None, None)
             .await
             .unwrap();
 
@@ -997,6 +1037,7 @@ mod tests {
             tempdir.path().to_path_buf(),
             1, /* extremely small size */
             Some(notifier.clone()),
+            None,
         )
         .await
         .unwrap();
@@ -1217,7 +1258,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_blob_concurrency_on_fail() {
         let tempdir = create_temp_dir("test_get_blob_concurrency_on_fail_");
-        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX, None)
+        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX, None, None)
             .await
             .unwrap();
 
@@ -1254,7 +1295,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_dir_concurrency_on_fail() {
         let tempdir = create_temp_dir("test_get_dir_concurrency_on_fail_");
-        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX, None)
+        let stager = BoundedStager::new(tempdir.path().to_path_buf(), u64::MAX, None, None)
             .await
             .unwrap();
 
@@ -1286,5 +1327,85 @@ mod tests {
         }
 
         assert!(!stager.in_cache(puffin_file_name, key));
+    }
+
+    #[tokio::test]
+    async fn test_purge() {
+        let tempdir = create_temp_dir("test_purge_");
+        let notifier = MockNotifier::build();
+        let stager = BoundedStager::new(
+            tempdir.path().to_path_buf(),
+            u64::MAX,
+            Some(notifier.clone()),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // initialize stager
+        let puffin_file_name = "test_purge";
+        let blob_key = "blob_key";
+        let guard = stager
+            .get_blob(
+                puffin_file_name,
+                blob_key,
+                Box::new(|mut writer| {
+                    Box::pin(async move {
+                        writer.write_all(b"hello world").await.unwrap();
+                        Ok(11)
+                    })
+                }),
+            )
+            .await
+            .unwrap();
+        drop(guard);
+
+        let files_in_dir = [
+            ("file_a", "Hello, world!".as_bytes()),
+            ("file_b", "Hello, Rust!".as_bytes()),
+            ("file_c", "你好，世界！".as_bytes()),
+            ("subdir/file_d", "Hello, Puffin!".as_bytes()),
+            ("subdir/subsubdir/file_e", "¡Hola mundo!".as_bytes()),
+        ];
+
+        let dir_key = "dir_key";
+        let guard = stager
+            .get_dir(
+                puffin_file_name,
+                dir_key,
+                Box::new(|writer_provider| {
+                    Box::pin(async move {
+                        let mut size = 0;
+                        for (rel_path, content) in &files_in_dir {
+                            size += content.len();
+                            let mut writer = writer_provider.writer(rel_path).await.unwrap();
+                            writer.write_all(content).await.unwrap();
+                        }
+                        Ok(size as _)
+                    })
+                }),
+            )
+            .await
+            .unwrap();
+        drop(guard);
+
+        // purge the stager
+        stager.purge(puffin_file_name).await.unwrap();
+        stager.cache.run_pending_tasks().await;
+
+        let stats = notifier.stats();
+        assert_eq!(
+            stats,
+            Stats {
+                cache_insert_size: 81,
+                cache_evict_size: 81,
+                cache_hit_count: 0,
+                cache_hit_size: 0,
+                cache_miss_count: 2,
+                cache_miss_size: 81,
+                recycle_insert_size: 81,
+                recycle_clear_size: 0
+            }
+        );
     }
 }
