@@ -142,6 +142,16 @@ async fn main() {
         args.jobs = num_cpus::get() / 2;
     }
 
+    // normalize parallelism to 1 if any of the following conditions are met:
+    if args.server_addr.server_addr.is_some()
+        || args.setup_etcd
+        || args.setup_pg
+        || args.kafka_wal_broker_endpoints.is_some()
+    {
+        args.jobs = 1;
+        println!("Normalizing parallelism to 1 due to server addresses or etcd/pg setup");
+    }
+
     let config = ConfigBuilder::default()
         .case_dir(util::get_case_dir(args.case_dir))
         .fail_fast(args.fail_fast)
