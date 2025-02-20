@@ -12,7 +12,7 @@ workspace = true
 
 [dependencies]
 api.workspace = true
-async-trait = "0.1"
+async-trait.workspace = true
 chrono.workspace = true
 common-base.workspace = true
 common-catalog.workspace = true
@@ -34,7 +34,7 @@ greptime-proto.workspace = true
 humantime.workspace = true
 humantime-serde.workspace = true
 lazy_static.workspace = true
-paste = "1.0"
+paste.workspace = true
 serde.workspace = true
 snafu.workspace = true
 store-api.workspace = true

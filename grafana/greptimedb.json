@@ -384,8 +384,8 @@
         "rowHeight": 0.9,
         "showValue": "auto",
         "tooltip": {
-          "mode": "none",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -483,8 +483,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "pluginVersion": "10.2.3",
@@ -578,8 +578,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "pluginVersion": "10.2.3",
@@ -601,7 +601,7 @@
       "type": "timeseries"
     },
     {
-      "collapsed": true,
+      "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -684,8 +684,8 @@
               "showLegend": true
             },
             "tooltip": {
-              "mode": "single",
-              "sort": "none"
+              "mode": "multi",
+              "sort": "desc"
             }
           },
           "targets": [
@@ -878,8 +878,8 @@
               "showLegend": true
             },
             "tooltip": {
-              "mode": "single",
-              "sort": "none"
+              "mode": "multi",
+              "sort": "desc"
             }
           },
           "targets": [
@@ -1124,8 +1124,8 @@
               "showLegend": true
             },
             "tooltip": {
-              "mode": "single",
-              "sort": "none"
+              "mode": "multi",
+              "sort": "desc"
             }
           },
           "targets": [
@@ -1223,8 +1223,8 @@
               "showLegend": true
             },
             "tooltip": {
-              "mode": "single",
-              "sort": "none"
+              "mode": "multi",
+              "sort": "desc"
             }
           },
           "targets": [
@@ -1322,8 +1322,8 @@
               "showLegend": true
             },
             "tooltip": {
-              "mode": "single",
-              "sort": "none"
+              "mode": "multi",
+              "sort": "desc"
             }
           },
           "targets": [
@@ -1456,8 +1456,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -1573,8 +1573,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -1673,8 +1673,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -1773,8 +1773,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -1890,8 +1890,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -2002,8 +2002,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -2120,8 +2120,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -2233,8 +2233,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -2334,8 +2334,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -2435,8 +2435,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -2548,8 +2548,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -2661,8 +2661,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -2788,8 +2788,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -2889,8 +2889,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -2990,8 +2990,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -3091,8 +3091,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -3191,8 +3191,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -3302,8 +3302,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -3432,8 +3432,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -3543,8 +3543,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -3657,8 +3657,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -3808,8 +3808,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -3909,8 +3909,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -4011,8 +4011,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
@@ -4113,8 +4113,8 @@
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [

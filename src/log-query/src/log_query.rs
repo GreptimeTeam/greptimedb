@@ -55,7 +55,7 @@ pub struct LogQuery {
 }
 
 /// Expression to calculate on log after filtering.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LogExpr {
     NamedIdent(String),
     PositionalIdent(usize),
@@ -289,7 +289,7 @@ pub struct ColumnFilters {
     pub filters: Vec<ContentFilter>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ContentFilter {
     // Search-based filters
     /// Only match the exact content.
@@ -322,7 +322,7 @@ pub enum ContentFilter {
     Compound(Vec<ContentFilter>, BinaryOperator),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum BinaryOperator {
     And,
     Or,

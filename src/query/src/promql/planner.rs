@@ -612,8 +612,8 @@ impl PromPlanner {
 
         // transform function arguments
         let args = self.create_function_args(&args.args)?;
-        let input = if let Some(prom_expr) = args.input {
-            self.prom_expr_to_plan(&prom_expr, session_state).await?
+        let input = if let Some(prom_expr) = &args.input {
+            self.prom_expr_to_plan(prom_expr, session_state).await?
         } else {
             self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
             self.ctx.reset_table_name_and_schema();
@@ -631,17 +631,43 @@ impl PromPlanner {
                 ),
             })
         };
-        let mut func_exprs = self.create_function_expr(func, args.literals, session_state)?;
+        let mut func_exprs =
+            self.create_function_expr(func, args.literals.clone(), session_state)?;
         func_exprs.insert(0, self.create_time_index_column_expr()?);
         func_exprs.extend_from_slice(&self.create_tag_column_exprs()?);
 
-        LogicalPlanBuilder::from(input)
+        let builder = LogicalPlanBuilder::from(input)
             .project(func_exprs)
             .context(DataFusionPlanningSnafu)?
             .filter(self.create_empty_values_filter_expr()?)
-            .context(DataFusionPlanningSnafu)?
-            .build()
-            .context(DataFusionPlanningSnafu)
+            .context(DataFusionPlanningSnafu)?;
+
+        let builder = match func.name {
+            "sort" => builder
+                .sort(self.create_field_columns_sort_exprs(true))
+                .context(DataFusionPlanningSnafu)?,
+            "sort_desc" => builder
+                .sort(self.create_field_columns_sort_exprs(false))
+                .context(DataFusionPlanningSnafu)?,
+            "sort_by_label" => builder
+                .sort(Self::create_sort_exprs_by_tags(
+                    func.name,
+                    args.literals,
+                    true,
+                )?)
+                .context(DataFusionPlanningSnafu)?,
+            "sort_by_label_desc" => builder
+                .sort(Self::create_sort_exprs_by_tags(
+                    func.name,
+                    args.literals,
+                    false,
+                )?)
+                .context(DataFusionPlanningSnafu)?,
+
+            _ => builder,
+        };
+
+        builder.build().context(DataFusionPlanningSnafu)
     }
 
     async fn prom_ext_expr_to_plan(
@@ -1432,6 +1458,16 @@ impl PromPlanner {
 
                 ScalarFunc::GeneratedExpr
             }
+            "sort" | "sort_desc" | "sort_by_label" | "sort_by_label_desc" => {
+                // These functions are not expression but a part of plan,
+                // they are processed by `prom_call_expr_to_plan`.
+                for value in &self.ctx.field_columns {
+                    let expr = DfExpr::Column(Column::from_name(value));
+                    exprs.push(expr);
+                }
+
+                ScalarFunc::GeneratedExpr
+            }
             _ => {
                 if let Some(f) = session_state.scalar_functions().get(func.name) {
                     ScalarFunc::DataFusionBuiltin(f.clone())
@@ -1691,6 +1727,37 @@ impl PromPlanner {
         Ok(result)
     }
 
+    fn create_field_columns_sort_exprs(&self, asc: bool) -> Vec<SortExpr> {
+        self.ctx
+            .field_columns
+            .iter()
+            .map(|col| DfExpr::Column(Column::from_name(col)).sort(asc, false))
+            .collect::<Vec<_>>()
+    }
+
+    fn create_sort_exprs_by_tags(
+        func: &str,
+        tags: Vec<DfExpr>,
+        asc: bool,
+    ) -> Result<Vec<SortExpr>> {
+        ensure!(
+            !tags.is_empty(),
+            FunctionInvalidArgumentSnafu { fn_name: func }
+        );
+
+        tags.iter()
+            .map(|col| match col {
+                DfExpr::Literal(ScalarValue::Utf8(Some(label))) => {
+                    Ok(DfExpr::Column(Column::from_name(label)).sort(asc, false))
+                }
+                other => UnexpectedPlanExprSnafu {
+                    desc: format!("expected label string literal, but found {:?}", other),
+                }
+                .fail(),
+            })
+            .collect::<Result<Vec<_>>>()
+    }
+
     fn create_empty_values_filter_expr(&self) -> Result<DfExpr> {
         let mut exprs = Vec::with_capacity(self.ctx.field_columns.len());
         for value in &self.ctx.field_columns {
@@ -1803,6 +1870,8 @@ impl PromPlanner {
                 fn_name: SPECIAL_HISTOGRAM_QUANTILE.to_string(),
             })?
             .clone();
+        // remove le column from tag columns
+        self.ctx.tag_columns.retain(|col| col != LE_COLUMN_NAME);
 
         Ok(LogicalPlan::Extension(Extension {
             node: Arc::new(
@@ -2200,6 +2269,17 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu)?;
         }
 
+        ensure!(
+            left_context.field_columns.len() == 1,
+            MultiFieldsNotSupportedSnafu {
+                operator: "AND operator"
+            }
+        );
+        // Update the field column in context.
+        // The AND/UNLESS operator only keep the field column in left input.
+        let left_field_col = left_context.field_columns.first().unwrap();
+        self.ctx.field_columns = vec![left_field_col.clone()];
+
         // Generate join plan.
         // All set operations in PromQL are "distinct"
         match op.id() {
@@ -2405,6 +2485,7 @@ impl PromPlanner {
         // step 4: update context
         self.ctx.time_index_column = Some(left_time_index_column);
         self.ctx.tag_columns = all_tags.into_iter().collect();
+        self.ctx.field_columns = vec![left_field_col.to_string()];
 
         Ok(result)
     }
@@ -2458,7 +2539,6 @@ impl PromPlanner {
         let project_fields = non_field_columns_iter
             .chain(field_columns_iter)
             .collect::<Result<Vec<_>>>()?;
-
         LogicalPlanBuilder::from(input)
             .project(project_fields)
             .context(DataFusionPlanningSnafu)?
@@ -2590,6 +2670,68 @@ mod test {
                 .schema(schema)
                 .primary_key_indices((0..num_tag).collect())
                 .value_indices((num_tag + 1..num_tag + 1 + num_field).collect())
+                .next_column_id(1024)
+                .build()
+                .unwrap();
+            let table_info = TableInfoBuilder::default()
+                .name(table_name.to_string())
+                .meta(table_meta)
+                .build()
+                .unwrap();
+            let table = EmptyTable::from_table_info(&table_info);
+
+            assert!(catalog_list
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: schema_name.to_string(),
+                    table_name: table_name.to_string(),
+                    table_id: 1024,
+                    table,
+                })
+                .is_ok());
+        }
+
+        DfTableSourceProvider::new(
+            catalog_list,
+            false,
+            QueryContext::arc(),
+            DummyDecoder::arc(),
+            false,
+        )
+    }
+
+    async fn build_test_table_provider_with_fields(
+        table_name_tuples: &[(String, String)],
+        tags: &[&str],
+    ) -> DfTableSourceProvider {
+        let catalog_list = MemoryCatalogManager::with_default_setup();
+        for (schema_name, table_name) in table_name_tuples {
+            let mut columns = vec![];
+            let num_tag = tags.len();
+            for tag in tags {
+                columns.push(ColumnSchema::new(
+                    tag.to_string(),
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ));
+            }
+            columns.push(
+                ColumnSchema::new(
+                    "greptime_timestamp".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+            );
+            columns.push(ColumnSchema::new(
+                "greptime_value".to_string(),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ));
+            let schema = Arc::new(Schema::new(columns));
+            let table_meta = TableMetaBuilder::default()
+                .schema(schema)
+                .primary_key_indices((0..num_tag).collect())
                 .next_column_id(1024)
                 .build()
                 .unwrap();
@@ -3196,6 +3338,112 @@ mod test {
         );
 
         indie_query_plan_compare(query, expected).await;
+    }
+
+    #[tokio::test]
+    async fn test_nested_histogram_quantile() {
+        let mut eval_stmt = EvalStmt {
+            expr: PromExpr::NumberLiteral(NumberLiteral { val: 1.0 }),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let case = r#"label_replace(histogram_quantile(0.99, sum by(pod, le, path, code) (rate(greptime_servers_grpc_requests_elapsed_bucket{container="frontend"}[1m0s]))), "pod", "$1", "pod", "greptimedb-frontend-[0-9a-z]*-(.*)")"#;
+
+        let prom_expr = parser::parse(case).unwrap();
+        eval_stmt.expr = prom_expr;
+        let table_provider = build_test_table_provider_with_fields(
+            &[(
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "greptime_servers_grpc_requests_elapsed_bucket".to_string(),
+            )],
+            &["pod", "le", "path", "code", "container"],
+        )
+        .await;
+        // Should be ok
+        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_parse_and_operator() {
+        let mut eval_stmt = EvalStmt {
+            expr: PromExpr::NumberLiteral(NumberLiteral { val: 1.0 }),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let cases = [
+            r#"count (max by (persistentvolumeclaim,namespace) (kubelet_volume_stats_used_bytes{namespace=~".+"} ) and (max by (persistentvolumeclaim,namespace) (kubelet_volume_stats_used_bytes{namespace=~".+"} )) / (max by (persistentvolumeclaim,namespace) (kubelet_volume_stats_capacity_bytes{namespace=~".+"} )) >= (80 / 100)) or vector (0)"#,
+            r#"count (max by (persistentvolumeclaim,namespace) (kubelet_volume_stats_used_bytes{namespace=~".+"} ) unless (max by (persistentvolumeclaim,namespace) (kubelet_volume_stats_used_bytes{namespace=~".+"} )) / (max by (persistentvolumeclaim,namespace) (kubelet_volume_stats_capacity_bytes{namespace=~".+"} )) >= (80 / 100)) or vector (0)"#,
+        ];
+
+        for case in cases {
+            let prom_expr = parser::parse(case).unwrap();
+            eval_stmt.expr = prom_expr;
+            let table_provider = build_test_table_provider_with_fields(
+                &[
+                    (
+                        DEFAULT_SCHEMA_NAME.to_string(),
+                        "kubelet_volume_stats_used_bytes".to_string(),
+                    ),
+                    (
+                        DEFAULT_SCHEMA_NAME.to_string(),
+                        "kubelet_volume_stats_capacity_bytes".to_string(),
+                    ),
+                ],
+                &["namespace", "persistentvolumeclaim"],
+            )
+            .await;
+            // Should be ok
+            let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_nested_binary_op() {
+        let mut eval_stmt = EvalStmt {
+            expr: PromExpr::NumberLiteral(NumberLiteral { val: 1.0 }),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let case = r#"sum(rate(nginx_ingress_controller_requests{job=~".*"}[2m])) -
+        (
+            sum(rate(nginx_ingress_controller_requests{namespace=~".*"}[2m]))
+            or
+            vector(0)
+        )"#;
+
+        let prom_expr = parser::parse(case).unwrap();
+        eval_stmt.expr = prom_expr;
+        let table_provider = build_test_table_provider_with_fields(
+            &[(
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "nginx_ingress_controller_requests".to_string(),
+            )],
+            &["namespace", "job"],
+        )
+        .await;
+        // Should be ok
+        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

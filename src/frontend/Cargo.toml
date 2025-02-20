@@ -13,7 +13,7 @@ workspace = true
 [dependencies]
 api.workspace = true
 arc-swap = "1.0"
-async-trait = "0.1"
+async-trait.workspace = true
 auth.workspace = true
 cache.workspace = true
 catalog.workspace = true
@@ -70,7 +70,7 @@ catalog = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 datanode.workspace = true
 datatypes.workspace = true
-futures = "0.3"
+futures.workspace = true
 serde_json.workspace = true
 strfmt = "0.2"
 tower.workspace = true

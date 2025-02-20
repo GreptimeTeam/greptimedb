@@ -14,6 +14,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
@@ -21,11 +22,11 @@ use object_store::{FuturesAsyncWriter, ObjectStore};
 use puffin::error::{self as puffin_error, Result as PuffinResult};
 use puffin::puffin_manager::file_accessor::PuffinFileAccessor;
 use puffin::puffin_manager::fs_puffin_manager::FsPuffinManager;
-use puffin::puffin_manager::stager::BoundedStager;
+use puffin::puffin_manager::stager::{BoundedStager, Stager};
 use puffin::puffin_manager::{BlobGuard, PuffinManager, PuffinReader};
 use snafu::ResultExt;
 
-use crate::error::{PuffinInitStagerSnafu, Result};
+use crate::error::{PuffinInitStagerSnafu, PuffinPurgeStagerSnafu, Result};
 use crate::metrics::{
     StagerMetrics, INDEX_PUFFIN_FLUSH_OP_TOTAL, INDEX_PUFFIN_READ_BYTES_TOTAL,
     INDEX_PUFFIN_READ_OP_TOTAL, INDEX_PUFFIN_WRITE_BYTES_TOTAL, INDEX_PUFFIN_WRITE_OP_TOTAL,
@@ -61,12 +62,14 @@ impl PuffinManagerFactory {
         aux_path: impl AsRef<Path>,
         staging_capacity: u64,
         write_buffer_size: Option<usize>,
+        staging_ttl: Option<Duration>,
     ) -> Result<Self> {
         let staging_dir = aux_path.as_ref().join(STAGING_DIR);
         let stager = BoundedStager::new(
             staging_dir,
             staging_capacity,
             Some(Arc::new(StagerMetrics::default())),
+            staging_ttl,
         )
         .await
         .context(PuffinInitStagerSnafu)?;
@@ -81,6 +84,13 @@ impl PuffinManagerFactory {
         let puffin_file_accessor = ObjectStorePuffinFileAccessor::new(store);
         SstPuffinManager::new(self.stager.clone(), puffin_file_accessor)
     }
+
+    pub(crate) async fn purge_stager(&self, puffin_file_name: &str) -> Result<()> {
+        self.stager
+            .purge(puffin_file_name)
+            .await
+            .context(PuffinPurgeStagerSnafu)
+    }
 }
 
 #[cfg(test)]
@@ -89,7 +99,7 @@ impl PuffinManagerFactory {
         prefix: &str,
     ) -> (common_test_util::temp_dir::TempDir, Self) {
         let tempdir = common_test_util::temp_dir::create_temp_dir(prefix);
-        let factory = Self::new(tempdir.path().to_path_buf(), 1024, None)
+        let factory = Self::new(tempdir.path().to_path_buf(), 1024, None, None)
             .await
             .unwrap();
         (tempdir, factory)
@@ -98,7 +108,7 @@ impl PuffinManagerFactory {
     pub(crate) fn new_for_test_block(prefix: &str) -> (common_test_util::temp_dir::TempDir, Self) {
         let tempdir = common_test_util::temp_dir::create_temp_dir(prefix);
 
-        let f = Self::new(tempdir.path().to_path_buf(), 1024, None);
+        let f = Self::new(tempdir.path().to_path_buf(), 1024, None, None);
         let factory = common_runtime::block_on_global(f).unwrap();
 
         (tempdir, factory)
