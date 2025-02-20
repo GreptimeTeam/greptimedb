@@ -12,15 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
-
-use ahash::HashMap;
-
 use crate::etl::value::Value;
+use crate::PipelineMap;
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Map {
-    pub values: BTreeMap<String, Value>,
+    pub values: PipelineMap,
 }
 
 impl Map {
@@ -39,24 +36,14 @@ impl Map {
     }
 }
 
-impl From<HashMap<String, Value>> for Map {
-    fn from(values: HashMap<String, Value>) -> Self {
-        let mut map = Map::default();
-        for (k, v) in values.into_iter() {
-            map.insert(k, v);
-        }
-        map
-    }
-}
-
-impl From<BTreeMap<String, Value>> for Map {
-    fn from(values: BTreeMap<String, Value>) -> Self {
+impl From<PipelineMap> for Map {
+    fn from(values: PipelineMap) -> Self {
         Self { values }
     }
 }
 
 impl std::ops::Deref for Map {
-    type Target = BTreeMap<String, Value>;
+    type Target = PipelineMap;
 
     fn deref(&self) -> &Self::Target {
         &self.values
@@ -66,16 +53,6 @@ impl std::ops::Deref for Map {
 impl std::ops::DerefMut for Map {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.values
-    }
-}
-
-impl std::iter::IntoIterator for Map {
-    type Item = (String, Value);
-
-    type IntoIter = std::collections::btree_map::IntoIter<String, Value>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.values.into_iter()
     }
 }
 

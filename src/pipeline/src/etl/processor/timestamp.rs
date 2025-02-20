@@ -19,7 +19,6 @@ use chrono_tz::Tz;
 use lazy_static::lazy_static;
 use snafu::{OptionExt, ResultExt};
 
-use super::IntermediateStatus;
 use crate::etl::error::{
     DateFailedToGetLocalTimezoneSnafu, DateFailedToGetTimestampSnafu, DateInvalidFormatSnafu,
     DateParseSnafu, DateParseTimezoneSnafu, EpochInvalidResolutionSnafu, Error,
@@ -37,6 +36,7 @@ use crate::etl::value::time::{
     SEC_RESOLUTION, S_RESOLUTION, US_RESOLUTION,
 };
 use crate::etl::value::{Timestamp, Value};
+use crate::etl::PipelineMap;
 
 pub(crate) const PROCESSOR_TIMESTAMP: &str = "timestamp";
 const RESOLUTION_NAME: &str = "resolution";
@@ -298,7 +298,7 @@ impl Processor for TimestampProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut IntermediateStatus) -> Result<()> {
+    fn exec_mut(&self, val: &mut PipelineMap) -> Result<()> {
         for field in self.fields.iter() {
             let index = field.input_field();
             match val.get(index) {

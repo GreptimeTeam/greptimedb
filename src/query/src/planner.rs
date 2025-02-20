@@ -220,7 +220,7 @@ impl LogicalPlanner for DfLogicalPlanner {
                 .enable_ident_normalization,
         );
 
-        let mut planner = LogQueryPlanner::new(table_provider);
+        let mut planner = LogQueryPlanner::new(table_provider, self.session_state.clone());
         planner
             .query_to_plan(query)
             .await

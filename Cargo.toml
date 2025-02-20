@@ -160,7 +160,9 @@ parquet = { version = "53.0.0", default-features = false, features = ["arrow", "
 paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
-promql-parser = { version = "0.4.3", features = ["ser"] }
+promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", features = [
+    "ser",
+], rev = "27abb8e16003a50c720f00d6c85f41f5fa2a2a8e" }
 prost = "0.13"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.8"

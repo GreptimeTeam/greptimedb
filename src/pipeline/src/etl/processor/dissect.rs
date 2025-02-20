@@ -18,7 +18,6 @@ use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use itertools::Itertools;
 use snafu::OptionExt;
 
-use super::IntermediateStatus;
 use crate::etl::error::{
     DissectAppendOrderAlreadySetSnafu, DissectConsecutiveNamesSnafu, DissectEmptyPatternSnafu,
     DissectEndModifierAlreadySetSnafu, DissectInvalidPatternSnafu, DissectModifierAlreadySetSnafu,
@@ -32,6 +31,7 @@ use crate::etl::processor::{
     Processor, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, PATTERNS_NAME, PATTERN_NAME,
 };
 use crate::etl::value::Value;
+use crate::etl::PipelineMap;
 
 pub(crate) const PROCESSOR_DISSECT: &str = "dissect";
 
@@ -601,7 +601,7 @@ impl Processor for DissectProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut IntermediateStatus) -> Result<()> {
+    fn exec_mut(&self, val: &mut PipelineMap) -> Result<()> {
         for field in self.fields.iter() {
             let index = field.input_field();
             match val.get(index) {
