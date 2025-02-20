@@ -139,3 +139,99 @@ impl DfAccumulator for UddSketchState {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use datafusion::arrow::array::{BinaryArray, Float64Array};
+
+    use super::*;
+
+    #[test]
+    fn test_uddsketch_state_basic() {
+        let mut state = UddSketchState::new(10, 0.01);
+        state.update(1.0);
+        state.update(2.0);
+        state.update(3.0);
+
+        let result = state.evaluate().unwrap();
+        if let ScalarValue::Binary(Some(bytes)) = result {
+            let deserialized: UDDSketch = bincode::deserialize(&bytes).unwrap();
+            assert_eq!(deserialized.count(), 3);
+        } else {
+            panic!("Expected binary scalar value");
+        }
+    }
+
+    #[test]
+    fn test_uddsketch_state_roundtrip() {
+        let mut state = UddSketchState::new(10, 0.01);
+        state.update(1.0);
+        state.update(2.0);
+
+        // Serialize
+        let serialized = state.evaluate().unwrap();
+
+        // Create new state and merge the serialized data
+        let mut new_state = UddSketchState::new(10, 0.01);
+        if let ScalarValue::Binary(Some(bytes)) = &serialized {
+            new_state.merge(bytes);
+
+            // Verify the merged state matches original
+            let new_result = new_state.evaluate().unwrap();
+            assert_eq!(serialized, new_result);
+        } else {
+            panic!("Expected binary scalar value");
+        }
+    }
+
+    #[test]
+    fn test_uddsketch_state_batch_update() {
+        let mut state = UddSketchState::new(10, 0.01);
+        let values = vec![1.0f64, 2.0, 3.0];
+        let array = Arc::new(Float64Array::from(values)) as ArrayRef;
+
+        state
+            .update_batch(&[array.clone(), array.clone(), array])
+            .unwrap();
+
+        let result = state.evaluate().unwrap();
+        if let ScalarValue::Binary(Some(bytes)) = result {
+            let deserialized: UDDSketch = bincode::deserialize(&bytes).unwrap();
+            assert_eq!(deserialized.count(), 3);
+        } else {
+            panic!("Expected binary scalar value");
+        }
+    }
+
+    #[test]
+    fn test_uddsketch_state_merge_batch() {
+        let mut state1 = UddSketchState::new(10, 0.01);
+        state1.update(1.0);
+        let state1_binary = state1.evaluate().unwrap();
+
+        let mut state2 = UddSketchState::new(10, 0.01);
+        state2.update(2.0);
+        let state2_binary = state2.evaluate().unwrap();
+
+        let mut merged_state = UddSketchState::new(10, 0.01);
+        if let (ScalarValue::Binary(Some(bytes1)), ScalarValue::Binary(Some(bytes2))) =
+            (&state1_binary, &state2_binary)
+        {
+            let binary_array = Arc::new(BinaryArray::from(vec![
+                bytes1.as_slice(),
+                bytes2.as_slice(),
+            ])) as ArrayRef;
+            merged_state.merge_batch(&[binary_array]).unwrap();
+
+            let result = merged_state.evaluate().unwrap();
+            if let ScalarValue::Binary(Some(bytes)) = result {
+                let deserialized: UDDSketch = bincode::deserialize(&bytes).unwrap();
+                assert_eq!(deserialized.count(), 2);
+            } else {
+                panic!("Expected binary scalar value");
+            }
+        } else {
+            panic!("Expected binary scalar values");
+        }
+    }
+}
