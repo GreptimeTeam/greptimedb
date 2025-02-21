@@ -44,6 +44,7 @@ lazy_static.workspace = true
 log-query.workspace = true
 log-store.workspace = true
 meta-client.workspace = true
+num_cpus.workspace = true
 opentelemetry-proto.workspace = true
 operator.workspace = true
 partition.workspace = true

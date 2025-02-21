@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use futures::stream::BoxStream;
+use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,8 @@ use snafu::OptionExt;
 use table::metadata::TableId;
 
 use crate::error::{self, Result};
-use crate::key::flow::FlowScoped;
+use crate::key::flow::{flownode_addr_helper, FlowScoped};
+use crate::key::node_address::NodeAddressKey;
 use crate::key::{BytesAdapter, FlowId, FlowPartitionId, MetadataKey, MetadataValue};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
@@ -196,10 +197,7 @@ impl TableFlowManager {
     /// Retrieves all [TableFlowKey]s of the specified `table_id`.
     ///
     /// TODO(discord9): add cache for it since range request does not support cache.
-    pub fn flows(
-        &self,
-        table_id: TableId,
-    ) -> BoxStream<'static, Result<(TableFlowKey, TableFlowValue)>> {
+    pub async fn flows(&self, table_id: TableId) -> Result<Vec<(TableFlowKey, TableFlowValue)>> {
         let start_key = TableFlowKey::range_start_key(table_id);
         let req = RangeRequest::new().with_prefix(start_key);
         let stream = PaginationStream::new(
@@ -210,7 +208,9 @@ impl TableFlowManager {
         )
         .into_stream();
 
-        Box::pin(stream)
+        let mut res = stream.try_collect::<Vec<_>>().await?;
+        self.remap_table_flow_addresses(&mut res).await?;
+        Ok(res)
     }
 
     /// Builds a create table flow transaction.
@@ -237,6 +237,28 @@ impl TableFlowManager {
         }
 
         Ok(Txn::new().and_then(txns))
+    }
+
+    async fn remap_table_flow_addresses(
+        &self,
+        table_flows: &mut [(TableFlowKey, TableFlowValue)],
+    ) -> Result<()> {
+        let keys = table_flows
+            .iter()
+            .map(|(_, value)| NodeAddressKey::with_flownode(value.peer.id))
+            .collect::<Vec<_>>();
+        let flownode_addrs =
+            flownode_addr_helper::get_flownode_addresses(&self.kv_backend, keys).await?;
+        for (_, table_flow_value) in table_flows.iter_mut() {
+            let flownode_id = table_flow_value.peer.id;
+            // If an id lacks a corresponding address in the `flow_node_addrs`,
+            // it means the old address in `table_flow_value` is still valid,
+            // which is expected.
+            if let Some(flownode_addr) = flownode_addrs.get(&flownode_id) {
+                table_flow_value.peer.addr = flownode_addr.peer.addr.clone();
+            }
+        }
+        Ok(())
     }
 }
 

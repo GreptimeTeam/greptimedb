@@ -49,7 +49,6 @@ impl AnalyzerRule for StringNormalizationRule {
             | LogicalPlan::Distinct(_)
             | LogicalPlan::Dml(_)
             | LogicalPlan::Copy(_)
-            | LogicalPlan::Unnest(_)
             | LogicalPlan::RecursiveQuery(_) => {
                 let mut converter = StringNormalizationConverter;
                 let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
@@ -58,10 +57,15 @@ impl AnalyzerRule for StringNormalizationRule {
                     .into_iter()
                     .map(|e| e.rewrite(&mut converter).map(|x| x.data))
                     .collect::<Result<Vec<_>>>()?;
-                plan.with_new_exprs(expr, inputs).map(Transformed::yes)
+                if expr != plan.expressions_consider_join() {
+                    plan.with_new_exprs(expr, inputs).map(Transformed::yes)
+                } else {
+                    Ok(Transformed::no(plan))
+                }
             }
             LogicalPlan::Limit(_)
             | LogicalPlan::Explain(_)
+            | LogicalPlan::Unnest(_)
             | LogicalPlan::Ddl(_)
             | LogicalPlan::DescribeTable(_) => Ok(Transformed::no(plan)),
         })

@@ -21,7 +21,7 @@ use common_meta::key::node_address::{NodeAddressKey, NodeAddressValue};
 use common_meta::key::{MetadataKey, MetadataValue};
 use common_meta::peer::Peer;
 use common_meta::rpc::store::PutRequest;
-use common_telemetry::{error, warn};
+use common_telemetry::{error, info, warn};
 use dashmap::DashMap;
 use snafu::ResultExt;
 
@@ -185,6 +185,10 @@ async fn rewrite_node_address(ctx: &mut Context, stat: &Stat) {
 
         match ctx.leader_cached_kv_backend.put(put).await {
             Ok(_) => {
+                info!(
+                    "Successfully updated datanode `NodeAddressValue`: {:?}",
+                    peer
+                );
                 // broadcast invalidating cache
                 let cache_idents = stat
                     .table_ids()
@@ -200,11 +204,14 @@ async fn rewrite_node_address(ctx: &mut Context, stat: &Stat) {
                 }
             }
             Err(e) => {
-                error!(e; "Failed to update NodeAddressValue: {:?}", peer);
+                error!(e; "Failed to update datanode `NodeAddressValue`: {:?}", peer);
             }
         }
     } else {
-        warn!("Failed to serialize NodeAddressValue: {:?}", peer);
+        warn!(
+            "Failed to serialize datanode `NodeAddressValue`: {:?}",
+            peer
+        );
     }
 }
 

@@ -264,23 +264,29 @@ impl PrometheusJsonResponse {
 
             // assemble rows
             for row_index in 0..batch.num_rows() {
-                // retrieve tags
-                // TODO(ruihang): push table name `__metric__`
-                let mut tags = Vec::with_capacity(num_label_columns + 1);
-                tags.push(metric_name);
-                for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
-                    // TODO(ruihang): add test for NULL tag
-                    if let Some(tag_value) = tag_column.get_data(row_index) {
-                        tags.push((tag_name, tag_value));
-                    }
-                }
-
-                // retrieve timestamp
-                let timestamp_millis: i64 = timestamp_column.get_data(row_index).unwrap().into();
-                let timestamp = timestamp_millis as f64 / 1000.0;
-
                 // retrieve value
                 if let Some(v) = field_column.get_data(row_index) {
+                    // ignore all NaN values to reduce the amount of data to be sent.
+                    if v.is_nan() {
+                        continue;
+                    }
+
+                    // retrieve tags
+                    // TODO(ruihang): push table name `__metric__`
+                    let mut tags = Vec::with_capacity(num_label_columns + 1);
+                    tags.push(metric_name);
+                    for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
+                        // TODO(ruihang): add test for NULL tag
+                        if let Some(tag_value) = tag_column.get_data(row_index) {
+                            tags.push((tag_name, tag_value));
+                        }
+                    }
+
+                    // retrieve timestamp
+                    let timestamp_millis: i64 =
+                        timestamp_column.get_data(row_index).unwrap().into();
+                    let timestamp = timestamp_millis as f64 / 1000.0;
+
                     buffer
                         .entry(tags)
                         .or_default()

@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::str::FromStr;
 
+use api::v1::meta::HeartbeatRequest;
 use common_error::ext::ErrorExt;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -58,7 +60,7 @@ pub trait ClusterInfo {
 ///
 /// This key cannot be used to describe the `Metasrv` because the `Metasrv` does not have
 /// a `cluster_id`, it serves multiple clusters.
-#[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct NodeInfoKey {
     /// The cluster id.
     pub cluster_id: ClusterId,
@@ -69,6 +71,28 @@ pub struct NodeInfoKey {
 }
 
 impl NodeInfoKey {
+    /// Try to create a `NodeInfoKey` from a "good" heartbeat request. "good" as in every needed
+    /// piece of information is provided and valid.  
+    pub fn new(request: &HeartbeatRequest) -> Option<Self> {
+        let HeartbeatRequest { header, peer, .. } = request;
+        let header = header.as_ref()?;
+        let peer = peer.as_ref()?;
+
+        let role = header.role.try_into().ok()?;
+        let node_id = match role {
+            // Because the Frontend is stateless, it's too easy to neglect choosing a unique id
+            // for it when setting up a cluster. So we calculate its id from its address.
+            Role::Frontend => calculate_node_id(&peer.addr),
+            _ => peer.id,
+        };
+
+        Some(NodeInfoKey {
+            cluster_id: header.cluster_id,
+            role,
+            node_id,
+        })
+    }
+
     pub fn key_prefix_with_cluster_id(cluster_id: u64) -> String {
         format!("{}-{}-", CLUSTER_NODE_INFO_PREFIX, cluster_id)
     }
@@ -81,6 +105,13 @@ impl NodeInfoKey {
             i32::from(role)
         )
     }
+}
+
+/// Calculate (by using the DefaultHasher) the node's id from its address.
+fn calculate_node_id(addr: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    addr.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// The information of a node in the cluster.
@@ -100,7 +131,7 @@ pub struct NodeInfo {
     pub start_time_ms: u64,
 }
 
-#[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum Role {
     Datanode,
     Frontend,
@@ -271,6 +302,7 @@ impl TryFrom<i32> for Role {
 mod tests {
     use std::assert_matches::assert_matches;
 
+    use super::*;
     use crate::cluster::Role::{Datanode, Frontend};
     use crate::cluster::{DatanodeStatus, NodeInfo, NodeInfoKey, NodeStatus};
     use crate::peer::Peer;
@@ -337,5 +369,27 @@ mod tests {
 
         let prefix = NodeInfoKey::key_prefix_with_role(2, Frontend);
         assert_eq!(prefix, "__meta_cluster_node_info-2-1-");
+    }
+
+    #[test]
+    fn test_calculate_node_id_from_addr() {
+        // Test empty string
+        assert_eq!(calculate_node_id(""), calculate_node_id(""));
+
+        // Test same addresses return same ids
+        let addr1 = "127.0.0.1:8080";
+        let id1 = calculate_node_id(addr1);
+        let id2 = calculate_node_id(addr1);
+        assert_eq!(id1, id2);
+
+        // Test different addresses return different ids
+        let addr2 = "127.0.0.1:8081";
+        let id3 = calculate_node_id(addr2);
+        assert_ne!(id1, id3);
+
+        // Test long address
+        let long_addr = "very.long.domain.name.example.com:9999";
+        let id4 = calculate_node_id(long_addr);
+        assert!(id4 > 0);
     }
 }

@@ -224,6 +224,20 @@ impl HeartbeatTask {
         common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
+
+            let build_info = common_version::build_info();
+            let heartbeat_request = HeartbeatRequest {
+                peer: self_peer,
+                node_epoch,
+                info: Some(NodeInfo {
+                    version: build_info.version.to_string(),
+                    git_commit: build_info.commit_short.to_string(),
+                    start_time_ms: node_epoch,
+                    cpus: num_cpus::get() as u32,
+                }),
+                ..Default::default()
+            };
+
             loop {
                 if !running.load(Ordering::Relaxed) {
                     info!("shutdown heartbeat task");
@@ -235,9 +249,8 @@ impl HeartbeatTask {
                             match outgoing_message_to_mailbox_message(message) {
                                 Ok(message) => {
                                     let req = HeartbeatRequest {
-                                        peer: self_peer.clone(),
                                         mailbox_message: Some(message),
-                                        ..Default::default()
+                                        ..heartbeat_request.clone()
                                     };
                                     HEARTBEAT_RECV_COUNT.with_label_values(&["success"]).inc();
                                     Some(req)
@@ -253,22 +266,13 @@ impl HeartbeatTask {
                         }
                     }
                     _ = &mut sleep => {
-                        let build_info = common_version::build_info();
                         let region_stats = Self::load_region_stats(&region_server_clone);
                         let now = Instant::now();
                         let duration_since_epoch = (now - epoch).as_millis() as u64;
                         let req = HeartbeatRequest {
-                            peer: self_peer.clone(),
                             region_stats,
                             duration_since_epoch,
-                            node_epoch,
-                            info: Some(NodeInfo {
-                                version: build_info.version.to_string(),
-                                git_commit: build_info.commit_short.to_string(),
-                                // The start timestamp is the same as node_epoch currently.
-                                start_time_ms: node_epoch,
-                            }),
-                            ..Default::default()
+                            ..heartbeat_request.clone()
                         };
                         sleep.as_mut().reset(now + Duration::from_millis(interval));
                         Some(req)

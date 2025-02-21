@@ -12,14 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use futures::stream::BoxStream;
+use futures::TryStreamExt;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
 use crate::error::{self, Result};
-use crate::key::flow::FlowScoped;
+use crate::key::flow::{flownode_addr_helper, FlowScoped};
+use crate::key::node_address::NodeAddressKey;
 use crate::key::{BytesAdapter, FlowId, FlowPartitionId, MetadataKey, MetadataValue};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
@@ -167,10 +168,7 @@ impl FlowRouteManager {
     }
 
     /// Retrieves all [FlowRouteValue]s of the specified `flow_id`.
-    pub fn routes(
-        &self,
-        flow_id: FlowId,
-    ) -> BoxStream<'static, Result<(FlowRouteKey, FlowRouteValue)>> {
+    pub async fn routes(&self, flow_id: FlowId) -> Result<Vec<(FlowRouteKey, FlowRouteValue)>> {
         let start_key = FlowRouteKey::range_start_key(flow_id);
         let req = RangeRequest::new().with_prefix(start_key);
         let stream = PaginationStream::new(
@@ -181,7 +179,9 @@ impl FlowRouteManager {
         )
         .into_stream();
 
-        Box::pin(stream)
+        let mut res = stream.try_collect::<Vec<_>>().await?;
+        self.remap_flow_route_addresses(&mut res).await?;
+        Ok(res)
     }
 
     /// Builds a create flow routes transaction.
@@ -202,6 +202,28 @@ impl FlowRouteManager {
             .collect::<Result<Vec<_>>>()?;
 
         Ok(Txn::new().and_then(txns))
+    }
+
+    async fn remap_flow_route_addresses(
+        &self,
+        flow_routes: &mut [(FlowRouteKey, FlowRouteValue)],
+    ) -> Result<()> {
+        let keys = flow_routes
+            .iter()
+            .map(|(_, value)| NodeAddressKey::with_flownode(value.peer.id))
+            .collect();
+        let flow_node_addrs =
+            flownode_addr_helper::get_flownode_addresses(&self.kv_backend, keys).await?;
+        for (_, flow_route_value) in flow_routes.iter_mut() {
+            let flownode_id = flow_route_value.peer.id;
+            // If an id lacks a corresponding address in the `flow_node_addrs`,
+            // it means the old address in `table_flow_value` is still valid,
+            // which is expected.
+            if let Some(node_addr) = flow_node_addrs.get(&flownode_id) {
+                flow_route_value.peer.addr = node_addr.peer.addr.clone();
+            }
+        }
+        Ok(())
     }
 }
 

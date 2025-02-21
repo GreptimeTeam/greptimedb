@@ -43,6 +43,7 @@ use snafu::{ensure, ResultExt};
 use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
 use tower::ServiceBuilder;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::decompression::RequestDecompressionLayer;
 use tower_http::trace::TraceLayer;
@@ -990,6 +991,7 @@ impl HttpServer {
                 "/label/{label_name}/values",
                 routing::get(label_values_query),
             )
+            .layer(ServiceBuilder::new().layer(CompressionLayer::new()))
             .with_state(prometheus_handler)
     }
 
