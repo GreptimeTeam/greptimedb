@@ -56,7 +56,7 @@ runs:
 
     - name: Start EC2 runner
       if: startsWith(inputs.runner, 'ec2')
-      uses: machulav/ec2-github-runner@v2
+      uses: machulav/ec2-github-runner@v2.3.8
       id: start-linux-arm64-ec2-runner
       with:
         mode: start

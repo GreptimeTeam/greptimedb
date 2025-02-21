@@ -1,4 +1,4 @@
-FROM ubuntu:22.04
+FROM ubuntu:latest
 
 # The binary name of GreptimeDB executable.
 # Defaults to "greptime", but sometimes in other projects it might be different.
