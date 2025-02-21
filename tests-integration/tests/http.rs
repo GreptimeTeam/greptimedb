@@ -413,6 +413,18 @@ pub async fn test_sql_api(store_type: StorageType) {
     let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), ErrorCode::DatabaseNotFound as u32);
 
+    // test analyze format
+    let res = client
+        .get("/v1/sql?sql=explain analyze format json select cpu, ts from demo limit 1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
+    let output = body.output();
+    assert_eq!(output.len(), 1);
+    // this is something only json format can show
+    assert!(format!("{:?}", output[0]).contains("\\\"param\\\""));
+
     // test parse method
     let res = client.get("/v1/sql/parse?sql=desc table t").send().await;
     assert_eq!(res.status(), StatusCode::OK);

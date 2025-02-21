@@ -17,11 +17,13 @@
 //! The code skeleton is taken from `datafusion/physical-plan/src/analyze.rs`
 
 use std::any::Any;
+use std::fmt::Display;
 use std::sync::Arc;
 
+use ahash::HashMap;
 use arrow::array::{StringBuilder, UInt32Builder};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use common_recordbatch::adapter::{MetricCollector, RecordBatchMetrics};
+use common_recordbatch::adapter::{MetricCollector, PlanMetrics, RecordBatchMetrics};
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
 use datafusion::error::Result as DfResult;
 use datafusion::execution::TaskContext;
@@ -34,6 +36,8 @@ use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{internal_err, DataFusionError};
 use datafusion_physical_expr::{Distribution, EquivalenceProperties, Partitioning};
 use futures::StreamExt;
+use serde::Serialize;
+use sqlparser::ast::AnalyzeFormat;
 
 use crate::dist_plan::MergeScanExec;
 
@@ -46,11 +50,12 @@ pub struct DistAnalyzeExec {
     input: Arc<dyn ExecutionPlan>,
     schema: SchemaRef,
     properties: PlanProperties,
+    format: AnalyzeFormat,
 }
 
 impl DistAnalyzeExec {
     /// Create a new DistAnalyzeExec
-    pub fn new(input: Arc<dyn ExecutionPlan>) -> Self {
+    pub fn new(input: Arc<dyn ExecutionPlan>, format: AnalyzeFormat) -> Self {
         let schema = SchemaRef::new(Schema::new(vec![
             Field::new(STAGE, DataType::UInt32, true),
             Field::new(NODE, DataType::UInt32, true),
@@ -61,6 +66,7 @@ impl DistAnalyzeExec {
             input,
             schema,
             properties,
+            format,
         }
     }
 
@@ -110,7 +116,7 @@ impl ExecutionPlan for DistAnalyzeExec {
         self: Arc<Self>,
         mut children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(Self::new(children.pop().unwrap())))
+        Ok(Arc::new(Self::new(children.pop().unwrap(), self.format)))
     }
 
     fn execute(
@@ -131,6 +137,7 @@ impl ExecutionPlan for DistAnalyzeExec {
         let captured_schema = self.schema.clone();
 
         // Finish the input stream and create the output
+        let format = self.format;
         let mut input_stream = coalesce_partition_plan.execute(0, context)?;
         let output = async move {
             let mut total_rows = 0;
@@ -138,7 +145,7 @@ impl ExecutionPlan for DistAnalyzeExec {
                 total_rows += batch.num_rows();
             }
 
-            create_output_batch(total_rows, captured_input, captured_schema)
+            create_output_batch(total_rows, captured_input, captured_schema, format)
         };
 
         Ok(Box::pin(RecordBatchStreamAdapter::new(
@@ -166,10 +173,10 @@ impl AnalyzeOutputBuilder {
         }
     }
 
-    fn append_metric(&mut self, stage: u32, node: u32, metric: RecordBatchMetrics) {
+    fn append_metric(&mut self, stage: u32, node: u32, content: String) {
         self.stage_builder.append_value(stage);
         self.node_builder.append_value(node);
-        self.plan_builder.append_value(metric.to_string());
+        self.plan_builder.append_value(content);
     }
 
     fn append_total_rows(&mut self, total_rows: usize) {
@@ -197,6 +204,7 @@ fn create_output_batch(
     total_rows: usize,
     input: Arc<dyn ExecutionPlan>,
     schema: SchemaRef,
+    format: AnalyzeFormat,
 ) -> DfResult<DfRecordBatch> {
     let mut builder = AnalyzeOutputBuilder::new(schema);
 
@@ -207,14 +215,14 @@ fn create_output_batch(
     let stage_0_metrics = collector.record_batch_metrics;
 
     // Append the metrics of the current stage
-    builder.append_metric(0, 0, stage_0_metrics);
+    builder.append_metric(0, 0, metrics_to_string(stage_0_metrics, format)?);
 
     // Find merge scan and append its sub_stage_metrics
     input.apply(|plan| {
         if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>() {
             let sub_stage_metrics = merge_scan.sub_stage_metrics();
             for (node, metric) in sub_stage_metrics.into_iter().enumerate() {
-                builder.append_metric(1, node as _, metric);
+                builder.append_metric(1, node as _, metrics_to_string(metric, format)?);
             }
             return Ok(TreeNodeRecursion::Stop);
         }
@@ -225,4 +233,88 @@ fn create_output_batch(
     builder.append_total_rows(total_rows);
 
     builder.finish()
+}
+
+fn metrics_to_string(metrics: RecordBatchMetrics, format: AnalyzeFormat) -> DfResult<String> {
+    match format {
+        AnalyzeFormat::JSON => Ok(JsonMetrics::from_record_batch_metrics(metrics).to_string()),
+        AnalyzeFormat::TEXT => Ok(metrics.to_string()),
+        AnalyzeFormat::GRAPHVIZ => Err(DataFusionError::NotImplemented(
+            "GRAPHVIZ format is not supported for metrics output".to_string(),
+        )),
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
+struct JsonMetrics {
+    name: String,
+    param: String,
+
+    // well-known metrics
+    output_rows: usize,
+    // busy time in nanoseconds
+    elapsed_compute: usize,
+
+    // other metrics
+    metrics: HashMap<String, usize>,
+    children: Vec<JsonMetrics>,
+}
+
+impl JsonMetrics {
+    fn from_record_batch_metrics(record_batch_metrics: RecordBatchMetrics) -> Self {
+        let mut layers: HashMap<usize, Vec<Self>> = HashMap::default();
+
+        for plan_metrics in record_batch_metrics.plan_metrics.into_iter().rev() {
+            let (level, mut metrics) = Self::from_plan_metrics(plan_metrics);
+            if let Some(next_layer) = layers.remove(&(level + 1)) {
+                metrics.children = next_layer;
+            }
+            if level == 0 {
+                return metrics;
+            }
+            layers.entry(level).or_default().push(metrics);
+        }
+
+        // Unreachable path. Each metrics should contains at least one level 0.
+        Self::default()
+    }
+
+    /// Convert a [`PlanMetrics`] to a [`JsonMetrics`] without children.
+    ///
+    /// Returns the level of the plan and the [`JsonMetrics`].
+    fn from_plan_metrics(plan_metrics: PlanMetrics) -> (usize, Self) {
+        let raw_name = plan_metrics.plan.trim_end();
+        let mut elapsed_compute = 0;
+        let mut output_rows = 0;
+        let mut other_metrics = HashMap::default();
+        let (name, param) = raw_name.split_once(": ").unwrap_or_default();
+
+        for (name, value) in plan_metrics.metrics.into_iter() {
+            if name == "elapsed_compute" {
+                elapsed_compute = value;
+            } else if name == "output_rows" {
+                output_rows = value;
+            } else {
+                other_metrics.insert(name, value);
+            }
+        }
+
+        (
+            plan_metrics.level,
+            Self {
+                name: name.to_string(),
+                param: param.to_string(),
+                output_rows,
+                elapsed_compute,
+                metrics: other_metrics,
+                children: vec![],
+            },
+        )
+    }
+}
+
+impl Display for JsonMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", serde_json::to_string(self).unwrap())
+    }
 }
