@@ -77,11 +77,12 @@ impl DistPlannerAnalyzer {
             .map(|e| e.transform(&Self::transform_subquery).map(|x| x.data))
             .collect::<DfResult<Vec<_>>>()?;
 
-        if exprs != plan.expressions_consider_join() {
+        // Some plans that are special treated (should not call `with_new_exprs` on them)
+        if !matches!(plan, LogicalPlan::Unnest(_)) {
             let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
-            return Ok(Transformed::yes(plan.with_new_exprs(exprs, inputs)?));
+            Ok(Transformed::yes(plan.with_new_exprs(exprs, inputs)?))
         } else {
-            return Ok(Transformed::no(plan));
+            Ok(Transformed::no(plan))
         }
     }
 
