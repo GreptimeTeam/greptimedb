@@ -343,6 +343,16 @@ pub enum Error {
         location: Location,
     },
 
+    #[cfg(feature = "mysql_kvbackend")]
+    #[snafu(display("Failed to parse mysql url: {}", mysql_url))]
+    ParseMySqlUrl {
+        #[snafu(source)]
+        error: sqlx::error::Error,
+        mysql_url: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to find table route for {table_id}"))]
     TableRouteNotFound {
         table_id: TableId,
@@ -902,7 +912,8 @@ impl ErrorExt for Error {
             #[cfg(feature = "mysql_kvbackend")]
             Error::MySqlExecution { .. }
             | Error::CreateMySqlPool { .. }
-            | Error::ConnectMySql { .. } => StatusCode::Internal,
+            | Error::ConnectMySql { .. }
+            | Error::ParseMySqlUrl { .. } => StatusCode::Internal,
         }
     }
 
