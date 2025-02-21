@@ -54,7 +54,10 @@ use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, Sto
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::region_server::RegionServer;
 use file_engine::config::EngineConfig as FileEngineConfig;
-use flow::{FlowConfig, FlowWorkerManager, FlownodeBuilder, FlownodeOptions, FrontendInvoker};
+use flow::{
+    FlowConfig, FlowWorkerManager, FlownodeBuilder, FlownodeOptions, FlownodeServer,
+    FrontendInvoker,
+};
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
@@ -73,7 +76,7 @@ use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::ResultExt;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::RwLock;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
@@ -247,14 +250,21 @@ impl StandaloneOptions {
             ..Default::default()
         }
     }
+
+    pub fn flownode_options(&self) -> FlownodeOptions {
+        FlownodeOptions {
+            flow: self.flow.clone(),
+            mode: Mode::Standalone,
+            ..Default::default()
+        }
+    }
 }
 
 pub struct Instance {
     datanode: Datanode,
     frontend: FeInstance,
     // TODO(discord9): wrapped it in flownode instance instead
-    flow_worker_manager: Arc<FlowWorkerManager>,
-    flow_shutdown: broadcast::Sender<()>,
+    flow_server: FlownodeServer,
     procedure_manager: ProcedureManagerRef,
     wal_options_allocator: WalOptionsAllocatorRef,
 
@@ -292,10 +302,12 @@ impl App for Instance {
             .await
             .context(StartFrontendSnafu)?;
 
+        plugins::start_flownode_plugins(self.flow_server.plugins().clone())
+            .await
+            .context(StartFlownodeSnafu)?;
+
         self.frontend.start().await.context(StartFrontendSnafu)?;
-        self.flow_worker_manager
-            .clone()
-            .run_background(Some(self.flow_shutdown.subscribe()));
+        self.flow_server.start_local().await;
         Ok(())
     }
 
@@ -304,6 +316,15 @@ impl App for Instance {
             .shutdown()
             .await
             .context(ShutdownFrontendSnafu)?;
+
+        self.flow_server.shutdown_local().await
+            .map_err(|_e| {
+                flow::error::InternalSnafu {
+                    reason: "Failed to send shutdown signal to flow worker manager, all receiver end already closed".to_string(),
+                }
+                .build()
+            })
+            .context(ShutdownFlownodeSnafu)?;
 
         self.procedure_manager
             .stop()
@@ -314,15 +335,6 @@ impl App for Instance {
             .shutdown()
             .await
             .context(ShutdownDatanodeSnafu)?;
-        self.flow_shutdown
-            .send(())
-            .map_err(|_e| {
-                flow::error::InternalSnafu {
-                    reason: "Failed to send shutdown signal to flow worker manager, all receiver end already closed".to_string(),
-                }
-                .build()
-            })
-            .context(ShutdownFlownodeSnafu)?;
         info!("Datanode instance stopped.");
 
         Ok(())
@@ -471,6 +483,7 @@ impl StartCommand {
         opts.grpc.detect_server_addr();
         let fe_opts = opts.frontend_options();
         let dn_opts = opts.datanode_options();
+        let fn_opts = opts.flownode_options();
 
         plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &fe_opts)
             .await
@@ -479,6 +492,10 @@ impl StartCommand {
         plugins::setup_datanode_plugins(&mut plugins, &plugin_opts, &dn_opts)
             .await
             .context(StartDatanodeSnafu)?;
+
+        plugins::setup_flownode_plugins(&mut plugins, &plugin_opts, &fn_opts)
+            .await
+            .context(StartFlownodeSnafu)?;
 
         set_default_timezone(fe_opts.default_timezone.as_deref()).context(InitTimezoneSnafu)?;
 
@@ -540,13 +557,11 @@ impl StartCommand {
             catalog_manager.clone(),
             flow_metadata_manager.clone(),
         );
-        let flownode = Arc::new(
-            flow_builder
-                .build()
-                .await
-                .map_err(BoxedError::new)
-                .context(OtherSnafu)?,
-        );
+        let flownode = flow_builder
+            .build()
+            .await
+            .map_err(BoxedError::new)
+            .context(OtherSnafu)?;
 
         // set the ref to query for the local flow state
         {
@@ -620,12 +635,11 @@ impl StartCommand {
             layered_cache_registry.clone(),
             ddl_task_executor.clone(),
             node_manager,
+            plugins.clone(),
         )
         .await
         .context(StartFlownodeSnafu)?;
         flow_worker_manager.set_frontend_invoker(invoker).await;
-
-        let (tx, _rx) = broadcast::channel(1);
 
         let servers = Services::new(opts, Arc::new(frontend.clone()), plugins)
             .build()
@@ -638,8 +652,7 @@ impl StartCommand {
         Ok(Instance {
             datanode,
             frontend,
-            flow_worker_manager,
-            flow_shutdown: tx,
+            flow_server: flownode.server,
             procedure_manager,
             wal_options_allocator,
             _guard: guard,
