@@ -214,7 +214,7 @@ impl FulltextIndexApplier {
             .await
             .context(PuffinBuildReaderSnafu)?
             .with_file_size_hint(file_size_hint)
-            .dir(&blob_key)
+            .dir(blob_key)
             .await
         {
             Ok(dir) => Ok(Some(dir)),
