@@ -77,6 +77,7 @@ use crate::promql::error::{
     UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, UnsupportedVectorMatchSnafu,
     ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
 };
+use crate::promql::utils::{project_columns, project_time_index_column, with_project_and_alias};
 
 /// `time()` function in PromQL.
 const SPECIAL_TIME_FUNCTION: &str = "time";
@@ -384,7 +385,6 @@ impl PromPlanner {
             (None, None) => {
                 let left_input = self.prom_expr_to_plan(lhs, session_state).await?;
                 let left_field_columns = self.ctx.field_columns.clone();
-                let left_time_index_column = self.ctx.time_index_column.clone();
                 let mut left_table_ref = self
                     .table_ref()
                     .unwrap_or_else(|_| TableReference::bare(""));
@@ -392,7 +392,6 @@ impl PromPlanner {
 
                 let right_input = self.prom_expr_to_plan(rhs, session_state).await?;
                 let right_field_columns = self.ctx.field_columns.clone();
-                let right_time_index_column = self.ctx.time_index_column.clone();
                 let mut right_table_ref = self
                     .table_ref()
                     .unwrap_or_else(|_| TableReference::bare(""));
@@ -436,11 +435,8 @@ impl PromPlanner {
                     right_input,
                     left_table_ref.clone(),
                     right_table_ref.clone(),
-                    left_time_index_column,
-                    right_time_index_column,
-                    // if left plan or right plan tag is empty, means case like `scalar(...) + host` or `host + scalar(...)`
-                    // under this case we only join on time index
-                    left_context.tag_columns.is_empty() || right_context.tag_columns.is_empty(),
+                    left_context,
+                    right_context,
                     modifier,
                 )?;
                 let join_plan_schema = join_plan.schema().clone();
@@ -2111,32 +2107,100 @@ impl PromPlanner {
     }
 
     /// Build a inner join on time index column and tag columns to concat two logical plans.
-    /// When `only_join_time_index == true` we only join on the time index, because these two plan may not have the same tag columns
     #[allow(clippy::too_many_arguments)]
     fn join_on_non_field_columns(
-        &self,
+        &mut self,
         left: LogicalPlan,
         right: LogicalPlan,
         left_table_ref: TableReference,
         right_table_ref: TableReference,
-        left_time_index_column: Option<String>,
-        right_time_index_column: Option<String>,
-        only_join_time_index: bool,
+        left_context: PromPlannerContext,
+        right_context: PromPlannerContext,
         modifier: &Option<BinModifier>,
     ) -> Result<LogicalPlan> {
-        let mut left_tag_columns = if only_join_time_index {
-            BTreeSet::new()
-        } else {
-            self.ctx
-                .tag_columns
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>()
-        };
-        let mut right_tag_columns = left_tag_columns.clone();
+        // checks
+        ensure!(
+            left_context.field_columns.len() == right_context.field_columns.len(),
+            CombineTableColumnMismatchSnafu {
+                left: left_context.field_columns.clone(),
+                right: right_context.field_columns.clone()
+            }
+        );
+        ensure!(
+            left_context.field_columns.len() == 1,
+            MultiFieldsNotSupportedSnafu {
+                operator: "OR operator"
+            }
+        );
 
-        // apply modifier
+        // if left plan or right plan tag is empty, means case like `scalar(...) + host` or `host + scalar(...)`
+        // under this case we only join on time index
+        let only_join_time_index =
+            left_context.tag_columns.is_empty() || right_context.tag_columns.is_empty();
+
+        let (mut left_tag_columns, mut right_tag_columns) = if only_join_time_index {
+            (BTreeSet::new(), BTreeSet::new())
+        } else {
+            (
+                left_context.tag_columns.iter().cloned().collect(),
+                right_context.tag_columns.iter().cloned().collect(),
+            )
+        };
+
+        let left_qualifier_string = left_table_ref.to_string();
+        let right_qualifier_string = right_table_ref.to_string();
+        // Take the name of first field column. The length is checked above.
+        let left_field_col = left_context.field_columns.first().unwrap();
+
+        // step 1: align schema using project.
+        let left_project_exprs = project_columns(None, left_context.tag_columns.iter())
+            .chain(project_columns(
+                Some(left_table_ref.clone()),
+                left_context.field_columns.iter(),
+            ))
+            .chain(project_time_index_column(
+                Some(left_table_ref.clone()),
+                left_context.time_index_column.as_ref(),
+                right_context.time_index_column.as_ref(),
+            ));
+
+        let right_project_exprs = project_columns(None, right_context.tag_columns.iter())
+            .chain(project_columns(
+                Some(right_table_ref.clone()),
+                right_context.field_columns.iter(),
+            ))
+            .chain(project_time_index_column(
+                Some(right_table_ref.clone()),
+                right_context.time_index_column.as_ref(),
+                left_context.time_index_column.as_ref(),
+            ));
+
+        let left_projected =
+            with_project_and_alias(left, left_qualifier_string, left_project_exprs)?;
+        let right_projected =
+            with_project_and_alias(right, right_qualifier_string, right_project_exprs)?;
+
+        let mut join_type = JoinType::Inner;
+        let mut extra_columns = BTreeSet::new();
+
+        // step 2: apply modifier
         if let Some(modifier) = modifier {
+            match &modifier.card {
+                VectorMatchCardinality::OneToOne => {
+                    join_type = JoinType::Inner;
+                }
+                VectorMatchCardinality::ManyToOne(ls) => {
+                    join_type = JoinType::Left;
+                    extra_columns.extend(ls.labels.iter().cloned());
+                }
+                _ => {
+                    return UnsupportedVectorMatchSnafu {
+                        name: modifier.card.clone(),
+                    }
+                    .fail()
+                }
+            }
+
             // apply label modifier
             if let Some(matching) = &modifier.matching {
                 match matching {
@@ -2159,33 +2223,49 @@ impl PromPlanner {
             }
         }
 
+        // only update tag columns if join type is left
+        // because left join only keep the right side tag columns.
+        //
+        // For Left join:
+        // - case1: if extra_columns is empty, means no label modifier,
+        //   so we only keep the right side tag columns.
+        //
+        // - case2: if extra_columns is not empty, means there are label modifier,
+        //   so we keep all tag columns on right side.
+        if join_type == JoinType::Left {
+            let mut tags_columns = right_tag_columns
+                .clone()
+                .into_iter()
+                .chain(extra_columns.clone())
+                .collect::<Vec<_>>();
+            tags_columns.sort_unstable();
+            self.ctx.tag_columns = tags_columns;
+        };
+
         // push time index column if it exists
-        if let (Some(left_time_index_column), Some(right_time_index_column)) =
-            (left_time_index_column, right_time_index_column)
-        {
-            left_tag_columns.insert(left_time_index_column);
-            right_tag_columns.insert(right_time_index_column);
+        if let (Some(left_time_index_column), Some(right_time_index_column)) = (
+            &left_context.time_index_column,
+            &right_context.time_index_column,
+        ) {
+            left_tag_columns.insert(left_time_index_column.clone());
+            right_tag_columns.insert(right_time_index_column.clone());
         }
 
-        let right = LogicalPlanBuilder::from(right)
-            .alias(right_table_ref)
-            .context(DataFusionPlanningSnafu)?
-            .build()
-            .context(DataFusionPlanningSnafu)?;
-
-        // Inner Join on time index column to concat two operator
-        LogicalPlanBuilder::from(left)
-            .alias(left_table_ref)
+        // step 3: build join plan
+        let plan = LogicalPlanBuilder::from(left_projected)
+            .alias(left_table_ref.clone())
             .context(DataFusionPlanningSnafu)?
             .join(
-                right,
-                JoinType::Inner,
+                right_projected,
+                join_type,
                 (
                     left_tag_columns
+                        .clone()
                         .into_iter()
                         .map(Column::from_name)
                         .collect::<Vec<_>>(),
                     right_tag_columns
+                        .clone()
                         .into_iter()
                         .map(Column::from_name)
                         .collect::<Vec<_>>(),
@@ -2194,7 +2274,14 @@ impl PromPlanner {
             )
             .context(DataFusionPlanningSnafu)?
             .build()
-            .context(DataFusionPlanningSnafu)
+            .context(DataFusionPlanningSnafu)?;
+
+        // step 4: update context
+        self.ctx.table_name = Some(left_table_ref.table().to_string());
+        self.ctx.field_columns = vec![left_field_col.clone()];
+        self.ctx.time_index_column = left_context.time_index_column.clone();
+
+        Ok(plan)
     }
 
     /// Build a set operator (AND/OR/UNLESS)
@@ -2705,6 +2792,67 @@ mod test {
                 .schema(schema)
                 .primary_key_indices((0..num_tag).collect())
                 .value_indices((num_tag + 1..num_tag + 1 + num_field).collect())
+                .next_column_id(1024)
+                .build()
+                .unwrap();
+            let table_info = TableInfoBuilder::default()
+                .name(table_name.to_string())
+                .meta(table_meta)
+                .build()
+                .unwrap();
+            let table = EmptyTable::from_table_info(&table_info);
+
+            assert!(catalog_list
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: schema_name.to_string(),
+                    table_name: table_name.to_string(),
+                    table_id: 1024,
+                    table,
+                })
+                .is_ok());
+        }
+
+        DfTableSourceProvider::new(
+            catalog_list,
+            false,
+            QueryContext::arc(),
+            DummyDecoder::arc(),
+            false,
+        )
+    }
+
+    async fn build_test_table_provider_with_detailed_tags(
+        table_name_and_tags_tuples: &[(String, String, &[&str])],
+    ) -> DfTableSourceProvider {
+        let catalog_list = MemoryCatalogManager::with_default_setup();
+        for (schema_name, table_name, tags) in table_name_and_tags_tuples {
+            let mut columns = vec![];
+            let num_tag = tags.len();
+            for tag in *tags {
+                columns.push(ColumnSchema::new(
+                    tag.to_string(),
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ));
+            }
+            columns.push(
+                ColumnSchema::new(
+                    "greptime_timestamp".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+            );
+            columns.push(ColumnSchema::new(
+                "greptime_value".to_string(),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ));
+            let schema = Arc::new(Schema::new(columns));
+            let table_meta = TableMetaBuilder::default()
+                .schema(schema)
+                .primary_key_indices((0..num_tag).collect())
                 .next_column_id(1024)
                 .build()
                 .unwrap();
@@ -3426,6 +3574,78 @@ mod test {
               Filter: http_server_requests_seconds_count.uri = Utf8("/accounts/login") AND http_server_requests_seconds_count.greptime_timestamp >= TimestampMillisecond(-1000, None) AND http_server_requests_seconds_count.greptime_timestamp <= TimestampMillisecond(100001000, None)
                 TableScan: http_server_requests_seconds_count"#;
         assert_eq!(plan.to_string(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_group_left() {
+        let mut eval_stmt = EvalStmt {
+            expr: PromExpr::NumberLiteral(NumberLiteral { val: 1.0 }),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let cases = [
+            (
+                r#"http_requests_total * on(instance, job) group_left http_request_latency_seconds"#,
+                vec![
+                    "http_requests_total.greptime_timestamp",
+                    "http_requests_total.greptime_value * http_request_latency_seconds.greptime_value",
+                    "http_requests_total.instance",
+                    "http_requests_total.job",
+                ],
+            ),
+            (
+                r#"http_requests_total * on(instance, job) group_left(code) http_request_latency_seconds"#,
+                vec![
+                    "http_requests_total.code",
+                    "http_requests_total.greptime_timestamp",
+                    "http_requests_total.greptime_value * http_request_latency_seconds.greptime_value",
+                    "http_requests_total.instance",
+                    "http_requests_total.job",
+                ],
+            ),
+            (
+                r#"label_replace(http_requests_total * on(instance, job) group_left(code) http_request_latency_seconds, "code", "$1", "code", "prefix-(.*)")"#,
+                vec![
+                    "code",
+                    "http_requests_total.greptime_timestamp",
+                    "http_requests_total.greptime_value * http_request_latency_seconds.greptime_value",
+                    "http_requests_total.instance",
+                    "http_requests_total.job",
+                ],
+            ),
+        ];
+        for case in cases {
+            let prom_expr = parser::parse(case.0).unwrap();
+            eval_stmt.expr = prom_expr;
+            let table_provider = build_test_table_provider_with_detailed_tags(&[
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "http_requests_total".to_string(),
+                    &["instance", "job", "code"],
+                ),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "http_request_latency_seconds".to_string(),
+                    &["instance", "job"],
+                ),
+            ])
+            .await;
+
+            let plan =
+                PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+                    .await
+                    .unwrap();
+            let mut fields = plan.schema().field_names();
+            fields.sort();
+            let mut expected = case.1.clone();
+            expected.sort();
+            assert_eq!(fields, expected);
+        }
     }
 
     #[tokio::test]
