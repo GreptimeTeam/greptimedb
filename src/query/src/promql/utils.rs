@@ -61,15 +61,15 @@ pub fn project_time_index_column(
 /// * `plan` - The input relation to project.
 /// * `qualifier` - The qualifier of the input relation.
 /// * `exprs` - The expressions to project.
-pub fn with_project_and_alias(
+pub fn with_alias_and_project(
     plan: LogicalPlan,
     alias: String,
     exprs: impl Iterator<Item = Expr>,
 ) -> Result<LogicalPlan> {
     LogicalPlanBuilder::from(plan)
-        .project(exprs)
-        .context(DataFusionPlanningSnafu)?
         .alias(alias)
+        .context(DataFusionPlanningSnafu)?
+        .project(exprs)
         .context(DataFusionPlanningSnafu)?
         .build()
         .context(DataFusionPlanningSnafu)
