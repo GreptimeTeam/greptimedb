@@ -38,21 +38,25 @@ use log_query::LogQuery;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use pipeline::{GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion, PipelineWay};
+use pipeline::{
+    GreptimePipelineParams, GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion,
+    PipelineWay,
+};
 use serde_json::Value;
 use session::context::{QueryContext, QueryContextRef};
 
 use crate::error::Result;
+use crate::http::jaeger::QueryTraceParams;
 use crate::influxdb::InfluxdbRequest;
 use crate::opentsdb::codec::DataPoint;
 use crate::prom_store::Metrics;
-
 pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + Sync>;
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
 pub type PromStoreProtocolHandlerRef = Arc<dyn PromStoreProtocolHandler + Send + Sync>;
 pub type OpenTelemetryProtocolHandlerRef = Arc<dyn OpenTelemetryProtocolHandler + Send + Sync>;
 pub type PipelineHandlerRef = Arc<dyn PipelineHandler + Send + Sync>;
 pub type LogQueryHandlerRef = Arc<dyn LogQueryHandler + Send + Sync>;
+pub type JaegerQueryHandlerRef = Arc<dyn JaegerQueryHandler + Send + Sync>;
 
 #[async_trait]
 pub trait InfluxdbLineProtocolHandler {
@@ -110,8 +114,10 @@ pub trait OpenTelemetryProtocolHandler: PipelineHandler {
 
     async fn logs(
         &self,
+        pipeline_handler: PipelineHandlerRef,
         request: ExportLogsServiceRequest,
         pipeline: PipelineWay,
+        pipeline_params: GreptimePipelineParams,
         table_name: String,
         ctx: QueryContextRef,
     ) -> Result<Output>;
@@ -164,4 +170,29 @@ pub trait PipelineHandler {
 #[async_trait]
 pub trait LogQueryHandler {
     async fn query(&self, query: LogQuery, ctx: QueryContextRef) -> Result<Output>;
+}
+
+/// Handle Jaeger query requests.
+#[async_trait]
+pub trait JaegerQueryHandler {
+    /// Get trace services. It's used for `/api/services` API.
+    async fn get_services(&self, ctx: QueryContextRef) -> Result<Output>;
+
+    /// Get Jaeger operations. It's used for `/api/operations` and `/api/services/{service_name}/operations` API.
+    async fn get_operations(
+        &self,
+        ctx: QueryContextRef,
+        service_name: &str,
+        span_kind: Option<&str>,
+    ) -> Result<Output>;
+
+    /// Get trace by trace id. It's used for `/api/traces/{trace_id}` API.
+    async fn get_trace(&self, ctx: QueryContextRef, trace_id: &str) -> Result<Output>;
+
+    /// Find traces by query params. It's used for `/api/traces` API.
+    async fn find_traces(
+        &self,
+        ctx: QueryContextRef,
+        query_params: QueryTraceParams,
+    ) -> Result<Output>;
 }

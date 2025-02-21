@@ -24,6 +24,7 @@ use common_error::ext::ErrorExt;
 use common_telemetry::{debug, error};
 use headers::ContentType;
 use once_cell::sync::Lazy;
+use pipeline::GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME;
 use serde_json::{json, Deserializer, Value};
 use session::context::{Channel, QueryContext};
 use snafu::{ensure, ResultExt};
@@ -32,10 +33,7 @@ use crate::error::{
     status_code_to_http_status, InvalidElasticsearchInputSnafu, ParseJsonSnafu,
     Result as ServersResult,
 };
-use crate::http::event::{
-    ingest_logs_inner, LogIngestRequest, LogIngesterQueryParams, LogState,
-    GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
-};
+use crate::http::event::{ingest_logs_inner, LogIngestRequest, LogIngesterQueryParams, LogState};
 use crate::metrics::{
     METRIC_ELASTICSEARCH_LOGS_DOCS_COUNT, METRIC_ELASTICSEARCH_LOGS_INGESTION_ELAPSED,
 };

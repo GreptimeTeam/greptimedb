@@ -430,6 +430,7 @@ impl<'a> ParserContext<'a> {
         Ok(values)
     }
 
+    /// Parse the columns and constraints.
     fn parse_columns(&mut self) -> Result<(Vec<Column>, Vec<TableConstraint>)> {
         let mut columns = vec![];
         let mut constraints = vec![];
@@ -666,6 +667,11 @@ impl<'a> ParserContext<'a> {
         }
     }
 
+    /// Parse a column option extensions.
+    ///
+    /// This function will handle:
+    /// - Vector type
+    /// - Indexes
     fn parse_column_extensions(
         parser: &mut Parser<'_>,
         column_name: &Ident,
@@ -697,8 +703,10 @@ impl<'a> ParserContext<'a> {
             column_extensions.vector_options = Some(options.into());
         }
 
+        // parse index options in column definition
         let mut is_index_declared = false;
 
+        // skipping index
         if let Token::Word(word) = parser.peek_token().token
             && word.value.eq_ignore_ascii_case(SKIPPING)
         {
@@ -731,7 +739,7 @@ impl<'a> ParserContext<'a> {
                     validate_column_skipping_index_create_option(key),
                     InvalidColumnOptionSnafu {
                         name: column_name.to_string(),
-                        msg: format!("invalid SKIP option: {key}"),
+                        msg: format!("invalid SKIPPING INDEX option: {key}"),
                     }
                 );
             }
@@ -740,12 +748,22 @@ impl<'a> ParserContext<'a> {
             is_index_declared |= true;
         }
 
+        // fulltext index
         if parser.parse_keyword(Keyword::FULLTEXT) {
+            // Consume `INDEX` keyword
             ensure!(
-                column_extensions.fulltext_options.is_none(),
+                parser.parse_keyword(Keyword::INDEX),
                 InvalidColumnOptionSnafu {
                     name: column_name.to_string(),
-                    msg: "duplicated FULLTEXT option",
+                    msg: "expect INDEX after FULLTEXT keyword",
+                }
+            );
+
+            ensure!(
+                column_extensions.fulltext_index_options.is_none(),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: "duplicated FULLTEXT INDEX option",
                 }
             );
 
@@ -771,12 +789,54 @@ impl<'a> ParserContext<'a> {
                     validate_column_fulltext_create_option(key),
                     InvalidColumnOptionSnafu {
                         name: column_name.to_string(),
-                        msg: format!("invalid FULLTEXT option: {key}"),
+                        msg: format!("invalid FULLTEXT INDEX option: {key}"),
                     }
                 );
             }
 
-            column_extensions.fulltext_options = Some(options.into());
+            column_extensions.fulltext_index_options = Some(options.into());
+            is_index_declared |= true;
+        }
+
+        // inverted index
+        if let Token::Word(word) = parser.peek_token().token
+            && word.value.eq_ignore_ascii_case(INVERTED)
+        {
+            parser.next_token();
+            // Consume `INDEX` keyword
+            ensure!(
+                parser.parse_keyword(Keyword::INDEX),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: "expect INDEX after INVERTED keyword",
+                }
+            );
+
+            ensure!(
+                column_extensions.inverted_index_options.is_none(),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: "duplicated INVERTED index option",
+                }
+            );
+
+            // inverted index doesn't have options, skipping `WITH`
+            // try cache `WITH` and throw error
+            let with_token = parser.peek_token();
+            ensure!(
+                with_token.token
+                    != Token::Word(Word {
+                        value: "WITH".to_string(),
+                        keyword: Keyword::WITH,
+                        quote_style: None,
+                    }),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: "INVERTED index doesn't support options",
+                }
+            );
+
+            column_extensions.inverted_index_options = Some(OptionMap::default());
             is_index_declared |= true;
         }
 
@@ -835,28 +895,6 @@ impl<'a> ParserContext<'a> {
                 Ok(Some(TableConstraint::TimeIndex {
                     column: columns.pop().unwrap(),
                 }))
-            }
-            TokenWithLocation {
-                token: Token::Word(w),
-                ..
-            } if w.value.eq_ignore_ascii_case(INVERTED) => {
-                self.parser
-                    .expect_keyword(Keyword::INDEX)
-                    .context(error::UnexpectedSnafu {
-                        expected: "INDEX",
-                        actual: self.peek_token_as_string(),
-                    })?;
-
-                let raw_columns = self
-                    .parser
-                    // allow empty list to unset inverted index
-                    .parse_parenthesized_column_list(Mandatory, true)
-                    .context(error::SyntaxSnafu)?;
-                let columns = raw_columns
-                    .into_iter()
-                    .map(Self::canonicalize_identifier)
-                    .collect::<Vec<_>>();
-                Ok(Some(TableConstraint::InvertedIndex { columns }))
             }
             _ => {
                 self.parser.prev_token();
@@ -1037,6 +1075,8 @@ mod tests {
     use common_error::ext::ErrorExt;
     use sqlparser::ast::ColumnOption::NotNull;
     use sqlparser::ast::{BinaryOperator, Expr, ObjectName, Value};
+    use sqlparser::dialect::GenericDialect;
+    use sqlparser::tokenizer::Tokenizer;
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
@@ -1151,7 +1191,6 @@ mod tests {
             memory float64,
             TIME INDEX (ts),
             PRIMARY KEY(ts, host),
-            INVERTED INDEX(host)
         ) with(location='/var/data/city.csv',format='csv');";
 
         let options = HashMap::from([
@@ -1185,12 +1224,6 @@ mod tests {
                     &constraints[1],
                     &TableConstraint::PrimaryKey {
                         columns: vec![Ident::new("ts"), Ident::new("host")]
-                    }
-                );
-                assert_eq!(
-                    &constraints[2],
-                    &TableConstraint::InvertedIndex {
-                        columns: vec![Ident::new("host")]
                     }
                 );
             }
@@ -1811,7 +1844,6 @@ ENGINE=mito";
                              memory float64,
                              TIME INDEX (ts),
                              PRIMARY KEY(ts, host),
-                             INVERTED INDEX(host)
                              ) engine=mito
                              with(ttl='10s');
          ";
@@ -1844,12 +1876,7 @@ ENGINE=mito";
                         columns: vec![Ident::new("ts"), Ident::new("host")]
                     }
                 );
-                assert_eq!(
-                    &constraints[2],
-                    &TableConstraint::InvertedIndex {
-                        columns: vec![Ident::new("host")]
-                    }
-                );
+                // inverted index is merged into column options
                 assert_eq!(1, c.options.len());
                 assert_eq!(
                     [("ttl", "10s")].into_iter().collect::<HashMap<_, _>>(),
@@ -1905,33 +1932,6 @@ ENGINE=mito";
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result.is_err());
         assert_matches!(result, Err(crate::error::Error::InvalidTimeIndex { .. }));
-    }
-
-    #[test]
-    fn test_inverted_index_empty_list() {
-        let sql = r"create table demo(
-                             host string,
-                             ts timestamp time index,
-                             cpu float64 default 0,
-                             memory float64,
-                             TIME INDEX (ts),
-                             inverted index()
-                             ) engine=mito;
-         ";
-        let result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-
-        if let Statement::CreateTable(c) = &result[0] {
-            let tc = &c
-                .constraints
-                .iter()
-                .find(|c| matches!(c, TableConstraint::InvertedIndex { .. }))
-                .unwrap();
-            assert_eq!(*tc, &TableConstraint::InvertedIndex { columns: vec![] });
-        } else {
-            unreachable!("should be create table statement");
-        }
     }
 
     #[test]
@@ -2019,7 +2019,7 @@ non TIMESTAMP(6) TIME INDEX,
         let sql1 = r"
 CREATE TABLE log (
     ts TIMESTAMP TIME INDEX,
-    msg TEXT FULLTEXT,
+    msg TEXT FULLTEXT INDEX,
 )";
         let result1 = ParserContext::create_with_dialect(
             sql1,
@@ -2031,7 +2031,12 @@ CREATE TABLE log (
         if let Statement::CreateTable(c) = &result1[0] {
             c.columns.iter().for_each(|col| {
                 if col.name().value == "msg" {
-                    assert!(col.extensions.fulltext_options.as_ref().unwrap().is_empty());
+                    assert!(col
+                        .extensions
+                        .fulltext_index_options
+                        .as_ref()
+                        .unwrap()
+                        .is_empty());
                 }
             });
         } else {
@@ -2041,7 +2046,7 @@ CREATE TABLE log (
         let sql2 = r"
 CREATE TABLE log (
     ts TIMESTAMP TIME INDEX,
-    msg STRING FULLTEXT WITH (analyzer='English', case_sensitive='false')
+    msg STRING FULLTEXT INDEX WITH (analyzer='English', case_sensitive='false')
 )";
         let result2 = ParserContext::create_with_dialect(
             sql2,
@@ -2053,7 +2058,7 @@ CREATE TABLE log (
         if let Statement::CreateTable(c) = &result2[0] {
             c.columns.iter().for_each(|col| {
                 if col.name().value == "msg" {
-                    let options = col.extensions.fulltext_options.as_ref().unwrap();
+                    let options = col.extensions.fulltext_index_options.as_ref().unwrap();
                     assert_eq!(options.len(), 2);
                     assert_eq!(options.get("analyzer").unwrap(), "English");
                     assert_eq!(options.get("case_sensitive").unwrap(), "false");
@@ -2066,8 +2071,8 @@ CREATE TABLE log (
         let sql3 = r"
 CREATE TABLE log (
     ts TIMESTAMP TIME INDEX,
-    msg1 TINYTEXT FULLTEXT WITH (analyzer='English', case_sensitive='false'),
-    msg2 CHAR(20) FULLTEXT WITH (analyzer='Chinese', case_sensitive='true')
+    msg1 TINYTEXT FULLTEXT INDEX WITH (analyzer='English', case_sensitive='false'),
+    msg2 CHAR(20) FULLTEXT INDEX WITH (analyzer='Chinese', case_sensitive='true')
 )";
         let result3 = ParserContext::create_with_dialect(
             sql3,
@@ -2079,12 +2084,12 @@ CREATE TABLE log (
         if let Statement::CreateTable(c) = &result3[0] {
             c.columns.iter().for_each(|col| {
                 if col.name().value == "msg1" {
-                    let options = col.extensions.fulltext_options.as_ref().unwrap();
+                    let options = col.extensions.fulltext_index_options.as_ref().unwrap();
                     assert_eq!(options.len(), 2);
                     assert_eq!(options.get("analyzer").unwrap(), "English");
                     assert_eq!(options.get("case_sensitive").unwrap(), "false");
                 } else if col.name().value == "msg2" {
-                    let options = col.extensions.fulltext_options.as_ref().unwrap();
+                    let options = col.extensions.fulltext_index_options.as_ref().unwrap();
                     assert_eq!(options.len(), 2);
                     assert_eq!(options.get("analyzer").unwrap(), "Chinese");
                     assert_eq!(options.get("case_sensitive").unwrap(), "true");
@@ -2100,7 +2105,7 @@ CREATE TABLE log (
         let sql = r"
 CREATE TABLE log (
     ts TIMESTAMP TIME INDEX,
-    msg INT FULLTEXT,
+    msg INT FULLTEXT INDEX,
 )";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
@@ -2116,7 +2121,7 @@ CREATE TABLE log (
         let sql = r"
 CREATE TABLE log (
     ts TIMESTAMP TIME INDEX,
-    msg STRING FULLTEXT WITH (analyzer='English', analyzer='Chinese') FULLTEXT WITH (case_sensitive='false')
+    msg STRING FULLTEXT INDEX WITH (analyzer='English', analyzer='Chinese') FULLTEXT INDEX WITH (case_sensitive='false')
 )";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
@@ -2124,7 +2129,7 @@ CREATE TABLE log (
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("duplicated FULLTEXT option"));
+            .contains("duplicated FULLTEXT INDEX option"));
     }
 
     #[test]
@@ -2132,7 +2137,7 @@ CREATE TABLE log (
         let sql = r"
 CREATE TABLE log (
     ts TIMESTAMP TIME INDEX,
-    msg STRING FULLTEXT WITH (analyzer='English', invalid_option='Chinese')
+    msg STRING FULLTEXT INDEX WITH (analyzer='English', invalid_option='Chinese')
 )";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
@@ -2140,7 +2145,7 @@ CREATE TABLE log (
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("invalid FULLTEXT option"));
+            .contains("invalid FULLTEXT INDEX option"));
     }
 
     #[test]
@@ -2273,5 +2278,201 @@ CREATE TABLE log (
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_column_extensions_vector() {
+        let sql = "VECTOR(128)";
+        let dialect = GenericDialect {};
+        let mut tokenizer = Tokenizer::new(&dialect, sql);
+        let tokens = tokenizer.tokenize().unwrap();
+        let mut parser = Parser::new(&dialect).with_tokens(tokens);
+        let name = Ident::new("vec_col");
+        let data_type = DataType::Custom(
+            ObjectName(vec![Ident::new("VECTOR")]),
+            vec!["128".to_string()],
+        );
+        let mut extensions = ColumnExtensions::default();
+
+        let result =
+            ParserContext::parse_column_extensions(&mut parser, &name, &data_type, &mut extensions);
+        assert!(result.is_ok());
+        assert!(extensions.vector_options.is_some());
+        let vector_options = extensions.vector_options.unwrap();
+        assert_eq!(vector_options.get(VECTOR_OPT_DIM), Some(&"128".to_string()));
+    }
+
+    #[test]
+    fn test_parse_column_extensions_vector_invalid() {
+        let sql = "VECTOR()";
+        let dialect = GenericDialect {};
+        let mut tokenizer = Tokenizer::new(&dialect, sql);
+        let tokens = tokenizer.tokenize().unwrap();
+        let mut parser = Parser::new(&dialect).with_tokens(tokens);
+        let name = Ident::new("vec_col");
+        let data_type = DataType::Custom(ObjectName(vec![Ident::new("VECTOR")]), vec![]);
+        let mut extensions = ColumnExtensions::default();
+
+        let result =
+            ParserContext::parse_column_extensions(&mut parser, &name, &data_type, &mut extensions);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_column_extensions_indices() {
+        // Test skipping index
+        {
+            let sql = "SKIPPING INDEX";
+            let dialect = GenericDialect {};
+            let mut tokenizer = Tokenizer::new(&dialect, sql);
+            let tokens = tokenizer.tokenize().unwrap();
+            let mut parser = Parser::new(&dialect).with_tokens(tokens);
+            let name = Ident::new("col");
+            let data_type = DataType::String(None);
+            let mut extensions = ColumnExtensions::default();
+            let result = ParserContext::parse_column_extensions(
+                &mut parser,
+                &name,
+                &data_type,
+                &mut extensions,
+            );
+            assert!(result.is_ok());
+            assert!(extensions.skipping_index_options.is_some());
+        }
+
+        // Test fulltext index with options
+        {
+            let sql = "FULLTEXT INDEX WITH (analyzer = 'English', case_sensitive = 'true')";
+            let dialect = GenericDialect {};
+            let mut tokenizer = Tokenizer::new(&dialect, sql);
+            let tokens = tokenizer.tokenize().unwrap();
+            let mut parser = Parser::new(&dialect).with_tokens(tokens);
+            let name = Ident::new("text_col");
+            let data_type = DataType::String(None);
+            let mut extensions = ColumnExtensions::default();
+            let result = ParserContext::parse_column_extensions(
+                &mut parser,
+                &name,
+                &data_type,
+                &mut extensions,
+            );
+            assert!(result.unwrap());
+            assert!(extensions.fulltext_index_options.is_some());
+            let fulltext_options = extensions.fulltext_index_options.unwrap();
+            assert_eq!(
+                fulltext_options.get("analyzer"),
+                Some(&"English".to_string())
+            );
+            assert_eq!(
+                fulltext_options.get("case_sensitive"),
+                Some(&"true".to_string())
+            );
+        }
+
+        // Test fulltext index with invalid type (should fail)
+        {
+            let sql = "FULLTEXT INDEX WITH (analyzer = 'English')";
+            let dialect = GenericDialect {};
+            let mut tokenizer = Tokenizer::new(&dialect, sql);
+            let tokens = tokenizer.tokenize().unwrap();
+            let mut parser = Parser::new(&dialect).with_tokens(tokens);
+            let name = Ident::new("num_col");
+            let data_type = DataType::Int(None); // Non-string type
+            let mut extensions = ColumnExtensions::default();
+            let result = ParserContext::parse_column_extensions(
+                &mut parser,
+                &name,
+                &data_type,
+                &mut extensions,
+            );
+            assert!(result.is_err());
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("FULLTEXT index only supports string type"));
+        }
+
+        // Test fulltext index with invalid option (won't fail, the parser doesn't check the option's content)
+        {
+            let sql = "FULLTEXT INDEX WITH (analyzer = 'Invalid', case_sensitive = 'true')";
+            let dialect = GenericDialect {};
+            let mut tokenizer = Tokenizer::new(&dialect, sql);
+            let tokens = tokenizer.tokenize().unwrap();
+            let mut parser = Parser::new(&dialect).with_tokens(tokens);
+            let name = Ident::new("text_col");
+            let data_type = DataType::String(None);
+            let mut extensions = ColumnExtensions::default();
+            let result = ParserContext::parse_column_extensions(
+                &mut parser,
+                &name,
+                &data_type,
+                &mut extensions,
+            );
+            assert!(result.unwrap());
+        }
+
+        // Test inverted index
+        {
+            let sql = "INVERTED INDEX";
+            let dialect = GenericDialect {};
+            let mut tokenizer = Tokenizer::new(&dialect, sql);
+            let tokens = tokenizer.tokenize().unwrap();
+            let mut parser = Parser::new(&dialect).with_tokens(tokens);
+            let name = Ident::new("col");
+            let data_type = DataType::String(None);
+            let mut extensions = ColumnExtensions::default();
+            let result = ParserContext::parse_column_extensions(
+                &mut parser,
+                &name,
+                &data_type,
+                &mut extensions,
+            );
+            assert!(result.is_ok());
+            assert!(extensions.inverted_index_options.is_some());
+        }
+
+        // Test inverted index with options (should fail)
+        {
+            let sql = "INVERTED INDEX WITH (analyzer = 'English')";
+            let dialect = GenericDialect {};
+            let mut tokenizer = Tokenizer::new(&dialect, sql);
+            let tokens = tokenizer.tokenize().unwrap();
+            let mut parser = Parser::new(&dialect).with_tokens(tokens);
+            let name = Ident::new("col");
+            let data_type = DataType::String(None);
+            let mut extensions = ColumnExtensions::default();
+            let result = ParserContext::parse_column_extensions(
+                &mut parser,
+                &name,
+                &data_type,
+                &mut extensions,
+            );
+            assert!(result.is_err());
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("INVERTED index doesn't support options"));
+        }
+
+        // Test multiple indices
+        {
+            let sql = "SKIPPING INDEX FULLTEXT INDEX";
+            let dialect = GenericDialect {};
+            let mut tokenizer = Tokenizer::new(&dialect, sql);
+            let tokens = tokenizer.tokenize().unwrap();
+            let mut parser = Parser::new(&dialect).with_tokens(tokens);
+            let name = Ident::new("col");
+            let data_type = DataType::String(None);
+            let mut extensions = ColumnExtensions::default();
+            let result = ParserContext::parse_column_extensions(
+                &mut parser,
+                &name,
+                &data_type,
+                &mut extensions,
+            );
+            assert!(result.unwrap());
+            assert!(extensions.skipping_index_options.is_some());
+            assert!(extensions.fulltext_index_options.is_some());
+        }
     }
 }

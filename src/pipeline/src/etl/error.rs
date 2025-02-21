@@ -543,6 +543,11 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("Yaml parse error."))]
+    YamlParse {
+        #[snafu(implicit)]
+        location: Location,
+    },
     #[snafu(display("Prepare value must be an object"))]
     PrepareValueMustBeObject {
         #[snafu(implicit)]
@@ -590,9 +595,9 @@ pub enum Error {
     },
     #[snafu(display("Field is required for dispatcher"))]
     FieldRequiredForDispatcher,
-    #[snafu(display("table_part is required for dispatcher rule"))]
-    TablePartRequiredForDispatcherRule,
-    #[snafu(display("value is required for dispatcher rule"))]
+    #[snafu(display("Table_suffix is required for dispatcher rule"))]
+    TableSuffixRequiredForDispatcherRule,
+    #[snafu(display("Value is required for dispatcher rule"))]
     ValueRequiredForDispatcherRule,
     #[snafu(display(
         "Reached max nested levels when flattening JSON object: {max_nested_levels}"

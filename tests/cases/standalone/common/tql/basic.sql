@@ -17,6 +17,12 @@ TQL EVAL (0, 10, '5s') test{__schema__="public"};
 TQL EVAL (0, 10, '5s') test{__schema__="greptime_private"};
 
 -- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 10, '5s') test{__database__="public"};
+
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 10, '5s') test{__database__="greptime_private"};
+
+-- SQLNESS SORT_RESULT 2 1
 TQL EVAL (0, 10, '5s') {__name__="test", __field__="i"};
 
 -- NOT SUPPORTED: `__name__` matcher without equal condition

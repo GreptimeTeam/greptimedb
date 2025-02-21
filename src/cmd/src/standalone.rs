@@ -60,7 +60,8 @@ use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
 use frontend::server::Services;
 use frontend::service_config::{
-    InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
+    InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, PostgresOptions,
+    PromStoreOptions,
 };
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use mito2::config::MitoConfig;
@@ -140,6 +141,7 @@ pub struct StandaloneOptions {
     pub postgres: PostgresOptions,
     pub opentsdb: OpentsdbOptions,
     pub influxdb: InfluxdbOptions,
+    pub jaeger: JaegerOptions,
     pub prom_store: PromStoreOptions,
     pub wal: DatanodeWalConfig,
     pub storage: StorageConfig,
@@ -169,6 +171,7 @@ impl Default for StandaloneOptions {
             postgres: PostgresOptions::default(),
             opentsdb: OpentsdbOptions::default(),
             influxdb: InfluxdbOptions::default(),
+            jaeger: JaegerOptions::default(),
             prom_store: PromStoreOptions::default(),
             wal: DatanodeWalConfig::default(),
             storage: StorageConfig::default(),
@@ -217,6 +220,7 @@ impl StandaloneOptions {
             postgres: cloned_opts.postgres,
             opentsdb: cloned_opts.opentsdb,
             influxdb: cloned_opts.influxdb,
+            jaeger: cloned_opts.jaeger,
             prom_store: cloned_opts.prom_store,
             meta_client: None,
             logging: cloned_opts.logging,

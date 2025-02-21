@@ -21,19 +21,18 @@
 
 use std::borrow::Cow;
 
-use ahash::HashSet;
 use regex::Regex;
 use snafu::OptionExt;
 
 use crate::etl::error::{
     Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, Result,
 };
-use crate::etl::field::{Fields, OneInputOneOutputField};
+use crate::etl::field::Fields;
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, ProcessorBuilder, ProcessorKind, FIELDS_NAME,
-    FIELD_NAME, IGNORE_MISSING_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fields, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::Value;
+use crate::etl::PipelineMap;
 use crate::etl_error::DigestPatternInvalidSnafu;
 
 pub(crate) const PROCESSOR_DIGEST: &str = "digest";
@@ -88,54 +87,10 @@ impl PresetPattern {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct DigestProcessorBuilder {
-    fields: Fields,
-    patterns: Vec<Regex>,
-    ignore_missing: bool,
-}
-
-impl ProcessorBuilder for DigestProcessorBuilder {
-    fn output_keys(&self) -> HashSet<&str> {
-        self.fields
-            .iter()
-            .map(|f| f.target_or_input_field())
-            .collect()
-    }
-
-    fn input_keys(&self) -> HashSet<&str> {
-        self.fields.iter().map(|f| f.input_field()).collect()
-    }
-
-    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind> {
-        self.build(intermediate_keys).map(ProcessorKind::Digest)
-    }
-}
-
-impl DigestProcessorBuilder {
-    fn build(self, intermediate_keys: &[String]) -> Result<DigestProcessor> {
-        let mut real_fields = Vec::with_capacity(self.fields.len());
-        for field in self.fields.into_iter() {
-            let input = OneInputOneOutputField::build(
-                "digest",
-                intermediate_keys,
-                field.input_field(),
-                field.target_or_input_field(),
-            )?;
-            real_fields.push(input);
-        }
-        Ok(DigestProcessor {
-            fields: real_fields,
-            ignore_missing: self.ignore_missing,
-            patterns: self.patterns,
-        })
-    }
-}
-
 /// Computes a digest (hash) of the input string.
 #[derive(Debug, Default)]
 pub struct DigestProcessor {
-    fields: Vec<OneInputOneOutputField>,
+    fields: Fields,
     ignore_missing: bool,
     patterns: Vec<Regex>,
 }
@@ -169,7 +124,7 @@ impl DigestProcessor {
     }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for DigestProcessorBuilder {
+impl TryFrom<&yaml_rust::yaml::Hash> for DigestProcessor {
     type Error = Error;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self> {
@@ -226,10 +181,10 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DigestProcessorBuilder {
         }
 
         for field in fields.iter_mut() {
-            field.target_field = Some(format!("{}_digest", field.input_field()));
+            field.set_target_field(Some(format!("{}_digest", field.input_field())));
         }
 
-        Ok(DigestProcessorBuilder {
+        Ok(DigestProcessor {
             fields,
             patterns,
             ignore_missing,
@@ -246,23 +201,23 @@ impl crate::etl::processor::Processor for DigestProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<()> {
+    fn exec_mut(&self, val: &mut PipelineMap) -> Result<()> {
         for field in self.fields.iter() {
-            let index = field.input_index();
+            let index = field.input_field();
             match val.get(index) {
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
                         return ProcessorMissingFieldSnafu {
                             processor: self.kind(),
-                            field: field.input_name(),
+                            field: field.input_field(),
                         }
                         .fail();
                     }
                 }
                 Some(v) => {
                     let result = self.process(v)?;
-                    let output_index = field.output_index();
-                    val[output_index] = result;
+                    let output_index = field.target_or_input_field();
+                    val.insert(output_index.to_string(), result);
                 }
             }
         }
@@ -278,7 +233,7 @@ mod tests {
     #[test]
     fn test_digest_processor_ip() {
         let processor = DigestProcessor {
-            fields: vec![],
+            fields: Fields::default(),
             ignore_missing: false,
             patterns: vec![PresetPattern::Ip.regex()],
         };
@@ -306,7 +261,7 @@ mod tests {
     #[test]
     fn test_digest_processor_uuid() {
         let processor = DigestProcessor {
-            fields: vec![],
+            fields: Fields::default(),
             ignore_missing: false,
             patterns: vec![PresetPattern::Uuid.regex()],
         };
@@ -339,7 +294,7 @@ mod tests {
     #[test]
     fn test_digest_processor_brackets() {
         let processor = DigestProcessor {
-            fields: vec![],
+            fields: Fields::default(),
             ignore_missing: false,
             patterns: vec![PresetPattern::Bracketed.regex()],
         };
@@ -389,7 +344,7 @@ mod tests {
     #[test]
     fn test_digest_processor_quotes() {
         let processor = DigestProcessor {
-            fields: vec![],
+            fields: Fields::default(),
             ignore_missing: false,
             patterns: vec![PresetPattern::Quoted.regex()],
         };
@@ -409,7 +364,7 @@ mod tests {
     #[test]
     fn test_digest_processor_custom_regex() {
         let processor = DigestProcessor {
-            fields: vec![],
+            fields: Fields::default(),
             ignore_missing: false,
             patterns: vec![Regex::new(r"\d+").unwrap()],
         };

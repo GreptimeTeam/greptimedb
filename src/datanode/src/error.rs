@@ -260,6 +260,14 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to handle batch ddl request, ddl_type: {}", ddl_type))]
+    HandleBatchDdlRequest {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+        ddl_type: String,
+    },
+
     #[snafu(display("RegionId {} not found", region_id))]
     RegionNotFound {
         region_id: RegionId,
@@ -438,7 +446,8 @@ impl ErrorExt for Error {
             UnsupportedOutput { .. } => StatusCode::Unsupported,
             HandleRegionRequest { source, .. }
             | GetRegionMetadata { source, .. }
-            | HandleBatchOpenRequest { source, .. } => source.status_code(),
+            | HandleBatchOpenRequest { source, .. }
+            | HandleBatchDdlRequest { source, .. } => source.status_code(),
             StopRegionEngine { source, .. } => source.status_code(),
 
             FindLogicalRegions { source, .. } => source.status_code(),

@@ -17,20 +17,23 @@ use std::fmt::{self, Display};
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
-use api::v1::column_def::as_fulltext_option;
+use api::v1::column_def::{as_fulltext_option, as_skipping_index_type};
 use api::v1::region::{
     alter_request, compact_request, region_request, AlterRequest, AlterRequests, CloseRequest,
     CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
     FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
-use api::v1::{self, set_index, Analyzer, Option as PbOption, Rows, SemanticType, WriteHint};
+use api::v1::{
+    self, set_index, Analyzer, Option as PbOption, Rows, SemanticType,
+    SkippingIndexType as PbSkippingIndexType, WriteHint,
+};
 pub use common_base::AffectedRows;
 use common_time::TimeToLive;
-use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::FulltextOptions;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
-use strum::IntoStaticStr;
+use strum::{AsRefStr, IntoStaticStr};
 
 use crate::logstore::entry;
 use crate::metadata::{
@@ -46,6 +49,67 @@ use crate::mito_engine_options::{
 };
 use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
+
+#[derive(Debug, IntoStaticStr)]
+pub enum BatchRegionDdlRequest {
+    Create(Vec<(RegionId, RegionCreateRequest)>),
+    Drop(Vec<(RegionId, RegionDropRequest)>),
+    Alter(Vec<(RegionId, RegionAlterRequest)>),
+}
+
+impl BatchRegionDdlRequest {
+    /// Converts [Body](region_request::Body) to [`BatchRegionDdlRequest`].
+    pub fn try_from_request_body(body: region_request::Body) -> Result<Option<Self>> {
+        match body {
+            region_request::Body::Creates(creates) => {
+                let requests = creates
+                    .requests
+                    .into_iter()
+                    .map(parse_region_create)
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Some(Self::Create(requests)))
+            }
+            region_request::Body::Drops(drops) => {
+                let requests = drops
+                    .requests
+                    .into_iter()
+                    .map(parse_region_drop)
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Some(Self::Drop(requests)))
+            }
+            region_request::Body::Alters(alters) => {
+                let requests = alters
+                    .requests
+                    .into_iter()
+                    .map(parse_region_alter)
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Some(Self::Alter(requests)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub fn request_type(&self) -> &'static str {
+        self.into()
+    }
+
+    pub fn into_region_requests(self) -> Vec<(RegionId, RegionRequest)> {
+        match self {
+            Self::Create(requests) => requests
+                .into_iter()
+                .map(|(region_id, request)| (region_id, RegionRequest::Create(request)))
+                .collect(),
+            Self::Drop(requests) => requests
+                .into_iter()
+                .map(|(region_id, request)| (region_id, RegionRequest::Drop(request)))
+                .collect(),
+            Self::Alter(requests) => requests
+                .into_iter()
+                .map(|(region_id, request)| (region_id, RegionRequest::Alter(request)))
+                .collect(),
+        }
+    }
+}
 
 #[derive(Debug, IntoStaticStr)]
 pub enum RegionRequest {
@@ -123,7 +187,7 @@ fn make_region_deletes(deletes: DeleteRequests) -> Result<Vec<(RegionId, RegionR
     Ok(requests)
 }
 
-fn make_region_create(create: CreateRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+fn parse_region_create(create: CreateRequest) -> Result<(RegionId, RegionCreateRequest)> {
     let column_metadatas = create
         .column_defs
         .into_iter()
@@ -131,16 +195,21 @@ fn make_region_create(create: CreateRequest) -> Result<Vec<(RegionId, RegionRequ
         .collect::<Result<Vec<_>>>()?;
     let region_id = create.region_id.into();
     let region_dir = region_dir(&create.path, region_id);
-    Ok(vec![(
+    Ok((
         region_id,
-        RegionRequest::Create(RegionCreateRequest {
+        RegionCreateRequest {
             engine: create.engine,
             column_metadatas,
             primary_key: create.primary_key,
             options: create.options,
             region_dir,
-        }),
-    )])
+        },
+    ))
+}
+
+fn make_region_create(create: CreateRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let (region_id, request) = parse_region_create(create)?;
+    Ok(vec![(region_id, RegionRequest::Create(request))])
 }
 
 fn make_region_creates(creates: CreateRequests) -> Result<Vec<(RegionId, RegionRequest)>> {
@@ -151,9 +220,14 @@ fn make_region_creates(creates: CreateRequests) -> Result<Vec<(RegionId, RegionR
     Ok(requests)
 }
 
-fn make_region_drop(drop: DropRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+fn parse_region_drop(drop: DropRequest) -> Result<(RegionId, RegionDropRequest)> {
     let region_id = drop.region_id.into();
-    Ok(vec![(region_id, RegionRequest::Drop(RegionDropRequest {}))])
+    Ok((region_id, RegionDropRequest {}))
+}
+
+fn make_region_drop(drop: DropRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let (region_id, request) = parse_region_drop(drop)?;
+    Ok(vec![(region_id, RegionRequest::Drop(request))])
 }
 
 fn make_region_drops(drops: DropRequests) -> Result<Vec<(RegionId, RegionRequest)>> {
@@ -186,12 +260,15 @@ fn make_region_close(close: CloseRequest) -> Result<Vec<(RegionId, RegionRequest
     )])
 }
 
-fn make_region_alter(alter: AlterRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+fn parse_region_alter(alter: AlterRequest) -> Result<(RegionId, RegionAlterRequest)> {
     let region_id = alter.region_id.into();
-    Ok(vec![(
-        region_id,
-        RegionRequest::Alter(RegionAlterRequest::try_from(alter)?),
-    )])
+    let request = RegionAlterRequest::try_from(alter)?;
+    Ok((region_id, request))
+}
+
+fn make_region_alter(alter: AlterRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let (region_id, request) = parse_region_alter(alter)?;
+    Ok(vec![(region_id, RegionRequest::Alter(request))])
 }
 
 fn make_region_alters(alters: AlterRequests) -> Result<Vec<(RegionId, RegionRequest)>> {
@@ -401,7 +478,7 @@ impl TryFrom<AlterRequest> for RegionAlterRequest {
 }
 
 /// Kind of the alteration.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, AsRefStr)]
 pub enum AlterKind {
     /// Add columns to the region.
     AddColumns {
@@ -437,6 +514,10 @@ pub enum ApiSetIndexOptions {
     Inverted {
         column_name: String,
     },
+    Skipping {
+        column_name: String,
+        options: SkippingIndexOptions,
+    },
 }
 
 impl ApiSetIndexOptions {
@@ -444,6 +525,7 @@ impl ApiSetIndexOptions {
         match self {
             ApiSetIndexOptions::Fulltext { column_name, .. } => column_name,
             ApiSetIndexOptions::Inverted { column_name } => column_name,
+            ApiSetIndexOptions::Skipping { column_name, .. } => column_name,
         }
     }
 
@@ -451,6 +533,7 @@ impl ApiSetIndexOptions {
         match self {
             ApiSetIndexOptions::Fulltext { .. } => true,
             ApiSetIndexOptions::Inverted { .. } => false,
+            ApiSetIndexOptions::Skipping { .. } => false,
         }
     }
 }
@@ -459,6 +542,7 @@ impl ApiSetIndexOptions {
 pub enum ApiUnsetIndexOptions {
     Fulltext { column_name: String },
     Inverted { column_name: String },
+    Skipping { column_name: String },
 }
 
 impl ApiUnsetIndexOptions {
@@ -466,6 +550,7 @@ impl ApiUnsetIndexOptions {
         match self {
             ApiUnsetIndexOptions::Fulltext { column_name } => column_name,
             ApiUnsetIndexOptions::Inverted { column_name } => column_name,
+            ApiUnsetIndexOptions::Skipping { column_name } => column_name,
         }
     }
 
@@ -473,6 +558,7 @@ impl ApiUnsetIndexOptions {
         match self {
             ApiUnsetIndexOptions::Fulltext { .. } => true,
             ApiUnsetIndexOptions::Inverted { .. } => false,
+            ApiUnsetIndexOptions::Skipping { .. } => false,
         }
     }
 }
@@ -648,6 +734,18 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                         column_name: i.column_name,
                     },
                 },
+                set_index::Options::Skipping(s) => AlterKind::SetIndex {
+                    options: ApiSetIndexOptions::Skipping {
+                        column_name: s.column_name,
+                        options: SkippingIndexOptions {
+                            index_type: as_skipping_index_type(
+                                PbSkippingIndexType::try_from(s.skipping_index_type)
+                                    .context(DecodeProtoSnafu)?,
+                            ),
+                            granularity: s.granularity as u32,
+                        },
+                    },
+                },
             },
             alter_request::Kind::UnsetIndex(o) => match o.options.unwrap() {
                 v1::unset_index::Options::Fulltext(f) => AlterKind::UnsetIndex {
@@ -658,6 +756,11 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                 v1::unset_index::Options::Inverted(i) => AlterKind::UnsetIndex {
                     options: ApiUnsetIndexOptions::Inverted {
                         column_name: i.column_name,
+                    },
+                },
+                v1::unset_index::Options::Skipping(s) => AlterKind::UnsetIndex {
+                    options: ApiUnsetIndexOptions::Skipping {
+                        column_name: s.column_name,
                     },
                 },
             },
@@ -1008,6 +1111,12 @@ pub struct RegionCatchupRequest {
     pub entry_id: Option<entry::Id>,
     /// The hint for replaying memtable.
     pub location_id: Option<u64>,
+}
+
+/// Get sequences of regions by region ids.
+#[derive(Debug, Clone)]
+pub struct RegionSequencesRequest {
+    pub region_ids: Vec<RegionId>,
 }
 
 impl fmt::Display for RegionRequest {

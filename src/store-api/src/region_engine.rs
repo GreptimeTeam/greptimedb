@@ -15,6 +15,7 @@
 //! Region Engine's definition
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::sync::{Arc, Mutex};
 
@@ -33,8 +34,10 @@ use tokio::sync::Semaphore;
 
 use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
-use crate::region_request::{RegionOpenRequest, RegionRequest};
-use crate::storage::{RegionId, ScanRequest};
+use crate::region_request::{
+    BatchRegionDdlRequest, RegionOpenRequest, RegionRequest, RegionSequencesRequest,
+};
+use crate::storage::{RegionId, ScanRequest, SequenceNumber};
 
 /// The settable region role state.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -407,12 +410,53 @@ pub trait RegionEngine: Send + Sync {
         Ok(join_all(tasks).await)
     }
 
+    async fn handle_batch_ddl_requests(
+        &self,
+        request: BatchRegionDdlRequest,
+    ) -> Result<RegionResponse, BoxedError> {
+        let requests = request.into_region_requests();
+
+        let mut affected_rows = 0;
+        let mut extensions = HashMap::new();
+
+        for (region_id, request) in requests {
+            let result = self.handle_request(region_id, request).await?;
+            affected_rows += result.affected_rows;
+            extensions.extend(result.extensions);
+        }
+
+        Ok(RegionResponse {
+            affected_rows,
+            extensions,
+        })
+    }
+
     /// Handles non-query request to the region. Returns the count of affected rows.
     async fn handle_request(
         &self,
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<RegionResponse, BoxedError>;
+
+    /// Returns the last sequence number of the region.
+    async fn get_last_seq_num(
+        &self,
+        region_id: RegionId,
+    ) -> Result<Option<SequenceNumber>, BoxedError>;
+
+    async fn get_region_sequences(
+        &self,
+        seqs: RegionSequencesRequest,
+    ) -> Result<HashMap<u64, u64>, BoxedError> {
+        let mut results = HashMap::with_capacity(seqs.region_ids.len());
+
+        for region_id in seqs.region_ids {
+            let seq = self.get_last_seq_num(region_id).await?.unwrap_or_default();
+            results.insert(region_id.as_u64(), seq);
+        }
+
+        Ok(results)
+    }
 
     /// Handles query and return a scanner that can be used to scan the region concurrently.
     async fn handle_query(

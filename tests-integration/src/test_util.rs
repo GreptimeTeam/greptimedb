@@ -431,6 +431,7 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
         .with_log_ingest_handler(instance.instance.clone(), None, None)
         .with_logs_handler(instance.instance.clone())
         .with_otlp_handler(instance.instance.clone())
+        .with_jaeger_handler(instance.instance.clone())
         .with_greptime_config_options(instance.opts.to_toml().unwrap());
 
     if let Some(user_provider) = user_provider {
@@ -589,6 +590,7 @@ pub async fn setup_mysql_server_with_user_provider(
                 ReloadableTlsServerConfig::try_new(opts.tls.clone())
                     .expect("Failed to load certificates and keys"),
             ),
+            0,
             opts.reject_no_database.unwrap_or(false),
         )),
     ));
@@ -641,6 +643,7 @@ pub async fn setup_pg_server_with_user_provider(
         ServerSqlQueryHandlerAdapter::arc(fe_instance_ref),
         opts.tls.should_force_tls(),
         tls_server_config,
+        0,
         runtime,
         user_provider,
     )) as Box<dyn Server>);

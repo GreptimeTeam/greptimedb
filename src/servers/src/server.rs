@@ -144,6 +144,7 @@ impl AcceptTask {
         &mut self,
         addr: SocketAddr,
         name: &str,
+        keep_alive_secs: u64,
     ) -> Result<(Abortable<TcpListenerStream>, SocketAddr)> {
         match self.abort_registration.take() {
             Some(registration) => {
@@ -156,6 +157,15 @@ impl AcceptTask {
                 // get actually bond addr in case input addr use port 0
                 let addr = listener.local_addr()?;
                 info!("{name} server started at {addr}");
+
+                // set keep-alive
+                if keep_alive_secs > 0 {
+                    let socket_ref = socket2::SockRef::from(&listener);
+                    let keep_alive = socket2::TcpKeepalive::new()
+                        .with_time(std::time::Duration::from_secs(keep_alive_secs))
+                        .with_interval(std::time::Duration::from_secs(keep_alive_secs));
+                    socket_ref.set_tcp_keepalive(&keep_alive)?;
+                }
 
                 let stream = TcpListenerStream::new(listener);
                 let stream = Abortable::new(stream, registration);
@@ -205,12 +215,16 @@ impl BaseTcpServer {
         task.shutdown(&self.name).await
     }
 
+    /// Bind the server to the given address and set the keep-alive time.
+    ///
+    /// If `keep_alive_secs` is 0, the keep-alive will not be set.
     pub(crate) async fn bind(
         &self,
         addr: SocketAddr,
+        keep_alive_secs: u64,
     ) -> Result<(Abortable<TcpListenerStream>, SocketAddr)> {
         let mut task = self.accept_task.lock().await;
-        task.bind(addr, &self.name).await
+        task.bind(addr, &self.name, keep_alive_secs).await
     }
 
     pub(crate) async fn start_with(&self, join_handle: JoinHandle<()>) -> Result<()> {

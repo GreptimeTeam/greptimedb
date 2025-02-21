@@ -87,6 +87,15 @@ where
         self
     }
 
+    async fn metadata(&self) -> Result<Arc<FileMetadata>> {
+        let reader = self
+            .puffin_file_accessor
+            .reader(&self.puffin_file_name)
+            .await?;
+        let mut file = PuffinFileReader::new(reader);
+        self.get_puffin_file_metadata(&mut file).await
+    }
+
     async fn blob(&self, key: &str) -> Result<Self::Blob> {
         let mut reader = self
             .puffin_file_accessor

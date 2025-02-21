@@ -39,6 +39,7 @@ use promql_parser::parser::{
     UnaryExpr, VectorSelector,
 };
 use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
+use query::promql::planner::normalize_matcher;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -95,7 +96,7 @@ pub struct PromData {
     pub result: PromQueryResult,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum PrometheusResponse {
     PromData(PromData),
@@ -106,6 +107,8 @@ pub enum PrometheusResponse {
     BuildInfo(OwnedBuildInfo),
     #[serde(skip_deserializing)]
     ParseResult(promql_parser::parser::Expr),
+    #[default]
+    None,
 }
 
 impl PrometheusResponse {
@@ -144,11 +147,9 @@ impl PrometheusResponse {
             }
         }
     }
-}
 
-impl Default for PrometheusResponse {
-    fn default() -> Self {
-        PrometheusResponse::PromData(Default::default())
+    pub fn is_none(&self) -> bool {
+        matches!(self, PrometheusResponse::None)
     }
 }
 
@@ -857,6 +858,7 @@ fn find_metric_name_not_equal_matchers(expr: &PromqlExpr) -> Option<Vec<Matcher>
         matchers
             .into_iter()
             .filter(|m| !matches!(m.op, MatchOp::Equal))
+            .map(normalize_matcher)
             .collect::<Vec<_>>()
     })
 }

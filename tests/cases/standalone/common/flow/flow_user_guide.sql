@@ -5,7 +5,7 @@ CREATE TABLE `ngx_access_log` (
     `referer` STRING NULL,
     `method` STRING NULL,
     `endpoint` STRING NULL,
-    `trace_id` STRING NULL FULLTEXT,
+    `trace_id` STRING NULL FULLTEXT INDEX,
     `protocol` STRING NULL,
     `status` SMALLINT UNSIGNED NULL,
     `size` DOUBLE NULL,

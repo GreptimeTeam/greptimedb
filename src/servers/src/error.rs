@@ -25,6 +25,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_telemetry::{error, warn};
+use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use headers::ContentType;
 use http::header::InvalidHeaderValue;
@@ -154,6 +155,14 @@ pub enum Error {
     Pipeline {
         #[snafu(source)]
         source: pipeline::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Pipeline transform error"))]
+    PipelineTransform {
+        #[snafu(source)]
+        source: pipeline::etl_error::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -557,12 +566,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("OpenTelemetry log error"))]
-    OpenTelemetryLog {
-        source: pipeline::etl_error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
     #[snafu(display("Unsupported json data type for tag: {} {}", key, ty))]
     UnsupportedJsonDataTypeForTag {
         key: String,
@@ -593,6 +596,21 @@ pub enum Error {
     #[snafu(display("Invalid elasticsearch input, reason: {}", reason))]
     InvalidElasticsearchInput {
         reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid Jaeger query, reason: {}", reason))]
+    InvalidJaegerQuery {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("DataFusion error"))]
+    DataFusion {
+        #[snafu(source)]
+        error: DataFusionError,
         #[snafu(implicit)]
         location: Location,
     },
@@ -634,6 +652,7 @@ impl ErrorExt for Error {
             | CheckDatabaseValidity { source, .. } => source.status_code(),
 
             Pipeline { source, .. } => source.status_code(),
+            PipelineTransform { source, .. } => source.status_code(),
 
             NotSupported { .. }
             | InvalidParameter { .. }
@@ -661,12 +680,12 @@ impl ErrorExt for Error {
             | InvalidLokiPayload { .. }
             | UnsupportedContentType { .. }
             | TimestampOverflow { .. }
-            | OpenTelemetryLog { .. }
             | UnsupportedJsonDataTypeForTag { .. }
             | InvalidTableName { .. }
             | PrepareStatementNotFound { .. }
             | FailedToParseQuery { .. }
-            | InvalidElasticsearchInput { .. } => StatusCode::InvalidArguments,
+            | InvalidElasticsearchInput { .. }
+            | InvalidJaegerQuery { .. } => StatusCode::InvalidArguments,
 
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),
@@ -709,7 +728,7 @@ impl ErrorExt for Error {
 
             ConvertScalarValue { source, .. } => source.status_code(),
 
-            ToJson { .. } => StatusCode::Internal,
+            ToJson { .. } | DataFusion { .. } => StatusCode::Internal,
 
             ConvertSqlValue { source, .. } => source.status_code(),
 

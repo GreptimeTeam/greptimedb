@@ -498,13 +498,13 @@ fn interleave_batches(
     }
 
     // interleave arrays
-    let mut interleaved_arrays = Vec::with_capacity(arrays.len());
-    for array in arrays {
-        interleaved_arrays.push(compute::interleave(&array, &indices)?);
-    }
+    let interleaved_arrays: Vec<_> = arrays
+        .into_iter()
+        .map(|array| compute::interleave(&array, &indices))
+        .collect::<Result<_, _>>()?;
 
     // assemble new record batch
-    RecordBatch::try_new(schema.clone(), interleaved_arrays)
+    RecordBatch::try_new(schema, interleaved_arrays)
         .map_err(|e| DataFusionError::ArrowError(e, None))
 }
 

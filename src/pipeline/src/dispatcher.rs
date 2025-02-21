@@ -12,18 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_telemetry::debug;
 use snafu::OptionExt;
 use yaml_rust::Yaml;
 
-use crate::etl::error::{Error, Result};
-use crate::etl_error::{
-    FieldRequiredForDispatcherSnafu, TablePartRequiredForDispatcherRuleSnafu,
+use crate::etl::error::{
+    Error, FieldRequiredForDispatcherSnafu, Result, TableSuffixRequiredForDispatcherRuleSnafu,
     ValueRequiredForDispatcherRuleSnafu,
 };
-use crate::Value;
+use crate::{PipelineMap, Value};
 
 const FIELD: &str = "field";
-const TABLE_PARTIAL: &str = "table_part";
+const TABLE_SUFFIX: &str = "table_suffix";
 const PIPELINE: &str = "pipeline";
 const VALUE: &str = "value";
 const RULES: &str = "rules";
@@ -39,10 +39,10 @@ const RULES: &str = "rules";
 ///   rules:
 ///     - value: http
 ///       pipeline: http_pipeline
-///       table_part: http_log
+///       table_suffix: http_log
 ///     - value: db
 ///       pipeline: db_pipeline
-///       table_part: db_log
+///       table_suffix: db_log
 /// ```
 ///
 /// If none of the rules match the value, this pipeline will continue to process
@@ -58,12 +58,12 @@ pub(crate) struct Dispatcher {
 /// - `value`: for pattern matching
 /// - `pipeline`: the pipeline to call, if it's unspecified, we use default
 ///   `greptime_identity`
-/// - `table_part`: the table name segment that we use to construct full table
+/// - `table_suffix`: the table name segment that we use to construct full table
 ///   name
 #[derive(Debug, PartialEq)]
 pub(crate) struct Rule {
     pub value: Value,
-    pub table_part: String,
+    pub table_suffix: String,
     pub pipeline: Option<String>,
 }
 
@@ -80,10 +80,11 @@ impl TryFrom<&Yaml> for Dispatcher {
             rules
                 .iter()
                 .map(|rule| {
-                    let table_part = rule[TABLE_PARTIAL]
+                    let table_part = rule[TABLE_SUFFIX]
                         .as_str()
                         .map(|s| s.to_string())
-                        .context(TablePartRequiredForDispatcherRuleSnafu)?;
+                        .context(TableSuffixRequiredForDispatcherRuleSnafu)?;
+
                     let pipeline = rule[PIPELINE].as_str().map(|s| s.to_string());
 
                     if rule[VALUE].is_badvalue() {
@@ -93,7 +94,7 @@ impl TryFrom<&Yaml> for Dispatcher {
 
                     Ok(Rule {
                         value,
-                        table_part,
+                        table_suffix: table_part,
                         pipeline,
                     })
                 })
@@ -103,5 +104,23 @@ impl TryFrom<&Yaml> for Dispatcher {
         };
 
         Ok(Dispatcher { field, rules })
+    }
+}
+
+impl Dispatcher {
+    /// execute dispatcher and returns matched rule if any
+    pub(crate) fn exec(&self, data: &PipelineMap) -> Option<&Rule> {
+        if let Some(value) = data.get(&self.field) {
+            for rule in &self.rules {
+                if rule.value == *value {
+                    return Some(rule);
+                }
+            }
+
+            None
+        } else {
+            debug!("field {} not found in keys {:?}", &self.field, data.keys());
+            None
+        }
     }
 }

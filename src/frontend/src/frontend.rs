@@ -24,7 +24,8 @@ use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 
 use crate::service_config::{
-    InfluxdbOptions, MysqlOptions, OpentsdbOptions, OtlpOptions, PostgresOptions, PromStoreOptions,
+    InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, OtlpOptions, PostgresOptions,
+    PromStoreOptions,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -40,6 +41,7 @@ pub struct FrontendOptions {
     pub opentsdb: OpentsdbOptions,
     pub influxdb: InfluxdbOptions,
     pub prom_store: PromStoreOptions,
+    pub jaeger: JaegerOptions,
     pub otlp: OtlpOptions,
     pub meta_client: Option<MetaClientOptions>,
     pub logging: LoggingOptions,
@@ -62,6 +64,7 @@ impl Default for FrontendOptions {
             postgres: PostgresOptions::default(),
             opentsdb: OpentsdbOptions::default(),
             influxdb: InfluxdbOptions::default(),
+            jaeger: JaegerOptions::default(),
             prom_store: PromStoreOptions::default(),
             otlp: OtlpOptions::default(),
             meta_client: None,

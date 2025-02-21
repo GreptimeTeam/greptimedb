@@ -26,6 +26,8 @@ jobs:
     runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: crate-ci/typos@master
       - name: Check the config docs
         run: |
@@ -38,6 +40,8 @@ jobs:
     name: Check License Header
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: korandoru/hawkeye@v5
 
   check:
@@ -49,6 +53,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -70,6 +76,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Install taplo
         run: cargo +stable install taplo-cli --version ^0.9 --locked --force
@@ -85,6 +93,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -139,6 +149,8 @@ jobs:
           echo "Disk space after:"
           df -h
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -192,6 +204,8 @@ jobs:
           echo "Disk space after:"
           df -h
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -238,6 +252,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -295,6 +311,8 @@ jobs:
           echo "Disk space after:"
           df -h
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Setup Kind
         uses: ./.github/actions/setup-kind
       - if: matrix.mode.minio
@@ -437,6 +455,8 @@ jobs:
           echo "Disk space after:"
           df -h
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Setup Kind
         uses: ./.github/actions/setup-kind
       - name: Setup Chaos Mesh
@@ -562,6 +582,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - if: matrix.mode.kafka
         name: Setup kafka server
         working-directory: tests-integration/fixtures
@@ -589,6 +611,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -604,6 +628,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -626,6 +652,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Merge Conflict Finder
         uses: olivernybroe/action-conflict-finder@v4.0
 
@@ -636,6 +664,8 @@ jobs:
     needs:  [conflict-check, clippy, fmt]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -684,6 +714,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}

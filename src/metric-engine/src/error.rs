@@ -50,13 +50,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Region `{}` already exists", region_id))]
-    RegionAlreadyExists {
-        region_id: RegionId,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to deserialize column metadata from {}", raw))]
     DeserializeColumnMetadata {
         raw: String,
@@ -225,6 +218,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Unsupported alter kind: {}", kind))]
+    UnsupportedAlterKind {
+        kind: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Multiple field column found: {} and {}", previous, current))]
     MultipleFieldColumn {
         previous: String,
@@ -252,6 +252,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Unexpected request: {}", reason))]
+    UnexpectedRequest {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -269,7 +276,9 @@ impl ErrorExt for Error {
             | MultipleFieldColumn { .. }
             | NoFieldColumn { .. }
             | AddingFieldColumn { .. }
-            | ParseRegionOptions { .. } => StatusCode::InvalidArguments,
+            | ParseRegionOptions { .. }
+            | UnexpectedRequest { .. }
+            | UnsupportedAlterKind { .. } => StatusCode::InvalidArguments,
 
             ForbiddenPhysicalAlter { .. } | UnsupportedRegionRequest { .. } => {
                 StatusCode::Unsupported
@@ -300,8 +309,6 @@ impl ErrorExt for Error {
             EncodePrimaryKey { source, .. } => source.status_code(),
 
             CollectRecordBatchStream { source, .. } => source.status_code(),
-
-            RegionAlreadyExists { .. } => StatusCode::RegionAlreadyExists,
         }
     }
 

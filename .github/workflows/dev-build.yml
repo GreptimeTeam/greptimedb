@@ -76,14 +76,8 @@ env:
 
   NIGHTLY_RELEASE_PREFIX: nightly
 
-  # Use the different image name to avoid conflict with the release images.
-  IMAGE_NAME: greptimedb-dev
-
   # The source code will check out in the following path: '${WORKING_DIR}/dev/greptime'.
   CHECKOUT_GREPTIMEDB_PATH: dev/greptimedb
-
-permissions:
-  issues: write
 
 jobs:
   allocate-runners:
@@ -107,6 +101,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Create version
         id: create-version
@@ -161,6 +156,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Checkout greptimedb
         uses: actions/checkout@v4
@@ -168,6 +164,7 @@ jobs:
           repository: ${{ inputs.repository }}
           ref: ${{ inputs.commit }}
           path: ${{ env.CHECKOUT_GREPTIMEDB_PATH }}
+          persist-credentials: true
 
       - uses: ./.github/actions/build-linux-artifacts
         with:
@@ -192,6 +189,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Checkout greptimedb
         uses: actions/checkout@v4
@@ -199,6 +197,7 @@ jobs:
           repository: ${{ inputs.repository }}
           ref: ${{ inputs.commit }}
           path: ${{ env.CHECKOUT_GREPTIMEDB_PATH }}
+          persist-credentials: true
 
       - uses: ./.github/actions/build-linux-artifacts
         with:
@@ -226,13 +225,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Build and push images to dockerhub
         uses: ./.github/actions/build-images
         with:
           image-registry: docker.io
           image-namespace: ${{ vars.IMAGE_NAMESPACE }}
-          image-name: ${{ env.IMAGE_NAME }}
+          image-name: ${{ vars.DEV_BUILD_IMAGE_NAME }}
           image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
           image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
           version: ${{ needs.allocate-runners.outputs.version }}
@@ -257,13 +257,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Release artifacts to CN region
         uses: ./.github/actions/release-cn-artifacts
         with:
           src-image-registry: docker.io
           src-image-namespace: ${{ vars.IMAGE_NAMESPACE }}
-          src-image-name: ${{ env.IMAGE_NAME }}
+          src-image-name: ${{ vars.DEV_BUILD_IMAGE_NAME }}
           dst-image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
           dst-image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
           dst-image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
@@ -273,6 +274,7 @@ jobs:
           aws-cn-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
           aws-cn-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
           aws-cn-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
+          upload-to-s3: false
           dev-mode: true                     # Only build the standard images(exclude centos images).
           push-latest-tag: false             # Don't push the latest tag to registry.
           update-version-info: false         # Don't update the version info in S3.
@@ -291,6 +293,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Stop EC2 runner
         uses: ./.github/actions/stop-runner
@@ -316,6 +319,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Stop EC2 runner
         uses: ./.github/actions/stop-runner
@@ -334,10 +338,16 @@ jobs:
       release-images-to-dockerhub
     ]
     runs-on: ubuntu-20.04
+    permissions:
+      issues: write
+
     env:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - uses: ./.github/actions/setup-cyborg
       - name: Report CI status
         id: report-ci-status

@@ -71,12 +71,11 @@ impl TryFrom<Value> for ValueData {
     }
 }
 
-// TODO(yuanbohan): add fulltext support in datatype_extension
 pub(crate) fn coerce_columns(transform: &Transform) -> Result<Vec<ColumnSchema>> {
     let mut columns = Vec::new();
 
-    for field in transform.real_fields.iter() {
-        let column_name = field.output_name().to_string();
+    for field in transform.fields.iter() {
+        let column_name = field.target_or_input_field().to_string();
 
         let (datatype, datatype_extension) = coerce_type(transform)?;
 
@@ -160,19 +159,7 @@ fn coerce_type(transform: &Transform) -> Result<(ColumnDataType, Option<ColumnDa
 
 pub(crate) fn coerce_value(val: &Value, transform: &Transform) -> Result<Option<ValueData>> {
     match val {
-        Value::Null => match &transform.default {
-            Some(default) => coerce_value(default, transform),
-            None => match transform.on_failure {
-                Some(OnFailure::Ignore) => Ok(None),
-                Some(OnFailure::Default) => transform
-                    .get_default()
-                    .map(|default| coerce_value(default, transform))
-                    .unwrap_or_else(|| {
-                        coerce_value(transform.get_type_matched_default_val(), transform)
-                    }),
-                None => Ok(None),
-            },
-        },
+        Value::Null => Ok(None),
 
         Value::Int8(n) => coerce_i64_value(*n as i64, transform),
         Value::Int16(n) => coerce_i64_value(*n as i64, transform),
@@ -477,12 +464,14 @@ fn coerce_json_value(v: &Value, transform: &Transform) -> Result<Option<ValueDat
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+    use crate::etl::field::Fields;
 
     #[test]
     fn test_coerce_string_without_on_failure() {
         let transform = Transform {
-            real_fields: vec![],
+            fields: Fields::default(),
             type_: Value::Int32(0),
             default: None,
             index: None,
@@ -507,7 +496,7 @@ mod tests {
     #[test]
     fn test_coerce_string_with_on_failure_ignore() {
         let transform = Transform {
-            real_fields: vec![],
+            fields: Fields::default(),
             type_: Value::Int32(0),
             default: None,
             index: None,
@@ -522,7 +511,7 @@ mod tests {
     #[test]
     fn test_coerce_string_with_on_failure_default() {
         let mut transform = Transform {
-            real_fields: vec![],
+            fields: Fields::default(),
             type_: Value::Int32(0),
             default: None,
             index: None,

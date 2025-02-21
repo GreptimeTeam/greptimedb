@@ -15,6 +15,7 @@
 pub mod builder;
 mod grpc;
 mod influxdb;
+mod jaeger;
 mod log_handler;
 mod logs;
 mod opentsdb;
@@ -65,7 +66,7 @@ use servers::prometheus_handler::PrometheusHandler;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{
-    InfluxdbLineProtocolHandler, LogQueryHandler, OpenTelemetryProtocolHandler,
+    InfluxdbLineProtocolHandler, JaegerQueryHandler, LogQueryHandler, OpenTelemetryProtocolHandler,
     OpentsdbProtocolHandler, PipelineHandler, PromStoreProtocolHandler,
 };
 use servers::server::ServerHandlers;
@@ -100,6 +101,7 @@ pub trait FrontendInstance:
     + PrometheusHandler
     + PipelineHandler
     + LogQueryHandler
+    + JaegerQueryHandler
     + Send
     + Sync
     + 'static
@@ -167,6 +169,10 @@ impl Instance {
         &self.catalog_manager
     }
 
+    pub fn query_engine(&self) -> &QueryEngineRef {
+        &self.query_engine
+    }
+
     pub fn plugins(&self) -> Plugins {
         self.plugins.clone()
     }
@@ -231,6 +237,13 @@ impl Instance {
 
         let output = match stmt {
             Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
+                // TODO: remove this when format is supported in datafusion
+                if let Statement::Explain(explain) = &stmt {
+                    if let Some(format) = explain.format() {
+                        query_ctx.set_explain_format(format.to_string());
+                    }
+                }
+
                 let stmt = QueryStatement::Sql(stmt);
                 let plan = self
                     .statement_executor

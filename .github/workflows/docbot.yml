@@ -3,16 +3,17 @@ on:
   pull_request_target:
     types: [opened, edited]
 
-permissions:
-  pull-requests: write
-  contents: read
-
 jobs:
   docbot:
     runs-on: ubuntu-20.04
+    permissions:
+      pull-requests: write
+      contents: read
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/setup-cyborg
       - name: Maybe Follow Up Docs Issue
         working-directory: cyborg

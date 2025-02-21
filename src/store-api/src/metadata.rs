@@ -28,7 +28,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::arrow::datatypes::FieldRef;
-use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef};
+use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef, SkippingIndexOptions};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
@@ -586,6 +586,10 @@ impl RegionMetadataBuilder {
                 ApiSetIndexOptions::Inverted { column_name } => {
                     self.change_column_inverted_index_options(column_name, true)?
                 }
+                ApiSetIndexOptions::Skipping {
+                    column_name,
+                    options,
+                } => self.change_column_skipping_index_options(column_name, Some(options))?,
             },
             AlterKind::UnsetIndex { options } => match options {
                 ApiUnsetIndexOptions::Fulltext { column_name } => {
@@ -593,6 +597,9 @@ impl RegionMetadataBuilder {
                 }
                 ApiUnsetIndexOptions::Inverted { column_name } => {
                     self.change_column_inverted_index_options(column_name, false)?
+                }
+                ApiUnsetIndexOptions::Skipping { column_name } => {
+                    self.change_column_skipping_index_options(column_name, None)?
                 }
             },
             AlterKind::SetRegionOptions { options: _ } => {
@@ -633,34 +640,10 @@ impl RegionMetadataBuilder {
             .map(|col| col.column_schema.name.clone())
             .collect();
 
-        let pk_as_inverted_index = !self
-            .column_metadatas
-            .iter()
-            .any(|c| c.column_schema.has_inverted_index_key());
-        let mut set_inverted_index_for_primary_keys = false;
-
         for add_column in columns {
             if names.contains(&add_column.column_metadata.column_schema.name) {
                 // Column already exists.
                 continue;
-            }
-
-            // Handles using primary key as inverted index.
-            let has_inverted_index_key = add_column
-                .column_metadata
-                .column_schema
-                .has_inverted_index_key();
-
-            if pk_as_inverted_index
-                && has_inverted_index_key
-                && !set_inverted_index_for_primary_keys
-            {
-                self.column_metadatas.iter_mut().for_each(|col| {
-                    if col.semantic_type == SemanticType::Tag {
-                        col.column_schema.set_inverted_index(true);
-                    }
-                });
-                set_inverted_index_for_primary_keys = true;
             }
 
             let column_id = add_column.column_metadata.column_id;
@@ -784,6 +767,32 @@ impl RegionMetadataBuilder {
                     )?;
                 }
                 break;
+            }
+        }
+        Ok(())
+    }
+
+    fn change_column_skipping_index_options(
+        &mut self,
+        column_name: String,
+        options: Option<SkippingIndexOptions>,
+    ) -> Result<()> {
+        for column_meta in self.column_metadatas.iter_mut() {
+            if column_meta.column_schema.name == column_name {
+                if let Some(options) = &options {
+                    column_meta
+                        .column_schema
+                        .set_skipping_options(options)
+                        .context(UnsetSkippingIndexOptionsSnafu {
+                            column_name: column_name.clone(),
+                        })?;
+                } else {
+                    column_meta.column_schema.unset_skipping_options().context(
+                        UnsetSkippingIndexOptionsSnafu {
+                            column_name: column_name.clone(),
+                        },
+                    )?;
+                }
             }
         }
         Ok(())
@@ -938,6 +947,22 @@ pub enum MetadataError {
 
     #[snafu(display("Failed to set fulltext options for column {}", column_name))]
     SetFulltextOptions {
+        column_name: String,
+        source: datatypes::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to set skipping index options for column {}", column_name))]
+    SetSkippingIndexOptions {
+        column_name: String,
+        source: datatypes::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to unset skipping index options for column {}", column_name))]
+    UnsetSkippingIndexOptions {
         column_name: String,
         source: datatypes::Error,
         #[snafu(implicit)]
@@ -1526,6 +1551,8 @@ mod test {
 
     #[test]
     fn test_add_column_with_inverted_index() {
+        // only set inverted index to true explicitly will this column be inverted indexed
+
         // a (tag), b (field), c (ts)
         let metadata = build_test_region_metadata();
         let mut builder = RegionMetadataBuilder::from_existing(metadata);
@@ -1550,7 +1577,7 @@ mod test {
         check_columns(&metadata, &["a", "b", "c", "d", "e"]);
         assert_eq!([1, 4, 5], &metadata.primary_key[..]);
         let column_metadata = metadata.column_by_name("a").unwrap();
-        assert!(column_metadata.column_schema.is_inverted_indexed());
+        assert!(!column_metadata.column_schema.is_inverted_indexed());
         let column_metadata = metadata.column_by_name("b").unwrap();
         assert!(!column_metadata.column_schema.is_inverted_indexed());
         let column_metadata = metadata.column_by_name("c").unwrap();

@@ -112,6 +112,11 @@ where
         if opts.otlp.enable {
             builder = builder.with_otlp_handler(self.instance.clone());
         }
+
+        if opts.jaeger.enable {
+            builder = builder.with_jaeger_handler(self.instance.clone());
+        }
+
         builder
     }
 
@@ -227,6 +232,7 @@ where
                 Arc::new(MysqlSpawnConfig::new(
                     opts.tls.should_force_tls(),
                     tls_server_config,
+                    opts.keep_alive.as_secs(),
                     opts.reject_no_database.unwrap_or(false),
                 )),
             );
@@ -248,6 +254,7 @@ where
                 ServerSqlQueryHandlerAdapter::arc(instance.clone()),
                 opts.tls.should_force_tls(),
                 tls_server_config,
+                opts.keep_alive.as_secs(),
                 common_runtime::global_runtime(),
                 user_provider.clone(),
             )) as Box<dyn Server>;

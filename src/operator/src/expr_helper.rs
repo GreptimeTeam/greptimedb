@@ -22,14 +22,15 @@ use api::v1::{
     set_index, unset_index, AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer,
     ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
     DropColumn, DropColumns, ExpireAfter, ModifyColumnType, ModifyColumnTypes, RenameTable,
-    SemanticType, SetDatabaseOptions, SetFulltext, SetIndex, SetInverted, SetTableOptions,
-    TableName, UnsetDatabaseOptions, UnsetFulltext, UnsetIndex, UnsetInverted, UnsetTableOptions,
+    SemanticType, SetDatabaseOptions, SetFulltext, SetIndex, SetInverted, SetSkipping,
+    SetTableOptions, SkippingIndexType as PbSkippingIndexType, TableName, UnsetDatabaseOptions,
+    UnsetFulltext, UnsetIndex, UnsetInverted, UnsetSkipping, UnsetTableOptions,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
 use common_time::Timezone;
 use datafusion::sql::planner::object_name_to_table_reference;
-use datatypes::schema::{ColumnSchema, FulltextAnalyzer, COMMENT_KEY};
+use datatypes::schema::{ColumnSchema, FulltextAnalyzer, Schema, SkippingIndexType, COMMENT_KEY};
 use file_engine::FileOptions;
 use query::sql::{
     check_file_to_table_schema_compatibility, file_column_schemas_to_table,
@@ -54,42 +55,44 @@ use table::table_reference::TableReference;
 
 use crate::error::{
     BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu,
-    ConvertIdentifierSnafu, EncodeJsonSnafu, ExternalSnafu, IllegalPrimaryKeysDefSnafu,
-    InferFileTableSchemaSnafu, InvalidFlowNameSnafu, InvalidSqlSnafu, NotSupportedSnafu,
-    ParseSqlSnafu, PrepareFileTableSnafu, Result, SchemaIncompatibleSnafu,
+    ConvertIdentifierSnafu, EncodeJsonSnafu, ExternalSnafu, FindNewColumnsOnInsertionSnafu,
+    IllegalPrimaryKeysDefSnafu, InferFileTableSchemaSnafu, InvalidFlowNameSnafu, InvalidSqlSnafu,
+    NotSupportedSnafu, ParseSqlSnafu, PrepareFileTableSnafu, Result, SchemaIncompatibleSnafu,
     UnrecognizedTableOptionSnafu,
 };
 
-#[derive(Debug, Copy, Clone)]
-pub struct CreateExprFactory;
+pub fn create_table_expr_by_column_schemas(
+    table_name: &TableReference<'_>,
+    column_schemas: &[api::v1::ColumnSchema],
+    engine: &str,
+    desc: Option<&str>,
+) -> Result<CreateTableExpr> {
+    let column_exprs = ColumnExpr::from_column_schemas(column_schemas);
+    let expr = common_grpc_expr::util::build_create_table_expr(
+        None,
+        table_name,
+        column_exprs,
+        engine,
+        desc.unwrap_or("Created on insertion"),
+    )
+    .context(BuildCreateExprOnInsertionSnafu)?;
 
-impl CreateExprFactory {
-    pub fn create_table_expr_by_column_schemas(
-        &self,
-        table_name: &TableReference<'_>,
-        column_schemas: &[api::v1::ColumnSchema],
-        engine: &str,
-        desc: Option<&str>,
-    ) -> Result<CreateTableExpr> {
-        let column_exprs = ColumnExpr::from_column_schemas(column_schemas);
-        let create_expr = common_grpc_expr::util::build_create_table_expr(
-            None,
-            table_name,
-            column_exprs,
-            engine,
-            desc.unwrap_or("Created on insertion"),
-        )
-        .context(BuildCreateExprOnInsertionSnafu)?;
-
-        Ok(create_expr)
-    }
+    validate_create_expr(&expr)?;
+    Ok(expr)
 }
 
-// When the `CREATE EXTERNAL TABLE` statement is in expanded form, like
-// ```sql
-// CREATE EXTERNAL TABLE city (
-//   host string,
-//   ts timestamp,
+pub(crate) fn extract_add_columns_expr(
+    schema: &Schema,
+    column_exprs: Vec<ColumnExpr>,
+) -> Result<Option<AddColumns>> {
+    let add_columns = common_grpc_expr::util::extract_new_columns(schema, column_exprs)
+        .context(FindNewColumnsOnInsertionSnafu)?;
+    if let Some(add_columns) = &add_columns {
+        validate_add_columns_expr(add_columns)?;
+    }
+    Ok(add_columns)
+}
+
 //   cpu float64,
 //   memory float64,
 //   TIME INDEX (ts),
@@ -137,14 +140,8 @@ pub(crate) async fn create_external_expr(
         // expanded form
         let time_index = find_time_index(&create.constraints)?;
         let primary_keys = find_primary_keys(&create.columns, &create.constraints)?;
-        let inverted_index_cols = find_inverted_index_cols(&create.columns, &create.constraints)?;
-        let column_schemas = columns_to_column_schemas(
-            &create.columns,
-            &time_index,
-            &inverted_index_cols,
-            &primary_keys,
-            Some(&query_ctx.timezone()),
-        )?;
+        let column_schemas =
+            columns_to_column_schemas(&create.columns, &time_index, Some(&query_ctx.timezone()))?;
         (time_index, primary_keys, column_schemas)
     } else {
         // inferred form
@@ -179,6 +176,7 @@ pub(crate) async fn create_external_expr(
         table_id: None,
         engine: create.engine.to_string(),
     };
+
     Ok(expr)
 }
 
@@ -199,7 +197,6 @@ pub fn create_to_expr(
     );
 
     let primary_keys = find_primary_keys(&create.columns, &create.constraints)?;
-    let inverted_index_cols = find_inverted_index_cols(&create.columns, &create.constraints)?;
 
     let expr = CreateTableExpr {
         catalog_name,
@@ -210,7 +207,6 @@ pub fn create_to_expr(
             &create.columns,
             &time_index,
             &primary_keys,
-            &inverted_index_cols,
             Some(&query_ctx.timezone()),
         )?,
         time_index,
@@ -282,8 +278,9 @@ pub fn validate_create_expr(create: &CreateTableExpr) -> Result<()> {
         }
         .fail();
     }
-    // verify do not contain interval type column issue #3235
+
     for column in &create.column_defs {
+        // verify do not contain interval type column issue #3235
         if is_interval_type(&column.data_type()) {
             return InvalidSqlSnafu {
                 err_msg: format!(
@@ -293,9 +290,46 @@ pub fn validate_create_expr(create: &CreateTableExpr) -> Result<()> {
             }
             .fail();
         }
+        // verify do not contain datetime type column issue #5489
+        if is_date_time_type(&column.data_type()) {
+            return InvalidSqlSnafu {
+                err_msg: format!(
+                    "column name `{}` is datetime type, which is not supported, please use `timestamp` type instead",
+                    column.name
+                ),
+            }
+            .fail();
+        }
     }
-
     Ok(())
+}
+
+fn validate_add_columns_expr(add_columns: &AddColumns) -> Result<()> {
+    for add_column in &add_columns.add_columns {
+        let Some(column_def) = &add_column.column_def else {
+            continue;
+        };
+        if is_date_time_type(&column_def.data_type()) {
+            return InvalidSqlSnafu {
+                    err_msg: format!("column name `{}` is datetime type, which is not supported, please use `timestamp` type instead", column_def.name),
+                }
+                .fail();
+        }
+        if is_interval_type(&column_def.data_type()) {
+            return InvalidSqlSnafu {
+                err_msg: format!(
+                    "column name `{}` is interval type, which is not supported",
+                    column_def.name
+                ),
+            }
+            .fail();
+        }
+    }
+    Ok(())
+}
+
+fn is_date_time_type(data_type: &ColumnDataType) -> bool {
+    matches!(data_type, ColumnDataType::Datetime)
 }
 
 fn is_interval_type(data_type: &ColumnDataType) -> bool {
@@ -378,71 +412,24 @@ pub fn find_time_index(constraints: &[TableConstraint]) -> Result<String> {
     Ok(time_index.first().unwrap().to_string())
 }
 
-/// Finds the inverted index columns from the constraints. If no inverted index
-/// columns are provided in the constraints, return `None`.
-fn find_inverted_index_cols(
-    columns: &[SqlColumn],
-    constraints: &[TableConstraint],
-) -> Result<Option<Vec<String>>> {
-    let inverted_index_cols = constraints.iter().find_map(|constraint| {
-        if let TableConstraint::InvertedIndex { columns } = constraint {
-            Some(
-                columns
-                    .iter()
-                    .map(|ident| ident.value.clone())
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            None
-        }
-    });
-
-    let Some(inverted_index_cols) = inverted_index_cols else {
-        return Ok(None);
-    };
-
-    for col in &inverted_index_cols {
-        if !columns.iter().any(|c| c.name().value == *col) {
-            return InvalidSqlSnafu {
-                err_msg: format!("inverted index column `{}` not found in column list", col),
-            }
-            .fail();
-        }
-    }
-
-    Ok(Some(inverted_index_cols))
-}
-
 fn columns_to_expr(
     column_defs: &[SqlColumn],
     time_index: &str,
     primary_keys: &[String],
-    invereted_index_cols: &Option<Vec<String>>,
     timezone: Option<&Timezone>,
 ) -> Result<Vec<api::v1::ColumnDef>> {
-    let column_schemas = columns_to_column_schemas(
-        column_defs,
-        time_index,
-        invereted_index_cols,
-        primary_keys,
-        timezone,
-    )?;
+    let column_schemas = columns_to_column_schemas(column_defs, time_index, timezone)?;
     column_schemas_to_defs(column_schemas, primary_keys)
 }
 
 fn columns_to_column_schemas(
     columns: &[SqlColumn],
     time_index: &str,
-    invereted_index_cols: &Option<Vec<String>>,
-    primary_keys: &[String],
     timezone: Option<&Timezone>,
 ) -> Result<Vec<ColumnSchema>> {
     columns
         .iter()
-        .map(|c| {
-            column_to_schema(c, time_index, invereted_index_cols, primary_keys, timezone)
-                .context(ParseSqlSnafu)
-        })
+        .map(|c| column_to_schema(c, time_index, timezone).context(ParseSqlSnafu))
         .collect::<Result<Vec<ColumnSchema>>>()
 }
 
@@ -601,6 +588,19 @@ pub(crate) fn to_alter_table_expr(
                     column_name: column_name.value,
                 })),
             },
+            sql::statements::alter::SetIndexOperation::Skipping {
+                column_name,
+                options,
+            } => SetIndex {
+                options: Some(set_index::Options::Skipping(SetSkipping {
+                    column_name: column_name.value,
+                    enable: true,
+                    granularity: options.granularity as u64,
+                    skipping_index_type: match options.index_type {
+                        SkippingIndexType::BloomFilter => PbSkippingIndexType::BloomFilter.into(),
+                    },
+                })),
+            },
         }),
         AlterTableOperation::UnsetIndex { options } => AlterTableKind::UnsetIndex(match options {
             sql::statements::alter::UnsetIndexOperation::Fulltext { column_name } => UnsetIndex {
@@ -610,6 +610,11 @@ pub(crate) fn to_alter_table_expr(
             },
             sql::statements::alter::UnsetIndexOperation::Inverted { column_name } => UnsetIndex {
                 options: Some(unset_index::Options::Inverted(UnsetInverted {
+                    column_name: column_name.value,
+                })),
+            },
+            sql::statements::alter::UnsetIndexOperation::Skipping { column_name } => UnsetIndex {
+                options: Some(unset_index::Options::Skipping(UnsetSkipping {
                     column_name: column_name.value,
                 })),
             },

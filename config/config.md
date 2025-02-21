@@ -40,6 +40,7 @@
 | `mysql.enable` | Bool | `true` | Whether to enable. |
 | `mysql.addr` | String | `127.0.0.1:4002` | The addr to bind the MySQL server. |
 | `mysql.runtime_size` | Integer | `2` | The number of server worker threads. |
+| `mysql.keep_alive` | String | `0s` | Server-side keep-alive time.<br/>Set to 0 (default) to disable. |
 | `mysql.tls` | -- | -- | -- |
 | `mysql.tls.mode` | String | `disable` | TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html<br/>- `disable` (default value)<br/>- `prefer`<br/>- `require`<br/>- `verify-ca`<br/>- `verify-full` |
 | `mysql.tls.cert_path` | String | Unset | Certificate file path. |
@@ -49,6 +50,7 @@
 | `postgres.enable` | Bool | `true` | Whether to enable |
 | `postgres.addr` | String | `127.0.0.1:4003` | The addr to bind the PostgresSQL server. |
 | `postgres.runtime_size` | Integer | `2` | The number of server worker threads. |
+| `postgres.keep_alive` | String | `0s` | Server-side keep-alive time.<br/>Set to 0 (default) to disable. |
 | `postgres.tls` | -- | -- | PostgresSQL server TLS options, see `mysql.tls` section. |
 | `postgres.tls.mode` | String | `disable` | TLS mode. |
 | `postgres.tls.cert_path` | String | Unset | Certificate file path. |
@@ -58,6 +60,8 @@
 | `opentsdb.enable` | Bool | `true` | Whether to enable OpenTSDB put in HTTP API. |
 | `influxdb` | -- | -- | InfluxDB protocol options. |
 | `influxdb.enable` | Bool | `true` | Whether to enable InfluxDB protocol in HTTP API. |
+| `jaeger` | -- | -- | Jaeger protocol options. |
+| `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
@@ -148,6 +152,7 @@
 | `region_engine.mito.index` | -- | -- | The options for index in Mito engine. |
 | `region_engine.mito.index.aux_path` | String | `""` | Auxiliary directory path for the index in filesystem, used to store intermediate files for<br/>creating the index and staging files for searching the index, defaults to `{data_home}/index_intermediate`.<br/>The default name for this directory is `index_intermediate` for backward compatibility.<br/><br/>This path contains two subdirectories:<br/>- `__intm`: for storing intermediate files used during creating index.<br/>- `staging`: for storing staging files used during searching index. |
 | `region_engine.mito.index.staging_size` | String | `2GB` | The max capacity of the staging directory. |
+| `region_engine.mito.index.staging_ttl` | String | `7d` | The TTL of the staging directory.<br/>Defaults to 7 days.<br/>Setting it to "0s" to disable TTL. |
 | `region_engine.mito.index.metadata_cache_size` | String | `64MiB` | Cache size for inverted index metadata. |
 | `region_engine.mito.index.content_cache_size` | String | `128MiB` | Cache size for inverted index content. |
 | `region_engine.mito.index.content_cache_page_size` | String | `64KiB` | Page size for inverted index content cache. |
@@ -234,6 +239,7 @@
 | `mysql.enable` | Bool | `true` | Whether to enable. |
 | `mysql.addr` | String | `127.0.0.1:4002` | The addr to bind the MySQL server. |
 | `mysql.runtime_size` | Integer | `2` | The number of server worker threads. |
+| `mysql.keep_alive` | String | `0s` | Server-side keep-alive time.<br/>Set to 0 (default) to disable. |
 | `mysql.tls` | -- | -- | -- |
 | `mysql.tls.mode` | String | `disable` | TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html<br/>- `disable` (default value)<br/>- `prefer`<br/>- `require`<br/>- `verify-ca`<br/>- `verify-full` |
 | `mysql.tls.cert_path` | String | Unset | Certificate file path. |
@@ -243,6 +249,7 @@
 | `postgres.enable` | Bool | `true` | Whether to enable |
 | `postgres.addr` | String | `127.0.0.1:4003` | The addr to bind the PostgresSQL server. |
 | `postgres.runtime_size` | Integer | `2` | The number of server worker threads. |
+| `postgres.keep_alive` | String | `0s` | Server-side keep-alive time.<br/>Set to 0 (default) to disable. |
 | `postgres.tls` | -- | -- | PostgresSQL server TLS options, see `mysql.tls` section. |
 | `postgres.tls.mode` | String | `disable` | TLS mode. |
 | `postgres.tls.cert_path` | String | Unset | Certificate file path. |
@@ -252,6 +259,8 @@
 | `opentsdb.enable` | Bool | `true` | Whether to enable OpenTSDB put in HTTP API. |
 | `influxdb` | -- | -- | InfluxDB protocol options. |
 | `influxdb.enable` | Bool | `true` | Whether to enable InfluxDB protocol in HTTP API. |
+| `jaeger` | -- | -- | Jaeger protocol options. |
+| `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
@@ -483,6 +492,7 @@
 | `region_engine.mito.index` | -- | -- | The options for index in Mito engine. |
 | `region_engine.mito.index.aux_path` | String | `""` | Auxiliary directory path for the index in filesystem, used to store intermediate files for<br/>creating the index and staging files for searching the index, defaults to `{data_home}/index_intermediate`.<br/>The default name for this directory is `index_intermediate` for backward compatibility.<br/><br/>This path contains two subdirectories:<br/>- `__intm`: for storing intermediate files used during creating index.<br/>- `staging`: for storing staging files used during searching index. |
 | `region_engine.mito.index.staging_size` | String | `2GB` | The max capacity of the staging directory. |
+| `region_engine.mito.index.staging_ttl` | String | `7d` | The TTL of the staging directory.<br/>Defaults to 7 days.<br/>Setting it to "0s" to disable TTL. |
 | `region_engine.mito.index.metadata_cache_size` | String | `64MiB` | Cache size for inverted index metadata. |
 | `region_engine.mito.index.content_cache_size` | String | `128MiB` | Cache size for inverted index content. |
 | `region_engine.mito.index.content_cache_page_size` | String | `64KiB` | Page size for inverted index content cache. |

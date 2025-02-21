@@ -17,7 +17,7 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use index::inverted_index::create::sort::external_sort::ExternalSorter;
 use index::inverted_index::create::sort_create::SortIndexCreator;
 use index::inverted_index::create::InvertedIndexCreator;
@@ -34,7 +34,7 @@ use crate::error::{
     PushIndexValueSnafu, Result,
 };
 use crate::read::Batch;
-use crate::row_converter::{CompositeValues, SortField};
+use crate::row_converter::SortField;
 use crate::sst::file::FileId;
 use crate::sst::index::codec::{IndexValueCodec, IndexValuesCodec};
 use crate::sst::index::intermediate::{
@@ -71,8 +71,8 @@ pub struct InvertedIndexer {
     /// The memory usage of the index creator.
     memory_usage: Arc<AtomicUsize>,
 
-    /// Ids of indexed columns.
-    indexed_column_ids: HashSet<ColumnId>,
+    /// Ids of indexed columns and their names (`to_string` of the column id).
+    indexed_column_ids: Vec<(ColumnId, String)>,
 }
 
 impl InvertedIndexer {
@@ -105,6 +105,13 @@ impl InvertedIndexer {
             metadata.primary_key_encoding,
             metadata.primary_key_columns(),
         );
+        let indexed_column_ids = indexed_column_ids
+            .into_iter()
+            .map(|col_id| {
+                let col_id_str = col_id.to_string();
+                (col_id, col_id_str)
+            })
+            .collect();
         Self {
             codec,
             index_creator,
@@ -183,73 +190,61 @@ impl InvertedIndexer {
         let n = batch.num_rows();
         guard.inc_row_count(n);
 
-        // TODO(weny, zhenchi): lazy decode
-        if batch.pk_values().is_none() {
-            let values = self.codec.decode(batch.primary_key())?;
-            batch.set_pk_values(values);
-        }
+        for (col_id, col_id_str) in &self.indexed_column_ids {
+            match self.codec.pk_col_info(*col_id) {
+                // pk
+                Some(col_info) => {
+                    let pk_idx = col_info.idx;
+                    let field = &col_info.field;
+                    let value = batch
+                        .pk_col_value(self.codec.decoder(), pk_idx, *col_id)?
+                        .filter(|v| !v.is_null())
+                        .map(|v| {
+                            self.value_buf.clear();
+                            IndexValueCodec::encode_nonnull_value(
+                                v.as_value_ref(),
+                                field,
+                                &mut self.value_buf,
+                            )?;
+                            Ok(self.value_buf.as_slice())
+                        })
+                        .transpose()?;
 
-        // Safety: the primary key is decoded
-        let values = batch.pk_values().unwrap();
-        for (idx, (col_id, field)) in self.codec.fields().iter().enumerate() {
-            if !self.indexed_column_ids.contains(col_id) {
-                continue;
-            }
-
-            let value = match &values {
-                CompositeValues::Dense(vec) => {
-                    let value = &vec[idx].1;
-                    if value.is_null() {
-                        None
-                    } else {
-                        Some(value)
-                    }
+                    self.index_creator
+                        .push_with_name_n(col_id_str, value, n)
+                        .await
+                        .context(PushIndexValueSnafu)?;
                 }
-                CompositeValues::Sparse(sparse_values) => sparse_values.get(col_id),
-            };
-
-            if let Some(value) = value.as_ref() {
-                self.value_buf.clear();
-                IndexValueCodec::encode_nonnull_value(
-                    value.as_value_ref(),
-                    field,
-                    &mut self.value_buf,
-                )?;
-            }
-
-            // Safety: the column id is guaranteed to be in the map
-            let col_id_str = self.codec.column_ids().get(col_id).unwrap();
-
-            // non-null value -> Some(encoded_bytes), null value -> None
-            let value = value.is_some().then_some(self.value_buf.as_slice());
-            self.index_creator
-                .push_with_name_n(col_id_str, value, n)
-                .await
-                .context(PushIndexValueSnafu)?;
-        }
-
-        for field in batch.fields() {
-            if !self.indexed_column_ids.contains(&field.column_id) {
-                continue;
-            }
-
-            let sort_field = SortField::new(field.data.data_type());
-            let col_id_str = field.column_id.to_string();
-            for i in 0..n {
-                self.value_buf.clear();
-                let value = field.data.get_ref(i);
-
-                if value.is_null() {
-                    self.index_creator
-                        .push_with_name(&col_id_str, None)
-                        .await
-                        .context(PushIndexValueSnafu)?;
-                } else {
-                    IndexValueCodec::encode_nonnull_value(value, &sort_field, &mut self.value_buf)?;
-                    self.index_creator
-                        .push_with_name(&col_id_str, Some(&self.value_buf))
-                        .await
-                        .context(PushIndexValueSnafu)?;
+                // fields
+                None => {
+                    let Some(values) = batch.field_col_value(*col_id) else {
+                        debug!(
+                            "Column {} not found in the batch during building inverted index",
+                            col_id
+                        );
+                        continue;
+                    };
+                    let sort_field = SortField::new(values.data.data_type());
+                    for i in 0..n {
+                        self.value_buf.clear();
+                        let value = values.data.get_ref(i);
+                        if value.is_null() {
+                            self.index_creator
+                                .push_with_name(col_id_str, None)
+                                .await
+                                .context(PushIndexValueSnafu)?;
+                        } else {
+                            IndexValueCodec::encode_nonnull_value(
+                                value,
+                                &sort_field,
+                                &mut self.value_buf,
+                            )?;
+                            self.index_creator
+                                .push_with_name(col_id_str, Some(&self.value_buf))
+                                .await
+                                .context(PushIndexValueSnafu)?;
+                        }
+                    }
                 }
             }
         }
@@ -313,7 +308,7 @@ impl InvertedIndexer {
     }
 
     pub fn column_ids(&self) -> impl Iterator<Item = ColumnId> + '_ {
-        self.indexed_column_ids.iter().copied()
+        self.indexed_column_ids.iter().map(|(col_id, _)| *col_id)
     }
 
     pub fn memory_usage(&self) -> usize {

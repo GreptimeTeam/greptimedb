@@ -43,6 +43,7 @@ use snafu::{ensure, ResultExt};
 use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
 use tower::ServiceBuilder;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::decompression::RequestDecompressionLayer;
 use tower_http::trace::TraceLayer;
@@ -72,8 +73,9 @@ use crate::metrics_handler::MetricsHandler;
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
-    InfluxdbLineProtocolHandlerRef, LogQueryHandlerRef, OpenTelemetryProtocolHandlerRef,
-    OpentsdbProtocolHandlerRef, PipelineHandlerRef, PromStoreProtocolHandlerRef,
+    InfluxdbLineProtocolHandlerRef, JaegerQueryHandlerRef, LogQueryHandlerRef,
+    OpenTelemetryProtocolHandlerRef, OpentsdbProtocolHandlerRef, PipelineHandlerRef,
+    PromStoreProtocolHandlerRef,
 };
 use crate::server::Server;
 
@@ -86,6 +88,7 @@ mod extractor;
 pub mod handler;
 pub mod header;
 pub mod influxdb;
+pub mod jaeger;
 pub mod logs;
 pub mod loki;
 pub mod mem_prof;
@@ -652,6 +655,16 @@ impl HttpServerBuilder {
         }
     }
 
+    pub fn with_jaeger_handler(self, handler: JaegerQueryHandlerRef) -> Self {
+        Self {
+            router: self.router.nest(
+                &format!("/{HTTP_API_VERSION}/jaeger"),
+                HttpServer::route_jaeger(handler),
+            ),
+            ..self
+        }
+    }
+
     pub fn with_extra_router(self, router: Router) -> Self {
         Self {
             router: self.router.merge(router),
@@ -978,6 +991,7 @@ impl HttpServer {
                 "/label/{label_name}/values",
                 routing::get(label_values_query),
             )
+            .layer(ServiceBuilder::new().layer(CompressionLayer::new()))
             .with_state(prometheus_handler)
     }
 
@@ -1053,6 +1067,25 @@ impl HttpServer {
         Router::new()
             .route("/config", routing::get(handler::config))
             .with_state(state)
+    }
+
+    fn route_jaeger<S>(handler: JaegerQueryHandlerRef) -> Router<S> {
+        Router::new()
+            .route("/api/services", routing::get(jaeger::handle_get_services))
+            .route(
+                "/api/services/{service_name}/operations",
+                routing::get(jaeger::handle_get_operations_by_service),
+            )
+            .route(
+                "/api/operations",
+                routing::get(jaeger::handle_get_operations),
+            )
+            .route("/api/traces", routing::get(jaeger::handle_find_traces))
+            .route(
+                "/api/traces/{trace_id}",
+                routing::get(jaeger::handle_get_trace),
+            )
+            .with_state(handler)
     }
 }
 

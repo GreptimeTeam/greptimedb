@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use api::v1::meta::{HeartbeatRequest, NodeInfo as PbNodeInfo, Role};
-use common_meta::cluster;
 use common_meta::cluster::{
     DatanodeStatus, FlownodeStatus, FrontendStatus, NodeInfo, NodeInfoKey, NodeStatus,
 };
@@ -42,7 +41,7 @@ impl HeartbeatHandler for CollectFrontendClusterInfoHandler {
         ctx: &mut Context,
         _acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
-        let Some((key, peer, info)) = extract_base_info(req, Role::Frontend) else {
+        let Some((key, peer, info)) = extract_base_info(req) else {
             return Ok(HandleControl::Continue);
         };
 
@@ -75,7 +74,7 @@ impl HeartbeatHandler for CollectFlownodeClusterInfoHandler {
         ctx: &mut Context,
         _acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
-        let Some((key, peer, info)) = extract_base_info(req, Role::Flownode) else {
+        let Some((key, peer, info)) = extract_base_info(req) else {
             return Ok(HandleControl::Continue);
         };
 
@@ -109,7 +108,7 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
         ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
-        let Some((key, peer, info)) = extract_base_info(req, Role::Datanode) else {
+        let Some((key, peer, info)) = extract_base_info(req) else {
             return Ok(HandleControl::Continue);
         };
 
@@ -144,16 +143,9 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
     }
 }
 
-fn extract_base_info(
-    req: &HeartbeatRequest,
-    role: Role,
-) -> Option<(NodeInfoKey, Peer, PbNodeInfo)> {
-    let HeartbeatRequest {
-        header, peer, info, ..
-    } = req;
-    let Some(header) = &header else {
-        return None;
-    };
+fn extract_base_info(request: &HeartbeatRequest) -> Option<(NodeInfoKey, Peer, PbNodeInfo)> {
+    let HeartbeatRequest { peer, info, .. } = request;
+    let key = NodeInfoKey::new(request)?;
     let Some(peer) = &peer else {
         return None;
     };
@@ -161,19 +153,7 @@ fn extract_base_info(
         return None;
     };
 
-    Some((
-        NodeInfoKey {
-            cluster_id: header.cluster_id,
-            role: match role {
-                Role::Datanode => cluster::Role::Datanode,
-                Role::Frontend => cluster::Role::Frontend,
-                Role::Flownode => cluster::Role::Flownode,
-            },
-            node_id: peer.id,
-        },
-        Peer::from(peer.clone()),
-        info.clone(),
-    ))
+    Some((key, Peer::from(peer.clone()), info.clone()))
 }
 
 async fn put_into_memory_store(ctx: &mut Context, key: NodeInfoKey, value: NodeInfo) -> Result<()> {

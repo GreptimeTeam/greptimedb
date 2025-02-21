@@ -12,17 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ahash::HashSet;
 use snafu::{OptionExt, ResultExt};
 
 use crate::etl::error::{
     EpochInvalidResolutionSnafu, Error, FailedToParseIntSnafu, KeyMustBeStringSnafu,
     ProcessorMissingFieldSnafu, ProcessorUnsupportedValueSnafu, Result,
 };
-use crate::etl::field::{Fields, OneInputOneOutputField};
+use crate::etl::field::Fields;
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, ProcessorBuilder,
-    ProcessorKind, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
+    IGNORE_MISSING_NAME,
 };
 use crate::etl::value::time::{
     MICROSECOND_RESOLUTION, MICRO_RESOLUTION, MILLISECOND_RESOLUTION, MILLI_RESOLUTION,
@@ -30,6 +29,7 @@ use crate::etl::value::time::{
     SEC_RESOLUTION, S_RESOLUTION, US_RESOLUTION,
 };
 use crate::etl::value::{Timestamp, Value};
+use crate::etl::PipelineMap;
 
 pub(crate) const PROCESSOR_EPOCH: &str = "epoch";
 const RESOLUTION_NAME: &str = "resolution";
@@ -57,56 +57,12 @@ impl TryFrom<&str> for Resolution {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct EpochProcessorBuilder {
-    fields: Fields,
-    resolution: Resolution,
-    ignore_missing: bool,
-}
-
-impl ProcessorBuilder for EpochProcessorBuilder {
-    fn output_keys(&self) -> HashSet<&str> {
-        self.fields
-            .iter()
-            .map(|f| f.target_or_input_field())
-            .collect()
-    }
-
-    fn input_keys(&self) -> HashSet<&str> {
-        self.fields.iter().map(|f| f.input_field()).collect()
-    }
-
-    fn build(self, intermediate_keys: &[String]) -> Result<ProcessorKind> {
-        self.build(intermediate_keys).map(ProcessorKind::Epoch)
-    }
-}
-
-impl EpochProcessorBuilder {
-    pub fn build(self, intermediate_keys: &[String]) -> Result<EpochProcessor> {
-        let mut real_fields = vec![];
-        for field in self.fields.into_iter() {
-            let input = OneInputOneOutputField::build(
-                "epoch",
-                intermediate_keys,
-                field.input_field(),
-                field.target_or_input_field(),
-            )?;
-            real_fields.push(input);
-        }
-        Ok(EpochProcessor {
-            fields: real_fields,
-            resolution: self.resolution,
-            ignore_missing: self.ignore_missing,
-        })
-    }
-}
-
 /// support string, integer, float, time, epoch
 /// deprecated it should be removed in the future
 /// Reserved for compatibility only
 #[derive(Debug, Default)]
 pub struct EpochProcessor {
-    fields: Vec<OneInputOneOutputField>,
+    fields: Fields,
     resolution: Resolution,
     ignore_missing: bool,
     // description
@@ -157,7 +113,7 @@ impl EpochProcessor {
     }
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for EpochProcessorBuilder {
+impl TryFrom<&yaml_rust::yaml::Hash> for EpochProcessor {
     type Error = Error;
 
     fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self> {
@@ -188,7 +144,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for EpochProcessorBuilder {
                 _ => {}
             }
         }
-        let builder = EpochProcessorBuilder {
+        let builder = EpochProcessor {
             fields,
             resolution,
             ignore_missing,
@@ -207,23 +163,23 @@ impl Processor for EpochProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut Vec<Value>) -> Result<()> {
+    fn exec_mut(&self, val: &mut PipelineMap) -> Result<()> {
         for field in self.fields.iter() {
-            let index = field.input_index();
+            let index = field.input_field();
             match val.get(index) {
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
                         return ProcessorMissingFieldSnafu {
                             processor: self.kind(),
-                            field: field.input_name(),
+                            field: field.input_field(),
                         }
                         .fail();
                     }
                 }
                 Some(v) => {
                     let timestamp = self.parse(v)?;
-                    let output_index = field.output_index();
-                    val[output_index] = Value::Timestamp(timestamp);
+                    let output_index = field.target_or_input_field();
+                    val.insert(output_index.to_string(), Value::Timestamp(timestamp));
                 }
             }
         }

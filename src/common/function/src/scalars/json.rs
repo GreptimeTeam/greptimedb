@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
-mod json_get;
+pub mod json_get;
 mod json_is;
 mod json_path_exists;
 mod json_path_match;

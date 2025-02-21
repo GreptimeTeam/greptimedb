@@ -604,6 +604,33 @@ async fn cross_schema_query(instance: Arc<dyn MockInstance>) {
 
     let query_output = promql_query(
         ins.clone(),
+        r#"http_requests{__database__="greptime_private"}"#,
+        QueryContext::arc(),
+        start,
+        end,
+        interval,
+        lookback_delta,
+    )
+    .await
+    .unwrap();
+
+    let expected = r#"+------------+----------+------------+-------+---------------------+
+| job        | instance | group      | value | ts                  |
++------------+----------+------------+-------+---------------------+
+| api-server | 0        | production | 100.0 | 1970-01-01T00:00:00 |
+| api-server | 0        | canary     | 300.0 | 1970-01-01T00:00:00 |
+| api-server | 1        | production | 200.0 | 1970-01-01T00:00:00 |
+| api-server | 1        | canary     | 400.0 | 1970-01-01T00:00:00 |
+| app-server | 0        | canary     | 700.0 | 1970-01-01T00:00:00 |
+| app-server | 0        | production | 500.0 | 1970-01-01T00:00:00 |
+| app-server | 1        | canary     | 800.0 | 1970-01-01T00:00:00 |
+| app-server | 1        | production | 600.0 | 1970-01-01T00:00:00 |
++------------+----------+------------+-------+---------------------+"#;
+
+    check_unordered_output_stream(query_output, expected).await;
+
+    let query_output = promql_query(
+        ins.clone(),
         r#"http_requests"#,
         QueryContext::arc(),
         start,

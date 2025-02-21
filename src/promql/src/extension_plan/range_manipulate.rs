@@ -29,19 +29,22 @@ use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::EquivalenceProperties;
-use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
+use datafusion::physical_plan::metrics::{
+    BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricValue, MetricsSet,
+};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream, Statistics,
 };
 use datafusion::sql::TableReference;
-use futures::{Stream, StreamExt};
+use futures::{ready, Stream, StreamExt};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{DataFusionPlanningSnafu, DeserializeSnafu, Result};
-use crate::extension_plan::Millisecond;
+use crate::extension_plan::{Millisecond, METRIC_NUM_SERIES};
+use crate::metrics::PROMQL_SERIES_COUNT;
 use crate::range_array::RangeArray;
 
 /// Time series manipulator for range function.
@@ -359,6 +362,14 @@ impl ExecutionPlan for RangeManipulateExec {
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let baseline_metric = BaselineMetrics::new(&self.metric, partition);
+        let metrics_builder = MetricBuilder::new(&self.metric);
+        let num_series = Count::new();
+        metrics_builder
+            .with_partition(partition)
+            .build(MetricValue::Count {
+                name: METRIC_NUM_SERIES.into(),
+                count: num_series.clone(),
+            });
 
         let input = self.input.execute(partition, context)?;
         let schema = input.schema();
@@ -389,6 +400,7 @@ impl ExecutionPlan for RangeManipulateExec {
             output_schema: self.output_schema.clone(),
             input,
             metric: baseline_metric,
+            num_series,
         }))
     }
 
@@ -448,6 +460,8 @@ pub struct RangeManipulateStream {
     output_schema: SchemaRef,
     input: SendableRecordBatchStream,
     metric: BaselineMetrics,
+    /// Number of series processed.
+    num_series: Count,
 }
 
 impl RecordBatchStream for RangeManipulateStream {
@@ -460,19 +474,24 @@ impl Stream for RangeManipulateStream {
     type Item = DataFusionResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let timer = std::time::Instant::now();
         let poll = loop {
-            match self.input.poll_next_unpin(cx) {
-                Poll::Ready(Some(Ok(batch))) => {
-                    let _timer = self.metric.elapsed_compute().timer();
+            match ready!(self.input.poll_next_unpin(cx)) {
+                Some(Ok(batch)) => {
                     let result = self.manipulate(batch);
                     if let Ok(None) = result {
                         continue;
                     } else {
+                        self.num_series.add(1);
+                        self.metric.elapsed_compute().add_elapsed(timer);
                         break Poll::Ready(result.transpose());
                     }
                 }
-                Poll::Ready(other) => break Poll::Ready(other),
-                Poll::Pending => break Poll::Pending,
+                None => {
+                    PROMQL_SERIES_COUNT.observe(self.num_series.value() as f64);
+                    break Poll::Ready(None);
+                }
+                Some(Err(e)) => break Poll::Ready(Some(Err(e))),
             }
         };
         self.metric.record_poll(poll)

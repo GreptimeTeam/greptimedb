@@ -26,7 +26,9 @@ use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{LexRequirement, PhysicalSortRequirement};
 use datafusion::physical_plan::expressions::Column as ColumnExpr;
-use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
+use datafusion::physical_plan::metrics::{
+    BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricValue, MetricsSet,
+};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
@@ -38,6 +40,7 @@ use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
+use crate::extension_plan::METRIC_NUM_SERIES;
 use crate::metrics::PROMQL_SERIES_COUNT;
 
 #[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
@@ -190,6 +193,14 @@ impl ExecutionPlan for SeriesDivideExec {
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let baseline_metric = BaselineMetrics::new(&self.metric, partition);
+        let metrics_builder = MetricBuilder::new(&self.metric);
+        let num_series = Count::new();
+        metrics_builder
+            .with_partition(partition)
+            .build(MetricValue::Count {
+                name: METRIC_NUM_SERIES.into(),
+                count: num_series.clone(),
+            });
 
         let input = self.input.execute(partition, context)?;
         let schema = input.schema();
@@ -209,7 +220,7 @@ impl ExecutionPlan for SeriesDivideExec {
             schema,
             input,
             metric: baseline_metric,
-            num_series: 0,
+            num_series,
             inspect_start: 0,
         }))
     }
@@ -240,9 +251,10 @@ pub struct SeriesDivideStream {
     schema: SchemaRef,
     input: SendableRecordBatchStream,
     metric: BaselineMetrics,
-    num_series: usize,
     /// Index of buffered batches to start inspect next time.
     inspect_start: usize,
+    /// Number of series processed.
+    num_series: Count,
 }
 
 impl RecordBatchStream for SeriesDivideStream {
@@ -279,7 +291,7 @@ impl Stream for SeriesDivideStream {
                     let result_batch = compute::concat_batches(&self.schema, &result_batches)?;
 
                     self.inspect_start = 0;
-                    self.num_series += 1;
+                    self.num_series.add(1);
                     self.metric.elapsed_compute().add_elapsed(timer);
                     return Poll::Ready(Some(Ok(result_batch)));
                 } else {
@@ -293,7 +305,7 @@ impl Stream for SeriesDivideStream {
                         let result = compute::concat_batches(&self.schema, &self.buffer)?;
                         self.buffer.clear();
                         self.inspect_start = 0;
-                        self.num_series += 1;
+                        self.num_series.add(1);
                         self.metric.elapsed_compute().add_elapsed(timer);
                         return Poll::Ready(Some(Ok(result)));
                     }
@@ -302,7 +314,7 @@ impl Stream for SeriesDivideStream {
                 let batch = match ready!(self.as_mut().fetch_next_batch(cx)) {
                     Some(Ok(batch)) => batch,
                     None => {
-                        PROMQL_SERIES_COUNT.observe(self.num_series as f64);
+                        PROMQL_SERIES_COUNT.observe(self.num_series.value() as f64);
                         return Poll::Ready(None);
                     }
                     error => return Poll::Ready(error),

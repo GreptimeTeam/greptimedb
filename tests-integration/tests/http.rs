@@ -23,7 +23,7 @@ use common_error::status_code::StatusCode as ErrorCode;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use log_query::{Context, Limit, LogQuery, TimeFilter};
-use loki_proto::logproto::{EntryAdapter, PushRequest, StreamAdapter};
+use loki_proto::logproto::{EntryAdapter, LabelPairAdapter, PushRequest, StreamAdapter};
 use loki_proto::prost_types::Timestamp;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
@@ -93,6 +93,7 @@ macro_rules! http_tests {
                 test_plain_text_ingestion,
                 test_identify_pipeline,
                 test_identify_pipeline_with_flatten,
+                test_pipeline_dispatcher,
 
                 test_otlp_metrics,
                 test_otlp_traces,
@@ -102,6 +103,7 @@ macro_rules! http_tests {
                 test_elasticsearch_logs,
                 test_elasticsearch_logs_with_index,
                 test_log_query,
+                test_jaeger_query_api,
             );
         )*
     };
@@ -410,6 +412,18 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
     assert_eq!(body.code(), ErrorCode::DatabaseNotFound as u32);
+
+    // test analyze format
+    let res = client
+        .get("/v1/sql?sql=explain analyze format json select cpu, ts from demo limit 1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
+    let output = body.output();
+    assert_eq!(output.len(), 1);
+    // this is something only json format can show
+    assert!(format!("{:?}", output[0]).contains("\\\"param\\\""));
 
     // test parse method
     let res = client.get("/v1/sql/parse?sql=desc table t").send().await;
@@ -764,7 +778,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let data = res.text().await;
-    let expected = "{\"status\":\"error\",\"data\":{\"resultType\":\"\",\"result\":[]},\"error\":\"invalid promql query\",\"errorType\":\"InvalidArguments\"}";
+    let expected = "{\"status\":\"error\",\"error\":\"invalid promql query\",\"errorType\":\"InvalidArguments\"}";
     assert_eq!(expected, data);
 
     // range_query with __name__ not-equal matcher
@@ -922,6 +936,7 @@ watch = false
 enable = true
 addr = "127.0.0.1:4002"
 runtime_size = 2
+keep_alive = "0s"
 
 [mysql.tls]
 mode = "disable"
@@ -933,6 +948,7 @@ watch = false
 enable = true
 addr = "127.0.0.1:4003"
 runtime_size = 2
+keep_alive = "0s"
 
 [postgres.tls]
 mode = "disable"
@@ -944,6 +960,9 @@ watch = false
 enable = true
 
 [influxdb]
+enable = true
+
+[jaeger]
 enable = true
 
 [prom_store]
@@ -1000,6 +1019,7 @@ min_compaction_interval = "0s"
 [region_engine.mito.index]
 aux_path = ""
 staging_size = "2GiB"
+staging_ttl = "7days"
 write_buffer_size = "8MiB"
 content_cache_page_size = "64KiB"
 
@@ -1383,6 +1403,197 @@ pub async fn test_identify_pipeline(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_pipeline_dispatcher(storage_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(storage_type, "test_pipeline_dispatcher").await;
+
+    // handshake
+    let client = TestClient::new(app).await;
+
+    let root_pipeline = r#"
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+      ignore_missing: true
+
+dispatcher:
+  field: type
+  rules:
+    - value: http
+      table_suffix: http
+      pipeline: http
+    - value: db
+      table_suffix: db
+    - value: not_found
+      table_suffix: not_found
+      pipeline: not_found
+
+transform:
+  - fields:
+      - id1, id1_root
+      - id2, id2_root
+    type: int32
+  - fields:
+      - type
+      - log
+      - logger
+    type: string
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
+    let http_pipeline = r#"
+processors:
+
+transform:
+  - fields:
+      - id1, id1_http
+      - id2, id2_http
+    type: int32
+  - fields:
+      - log
+      - logger
+    type: string
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/root")
+        .header("Content-Type", "application/x-yaml")
+        .body(root_pipeline)
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = client
+        .post("/v1/events/pipelines/http")
+        .header("Content-Type", "application/x-yaml")
+        .body(http_pipeline)
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 2. write data
+    let data_body = r#"
+[
+  {
+    "id1": "2436",
+    "id2": "2528",
+    "logger": "INTERACT.MANAGER",
+    "type": "http",
+    "time": "2024-05-25 20:16:37.217",
+    "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+  }
+]
+"#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=root")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let data_body = r#"
+[
+  {
+    "id1": "2436",
+    "id2": "2528",
+    "logger": "INTERACT.MANAGER",
+    "type": "db",
+    "time": "2024-05-25 20:16:37.217",
+    "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+  }
+]
+"#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=root")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let data_body = r#"
+[
+  {
+    "id1": "2436",
+    "id2": "2528",
+    "logger": "INTERACT.MANAGER",
+    "type": "api",
+    "time": "2024-05-25 20:16:37.217",
+    "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+  }
+]
+"#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=root")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let data_body = r#"
+[
+  {
+    "id1": "2436",
+    "id2": "2528",
+    "logger": "INTERACT.MANAGER",
+    "type": "not_found",
+    "time": "2024-05-25 20:16:37.217",
+    "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+  }
+]
+"#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=root")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // 3. verify data
+    let expected = "[[2436]]";
+    validate_data(
+        "test_dispatcher_pipeline default table",
+        &client,
+        "select id1_root from logs1",
+        expected,
+    )
+    .await;
+
+    let expected = "[[2436]]";
+    validate_data(
+        "test_dispatcher_pipeline http table",
+        &client,
+        "select id1_http from logs1_http",
+        expected,
+    )
+    .await;
+
+    let expected = "[[\"2436\"]]";
+    validate_data(
+        "test_dispatcher_pipeline db table",
+        &client,
+        "select id1 from logs1_db",
+        expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
 pub async fn test_identify_pipeline_with_flatten(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
@@ -1587,8 +1798,8 @@ transform:
             .await;
         assert_eq!(res.status(), StatusCode::OK);
         let body: Value = res.json().await;
-        let schema = &body["schema"];
-        let rows = &body["rows"];
+        let schema = &body[0]["schema"];
+        let rows = &body[0]["rows"];
         assert_eq!(schema, &dryrun_schema);
         assert_eq!(rows, &dryrun_rows);
     }
@@ -1617,8 +1828,8 @@ transform:
             .await;
         assert_eq!(res.status(), StatusCode::OK);
         let body: Value = res.json().await;
-        let schema = &body["schema"];
-        let rows = &body["rows"];
+        let schema = &body[0]["schema"];
+        let rows = &body[0]["rows"];
         assert_eq!(schema, &dryrun_schema);
         assert_eq!(rows, &dryrun_rows);
     }
@@ -1645,8 +1856,8 @@ transform:
             .await;
         assert_eq!(res.status(), StatusCode::OK);
         let body: Value = res.json().await;
-        let schema = &body["schema"];
-        let rows = &body["rows"];
+        let schema = &body[0]["schema"];
+        let rows = &body[0]["rows"];
         assert_eq!(schema, &dryrun_schema);
         assert_eq!(rows, &dryrun_rows);
     }
@@ -1687,7 +1898,7 @@ pub async fn test_plain_text_ingestion(store_type: StorageType) {
 processors:
   - dissect:
       fields:
-        - line
+        - message
       patterns:
         - "%{+ts} %{+ts} %{content}"
   - date:
@@ -2027,12 +2238,30 @@ pub async fn test_loki_pb_logs(store_type: StorageType) {
                 EntryAdapter {
                     timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
                     line: "this is a log message".to_string(),
-                    structured_metadata: vec![],
+                    structured_metadata: vec![
+                        LabelPairAdapter {
+                            name: "key1".to_string(),
+                            value: "value1".to_string(),
+                        },
+                        LabelPairAdapter {
+                            name: "key2".to_string(),
+                            value: "value2".to_string(),
+                        },
+                    ],
                     parsed: vec![],
                 },
                 EntryAdapter {
-                    timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
-                    line: "this is a log message".to_string(),
+                    timestamp: Some(Timestamp::from_str("2024-11-07T10:53:51").unwrap()),
+                    line: "this is a log message 2".to_string(),
+                    structured_metadata: vec![LabelPairAdapter {
+                        name: "key3".to_string(),
+                        value: "value3".to_string(),
+                    }],
+                    parsed: vec![],
+                },
+                EntryAdapter {
+                    timestamp: Some(Timestamp::from_str("2024-11-07T10:53:52").unwrap()),
+                    line: "this is a log message 2".to_string(),
                     structured_metadata: vec![],
                     parsed: vec![],
                 },
@@ -2072,7 +2301,7 @@ pub async fn test_loki_pb_logs(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // test schema
-    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"service\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  \\\"wadaxi\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"service\\\", \\\"source\\\", \\\"wadaxi\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"structured_metadata\\\" JSON NULL,\\n  \\\"service\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  \\\"wadaxi\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"service\\\", \\\"source\\\", \\\"wadaxi\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
     validate_data(
         "loki_pb_schema",
         &client,
@@ -2082,7 +2311,7 @@ pub async fn test_loki_pb_logs(store_type: StorageType) {
     .await;
 
     // test content
-    let expected = r#"[[1730976830000000000,"this is a log message","test","integration","do anything"],[1730976830000000000,"this is a log message","test","integration","do anything"]]"#;
+    let expected = "[[1730976830000000000,\"this is a log message\",{\"key1\":\"value1\",\"key2\":\"value2\"},\"test\",\"integration\",\"do anything\"],[1730976831000000000,\"this is a log message 2\",{\"key3\":\"value3\"},\"test\",\"integration\",\"do anything\"],[1730976832000000000,\"this is a log message 2\",{},\"test\",\"integration\",\"do anything\"]]";
     validate_data(
         "loki_pb_content",
         &client,
@@ -2110,8 +2339,9 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
         "sender": "integration"
       },
       "values": [
-          [ "1735901380059465984", "this is line one" ],
-          [ "1735901398478897920", "this is line two" ]
+          [ "1735901380059465984", "this is line one", {"key1":"value1","key2":"value2"}],
+          [ "1735901398478897920", "this is line two", {"key3":"value3"}],
+          [ "1735901398478897921", "this is line two updated"]
       ]
     }
   ]
@@ -2141,7 +2371,7 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // test schema
-    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"sender\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"sender\\\", \\\"source\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    let expected =  "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"structured_metadata\\\" JSON NULL,\\n  \\\"sender\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"sender\\\", \\\"source\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
     validate_data(
         "loki_json_schema",
         &client,
@@ -2151,7 +2381,7 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
     .await;
 
     // test content
-    let expected = "[[1735901380059465984,\"this is line one\",\"integration\",\"test\"],[1735901398478897920,\"this is line two\",\"integration\",\"test\"]]";
+    let expected = "[[1735901380059465984,\"this is line one\",{\"key1\":\"value1\",\"key2\":\"value2\"},\"integration\",\"test\"],[1735901398478897920,\"this is line two\",{\"key3\":\"value3\"},\"integration\",\"test\"],[1735901398478897921,\"this is line two updated\",{},\"integration\",\"test\"]]";
     validate_data(
         "loki_json_content",
         &client,
@@ -2311,12 +2541,369 @@ pub async fn test_log_query(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_jaeger_query_api(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_jaeger_query_api").await;
+
+    let client = TestClient::new(app).await;
+
+    // Test empty response for `/api/services` API before writing any traces.
+    let res = client.get("/v1/jaeger/api/services").send().await;
+    assert_eq!(StatusCode::OK, res.status());
+    let expected = r#"
+    {
+        "data": null,
+        "total": 0,
+        "limit": 0,
+        "offset": 0,
+        "errors": []
+    }
+    "#;
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
+
+    let content = r#"
+    {
+        "resourceSpans": [
+            {
+                "resource": {
+                    "attributes": [
+                        {
+                            "key": "service.name",
+                            "value": {
+                                "stringValue": "test-jaeger-query-api"
+                            }
+                        }
+                    ]
+                },
+                "scopeSpans": [
+                    {
+                        "scope": {
+                        "name": "test-jaeger-query-api",
+                        "version": "1.0.0"
+                        },
+                        "spans": [
+                            {
+                                "traceId": "5611dce1bc9ebed65352d99a027b08ea",
+                                "spanId": "008421dbbd33a3e9",
+                                "name": "access-mysql",
+                                "kind": 2,
+                                "startTimeUnixNano": "1738726754492422000",
+                                "endTimeUnixNano": "1738726754592422000",
+                                "attributes": [
+                                    {
+                                        "key": "operation.type",
+                                        "value": {
+                                        "stringValue": "access-mysql"
+                                        }
+                                    },
+                                    {
+                                        "key": "net.peer.ip",
+                                        "value": {
+                                        "stringValue": "1.2.3.4"
+                                        }
+                                    },
+                                    {
+                                        "key": "peer.service",
+                                        "value": {
+                                        "stringValue": "test-jaeger-query-api"
+                                        }
+                                    }
+                                ],
+                                "status": {
+                                    "message": "success",
+                                    "code": 0
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "scope": {
+                        "name": "test-jaeger-query-api",
+                        "version": "1.0.0"
+                        },
+                        "spans": [
+                            {
+                                "traceId": "5611dce1bc9ebed65352d99a027b08ea",
+                                "spanId": "ffa03416a7b9ea48",
+                                "name": "access-redis",
+                                "kind": 2,
+                                "startTimeUnixNano": "1738726754492422000",
+                                "endTimeUnixNano": "1738726754592422000",
+                                "attributes": [
+                                    {
+                                        "key": "operation.type",
+                                        "value": {
+                                        "stringValue": "access-redis"
+                                        }
+                                    },
+                                    {
+                                        "key": "net.peer.ip",
+                                        "value": {
+                                        "stringValue": "1.2.3.4"
+                                        }
+                                    },
+                                    {
+                                        "key": "peer.service",
+                                        "value": {
+                                        "stringValue": "test-jaeger-query-api"
+                                        }
+                                    }
+                                ],
+                                "status": {
+                                    "message": "success",
+                                    "code": 0
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "schemaUrl": "https://opentelemetry.io/schemas/1.4.0"
+            }
+        ]
+    }
+    "#;
+
+    let req: ExportTraceServiceRequest = serde_json::from_str(content).unwrap();
+    let body = req.encode_to_vec();
+    // write traces data.
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )],
+        "/v1/otlp/v1/traces",
+        body.clone(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    // Test `/api/services` API.
+    let res = client.get("/v1/jaeger/api/services").send().await;
+    assert_eq!(StatusCode::OK, res.status());
+    let expected = r#"
+    {
+        "data": [
+            "test-jaeger-query-api"
+        ],
+        "total": 1,
+        "limit": 0,
+        "offset": 0,
+        "errors": []
+    }
+    "#;
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
+
+    // Test `/api/operations` API.
+    let res = client
+        .get("/v1/jaeger/api/operations?service=test-jaeger-query-api")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let expected = r#"
+    {
+        "data": [
+            {
+                "name": "access-mysql",
+                "spanKind": "server"
+            },
+            {
+                "name": "access-redis",
+                "spanKind": "server"
+            }
+        ],
+        "total": 2,
+        "limit": 0,
+        "offset": 0,
+        "errors": []
+    }
+    "#;
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
+
+    // Test `/api/services/{service_name}/operations` API.
+    let res = client
+        .get("/v1/jaeger/api/services/test-jaeger-query-api/operations")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let expected = r#"
+    {
+        "data": [
+            "access-mysql",
+            "access-redis"
+        ],
+        "total": 2,
+        "limit": 0,
+        "offset": 0,
+        "errors": []
+    }
+    "#;
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
+
+    // Test `/api/traces/{trace_id}` API.
+    let res = client
+        .get("/v1/jaeger/api/traces/5611dce1bc9ebed65352d99a027b08ea")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let expected = r#"
+    {
+      "data": [
+        {
+          "traceID": "5611dce1bc9ebed65352d99a027b08ea",
+          "spans": [
+            {
+              "traceID": "5611dce1bc9ebed65352d99a027b08ea",
+              "spanID": "008421dbbd33a3e9",
+              "operationName": "access-mysql",
+              "references": [],
+              "startTime": 1738726754492422,
+              "duration": 100000,
+              "tags": [
+                {
+                  "key": "net.peer.ip",
+                  "type": "string",
+                  "value": "1.2.3.4"
+                },
+                {
+                  "key": "operation.type",
+                  "type": "string",
+                  "value": "access-mysql"
+                },
+                {
+                  "key": "peer.service",
+                  "type": "string",
+                  "value": "test-jaeger-query-api"
+                }
+              ],
+              "logs": [],
+              "processID": "p1"
+            },
+            {
+              "traceID": "5611dce1bc9ebed65352d99a027b08ea",
+              "spanID": "ffa03416a7b9ea48",
+              "operationName": "access-redis",
+              "references": [],
+              "startTime": 1738726754492422,
+              "duration": 100000,
+              "tags": [
+                {
+                  "key": "net.peer.ip",
+                  "type": "string",
+                  "value": "1.2.3.4"
+                },
+                {
+                  "key": "operation.type",
+                  "type": "string",
+                  "value": "access-redis"
+                },
+                {
+                  "key": "peer.service",
+                  "type": "string",
+                  "value": "test-jaeger-query-api"
+                }
+              ],
+              "logs": [],
+              "processID": "p1"
+            }
+          ],
+          "processes": {
+            "p1": {
+              "serviceName": "test-jaeger-query-api",
+              "tags": []
+            }
+          }
+        }
+      ],
+      "total": 0,
+      "limit": 0,
+      "offset": 0,
+      "errors": []
+    }
+    "#;
+
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
+
+    // Test `/api/traces` API.
+    let res = client
+        .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&operation=access-mysql&start=1738726754492422&end=1738726754642422&tags=%7B%22operation.type%22%3A%22access-mysql%22%7D")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let expected = r#"
+    {
+      "data": [
+        {
+          "traceID": "5611dce1bc9ebed65352d99a027b08ea",
+          "spans": [
+            {
+              "traceID": "5611dce1bc9ebed65352d99a027b08ea",
+              "spanID": "008421dbbd33a3e9",
+              "operationName": "access-mysql",
+              "references": [],
+              "startTime": 1738726754492422,
+              "duration": 100000,
+              "tags": [
+                {
+                  "key": "net.peer.ip",
+                  "type": "string",
+                  "value": "1.2.3.4"
+                },
+                {
+                  "key": "operation.type",
+                  "type": "string",
+                  "value": "access-mysql"
+                },
+                {
+                  "key": "peer.service",
+                  "type": "string",
+                  "value": "test-jaeger-query-api"
+                }
+              ],
+              "logs": [],
+              "processID": "p1"
+            }
+          ],
+          "processes": {
+            "p1": {
+              "serviceName": "test-jaeger-query-api",
+              "tags": []
+            }
+          }
+        }
+      ],
+      "total": 0,
+      "limit": 0,
+      "offset": 0,
+      "errors": []
+    }
+    "#;
+
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
+
+    guard.remove_all().await;
+}
+
 async fn validate_data(test_name: &str, client: &TestClient, sql: &str, expected: &str) {
     let res = client
         .get(format!("/v1/sql?sql={sql}").as_str())
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::OK, "validate {test_name} fail");
     let resp = res.text().await;
     let v = get_rows_from_output(&resp);
 

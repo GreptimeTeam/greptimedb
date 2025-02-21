@@ -8,7 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-async-trait = "0.1"
+async-trait.workspace = true
 clap.workspace = true
 client = { workspace = true, features = ["testing"] }
 common-error.workspace = true

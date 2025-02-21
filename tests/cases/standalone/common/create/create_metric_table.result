@@ -73,24 +73,23 @@ DESC TABLE phy;
 
 SHOW CREATE TABLE phy;
 
-+-------+------------------------------------+
-| Table | Create Table                       |
-+-------+------------------------------------+
-| phy   | CREATE TABLE IF NOT EXISTS "phy" ( |
-|       |   "ts" TIMESTAMP(3) NOT NULL,      |
-|       |   "val" DOUBLE NULL,               |
-|       |   "host" STRING NULL,              |
-|       |   "job" STRING NULL,               |
-|       |   TIME INDEX ("ts"),               |
-|       |   PRIMARY KEY ("host", "job"),     |
-|       |   INVERTED INDEX ("host", "job")   |
-|       | )                                  |
-|       |                                    |
-|       | ENGINE=metric                      |
-|       | WITH(                              |
-|       |   physical_metric_table = ''       |
-|       | )                                  |
-+-------+------------------------------------+
++-------+--------------------------------------+
+| Table | Create Table                         |
++-------+--------------------------------------+
+| phy   | CREATE TABLE IF NOT EXISTS "phy" (   |
+|       |   "ts" TIMESTAMP(3) NOT NULL,        |
+|       |   "val" DOUBLE NULL,                 |
+|       |   "host" STRING NULL INVERTED INDEX, |
+|       |   "job" STRING NULL INVERTED INDEX,  |
+|       |   TIME INDEX ("ts"),                 |
+|       |   PRIMARY KEY ("host", "job")        |
+|       | )                                    |
+|       |                                      |
+|       | ENGINE=metric                        |
+|       | WITH(                                |
+|       |   physical_metric_table = ''         |
+|       | )                                    |
++-------+--------------------------------------+
 
 DESC TABLE t1;
 

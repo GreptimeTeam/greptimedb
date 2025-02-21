@@ -78,6 +78,9 @@ enable = true
 addr = "127.0.0.1:4002"
 ## The number of server worker threads.
 runtime_size = 2
+## Server-side keep-alive time.
+## Set to 0 (default) to disable.
+keep_alive = "0s"
 
 # MySQL server TLS options.
 [mysql.tls]
@@ -109,6 +112,9 @@ enable = true
 addr = "127.0.0.1:4003"
 ## The number of server worker threads.
 runtime_size = 2
+## Server-side keep-alive time.
+## Set to 0 (default) to disable.
+keep_alive = "0s"
 
 ## PostgresSQL server TLS options, see `mysql.tls` section.
 [postgres.tls]
@@ -134,6 +140,11 @@ enable = true
 ## InfluxDB protocol options.
 [influxdb]
 ## Whether to enable InfluxDB protocol in HTTP API.
+enable = true
+
+## Jaeger protocol options.
+[jaeger]
+## Whether to enable Jaeger protocol in HTTP API.
 enable = true
 
 ## Prometheus remote storage options
@@ -572,6 +583,11 @@ aux_path = ""
 
 ## The max capacity of the staging directory.
 staging_size = "2GB"
+
+## The TTL of the staging directory.
+## Defaults to 7 days.
+## Setting it to "0s" to disable TTL.
+staging_ttl = "7d"
 
 ## Cache size for inverted index metadata.
 metadata_cache_size = "64MiB"

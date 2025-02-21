@@ -24,7 +24,7 @@ use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 #[cfg(feature = "pg_kvbackend")]
-use common_meta::kv_backend::postgres::PgStore;
+use common_meta::kv_backend::rds::PgStore;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 #[cfg(feature = "pg_kvbackend")]
 use common_telemetry::error;

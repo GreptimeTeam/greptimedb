@@ -81,6 +81,7 @@ rust.unknown_lints = "deny"
 rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 
 [workspace.dependencies]
+# DO_NOT_REMOVE_THIS: BEGIN_OF_EXTERNAL_DEPENDENCIES
 # We turn off default-features for some dependencies here so the workspaces which inherit them can
 # selectively turn them on if needed, since we can override default-features = true (from false)
 # for the inherited dependency but cannot do the reverse (override from true to false).
@@ -106,6 +107,7 @@ bitflags = "2.4.1"
 bytemuck = "1.12"
 bytes = { version = "1.7", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10.1"
 clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
 crossbeam-utils = "0.8"
@@ -127,7 +129,7 @@ etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "683e9d10ae7f3dfb8aaabd89082fc600c17e3795" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "a25adc8a01340231121646d8f0a29d0e92f45461" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -158,7 +160,9 @@ parquet = { version = "53.0.0", default-features = false, features = ["arrow", "
 paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
-promql-parser = { version = "0.4.3", features = ["ser"] }
+promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", features = [
+    "ser",
+], rev = "27abb8e16003a50c720f00d6c85f41f5fa2a2a8e" }
 prost = "0.13"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.8"
@@ -207,6 +211,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"]
 typetag = "0.2"
 uuid = { version = "1.7", features = ["serde", "v4", "fast-rng"] }
 zstd = "0.13"
+# DO_NOT_REMOVE_THIS: END_OF_EXTERNAL_DEPENDENCIES
 
 ## workspaces members
 api = { path = "src/api" }

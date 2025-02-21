@@ -16,7 +16,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
+use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use axum::extract::{FromRequest, Multipart, Path, Query, Request, State};
 use axum::http::header::CONTENT_TYPE;
@@ -32,18 +32,17 @@ use headers::ContentType;
 use lazy_static::lazy_static;
 use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
-use pipeline::{
-    GreptimePipelineParams, GreptimeTransformer, PipelineVersion, GREPTIME_PIPELINE_PARAMS_HEADER,
-};
+use pipeline::{GreptimePipelineParams, GreptimeTransformer, PipelineDefinition, PipelineVersion};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Map, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
-    status_code_to_http_status, CatalogSnafu, Error, InvalidParameterSnafu, ParseJsonSnafu,
-    PipelineSnafu, Result, UnsupportedContentTypeSnafu,
+    status_code_to_http_status, Error, InvalidParameterSnafu, ParseJsonSnafu, PipelineSnafu,
+    Result, UnsupportedContentTypeSnafu,
 };
+use crate::http::header::constants::GREPTIME_PIPELINE_PARAMS_HEADER;
 use crate::http::header::CONTENT_TYPE_PROTOBUF_STR;
 use crate::http::result::greptime_manage_resp::GreptimedbManageResponse;
 use crate::http::result::greptime_result_v1::GreptimedbV1Response;
@@ -51,11 +50,11 @@ use crate::http::HttpResponse;
 use crate::interceptor::{LogIngestInterceptor, LogIngestInterceptorRef};
 use crate::metrics::{
     METRIC_FAILURE_VALUE, METRIC_HTTP_LOGS_INGESTION_COUNTER, METRIC_HTTP_LOGS_INGESTION_ELAPSED,
-    METRIC_HTTP_LOGS_TRANSFORM_ELAPSED, METRIC_SUCCESS_VALUE,
+    METRIC_SUCCESS_VALUE,
 };
+use crate::pipeline::run_pipeline;
 use crate::query_handler::PipelineHandlerRef;
 
-pub const GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME: &str = "greptime_identity";
 const GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX: &str = "greptime_";
 
 lazy_static! {
@@ -269,86 +268,107 @@ fn transform_ndjson_array_factory(
 }
 
 /// Dryrun pipeline with given data
-fn dryrun_pipeline_inner(
+async fn dryrun_pipeline_inner(
     value: Vec<Value>,
-    pipeline: &pipeline::Pipeline<GreptimeTransformer>,
+    pipeline: Arc<pipeline::Pipeline<GreptimeTransformer>>,
+    pipeline_handler: PipelineHandlerRef,
+    query_ctx: &QueryContextRef,
 ) -> Result<Response> {
-    let mut intermediate_state = pipeline.init_intermediate_state();
+    let params = GreptimePipelineParams::default();
 
-    let mut results = Vec::with_capacity(value.len());
-    for v in value {
-        pipeline
-            .prepare(v, &mut intermediate_state)
+    let results = run_pipeline(
+        &pipeline_handler,
+        PipelineDefinition::Resolved(pipeline),
+        &params,
+        pipeline::json_array_to_intermediate_state(value)
             .context(PipelineTransformSnafu)
-            .context(PipelineSnafu)?;
-        let r = pipeline
-            .exec_mut(&mut intermediate_state)
-            .context(PipelineTransformSnafu)
-            .context(PipelineSnafu)?;
-        results.push(r);
-        pipeline.reset_intermediate_state(&mut intermediate_state);
-    }
+            .context(PipelineSnafu)?,
+        "dry_run".to_owned(),
+        query_ctx,
+        true,
+    )
+    .await?;
 
     let colume_type_key = "colume_type";
     let data_type_key = "data_type";
     let name_key = "name";
 
-    let schema = pipeline
-        .schemas()
-        .iter()
-        .map(|cs| {
-            let mut map = Map::new();
-            map.insert(name_key.to_string(), Value::String(cs.column_name.clone()));
-            map.insert(
-                data_type_key.to_string(),
-                Value::String(cs.datatype().as_str_name().to_string()),
-            );
-            map.insert(
-                colume_type_key.to_string(),
-                Value::String(cs.semantic_type().as_str_name().to_string()),
-            );
-            map.insert(
-                "fulltext".to_string(),
-                Value::Bool(
-                    cs.options
-                        .clone()
-                        .is_some_and(|x| x.options.contains_key("fulltext")),
-                ),
-            );
-            Value::Object(map)
-        })
-        .collect::<Vec<_>>();
-    let rows = results
+    let results = results
         .into_iter()
-        .map(|row| {
-            let row = row
-                .values
-                .into_iter()
-                .enumerate()
-                .map(|(idx, v)| {
-                    v.value_data
-                        .map(|d| {
-                            let mut map = Map::new();
-                            map.insert("value".to_string(), column_data_to_json(d));
-                            map.insert("key".to_string(), schema[idx][name_key].clone());
-                            map.insert(
-                                "semantic_type".to_string(),
-                                schema[idx][colume_type_key].clone(),
-                            );
-                            map.insert("data_type".to_string(), schema[idx][data_type_key].clone());
-                            Value::Object(map)
-                        })
-                        .unwrap_or(Value::Null)
-                })
-                .collect();
-            Value::Array(row)
+        .filter_map(|row| {
+            if let Some(rows) = row.rows {
+                let table_name = row.table_name;
+                let schema = rows.schema;
+
+                let schema = schema
+                    .iter()
+                    .map(|cs| {
+                        let mut map = Map::new();
+                        map.insert(name_key.to_string(), Value::String(cs.column_name.clone()));
+                        map.insert(
+                            data_type_key.to_string(),
+                            Value::String(cs.datatype().as_str_name().to_string()),
+                        );
+                        map.insert(
+                            colume_type_key.to_string(),
+                            Value::String(cs.semantic_type().as_str_name().to_string()),
+                        );
+                        map.insert(
+                            "fulltext".to_string(),
+                            Value::Bool(
+                                cs.options
+                                    .clone()
+                                    .is_some_and(|x| x.options.contains_key("fulltext")),
+                            ),
+                        );
+                        Value::Object(map)
+                    })
+                    .collect::<Vec<_>>();
+
+                let rows = rows
+                    .rows
+                    .into_iter()
+                    .map(|row| {
+                        row.values
+                            .into_iter()
+                            .enumerate()
+                            .map(|(idx, v)| {
+                                v.value_data
+                                    .map(|d| {
+                                        let mut map = Map::new();
+                                        map.insert("value".to_string(), column_data_to_json(d));
+                                        map.insert(
+                                            "key".to_string(),
+                                            schema[idx][name_key].clone(),
+                                        );
+                                        map.insert(
+                                            "semantic_type".to_string(),
+                                            schema[idx][colume_type_key].clone(),
+                                        );
+                                        map.insert(
+                                            "data_type".to_string(),
+                                            schema[idx][data_type_key].clone(),
+                                        );
+                                        Value::Object(map)
+                                    })
+                                    .unwrap_or(Value::Null)
+                            })
+                            .collect()
+                    })
+                    .collect();
+
+                let mut result = Map::new();
+                result.insert("schema".to_string(), Value::Array(schema));
+                result.insert("rows".to_string(), Value::Array(rows));
+                result.insert("table_name".to_string(), Value::String(table_name));
+                let result = Value::Object(result);
+                Some(result)
+            } else {
+                None
+            }
         })
-        .collect::<Vec<_>>();
-    let mut result = Map::new();
-    result.insert("schema".to_string(), Value::Array(schema));
-    result.insert("rows".to_string(), Value::Array(rows));
-    let result = Value::Object(result);
-    Ok(Json(result).into_response())
+        .collect();
+    Ok(Json(Value::Array(results)).into_response())
 }
 
 /// Dryrun pipeline with given data
@@ -414,6 +434,9 @@ pub async fn pipeline_dryrun(
 ) -> Result<Response> {
     let handler = log_state.log_handler;
 
+    query_ctx.set_channel(Channel::Http);
+    let query_ctx = Arc::new(query_ctx);
+
     match check_pipeline_dryrun_params_valid(&payload) {
         Some(params) => {
             let data = params.data;
@@ -426,20 +449,29 @@ pub async fn pipeline_dryrun(
                         to_pipeline_version(params.pipeline_version).context(PipelineSnafu)?;
                     let pipeline_name = check_pipeline_name_exists(params.pipeline_name)?;
                     let pipeline = handler
-                        .get_pipeline(&pipeline_name, version, Arc::new(query_ctx))
+                        .get_pipeline(&pipeline_name, version, query_ctx.clone())
                         .await?;
-                    dryrun_pipeline_inner(data, &pipeline)
+                    dryrun_pipeline_inner(data, pipeline, handler, &query_ctx).await
                 }
                 Some(pipeline) => {
                     let pipeline = handler.build_pipeline(&pipeline);
                     match pipeline {
-                        Ok(pipeline) => match dryrun_pipeline_inner(data, &pipeline) {
-                            Ok(response) => Ok(response),
-                            Err(e) => Ok(add_step_info_for_pipeline_dryrun_error(
-                                "Failed to exec pipeline",
-                                e,
-                            )),
-                        },
+                        Ok(pipeline) => {
+                            match dryrun_pipeline_inner(
+                                data,
+                                Arc::new(pipeline),
+                                handler,
+                                &query_ctx,
+                            )
+                            .await
+                            {
+                                Ok(response) => Ok(response),
+                                Err(e) => Ok(add_step_info_for_pipeline_dryrun_error(
+                                    "Failed to exec pipeline",
+                                    e,
+                                )),
+                            }
+                        }
                         Err(e) => Ok(add_step_info_for_pipeline_dryrun_error(
                             "Failed to build pipeline",
                             e,
@@ -463,14 +495,11 @@ pub async fn pipeline_dryrun(
 
             check_data_valid(value.len())?;
 
-            query_ctx.set_channel(Channel::Http);
-            let query_ctx = Arc::new(query_ctx);
-
             let pipeline = handler
                 .get_pipeline(&pipeline_name, version, query_ctx.clone())
                 .await?;
 
-            dryrun_pipeline_inner(value, &pipeline)
+            dryrun_pipeline_inner(value, pipeline, handler, &query_ctx).await
         }
     }
 }
@@ -544,7 +573,7 @@ fn extract_pipeline_value_by_content_type(
         ct if ct == *TEXT_CONTENT_TYPE || ct == *TEXT_UTF8_CONTENT_TYPE => payload
             .lines()
             .filter(|line| !line.is_empty())
-            .map(|line| Value::String(line.to_string()))
+            .map(|line| json!({"message": line}))
             .collect(),
         _ => UnsupportedContentTypeSnafu { content_type }.fail()?,
     })
@@ -570,59 +599,20 @@ pub(crate) async fn ingest_logs_inner(
     );
 
     for request in log_ingest_requests {
-        let transformed_data: Rows = if pipeline_name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME {
-            let table = state
-                .get_table(&request.table, &query_ctx)
-                .await
-                .context(CatalogSnafu)?;
-            pipeline::identity_pipeline(request.values, table, &pipeline_params)
+        let requests = run_pipeline(
+            &state,
+            PipelineDefinition::from_name(&pipeline_name, version),
+            &pipeline_params,
+            pipeline::json_array_to_intermediate_state(request.values)
                 .context(PipelineTransformSnafu)
-                .context(PipelineSnafu)?
-        } else {
-            let pipeline = state
-                .get_pipeline(&pipeline_name, version, query_ctx.clone())
-                .await?;
+                .context(PipelineSnafu)?,
+            request.table,
+            &query_ctx,
+            true,
+        )
+        .await?;
 
-            let transform_timer = std::time::Instant::now();
-            let mut intermediate_state = pipeline.init_intermediate_state();
-            let mut results = Vec::with_capacity(request.values.len());
-            for v in request.values {
-                pipeline
-                    .prepare(v, &mut intermediate_state)
-                    .inspect_err(|_| {
-                        METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                            .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
-                            .observe(transform_timer.elapsed().as_secs_f64());
-                    })
-                    .context(PipelineTransformSnafu)
-                    .context(PipelineSnafu)?;
-                let r = pipeline
-                    .exec_mut(&mut intermediate_state)
-                    .inspect_err(|_| {
-                        METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                            .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
-                            .observe(transform_timer.elapsed().as_secs_f64());
-                    })
-                    .context(PipelineTransformSnafu)
-                    .context(PipelineSnafu)?;
-                results.push(r);
-                pipeline.reset_intermediate_state(&mut intermediate_state);
-            }
-
-            METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
-                .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
-                .observe(transform_timer.elapsed().as_secs_f64());
-
-            Rows {
-                rows: results,
-                schema: pipeline.schemas().clone(),
-            }
-        };
-
-        insert_requests.push(RowInsertRequest {
-            rows: Some(transformed_data),
-            table_name: request.table.clone(),
-        });
+        insert_requests.extend(requests);
     }
 
     let output = state

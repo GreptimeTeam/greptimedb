@@ -26,6 +26,7 @@ use crate::scalars::json::JsonFunction;
 use crate::scalars::matches::MatchesFunction;
 use crate::scalars::math::MathFunction;
 use crate::scalars::timestamp::TimestampFunction;
+use crate::scalars::uddsketch_calc::UddSketchCalcFunction;
 use crate::scalars::vector::VectorFunction;
 use crate::system::SystemFunction;
 use crate::table::TableFunction;
@@ -105,6 +106,7 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
     TimestampFunction::register(&function_registry);
     DateFunction::register(&function_registry);
     ExpressionFunction::register(&function_registry);
+    UddSketchCalcFunction::register(&function_registry);
 
     // Aggregate functions
     AggregateFunctions::register(&function_registry);
