@@ -80,3 +80,5 @@ CREATE DATABASE test_ttl_db WITH (ttl = 'instant');
 CREATE DATABASE test_ttl_db_2 WITH (ttl = '1s');
 
 ALTER DATABASE test_ttl_db_2 SET 'ttl' = 'instant';
+
+DROP DATABASE test_ttl_db_2;
