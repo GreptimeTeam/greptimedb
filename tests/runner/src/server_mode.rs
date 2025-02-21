@@ -38,20 +38,20 @@ pub enum ServerMode {
         metasrv_addr: String,
     },
     Metasrv {
-        bind_addr: String,
+        rpc_bind_addr: String,
         rpc_server_addr: String,
         http_addr: String,
     },
     Datanode {
         rpc_bind_addr: String,
-        rpc_hostname: String,
+        rpc_server_addr: String,
         http_addr: String,
         metasrv_addr: String,
         node_id: u32,
     },
     Flownode {
         rpc_bind_addr: String,
-        rpc_hostname: String,
+        rpc_server_addr: String,
         http_addr: String,
         metasrv_addr: String,
         node_id: u32,
@@ -114,7 +114,7 @@ impl ServerMode {
         let http_port = util::get_random_port();
 
         ServerMode::Metasrv {
-            bind_addr: format!("127.0.0.1:{bind_port}"),
+            rpc_bind_addr: format!("127.0.0.1:{bind_port}"),
             rpc_server_addr: format!("127.0.0.1:{bind_port}"),
             http_addr: format!("127.0.0.1:{http_port}"),
         }
@@ -126,7 +126,7 @@ impl ServerMode {
 
         ServerMode::Datanode {
             rpc_bind_addr: format!("127.0.0.1:{rpc_port}"),
-            rpc_hostname: format!("127.0.0.1:{rpc_port}"),
+            rpc_server_addr: format!("127.0.0.1:{rpc_port}"),
             http_addr: format!("127.0.0.1:{http_port}"),
             metasrv_addr: format!("127.0.0.1:{metasrv_port}"),
             node_id,
@@ -139,7 +139,7 @@ impl ServerMode {
 
         ServerMode::Flownode {
             rpc_bind_addr: format!("127.0.0.1:{rpc_port}"),
-            rpc_hostname: format!("127.0.0.1:{rpc_port}"),
+            rpc_server_addr: format!("127.0.0.1:{rpc_port}"),
             http_addr: format!("127.0.0.1:{http_port}"),
             metasrv_addr: format!("127.0.0.1:{metasrv_port}"),
             node_id,
@@ -185,8 +185,8 @@ impl ServerMode {
                     postgres_addr.clone(),
                 ]
             }
-            ServerMode::Metasrv { bind_addr, .. } => {
-                vec![bind_addr.clone()]
+            ServerMode::Metasrv { rpc_bind_addr, .. } => {
+                vec![rpc_bind_addr.clone()]
             }
             ServerMode::Datanode { rpc_bind_addr, .. } => {
                 vec![rpc_bind_addr.clone()]
@@ -374,13 +374,13 @@ impl ServerMode {
                 ]);
             }
             ServerMode::Metasrv {
-                bind_addr,
+                rpc_bind_addr,
                 rpc_server_addr,
                 http_addr,
             } => {
                 args.extend([
                     "--bind-addr".to_string(),
-                    bind_addr.clone(),
+                    rpc_bind_addr.clone(),
                     "--server-addr".to_string(),
                     rpc_server_addr.clone(),
                     "--enable-region-failover".to_string(),
@@ -415,7 +415,7 @@ impl ServerMode {
             }
             ServerMode::Datanode {
                 rpc_bind_addr,
-                rpc_hostname,
+                rpc_server_addr,
                 http_addr,
                 metasrv_addr,
                 node_id,
@@ -427,7 +427,7 @@ impl ServerMode {
                 ));
                 args.extend([
                     format!("--rpc-addr={rpc_bind_addr}"),
-                    format!("--rpc-hostname={rpc_hostname}"),
+                    format!("--rpc-server-addr={rpc_server_addr}"),
                     format!("--http-addr={http_addr}"),
                     format!("--data-home={}", data_home.display()),
                     format!("--log-dir={}/logs", data_home.display()),
@@ -439,14 +439,14 @@ impl ServerMode {
             }
             ServerMode::Flownode {
                 rpc_bind_addr,
-                rpc_hostname,
+                rpc_server_addr,
                 http_addr,
                 metasrv_addr,
                 node_id,
             } => {
                 args.extend([
                     format!("--rpc-addr={rpc_bind_addr}"),
-                    format!("--rpc-hostname={rpc_hostname}"),
+                    format!("--rpc-server-addr={rpc_server_addr}"),
                     format!("--node-id={node_id}"),
                     format!(
                         "--log-dir={}/greptimedb-{}-flownode/logs",
