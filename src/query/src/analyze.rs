@@ -215,14 +215,14 @@ fn create_output_batch(
     let stage_0_metrics = collector.record_batch_metrics;
 
     // Append the metrics of the current stage
-    builder.append_metric(0, 0, metrics_to_string(stage_0_metrics, format));
+    builder.append_metric(0, 0, metrics_to_string(stage_0_metrics, format)?);
 
     // Find merge scan and append its sub_stage_metrics
     input.apply(|plan| {
         if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>() {
             let sub_stage_metrics = merge_scan.sub_stage_metrics();
             for (node, metric) in sub_stage_metrics.into_iter().enumerate() {
-                builder.append_metric(1, node as _, metrics_to_string(metric, format));
+                builder.append_metric(1, node as _, metrics_to_string(metric, format)?);
             }
             return Ok(TreeNodeRecursion::Stop);
         }
@@ -235,10 +235,13 @@ fn create_output_batch(
     builder.finish()
 }
 
-fn metrics_to_string(metrics: RecordBatchMetrics, format: AnalyzeFormat) -> String {
+fn metrics_to_string(metrics: RecordBatchMetrics, format: AnalyzeFormat) -> DfResult<String> {
     match format {
-        AnalyzeFormat::JSON => JsonMetrics::from_record_batch_metrics(metrics).to_string(),
-        _ => metrics.to_string(),
+        AnalyzeFormat::JSON => Ok(JsonMetrics::from_record_batch_metrics(metrics).to_string()),
+        AnalyzeFormat::TEXT => Ok(metrics.to_string()),
+        AnalyzeFormat::GRAPHVIZ => Err(DataFusionError::NotImplemented(
+            "GRAPHVIZ format is not supported for metrics output".to_string(),
+        )),
     }
 }
 
@@ -246,6 +249,13 @@ fn metrics_to_string(metrics: RecordBatchMetrics, format: AnalyzeFormat) -> Stri
 struct JsonMetrics {
     name: String,
     param: String,
+
+    // well-known metrics
+    output_rows: usize,
+    // busy time in nanoseconds
+    elapsed_compute: usize,
+
+    // other metrics
     metrics: HashMap<String, usize>,
     children: Vec<JsonMetrics>,
 }
@@ -274,13 +284,29 @@ impl JsonMetrics {
     /// Returns the level of the plan and the [`JsonMetrics`].
     fn from_plan_metrics(plan_metrics: PlanMetrics) -> (usize, Self) {
         let raw_name = plan_metrics.plan.trim_end();
+        let mut elapsed_compute = 0;
+        let mut output_rows = 0;
+        let mut other_metrics = HashMap::default();
         let (name, param) = raw_name.split_once(": ").unwrap_or_default();
+
+        for (name, value) in plan_metrics.metrics.into_iter() {
+            if name == "elapsed_compute" {
+                elapsed_compute = value;
+            } else if name == "output_rows" {
+                output_rows = value;
+            } else {
+                other_metrics.insert(name, value);
+            }
+        }
+
         (
             plan_metrics.level,
             Self {
                 name: name.to_string(),
                 param: param.to_string(),
-                metrics: plan_metrics.metrics.into_iter().collect(),
+                output_rows,
+                elapsed_compute,
+                metrics: other_metrics,
                 children: vec![],
             },
         )
