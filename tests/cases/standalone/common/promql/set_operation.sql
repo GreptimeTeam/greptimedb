@@ -295,3 +295,82 @@ tql eval (3, 4, '1s') cache_hit / (cache_miss + cache_hit);
 drop table cache_hit;
 
 drop table cache_miss;
+
+create table cache_hit_with_null_label (
+    ts timestamp time index,
+    job string,
+    null_label string null,
+    greptime_value double,
+    primary key (job, null_label)
+);
+
+create table cache_miss_with_null_label (
+    ts timestamp time index,
+    job string,
+    null_label string null,
+    greptime_value double,
+    primary key (job, null_label)
+);
+
+insert into cache_hit_with_null_label values
+    (3000, "read", null, 1.0),
+    (3000, "write", null, 2.0),
+    (4000, "read", null, 3.0),
+    (4000, "write", null, 4.0);
+
+insert into cache_miss_with_null_label values
+    (3000, "read", null, 1.0),
+    (3000, "write", null, 2.0),
+    (4000, "read", null, 1.0),
+    (4000, "write", null, 2.0);
+
+-- SQLNESS SORT_RESULT 3 1
+-- null!=null, so it will returns the empty set.
+tql eval (3, 4, '1s') cache_hit_with_null_label / (cache_miss_with_null_label + cache_hit_with_null_label);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3, 4, '1s') cache_hit_with_null_label / ignoring(null_label) (cache_miss_with_null_label + ignoring(null_label) cache_hit_with_null_label);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3, 4, '1s') cache_hit_with_null_label / on(job) (cache_miss_with_null_label + on(job) cache_hit_with_null_label);
+
+drop table cache_hit_with_null_label;
+
+drop table cache_miss_with_null_label;
+
+create table http_requests_total (
+    ts timestamp time index,
+    instance string,
+    job string,
+    code string,
+    greptime_value double,
+    primary key (instance, job, code)
+);
+
+create table http_request_latency_seconds (
+    ts timestamp time index,
+    instance string,
+    job string,
+    greptime_value double,
+    primary key (instance, job)
+);
+
+insert into http_requests_total values
+    (3000, "server1", "web", "200", 100.0),
+    (3000, "server1", "web", "500", 5.0),
+    (3000, "server2", "web", "200", 200.0),
+    (3000, "server2", "web", "500", 10.0);
+
+insert into http_request_latency_seconds values
+    (3000, "server1", "web", 0.5),
+    (3000, "server2", "web", 0.7);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3, 4, '1s') http_requests_total * on(instance, job) group_left http_request_latency_seconds;
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3, 4, '1s') http_requests_total * on(instance, job) group_left(code) http_request_latency_seconds;
+
+drop table http_requests_total;
+
+drop table http_request_latency_seconds;
