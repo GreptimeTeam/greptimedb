@@ -41,6 +41,7 @@ pub mod region_query;
 pub mod sql;
 pub mod stats;
 pub(crate) mod window_sort;
+mod within_filter;
 
 #[cfg(test)]
 pub(crate) mod test_util;
