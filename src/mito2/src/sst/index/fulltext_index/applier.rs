@@ -15,6 +15,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use common_telemetry::warn;
 use index::fulltext_index::search::{FulltextIndexSearcher, RowId, TantivyFulltextIndexSearcher};
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
@@ -148,31 +149,72 @@ impl FulltextIndexApplier {
         column_id: ColumnId,
         file_size_hint: Option<u64>,
     ) -> Result<Option<SstPuffinDir>> {
-        let mut puffin_manager = None;
+        let blob_key = format!("{INDEX_BLOB_TYPE_TANTIVY}-{column_id}");
+
+        // FAST PATH: Try to read the index from the file cache.
         if let Some(file_cache) = &self.file_cache {
             let index_key = IndexKey::new(self.region_id, file_id, FileType::Puffin);
             if file_cache.get(index_key).await.is_some() {
-                puffin_manager = Some(self.puffin_manager_factory.build(
-                    file_cache.local_store(),
-                    WriteCachePathProvider::new(self.region_id, file_cache.clone()),
-                ));
+                match self
+                    .get_index_from_file_cache(file_cache, file_id, file_size_hint, &blob_key)
+                    .await
+                {
+                    Ok(dir) => return Ok(dir),
+                    Err(err) => {
+                        warn!(err; "An unexpected error occurred while reading the cached index file. Fallback to remote index file.")
+                    }
+                }
             }
         }
 
-        if puffin_manager.is_none() {
-            puffin_manager = Some(self.puffin_manager_factory.build(
-                self.store.clone(),
-                RegionFilePathFactory::new(self.region_dir.clone()),
-            ));
-        }
+        // SLOW PATH: Try to read the index from the remote file.
+        self.get_index_from_remote_file(file_id, file_size_hint, &blob_key)
+            .await
+    }
 
-        match puffin_manager
-            .unwrap()
+    async fn get_index_from_file_cache(
+        &self,
+        file_cache: &FileCacheRef,
+        file_id: FileId,
+        file_size_hint: Option<u64>,
+        blob_key: &str,
+    ) -> Result<Option<SstPuffinDir>> {
+        match self
+            .puffin_manager_factory
+            .build(
+                file_cache.local_store(),
+                WriteCachePathProvider::new(self.region_id, file_cache.clone()),
+            )
             .reader(&file_id)
             .await
             .context(PuffinBuildReaderSnafu)?
             .with_file_size_hint(file_size_hint)
-            .dir(&format!("{INDEX_BLOB_TYPE_TANTIVY}-{column_id}"))
+            .dir(blob_key)
+            .await
+        {
+            Ok(dir) => Ok(Some(dir)),
+            Err(puffin::error::Error::BlobNotFound { .. }) => Ok(None),
+            Err(err) => Err(err).context(PuffinReadBlobSnafu),
+        }
+    }
+
+    async fn get_index_from_remote_file(
+        &self,
+        file_id: FileId,
+        file_size_hint: Option<u64>,
+        blob_key: &str,
+    ) -> Result<Option<SstPuffinDir>> {
+        match self
+            .puffin_manager_factory
+            .build(
+                self.store.clone(),
+                RegionFilePathFactory::new(self.region_dir.clone()),
+            )
+            .reader(&file_id)
+            .await
+            .context(PuffinBuildReaderSnafu)?
+            .with_file_size_hint(file_size_hint)
+            .dir(&blob_key)
             .await
         {
             Ok(dir) => Ok(Some(dir)),
