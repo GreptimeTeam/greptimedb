@@ -6,7 +6,8 @@ license.workspace = true
 
 [features]
 mock = []
-pg_kvbackend = ["dep:tokio-postgres", "common-meta/pg_kvbackend"]
+pg_kvbackend = ["dep:tokio-postgres", "common-meta/pg_kvbackend", "dep:deadpool-postgres", "dep:deadpool"]
+mysql_kvbackend = ["dep:sqlx", "common-meta/mysql_kvbackend"]
 
 [lints]
 workspace = true
@@ -38,8 +39,8 @@ common-version.workspace = true
 common-wal.workspace = true
 dashmap.workspace = true
 datatypes.workspace = true
-deadpool.workspace = true
-deadpool-postgres.workspace = true
+deadpool = { workspace = true, optional = true }
+deadpool-postgres = { workspace = true, optional = true }
 derive_builder.workspace = true
 etcd-client.workspace = true
 futures.workspace = true
@@ -60,6 +61,7 @@ serde.workspace = true
 serde_json.workspace = true
 servers.workspace = true
 snafu.workspace = true
+sqlx = { workspace = true, optional = true }
 store-api.workspace = true
 table.workspace = true
 tokio.workspace = true

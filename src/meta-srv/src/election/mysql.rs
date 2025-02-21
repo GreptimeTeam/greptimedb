@@ -21,17 +21,18 @@ use common_telemetry::{error, warn};
 use common_time::Timestamp;
 use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
-use tokio::sync::broadcast;
+use sqlx::mysql::{MySqlArguments, MySqlRow};
+use sqlx::query::Query;
+use sqlx::{MySql, MySqlConnection, Row};
+use tokio::sync::{broadcast, Mutex};
 use tokio::time::MissedTickBehavior;
-use tokio_postgres::types::ToSql;
-use tokio_postgres::Client;
 
 use crate::election::{
     listen_leader_change, Election, LeaderChangeMessage, LeaderKey, CANDIDATES_ROOT, ELECTION_KEY,
     IDLE_SESSION_TIMEOUT,
 };
 use crate::error::{
-    DeserializeFromJsonSnafu, NoLeaderSnafu, PostgresExecutionSnafu, Result, SerializeToJsonSnafu,
+    DeserializeFromJsonSnafu, MySqlExecutionSnafu, NoLeaderSnafu, Result, SerializeToJsonSnafu,
     UnexpectedSnafu,
 };
 use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
@@ -40,8 +41,9 @@ use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
 const LEASE_SEP: &str = r#"||__metadata_lease_sep||"#;
 
 struct ElectionSqlFactory<'a> {
-    lock_id: u64,
     table_name: &'a str,
+    election_sql: &'a str,
+    step_down_sql: &'a str,
 }
 
 struct ElectionSqlSet {
@@ -60,10 +62,10 @@ struct ElectionSqlSet {
     // SQL to update a value with expire time.
     //
     // Parameters for the query:
-    // `$1`: key,
-    // `$2`: previous value,
-    // `$3`: updated value,
-    // `$4`: lease time in seconds
+    // `$1`: updated value,
+    // `$2`: lease time in seconds
+    // `$3`: key,
+    // `$4`: previous value,
     update_value_with_lease: String,
     // SQL to get a value with expire time.
     //
@@ -82,19 +84,19 @@ struct ElectionSqlSet {
     // SQL to delete a value.
     //
     // Parameters:
-    // `$1`: key
+    // `?`: key
     //
     // Returns:
-    // column 0: key deleted,
-    // column 1: value deleted
+    // Rows affected
     delete_value: String,
 }
 
 impl<'a> ElectionSqlFactory<'a> {
-    fn new(lock_id: u64, table_name: &'a str) -> Self {
+    fn new(table_name: &'a str, election_sql: &'a str, step_down_sql: &'a str) -> Self {
         Self {
-            lock_id,
             table_name,
+            election_sql,
+            step_down_sql,
         }
     }
 
@@ -113,60 +115,59 @@ impl<'a> ElectionSqlFactory<'a> {
     // Currently the session timeout is longer than the leader lease time, so the leader lease may expire while the session is still alive.
     // Either the leader reconnects and step down or the session expires and the lock is released.
     fn set_idle_session_timeout_sql(&self) -> String {
-        format!("SET idle_session_timeout = '{}s';", IDLE_SESSION_TIMEOUT,)
+        format!("SET SESSION wait_timeout = {};", IDLE_SESSION_TIMEOUT,)
     }
 
     fn campaign_sql(&self) -> String {
-        format!("SELECT pg_try_advisory_lock({})", self.lock_id)
+        self.election_sql.to_string()
     }
 
     fn step_down_sql(&self) -> String {
-        format!("SELECT pg_advisory_unlock({})", self.lock_id)
+        self.step_down_sql.to_string()
     }
 
     fn put_value_with_lease_sql(&self) -> String {
         format!(
-            r#"WITH prev AS (
-                SELECT k, v FROM {} WHERE k = $1
-            ), insert AS (
-                INSERT INTO {}
-                VALUES($1, convert_to($2 || '{}' || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $3, 'YYYY-MM-DD HH24:MI:SS.MS'), 'UTF8'))
-                ON CONFLICT (k) DO NOTHING
+            r#"
+            INSERT INTO {} (k, v) VALUES (
+                ?,
+                CONCAT(
+                    ?,
+                    '{}',
+                    DATE_FORMAT(DATE_ADD(NOW(4), INTERVAL ? SECOND), '%Y-%m-%d %T.%f')
+                )
             )
-            SELECT k, v FROM prev;
+            ON DUPLICATE KEY UPDATE v = VALUES(v);
             "#,
-            self.table_name, self.table_name, LEASE_SEP
+            self.table_name, LEASE_SEP
         )
     }
 
     fn update_value_with_lease_sql(&self) -> String {
         format!(
-            r#"UPDATE {} 
-               SET v = convert_to($3 || '{}' || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $4, 'YYYY-MM-DD HH24:MI:SS.MS'), 'UTF8')
-               WHERE k = $1 AND v = $2"#,
+            r#"UPDATE {}
+               SET v = CONCAT(?, '{}', DATE_FORMAT(DATE_ADD(NOW(4), INTERVAL ? SECOND), '%Y-%m-%d %T.%f'))
+               WHERE k = ? AND v = ?"#,
             self.table_name, LEASE_SEP
         )
     }
 
     fn get_value_with_lease_sql(&self) -> String {
         format!(
-            r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM {} WHERE k = $1"#,
+            r#"SELECT v, DATE_FORMAT(NOW(4), '%Y-%m-%d %T.%f') FROM {} WHERE k = ?"#,
             self.table_name
         )
     }
 
     fn get_value_with_lease_by_prefix_sql(&self) -> String {
         format!(
-            r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM {} WHERE k LIKE $1"#,
+            r#"SELECT v, DATE_FORMAT(NOW(4), '%Y-%m-%d %T.%f') FROM {} WHERE k LIKE ?"#,
             self.table_name
         )
     }
 
     fn delete_value_sql(&self) -> String {
-        format!(
-            "DELETE FROM {} WHERE k = $1 RETURNING k,v;",
-            self.table_name
-        )
+        format!("DELETE FROM {} WHERE k = ?;", self.table_name)
     }
 }
 
@@ -193,14 +194,14 @@ fn parse_value_and_expire_time(value: &str) -> Result<(String, Timestamp)> {
 }
 
 #[derive(Debug, Clone, Default)]
-struct PgLeaderKey {
+struct MySqlLeaderKey {
     name: Vec<u8>,
     key: Vec<u8>,
     rev: i64,
     lease: i64,
 }
 
-impl LeaderKey for PgLeaderKey {
+impl LeaderKey for MySqlLeaderKey {
     fn name(&self) -> &[u8] {
         &self.name
     }
@@ -219,9 +220,9 @@ impl LeaderKey for PgLeaderKey {
 }
 
 /// PostgreSql implementation of Election.
-pub struct PgElection {
+pub struct MySqlElection {
     leader_value: String,
-    client: Client,
+    client: Mutex<MySqlConnection>,
     is_leader: AtomicBool,
     leader_infancy: AtomicBool,
     leader_watcher: broadcast::Sender<LeaderChangeMessage>,
@@ -230,26 +231,27 @@ pub struct PgElection {
     sql_set: ElectionSqlSet,
 }
 
-impl PgElection {
-    pub async fn with_pg_client(
+impl MySqlElection {
+    pub async fn with_mysql_client(
         leader_value: String,
-        client: Client,
+        mut client: sqlx::MySqlConnection,
         store_key_prefix: String,
         candidate_lease_ttl_secs: u64,
         table_name: &str,
-        lock_id: u64,
+        election_sql: &str,
+        step_down_sql: &str,
     ) -> Result<ElectionRef> {
-        let sql_factory = ElectionSqlFactory::new(lock_id, table_name);
+        let sql_factory = ElectionSqlFactory::new(table_name, election_sql, step_down_sql);
         // Set idle session timeout to IDLE_SESSION_TIMEOUT to avoid dead advisory lock.
-        client
-            .execute(&sql_factory.set_idle_session_timeout_sql(), &[])
+        sqlx::query(&sql_factory.set_idle_session_timeout_sql())
+            .execute(&mut client)
             .await
-            .context(PostgresExecutionSnafu)?;
+            .context(MySqlExecutionSnafu)?;
 
         let tx = listen_leader_change(leader_value.clone());
         Ok(Arc::new(Self {
             leader_value,
-            client,
+            client: Mutex::new(client),
             is_leader: AtomicBool::new(false),
             leader_infancy: AtomicBool::new(false),
             leader_watcher: tx,
@@ -273,7 +275,7 @@ impl PgElection {
 }
 
 #[async_trait::async_trait]
-impl Election for PgElection {
+impl Election for MySqlElection {
     type Leader = LeaderValue;
 
     fn is_leader(&self) -> bool {
@@ -367,11 +369,8 @@ impl Election for PgElection {
         keep_alive_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         loop {
-            let res = self
-                .client
-                .query(&self.sql_set.campaign, &[])
-                .await
-                .context(PostgresExecutionSnafu)?;
+            let query = sqlx::query(&self.sql_set.campaign);
+            let res = self.query(query).await?;
             let row = match res.first() {
                 Some(row) => row,
                 None => {
@@ -421,7 +420,25 @@ impl Election for PgElection {
     }
 }
 
-impl PgElection {
+impl MySqlElection {
+    async fn query(&self, query: Query<'_, MySql, MySqlArguments>) -> Result<Vec<MySqlRow>> {
+        let mut client = self.client.lock().await;
+        let res = query
+            .fetch_all(&mut *client)
+            .await
+            .context(MySqlExecutionSnafu)?;
+        Ok(res)
+    }
+
+    async fn execute(&self, query: Query<'_, MySql, MySqlArguments>) -> Result<u64> {
+        let mut client = self.client.lock().await;
+        let res = query
+            .execute(&mut *client)
+            .await
+            .context(MySqlExecutionSnafu)?;
+        Ok(res.rows_affected())
+    }
+
     /// Returns value, expire time and current time. If `with_origin` is true, the origin string is also returned.
     async fn get_value_with_lease(
         &self,
@@ -429,11 +446,8 @@ impl PgElection {
         with_origin: bool,
     ) -> Result<Option<(String, Timestamp, Timestamp, Option<String>)>> {
         let key = key.as_bytes();
-        let res = self
-            .client
-            .query(&self.sql_set.get_value_with_lease, &[&key])
-            .await
-            .context(PostgresExecutionSnafu)?;
+        let query = sqlx::query(&self.sql_set.get_value_with_lease).bind(key);
+        let res = self.query(query).await?;
 
         if res.is_empty() {
             return Ok(None);
@@ -465,11 +479,8 @@ impl PgElection {
         key_prefix: &str,
     ) -> Result<(Vec<(String, Timestamp)>, Timestamp)> {
         let key_prefix = format!("{}%", key_prefix).as_bytes().to_vec();
-        let res = self
-            .client
-            .query(&self.sql_set.get_value_with_lease_by_prefix, &[&key_prefix])
-            .await
-            .context(PostgresExecutionSnafu)?;
+        let query = sqlx::query(&self.sql_set.get_value_with_lease_by_prefix).bind(key_prefix);
+        let res = self.query(query).await?;
 
         let mut values_with_leases = vec![];
         let mut current = Timestamp::default();
@@ -494,19 +505,14 @@ impl PgElection {
     async fn update_value_with_lease(&self, key: &str, prev: &str, updated: &str) -> Result<()> {
         let key = key.as_bytes();
         let prev = prev.as_bytes();
-        let res = self
-            .client
-            .execute(
-                &self.sql_set.update_value_with_lease,
-                &[
-                    &key,
-                    &prev,
-                    &updated,
-                    &(self.candidate_lease_ttl_secs as f64),
-                ],
-            )
-            .await
-            .context(PostgresExecutionSnafu)?;
+        let updated = updated.as_bytes();
+
+        let query = sqlx::query(&self.sql_set.update_value_with_lease)
+            .bind(updated)
+            .bind(self.candidate_lease_ttl_secs as f64)
+            .bind(key)
+            .bind(prev);
+        let res = self.execute(query).await?;
 
         ensure!(
             res == 1,
@@ -527,12 +533,11 @@ impl PgElection {
     ) -> Result<bool> {
         let key = key.as_bytes();
         let lease_ttl_secs = lease_ttl_secs as f64;
-        let params: Vec<&(dyn ToSql + Sync)> = vec![&key, &value, &lease_ttl_secs];
-        let res = self
-            .client
-            .query(&self.sql_set.put_value_with_lease, &params)
-            .await
-            .context(PostgresExecutionSnafu)?;
+        let query = sqlx::query(&self.sql_set.put_value_with_lease)
+            .bind(key)
+            .bind(value)
+            .bind(lease_ttl_secs);
+        let res = self.query(query).await?;
         Ok(res.is_empty())
     }
 
@@ -540,13 +545,10 @@ impl PgElection {
     /// Caution: Should only delete the key if the lease is expired.
     async fn delete_value(&self, key: &str) -> Result<bool> {
         let key = key.as_bytes();
-        let res = self
-            .client
-            .query(&self.sql_set.delete_value, &[&key])
-            .await
-            .context(PostgresExecutionSnafu)?;
+        let query = sqlx::query(&self.sql_set.delete_value).bind(key);
+        let res = self.execute(query).await?;
 
-        Ok(res.len() == 1)
+        Ok(res == 1)
     }
 
     /// Handles the actions of a leader in the election process.
@@ -642,7 +644,7 @@ impl PgElection {
     /// Should only step down while holding the advisory lock.
     async fn step_down(&self) -> Result<()> {
         let key = self.election_key();
-        let leader_key = PgLeaderKey {
+        let leader_key = MySqlLeaderKey {
             name: self.leader_value.clone().into_bytes(),
             key: key.clone().into_bytes(),
             ..Default::default()
@@ -653,10 +655,8 @@ impl PgElection {
             .is_ok()
         {
             self.delete_value(&key).await?;
-            self.client
-                .query(&self.sql_set.step_down, &[])
-                .await
-                .context(PostgresExecutionSnafu)?;
+            let query = sqlx::query(&self.sql_set.step_down);
+            self.execute(query).await?;
             if let Err(e) = self
                 .leader_watcher
                 .send(LeaderChangeMessage::StepDown(Arc::new(leader_key)))
@@ -670,7 +670,7 @@ impl PgElection {
     /// Still consider itself as the leader locally but failed to acquire the lock. Step down without deleting the key.
     async fn step_down_without_lock(&self) -> Result<()> {
         let key = self.election_key().into_bytes();
-        let leader_key = PgLeaderKey {
+        let leader_key = MySqlLeaderKey {
             name: self.leader_value.clone().into_bytes(),
             key: key.clone(),
             ..Default::default()
@@ -694,7 +694,7 @@ impl PgElection {
     /// Caution: Should only elected while holding the advisory lock.
     async fn elected(&self) -> Result<()> {
         let key = self.election_key();
-        let leader_key = PgLeaderKey {
+        let leader_key = MySqlLeaderKey {
             name: self.leader_value.clone().into_bytes(),
             key: key.clone().into_bytes(),
             ..Default::default()
@@ -725,51 +725,56 @@ impl PgElection {
 mod tests {
     use std::env;
 
-    use tokio_postgres::{Client, NoTls};
+    use common_telemetry::init_default_ut_logging;
+    use sqlx::Connection;
 
     use super::*;
-    use crate::error::PostgresExecutionSnafu;
+    use crate::error::MySqlExecutionSnafu;
 
-    async fn create_postgres_client(table_name: Option<&str>) -> Result<Client> {
-        let endpoint = env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
+    async fn create_mysql_client(table_name: Option<&str>) -> Result<Mutex<MySqlConnection>> {
+        init_default_ut_logging();
+        let endpoint = env::var("GT_MYSQL_ENDPOINTS").unwrap_or_default();
         if endpoint.is_empty() {
             return UnexpectedSnafu {
                 violated: "Postgres endpoint is empty".to_string(),
             }
             .fail();
         }
-        let (client, connection) = tokio_postgres::connect(&endpoint, NoTls)
-            .await
-            .context(PostgresExecutionSnafu)?;
-        tokio::spawn(async move {
-            connection.await.context(PostgresExecutionSnafu).unwrap();
-        });
+        let mut client = MySqlConnection::connect(&endpoint).await.unwrap();
         if let Some(table_name) = table_name {
             let create_table_sql = format!(
-                "CREATE TABLE IF NOT EXISTS {}(k bytea PRIMARY KEY, v bytea);",
+                "CREATE TABLE IF NOT EXISTS {}(k BLOB, v BLOB, PRIMARY KEY (k(255)));",
                 table_name
             );
-            client.execute(&create_table_sql, &[]).await.unwrap();
+            sqlx::query(&create_table_sql)
+                .execute(&mut client)
+                .await
+                .context(MySqlExecutionSnafu)?;
         }
-        Ok(client)
+        Ok(Mutex::new(client))
     }
 
-    async fn drop_table(client: &Client, table_name: &str) {
+    async fn drop_table(client: &Mutex<MySqlConnection>, table_name: &str) {
+        let mut client = client.lock().await;
         let sql = format!("DROP TABLE IF EXISTS {};", table_name);
-        client.execute(&sql, &[]).await.unwrap();
+        sqlx::query(&sql)
+            .execute(&mut *client)
+            .await
+            .context(MySqlExecutionSnafu)
+            .unwrap();
     }
 
     #[tokio::test]
-    async fn test_postgres_crud() {
+    async fn test_mysql_crud() {
         let key = "test_key".to_string();
         let value = "test_value".to_string();
 
         let uuid = uuid::Uuid::new_v4().to_string();
-        let table_name = "test_postgres_crud_greptime_metakv";
-        let client = create_postgres_client(Some(table_name)).await.unwrap();
+        let table_name = "test_mysql_crud_greptime_metakv";
+        let client = create_mysql_client(Some(table_name)).await.unwrap();
 
         let (tx, _) = broadcast::channel(100);
-        let pg_election = PgElection {
+        let mysql_election = MySqlElection {
             leader_value: "test_leader".to_string(),
             client,
             is_leader: AtomicBool::new(false),
@@ -777,16 +782,21 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: uuid,
             candidate_lease_ttl_secs: 10,
-            sql_set: ElectionSqlFactory::new(28319, table_name).build(),
+            sql_set: ElectionSqlFactory::new(
+                table_name,
+                "SELECT GET_LOCK('__greptime_meta_kv_lock__1', 0)",
+                "SELECT RELEASE_LOCK('__greptime_meta_kv_lock__1')",
+            )
+            .build(),
         };
 
-        let res = pg_election
+        let res = mysql_election
             .put_value_with_lease(&key, &value, 10)
             .await
             .unwrap();
         assert!(res);
 
-        let (value_get, _, _, prev) = pg_election
+        let (value_get, _, _, prev) = mysql_election
             .get_value_with_lease(&key, true)
             .await
             .unwrap()
@@ -794,28 +804,31 @@ mod tests {
         assert_eq!(value_get, value);
 
         let prev = prev.unwrap();
-        pg_election
+        mysql_election
             .update_value_with_lease(&key, &prev, &value)
             .await
             .unwrap();
 
-        let res = pg_election.delete_value(&key).await.unwrap();
+        let res = mysql_election.delete_value(&key).await.unwrap();
         assert!(res);
 
-        let res = pg_election.get_value_with_lease(&key, false).await.unwrap();
+        let res = mysql_election
+            .get_value_with_lease(&key, false)
+            .await
+            .unwrap();
         assert!(res.is_none());
 
         for i in 0..10 {
             let key = format!("test_key_{}", i);
             let value = format!("test_value_{}", i);
-            pg_election
+            mysql_election
                 .put_value_with_lease(&key, &value, 10)
                 .await
                 .unwrap();
         }
 
         let key_prefix = "test_key".to_string();
-        let (res, _) = pg_election
+        let (res, _) = mysql_election
             .get_value_with_lease_by_prefix(&key_prefix)
             .await
             .unwrap();
@@ -823,18 +836,18 @@ mod tests {
 
         for i in 0..10 {
             let key = format!("test_key_{}", i);
-            let res = pg_election.delete_value(&key).await.unwrap();
+            let res = mysql_election.delete_value(&key).await.unwrap();
             assert!(res);
         }
 
-        let (res, current) = pg_election
+        let (res, current) = mysql_election
             .get_value_with_lease_by_prefix(&key_prefix)
             .await
             .unwrap();
         assert!(res.is_empty());
         assert!(current == Timestamp::default());
 
-        drop_table(&pg_election.client, table_name).await;
+        drop_table(&mysql_election.client, table_name).await;
     }
 
     async fn candidate(
@@ -843,10 +856,10 @@ mod tests {
         store_key_prefix: String,
         table_name: String,
     ) {
-        let client = create_postgres_client(None).await.unwrap();
+        let client = create_mysql_client(None).await.unwrap();
 
         let (tx, _) = broadcast::channel(100);
-        let pg_election = PgElection {
+        let mysql_election = MySqlElection {
             leader_value,
             client,
             is_leader: AtomicBool::new(false),
@@ -854,7 +867,12 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix,
             candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(28319, &table_name).build(),
+            sql_set: ElectionSqlFactory::new(
+                &table_name,
+                "SELECT GET_LOCK('__greptime_meta_kv_lock__2', 0)",
+                "SELECT RELEASE_LOCK('__greptime_meta_kv_lock__2')",
+            )
+            .build(),
         };
 
         let node_info = MetasrvNodeInfo {
@@ -863,7 +881,7 @@ mod tests {
             git_commit: "test_git_commit".to_string(),
             start_time_ms: 0,
         };
-        pg_election.register_candidate(&node_info).await.unwrap();
+        mysql_election.register_candidate(&node_info).await.unwrap();
     }
 
     #[tokio::test]
@@ -873,7 +891,7 @@ mod tests {
         let uuid = uuid::Uuid::new_v4().to_string();
         let table_name = "test_candidate_registration_greptime_metakv";
         let mut handles = vec![];
-        let client = create_postgres_client(Some(table_name)).await.unwrap();
+        let client = create_mysql_client(Some(table_name)).await.unwrap();
 
         for i in 0..10 {
             let leader_value = format!("{}{}", leader_value_prefix, i);
@@ -890,7 +908,7 @@ mod tests {
 
         let (tx, _) = broadcast::channel(100);
         let leader_value = "test_leader".to_string();
-        let pg_election = PgElection {
+        let mysql_election = MySqlElection {
             leader_value,
             client,
             is_leader: AtomicBool::new(false),
@@ -898,10 +916,15 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: uuid.clone(),
             candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(28319, table_name).build(),
+            sql_set: ElectionSqlFactory::new(
+                table_name,
+                "SELECT GET_LOCK('__greptime_meta_kv_lock__3', 0)",
+                "SELECT RELEASE_LOCK('__greptime_meta_kv_lock__3')",
+            )
+            .build(),
         };
 
-        let candidates = pg_election.all_candidates().await.unwrap();
+        let candidates = mysql_election.all_candidates().await.unwrap();
         assert_eq!(candidates.len(), 10);
 
         for handle in handles {
@@ -910,17 +933,17 @@ mod tests {
 
         // Wait for the candidate leases to expire.
         tokio::time::sleep(Duration::from_secs(5)).await;
-        let candidates = pg_election.all_candidates().await.unwrap();
+        let candidates = mysql_election.all_candidates().await.unwrap();
         assert!(candidates.is_empty());
 
         // Garbage collection
         for i in 0..10 {
             let key = format!("{}{}{}{}", uuid, CANDIDATES_ROOT, leader_value_prefix, i);
-            let res = pg_election.delete_value(&key).await.unwrap();
+            let res = mysql_election.delete_value(&key).await.unwrap();
             assert!(res);
         }
 
-        drop_table(&pg_election.client, table_name).await;
+        drop_table(&mysql_election.client, table_name).await;
     }
 
     #[tokio::test]
@@ -929,10 +952,10 @@ mod tests {
         let candidate_lease_ttl_secs = 5;
         let uuid = uuid::Uuid::new_v4().to_string();
         let table_name = "test_elected_and_step_down_greptime_metakv";
-        let client = create_postgres_client(Some(table_name)).await.unwrap();
+        let client = create_mysql_client(Some(table_name)).await.unwrap();
 
         let (tx, mut rx) = broadcast::channel(100);
-        let leader_pg_election = PgElection {
+        let leader_mysql_election = MySqlElection {
             leader_value: leader_value.clone(),
             client,
             is_leader: AtomicBool::new(false),
@@ -940,25 +963,30 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: uuid,
             candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(28320, table_name).build(),
+            sql_set: ElectionSqlFactory::new(
+                table_name,
+                "SELECT GET_LOCK('__greptime_meta_kv_lock__4', 0)",
+                "SELECT RELEASE_LOCK('__greptime_meta_kv_lock__4')",
+            )
+            .build(),
         };
 
-        leader_pg_election.elected().await.unwrap();
-        let (leader, expire_time, current, _) = leader_pg_election
-            .get_value_with_lease(&leader_pg_election.election_key(), false)
+        leader_mysql_election.elected().await.unwrap();
+        let (leader, expire_time, current, _) = leader_mysql_election
+            .get_value_with_lease(&leader_mysql_election.election_key(), false)
             .await
             .unwrap()
             .unwrap();
         assert!(leader == leader_value);
         assert!(expire_time > current);
-        assert!(leader_pg_election.is_leader());
+        assert!(leader_mysql_election.is_leader());
 
         match rx.recv().await {
             Ok(LeaderChangeMessage::Elected(key)) => {
                 assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
                 assert_eq!(
                     String::from_utf8_lossy(key.key()),
-                    leader_pg_election.election_key()
+                    leader_mysql_election.election_key()
                 );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
@@ -966,21 +994,24 @@ mod tests {
             _ => panic!("Expected LeaderChangeMessage::Elected"),
         }
 
-        leader_pg_election.step_down_without_lock().await.unwrap();
-        let (leader, _, _, _) = leader_pg_election
-            .get_value_with_lease(&leader_pg_election.election_key(), false)
+        leader_mysql_election
+            .step_down_without_lock()
+            .await
+            .unwrap();
+        let (leader, _, _, _) = leader_mysql_election
+            .get_value_with_lease(&leader_mysql_election.election_key(), false)
             .await
             .unwrap()
             .unwrap();
         assert!(leader == leader_value);
-        assert!(!leader_pg_election.is_leader());
+        assert!(!leader_mysql_election.is_leader());
 
         match rx.recv().await {
             Ok(LeaderChangeMessage::StepDown(key)) => {
                 assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
                 assert_eq!(
                     String::from_utf8_lossy(key.key()),
-                    leader_pg_election.election_key()
+                    leader_mysql_election.election_key()
                 );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
@@ -988,22 +1019,22 @@ mod tests {
             _ => panic!("Expected LeaderChangeMessage::StepDown"),
         }
 
-        leader_pg_election.elected().await.unwrap();
-        let (leader, expire_time, current, _) = leader_pg_election
-            .get_value_with_lease(&leader_pg_election.election_key(), false)
+        leader_mysql_election.elected().await.unwrap();
+        let (leader, expire_time, current, _) = leader_mysql_election
+            .get_value_with_lease(&leader_mysql_election.election_key(), false)
             .await
             .unwrap()
             .unwrap();
         assert!(leader == leader_value);
         assert!(expire_time > current);
-        assert!(leader_pg_election.is_leader());
+        assert!(leader_mysql_election.is_leader());
 
         match rx.recv().await {
             Ok(LeaderChangeMessage::Elected(key)) => {
                 assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
                 assert_eq!(
                     String::from_utf8_lossy(key.key()),
-                    leader_pg_election.election_key()
+                    leader_mysql_election.election_key()
                 );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
@@ -1011,20 +1042,20 @@ mod tests {
             _ => panic!("Expected LeaderChangeMessage::Elected"),
         }
 
-        leader_pg_election.step_down().await.unwrap();
-        let res = leader_pg_election
-            .get_value_with_lease(&leader_pg_election.election_key(), false)
+        leader_mysql_election.step_down().await.unwrap();
+        let res = leader_mysql_election
+            .get_value_with_lease(&leader_mysql_election.election_key(), false)
             .await
             .unwrap();
         assert!(res.is_none());
-        assert!(!leader_pg_election.is_leader());
+        assert!(!leader_mysql_election.is_leader());
 
         match rx.recv().await {
             Ok(LeaderChangeMessage::StepDown(key)) => {
                 assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
                 assert_eq!(
                     String::from_utf8_lossy(key.key()),
-                    leader_pg_election.election_key()
+                    leader_mysql_election.election_key()
                 );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
@@ -1032,7 +1063,7 @@ mod tests {
             _ => panic!("Expected LeaderChangeMessage::StepDown"),
         }
 
-        drop_table(&leader_pg_election.client, table_name).await;
+        drop_table(&leader_mysql_election.client, table_name).await;
     }
 
     #[tokio::test]
@@ -1041,10 +1072,10 @@ mod tests {
         let uuid = uuid::Uuid::new_v4().to_string();
         let table_name = "test_leader_action_greptime_metakv";
         let candidate_lease_ttl_secs = 5;
-        let client = create_postgres_client(Some(table_name)).await.unwrap();
+        let client = create_mysql_client(Some(table_name)).await.unwrap();
 
         let (tx, mut rx) = broadcast::channel(100);
-        let leader_pg_election = PgElection {
+        let leader_mysql_election = MySqlElection {
             leader_value: leader_value.clone(),
             client,
             is_leader: AtomicBool::new(false),
@@ -1052,33 +1083,35 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: uuid,
             candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(28321, table_name).build(),
+            sql_set: ElectionSqlFactory::new(
+                table_name,
+                "SELECT GET_LOCK('__greptime_meta_kv_lock__5', 0)",
+                "SELECT RELEASE_LOCK('__greptime_meta_kv_lock__5')",
+            )
+            .build(),
         };
 
         // Step 1: No leader exists, campaign and elected.
-        let res = leader_pg_election
-            .client
-            .query(&leader_pg_election.sql_set.campaign, &[])
-            .await
-            .unwrap();
+        let query = sqlx::query(&leader_mysql_election.sql_set.campaign);
+        let res = leader_mysql_election.query(query).await.unwrap();
         let res: bool = res[0].get(0);
         assert!(res);
-        leader_pg_election.leader_action().await.unwrap();
-        let (leader, expire_time, current, _) = leader_pg_election
-            .get_value_with_lease(&leader_pg_election.election_key(), false)
+        leader_mysql_election.leader_action().await.unwrap();
+        let (leader, expire_time, current, _) = leader_mysql_election
+            .get_value_with_lease(&leader_mysql_election.election_key(), false)
             .await
             .unwrap()
             .unwrap();
         assert!(leader == leader_value);
         assert!(expire_time > current);
-        assert!(leader_pg_election.is_leader());
+        assert!(leader_mysql_election.is_leader());
 
         match rx.recv().await {
             Ok(LeaderChangeMessage::Elected(key)) => {
                 assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
                 assert_eq!(
                     String::from_utf8_lossy(key.key()),
-                    leader_pg_election.election_key()
+                    leader_mysql_election.election_key()
                 );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
@@ -1087,36 +1120,30 @@ mod tests {
         }
 
         // Step 2: As a leader, renew the lease.
-        let res = leader_pg_election
-            .client
-            .query(&leader_pg_election.sql_set.campaign, &[])
-            .await
-            .unwrap();
+        let query = sqlx::query(&leader_mysql_election.sql_set.campaign);
+        let res = leader_mysql_election.query(query).await.unwrap();
         let res: bool = res[0].get(0);
         assert!(res);
-        leader_pg_election.leader_action().await.unwrap();
-        let (leader, new_expire_time, current, _) = leader_pg_election
-            .get_value_with_lease(&leader_pg_election.election_key(), false)
+        leader_mysql_election.leader_action().await.unwrap();
+        let (leader, new_expire_time, current, _) = leader_mysql_election
+            .get_value_with_lease(&leader_mysql_election.election_key(), false)
             .await
             .unwrap()
             .unwrap();
         assert!(leader == leader_value);
         assert!(new_expire_time > current && new_expire_time > expire_time);
-        assert!(leader_pg_election.is_leader());
+        assert!(leader_mysql_election.is_leader());
 
         // Step 3: Something wrong, the leader lease expired.
         tokio::time::sleep(Duration::from_secs(META_LEASE_SECS)).await;
 
-        let res = leader_pg_election
-            .client
-            .query(&leader_pg_election.sql_set.campaign, &[])
-            .await
-            .unwrap();
+        let query = sqlx::query(&leader_mysql_election.sql_set.campaign);
+        let res = leader_mysql_election.query(query).await.unwrap();
         let res: bool = res[0].get(0);
         assert!(res);
-        leader_pg_election.leader_action().await.unwrap();
-        let res = leader_pg_election
-            .get_value_with_lease(&leader_pg_election.election_key(), false)
+        leader_mysql_election.leader_action().await.unwrap();
+        let res = leader_mysql_election
+            .get_value_with_lease(&leader_mysql_election.election_key(), false)
             .await
             .unwrap();
         assert!(res.is_none());
@@ -1126,7 +1153,7 @@ mod tests {
                 assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
                 assert_eq!(
                     String::from_utf8_lossy(key.key()),
-                    leader_pg_election.election_key()
+                    leader_mysql_election.election_key()
                 );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
@@ -1135,29 +1162,26 @@ mod tests {
         }
 
         // Step 4: Re-campaign and elected.
-        let res = leader_pg_election
-            .client
-            .query(&leader_pg_election.sql_set.campaign, &[])
-            .await
-            .unwrap();
+        let query = sqlx::query(&leader_mysql_election.sql_set.campaign);
+        let res = leader_mysql_election.query(query).await.unwrap();
         let res: bool = res[0].get(0);
         assert!(res);
-        leader_pg_election.leader_action().await.unwrap();
-        let (leader, expire_time, current, _) = leader_pg_election
-            .get_value_with_lease(&leader_pg_election.election_key(), false)
+        leader_mysql_election.leader_action().await.unwrap();
+        let (leader, expire_time, current, _) = leader_mysql_election
+            .get_value_with_lease(&leader_mysql_election.election_key(), false)
             .await
             .unwrap()
             .unwrap();
         assert!(leader == leader_value);
         assert!(expire_time > current);
-        assert!(leader_pg_election.is_leader());
+        assert!(leader_mysql_election.is_leader());
 
         match rx.recv().await {
             Ok(LeaderChangeMessage::Elected(key)) => {
                 assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
                 assert_eq!(
                     String::from_utf8_lossy(key.key()),
-                    leader_pg_election.election_key()
+                    leader_mysql_election.election_key()
                 );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
@@ -1166,24 +1190,24 @@ mod tests {
         }
 
         // Step 5: Something wrong, the leader key is deleted by other followers.
-        leader_pg_election
-            .delete_value(&leader_pg_election.election_key())
+        leader_mysql_election
+            .delete_value(&leader_mysql_election.election_key())
             .await
             .unwrap();
-        leader_pg_election.leader_action().await.unwrap();
-        let res = leader_pg_election
-            .get_value_with_lease(&leader_pg_election.election_key(), false)
+        leader_mysql_election.leader_action().await.unwrap();
+        let res = leader_mysql_election
+            .get_value_with_lease(&leader_mysql_election.election_key(), false)
             .await
             .unwrap();
         assert!(res.is_none());
-        assert!(!leader_pg_election.is_leader());
+        assert!(!leader_mysql_election.is_leader());
 
         match rx.recv().await {
             Ok(LeaderChangeMessage::StepDown(key)) => {
                 assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
                 assert_eq!(
                     String::from_utf8_lossy(key.key()),
-                    leader_pg_election.election_key()
+                    leader_mysql_election.election_key()
                 );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
@@ -1192,29 +1216,26 @@ mod tests {
         }
 
         // Step 6: Re-campaign and elected.
-        let res = leader_pg_election
-            .client
-            .query(&leader_pg_election.sql_set.campaign, &[])
-            .await
-            .unwrap();
+        let query = sqlx::query(&leader_mysql_election.sql_set.campaign);
+        let res = leader_mysql_election.query(query).await.unwrap();
         let res: bool = res[0].get(0);
         assert!(res);
-        leader_pg_election.leader_action().await.unwrap();
-        let (leader, expire_time, current, _) = leader_pg_election
-            .get_value_with_lease(&leader_pg_election.election_key(), false)
+        leader_mysql_election.leader_action().await.unwrap();
+        let (leader, expire_time, current, _) = leader_mysql_election
+            .get_value_with_lease(&leader_mysql_election.election_key(), false)
             .await
             .unwrap()
             .unwrap();
         assert!(leader == leader_value);
         assert!(expire_time > current);
-        assert!(leader_pg_election.is_leader());
+        assert!(leader_mysql_election.is_leader());
 
         match rx.recv().await {
             Ok(LeaderChangeMessage::Elected(key)) => {
                 assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
                 assert_eq!(
                     String::from_utf8_lossy(key.key()),
-                    leader_pg_election.election_key()
+                    leader_mysql_election.election_key()
                 );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
@@ -1223,35 +1244,32 @@ mod tests {
         }
 
         // Step 7: Something wrong, the leader key changed by others.
-        let res = leader_pg_election
-            .client
-            .query(&leader_pg_election.sql_set.campaign, &[])
-            .await
-            .unwrap();
+        let query = sqlx::query(&leader_mysql_election.sql_set.campaign);
+        let res = leader_mysql_election.query(query).await.unwrap();
         let res: bool = res[0].get(0);
         assert!(res);
-        leader_pg_election
-            .delete_value(&leader_pg_election.election_key())
+        leader_mysql_election
+            .delete_value(&leader_mysql_election.election_key())
             .await
             .unwrap();
-        leader_pg_election
-            .put_value_with_lease(&leader_pg_election.election_key(), "test", 10)
+        leader_mysql_election
+            .put_value_with_lease(&leader_mysql_election.election_key(), "test", 10)
             .await
             .unwrap();
-        leader_pg_election.leader_action().await.unwrap();
-        let res = leader_pg_election
-            .get_value_with_lease(&leader_pg_election.election_key(), false)
+        leader_mysql_election.leader_action().await.unwrap();
+        let res = leader_mysql_election
+            .get_value_with_lease(&leader_mysql_election.election_key(), false)
             .await
             .unwrap();
         assert!(res.is_none());
-        assert!(!leader_pg_election.is_leader());
+        assert!(!leader_mysql_election.is_leader());
 
         match rx.recv().await {
             Ok(LeaderChangeMessage::StepDown(key)) => {
                 assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
                 assert_eq!(
                     String::from_utf8_lossy(key.key()),
-                    leader_pg_election.election_key()
+                    leader_mysql_election.election_key()
                 );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
@@ -1260,13 +1278,10 @@ mod tests {
         }
 
         // Clean up
-        leader_pg_election
-            .client
-            .query(&leader_pg_election.sql_set.step_down, &[])
-            .await
-            .unwrap();
+        let query = sqlx::query(&leader_mysql_election.sql_set.step_down);
+        leader_mysql_election.execute(query).await.unwrap();
 
-        drop_table(&leader_pg_election.client, table_name).await;
+        drop_table(&leader_mysql_election.client, table_name).await;
     }
 
     #[tokio::test]
@@ -1276,9 +1291,9 @@ mod tests {
         let uuid = uuid::Uuid::new_v4().to_string();
         let table_name = "test_follower_action_greptime_metakv";
 
-        let follower_client = create_postgres_client(Some(table_name)).await.unwrap();
+        let follower_client = create_mysql_client(Some(table_name)).await.unwrap();
         let (tx, mut rx) = broadcast::channel(100);
-        let follower_pg_election = PgElection {
+        let follower_mysql_election = MySqlElection {
             leader_value: "test_follower".to_string(),
             client: follower_client,
             is_leader: AtomicBool::new(false),
@@ -1286,12 +1301,17 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: uuid.clone(),
             candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(28322, table_name).build(),
+            sql_set: ElectionSqlFactory::new(
+                table_name,
+                "SELECT GET_LOCK('__greptime_meta_kv_lock__6', 0)",
+                "SELECT RELEASE_LOCK('__greptime_meta_kv_lock__6')",
+            )
+            .build(),
         };
 
-        let leader_client = create_postgres_client(Some(table_name)).await.unwrap();
+        let leader_client = create_mysql_client(Some(table_name)).await.unwrap();
         let (tx, _) = broadcast::channel(100);
-        let leader_pg_election = PgElection {
+        let leader_mysql_election = MySqlElection {
             leader_value: "test_leader".to_string(),
             client: leader_client,
             is_leader: AtomicBool::new(false),
@@ -1299,42 +1319,44 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: uuid,
             candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(28322, table_name).build(),
+            sql_set: ElectionSqlFactory::new(
+                table_name,
+                "SELECT GET_LOCK('__greptime_meta_kv_lock__6', 0)",
+                "SELECT RELEASE_LOCK('__greptime_meta_kv_lock__6')",
+            )
+            .build(),
         };
 
-        leader_pg_election
-            .client
-            .query(&leader_pg_election.sql_set.campaign, &[])
-            .await
-            .unwrap();
-        leader_pg_election.elected().await.unwrap();
+        let query = sqlx::query(&leader_mysql_election.sql_set.campaign);
+        leader_mysql_election.execute(query).await.unwrap();
+        leader_mysql_election.elected().await.unwrap();
 
         // Step 1: As a follower, the leader exists and the lease is not expired.
-        follower_pg_election.follower_action().await.unwrap();
+        follower_mysql_election.follower_action().await.unwrap();
 
         // Step 2: As a follower, the leader exists but the lease expired.
         tokio::time::sleep(Duration::from_secs(META_LEASE_SECS)).await;
-        assert!(follower_pg_election.follower_action().await.is_err());
+        assert!(follower_mysql_election.follower_action().await.is_err());
 
         // Step 3: As a follower, the leader does not exist.
-        leader_pg_election
-            .delete_value(&leader_pg_election.election_key())
+        leader_mysql_election
+            .delete_value(&leader_mysql_election.election_key())
             .await
             .unwrap();
-        assert!(follower_pg_election.follower_action().await.is_err());
+        assert!(follower_mysql_election.follower_action().await.is_err());
 
         // Step 4: Follower thinks it's the leader but failed to acquire the lock.
-        follower_pg_election
+        follower_mysql_election
             .is_leader
             .store(true, Ordering::Relaxed);
-        assert!(follower_pg_election.follower_action().await.is_err());
+        assert!(follower_mysql_election.follower_action().await.is_err());
 
         match rx.recv().await {
             Ok(LeaderChangeMessage::StepDown(key)) => {
                 assert_eq!(String::from_utf8_lossy(key.name()), "test_follower");
                 assert_eq!(
                     String::from_utf8_lossy(key.key()),
-                    follower_pg_election.election_key()
+                    follower_mysql_election.election_key()
                 );
                 assert_eq!(key.lease_id(), i64::default());
                 assert_eq!(key.revision(), i64::default());
@@ -1343,12 +1365,9 @@ mod tests {
         }
 
         // Clean up
-        leader_pg_election
-            .client
-            .query(&leader_pg_election.sql_set.step_down, &[])
-            .await
-            .unwrap();
+        let query = sqlx::query(&leader_mysql_election.sql_set.step_down);
+        leader_mysql_election.execute(query).await.unwrap();
 
-        drop_table(&follower_pg_election.client, table_name).await;
+        drop_table(&follower_mysql_election.client, table_name).await;
     }
 }
