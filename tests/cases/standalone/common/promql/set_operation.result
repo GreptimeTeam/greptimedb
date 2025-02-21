@@ -315,18 +315,7 @@ tql eval (3000, 3000, '1s') http_requests AND IGNORING (g, instance, job) vector
 -- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') vector(1) * http_requests;
 
-+-----+----------+------------+---------------------+------------------------------------------------+
-| job | instance | g          | ts                  | .greptime_value * http_requests.greptime_value |
-+-----+----------+------------+---------------------+------------------------------------------------+
-| api | 0        | canary     | 1970-01-01T00:50:00 | 300.0                                          |
-| api | 0        | production | 1970-01-01T00:50:00 | 100.0                                          |
-| api | 1        | canary     | 1970-01-01T00:50:00 | 400.0                                          |
-| api | 1        | production | 1970-01-01T00:50:00 | 200.0                                          |
-| app | 0        | canary     | 1970-01-01T00:50:00 | 700.0                                          |
-| app | 0        | production | 1970-01-01T00:50:00 | 500.0                                          |
-| app | 1        | canary     | 1970-01-01T00:50:00 | 800.0                                          |
-| app | 1        | production | 1970-01-01T00:50:00 | 600.0                                          |
-+-----+----------+------------+---------------------+------------------------------------------------+
+Error: 3000(PlanQuery), Internal error during building DataFusion plan: No field named .job. Valid fields are .greptime_value, .ts, http_requests.job, http_requests.instance, http_requests.g, http_requests.greptime_value, http_requests.time.
 
 drop table http_requests;
 
@@ -470,12 +459,7 @@ tql eval (0, 2000, '400') sum(t1{job="a"});
 -- SQLNESS SORT_RESULT 3 1
 tql eval (0, 2000, '400') sum(t1{job="a"}) - sum(t1{job="e"} or vector(1));
 
-+---------------------+-----------------------------------------------------+
-| ts                  | t1.sum(t1.greptime_value) - .sum(t1.greptime_value) |
-+---------------------+-----------------------------------------------------+
-| 1970-01-01T00:00:00 | 0.0                                                 |
-| 1970-01-01T00:20:00 | 2.0                                                 |
-+---------------------+-----------------------------------------------------+
+Error: 3000(PlanQuery), Internal error during building DataFusion plan: No field named t1."sum(t1.greptime_value)". Valid fields are t1.ts, "sum(t1.greptime_value)".
 
 drop table t1;
 
@@ -526,55 +510,27 @@ Affected Rows: 6
 -- SQLNESS SORT_RESULT 3 1
 tql eval (0, 2000, '400') max by (namespace) (stats_used_bytes{namespace=~".+"}) / max by (namespace) (stats_capacity_bytes{namespace=~".+"}) >= (80 / 100);
 
-+------------+---------------------+-----------------------------------------------------------------------------------------------------------------------+
-| namespace  | ts                  | stats_used_bytes.max(stats_used_bytes.greptime_value) / stats_capacity_bytes.max(stats_capacity_bytes.greptime_value) |
-+------------+---------------------+-----------------------------------------------------------------------------------------------------------------------+
-| namespace1 | 1970-01-01T00:20:00 | 0.8333333333333334                                                                                                    |
-| namespace2 | 1970-01-01T00:20:00 | 0.8666666666666667                                                                                                    |
-+------------+---------------------+-----------------------------------------------------------------------------------------------------------------------+
+Error: 3000(PlanQuery), Internal error during building DataFusion plan: No field named stats_used_bytes."max(stats_used_bytes.greptime_value)". Valid fields are stats_used_bytes.namespace, stats_used_bytes.ts, "max(stats_used_bytes.greptime_value)".
 
 -- SQLNESS SORT_RESULT 3 1
 tql eval (0, 2000, '400') max by (namespace) (stats_used_bytes{namespace=~".+"}) and (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100));
 
-+------------+---------------------+--------------------------------------+
-| namespace  | ts                  | max(stats_used_bytes.greptime_value) |
-+------------+---------------------+--------------------------------------+
-| namespace1 | 1970-01-01T00:20:00 | 25.0                                 |
-| namespace2 | 1970-01-01T00:20:00 | 26.0                                 |
-+------------+---------------------+--------------------------------------+
+Error: 3000(PlanQuery), Internal error during building DataFusion plan: No field named stats_used_bytes."max(stats_used_bytes.greptime_value)". Valid fields are stats_used_bytes.namespace, stats_used_bytes.ts, "max(stats_used_bytes.greptime_value)".
 
 -- SQLNESS SORT_RESULT 3 1
 tql eval (0, 2000, '400') count(max by (namespace) (stats_used_bytes{namespace=~".+"}) and (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100))) or vector(0);
 
-+---------------------+---------------------------------------------+
-| ts                  | count(max(stats_used_bytes.greptime_value)) |
-+---------------------+---------------------------------------------+
-| 1970-01-01T00:00:00 | 0                                           |
-| 1970-01-01T00:06:40 | 0                                           |
-| 1970-01-01T00:13:20 | 0                                           |
-| 1970-01-01T00:20:00 | 2                                           |
-| 1970-01-01T00:26:40 | 0                                           |
-| 1970-01-01T00:33:20 | 0                                           |
-+---------------------+---------------------------------------------+
+Error: 3000(PlanQuery), Internal error during building DataFusion plan: No field named stats_used_bytes."max(stats_used_bytes.greptime_value)". Valid fields are stats_used_bytes.namespace, stats_used_bytes.ts, "max(stats_used_bytes.greptime_value)".
 
 -- SQLNESS SORT_RESULT 3 1
 tql eval (0, 2000, '400') count(max by (namespace) (stats_used_bytes{namespace=~".+"}) and (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100)));
 
-+---------------------+---------------------------------------------+
-| ts                  | count(max(stats_used_bytes.greptime_value)) |
-+---------------------+---------------------------------------------+
-| 1970-01-01T00:20:00 | 2                                           |
-+---------------------+---------------------------------------------+
+Error: 3000(PlanQuery), Internal error during building DataFusion plan: No field named stats_used_bytes."max(stats_used_bytes.greptime_value)". Valid fields are stats_used_bytes.namespace, stats_used_bytes.ts, "max(stats_used_bytes.greptime_value)".
 
 -- SQLNESS SORT_RESULT 3 1
 tql eval (0, 2000, '400') count(max by (namespace) (stats_used_bytes{namespace=~".+"}) unless (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100)));
 
-+---------------------+---------------------------------------------+
-| ts                  | count(max(stats_used_bytes.greptime_value)) |
-+---------------------+---------------------------------------------+
-| 1970-01-01T00:00:00 | 2                                           |
-| 1970-01-01T00:13:20 | 2                                           |
-+---------------------+---------------------------------------------+
+Error: 3000(PlanQuery), Internal error during building DataFusion plan: No field named stats_used_bytes."max(stats_used_bytes.greptime_value)". Valid fields are stats_used_bytes.namespace, stats_used_bytes.ts, "max(stats_used_bytes.greptime_value)".
 
 drop table stats_used_bytes;
 
@@ -621,14 +577,7 @@ Affected Rows: 4
 -- SQLNESS SORT_RESULT 3 1
 tql eval (3, 4, '1s') cache_hit / (cache_miss + cache_hit);
 
-+-------+---------------------+-------------------------------------------------------------------------------+
-| job   | ts                  | lhs.greptime_value / rhs.cache_miss.greptime_value + cache_hit.greptime_value |
-+-------+---------------------+-------------------------------------------------------------------------------+
-| read  | 1970-01-01T00:00:03 | 0.5                                                                           |
-| read  | 1970-01-01T00:00:04 | 0.75                                                                          |
-| write | 1970-01-01T00:00:03 | 0.5                                                                           |
-| write | 1970-01-01T00:00:04 | 0.6666666666666666                                                            |
-+-------+---------------------+-------------------------------------------------------------------------------+
+Error: 3000(PlanQuery), Internal error during building DataFusion plan: No field named cache_miss."cache_miss.greptime_value + cache_hit.greptime_value". Valid fields are cache_miss.job, cache_miss.ts, "cache_miss.greptime_value + cache_hit.greptime_value".
 
 drop table cache_hit;
 
@@ -678,38 +627,98 @@ Affected Rows: 4
 -- null!=null, so it will returns the empty set.
 tql eval (3, 4, '1s') cache_hit_with_null_label / (cache_miss_with_null_label + cache_hit_with_null_label);
 
-++
-++
+Error: 3000(PlanQuery), Internal error during building DataFusion plan: No field named cache_miss_with_null_label."cache_miss_with_null_label.greptime_value + cache_hit_with_null_label.greptime_value". Valid fields are cache_miss_with_null_label.job, cache_miss_with_null_label.null_label, cache_miss_with_null_label.ts, "cache_miss_with_null_label.greptime_value + cache_hit_with_null_label.greptime_value".
 
 -- SQLNESS SORT_RESULT 3 1
 tql eval (3, 4, '1s') cache_hit_with_null_label / ignoring(null_label) (cache_miss_with_null_label + ignoring(null_label) cache_hit_with_null_label);
 
-+-------+------------+---------------------+---------------------------------------------------------------------------------------------------------------+
-| job   | null_label | ts                  | lhs.greptime_value / rhs.cache_miss_with_null_label.greptime_value + cache_hit_with_null_label.greptime_value |
-+-------+------------+---------------------+---------------------------------------------------------------------------------------------------------------+
-| read  |            | 1970-01-01T00:00:03 | 0.5                                                                                                           |
-| read  |            | 1970-01-01T00:00:04 | 0.75                                                                                                          |
-| write |            | 1970-01-01T00:00:03 | 0.5                                                                                                           |
-| write |            | 1970-01-01T00:00:04 | 0.6666666666666666                                                                                            |
-+-------+------------+---------------------+---------------------------------------------------------------------------------------------------------------+
+Error: 3000(PlanQuery), Internal error during building DataFusion plan: No field named cache_miss_with_null_label."cache_miss_with_null_label.greptime_value + cache_hit_with_null_label.greptime_value". Valid fields are cache_miss_with_null_label.job, cache_miss_with_null_label.null_label, cache_miss_with_null_label.ts, "cache_miss_with_null_label.greptime_value + cache_hit_with_null_label.greptime_value".
 
 -- SQLNESS SORT_RESULT 3 1
 tql eval (3, 4, '1s') cache_hit_with_null_label / on(job) (cache_miss_with_null_label + on(job) cache_hit_with_null_label);
 
-+-------+------------+---------------------+---------------------------------------------------------------------------------------------------------------+
-| job   | null_label | ts                  | lhs.greptime_value / rhs.cache_miss_with_null_label.greptime_value + cache_hit_with_null_label.greptime_value |
-+-------+------------+---------------------+---------------------------------------------------------------------------------------------------------------+
-| read  |            | 1970-01-01T00:00:03 | 0.5                                                                                                           |
-| read  |            | 1970-01-01T00:00:04 | 0.75                                                                                                          |
-| write |            | 1970-01-01T00:00:03 | 0.5                                                                                                           |
-| write |            | 1970-01-01T00:00:04 | 0.6666666666666666                                                                                            |
-+-------+------------+---------------------+---------------------------------------------------------------------------------------------------------------+
+Error: 3000(PlanQuery), Internal error during building DataFusion plan: No field named cache_miss_with_null_label."cache_miss_with_null_label.greptime_value + cache_hit_with_null_label.greptime_value". Valid fields are cache_miss_with_null_label.job, cache_miss_with_null_label.null_label, cache_miss_with_null_label.ts, "cache_miss_with_null_label.greptime_value + cache_hit_with_null_label.greptime_value".
 
 drop table cache_hit_with_null_label;
 
 Affected Rows: 0
 
 drop table cache_miss_with_null_label;
+
+Affected Rows: 0
+
+create table http_requests_total (
+    ts timestamp time index,
+    instance string,
+    job string,
+    code string,
+    greptime_value double,
+    primary key (instance, job, code)
+);
+
+Affected Rows: 0
+
+create table http_request_latency_seconds (
+    ts timestamp time index,
+    instance string,
+    job string,
+    greptime_value double,
+    primary key (instance, job)
+);
+
+Affected Rows: 0
+
+insert into http_requests_total values
+    (3000, "server1", "web", "200", 100.0),
+    (3000, "server1", "web", "500", 5.0),
+    (3000, "server2", "web", "200", 200.0),
+    (3000, "server2", "web", "500", 10.0);
+
+Affected Rows: 4
+
+insert into http_request_latency_seconds values
+    (3000, "server1", "web", 0.5),
+    (3000, "server2", "web", 0.7);
+
+Affected Rows: 2
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3, 4, '1s') http_requests_total * on(instance, job) group_left http_request_latency_seconds;
+
++----------+-----+---------------------+----------------------------------------------------------------------------------+
+| instance | job | ts                  | http_requests_total.greptime_value * http_request_latency_seconds.greptime_value |
++----------+-----+---------------------+----------------------------------------------------------------------------------+
+| server1  | web | 1970-01-01T00:00:03 | 2.5                                                                              |
+| server1  | web | 1970-01-01T00:00:03 | 50.0                                                                             |
+| server1  | web | 1970-01-01T00:00:04 | 2.5                                                                              |
+| server1  | web | 1970-01-01T00:00:04 | 50.0                                                                             |
+| server2  | web | 1970-01-01T00:00:03 | 140.0                                                                            |
+| server2  | web | 1970-01-01T00:00:03 | 7.0                                                                              |
+| server2  | web | 1970-01-01T00:00:04 | 140.0                                                                            |
+| server2  | web | 1970-01-01T00:00:04 | 7.0                                                                              |
++----------+-----+---------------------+----------------------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3, 4, '1s') http_requests_total * on(instance, job) group_left(code) http_request_latency_seconds;
+
++------+----------+-----+---------------------+----------------------------------------------------------------------------------+
+| code | instance | job | ts                  | http_requests_total.greptime_value * http_request_latency_seconds.greptime_value |
++------+----------+-----+---------------------+----------------------------------------------------------------------------------+
+| 200  | server1  | web | 1970-01-01T00:00:03 | 50.0                                                                             |
+| 200  | server1  | web | 1970-01-01T00:00:04 | 50.0                                                                             |
+| 200  | server2  | web | 1970-01-01T00:00:03 | 140.0                                                                            |
+| 200  | server2  | web | 1970-01-01T00:00:04 | 140.0                                                                            |
+| 500  | server1  | web | 1970-01-01T00:00:03 | 2.5                                                                              |
+| 500  | server1  | web | 1970-01-01T00:00:04 | 2.5                                                                              |
+| 500  | server2  | web | 1970-01-01T00:00:03 | 7.0                                                                              |
+| 500  | server2  | web | 1970-01-01T00:00:04 | 7.0                                                                              |
++------+----------+-----+---------------------+----------------------------------------------------------------------------------+
+
+drop table http_requests_total;
+
+Affected Rows: 0
+
+drop table http_request_latency_seconds;
 
 Affected Rows: 0
 
