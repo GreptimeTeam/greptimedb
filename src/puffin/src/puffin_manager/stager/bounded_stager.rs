@@ -174,7 +174,7 @@ impl<H: ToString + Clone + Send + Sync> Stager for BoundedStager<H> {
                     notifier.on_load_blob(timer.elapsed());
                 }
                 let guard = Arc::new(FsBlobGuard {
-                    handle: handle_str.to_string(),
+                    handle: handle_str,
                     path,
                     delete_queue: self.delete_queue.clone(),
                     size,

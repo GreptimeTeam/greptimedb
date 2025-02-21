@@ -34,11 +34,7 @@ use crate::puffin_manager::stager::Stager;
 use crate::puffin_manager::{PuffinWriter, PutOptions};
 
 /// `FsPuffinWriter` is a `PuffinWriter` that writes blobs and directories to a puffin file.
-pub struct FsPuffinWriter<S, W>
-where
-    S: Stager,
-    W: AsyncWrite + Unpin + Send,
-{
+pub struct FsPuffinWriter<S: Stager, W> {
     /// The name of the puffin file.
     handle: S::FileHandle,
 
@@ -52,11 +48,7 @@ where
     blob_keys: HashSet<String>,
 }
 
-impl<S, W> FsPuffinWriter<S, W>
-where
-    S: Stager,
-    W: AsyncWrite + Unpin + Send,
-{
+impl<S: Stager, W> FsPuffinWriter<S, W> {
     pub(crate) fn new(handle: S::FileHandle, stager: S, writer: W) -> Self {
         Self {
             handle,
