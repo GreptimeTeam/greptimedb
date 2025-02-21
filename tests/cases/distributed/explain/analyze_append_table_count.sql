@@ -28,3 +28,5 @@ SELECT count(*) FROM test_table;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 EXPLAIN ANALYZE SELECT count(*) FROM test_table;
+
+DROP TABLE test_table;

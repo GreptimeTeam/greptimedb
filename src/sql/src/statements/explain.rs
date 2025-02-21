@@ -15,7 +15,7 @@
 use std::fmt::{Display, Formatter};
 
 use serde::Serialize;
-use sqlparser::ast::Statement as SpStatement;
+use sqlparser::ast::{AnalyzeFormat, Statement as SpStatement};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::error::Error;
@@ -24,6 +24,15 @@ use crate::error::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct Explain {
     pub inner: SpStatement,
+}
+
+impl Explain {
+    pub fn format(&self) -> Option<AnalyzeFormat> {
+        match self.inner {
+            SpStatement::Explain { format, .. } => format,
+            _ => None,
+        }
+    }
 }
 
 impl TryFrom<SpStatement> for Explain {

@@ -372,3 +372,7 @@ ALTER DATABASE test_ttl_db_2 SET 'ttl' = 'instant';
 
 Error: 1004(InvalidArguments), Invalid set database option, key: ttl, value: instant
 
+DROP DATABASE test_ttl_db_2;
+
+Affected Rows: 0
+

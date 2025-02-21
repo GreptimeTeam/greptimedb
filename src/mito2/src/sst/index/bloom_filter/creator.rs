@@ -356,6 +356,7 @@ pub(crate) mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
+    use crate::access_layer::FilePathProvider;
     use crate::read::BatchColumn;
     use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -366,6 +367,18 @@ pub(crate) mod tests {
 
     pub async fn new_intm_mgr(path: impl AsRef<str>) -> IntermediateManager {
         IntermediateManager::init_fs(path).await.unwrap()
+    }
+
+    pub struct TestPathProvider;
+
+    impl FilePathProvider for TestPathProvider {
+        fn build_index_file_path(&self, file_id: FileId) -> String {
+            file_id.to_string()
+        }
+
+        fn build_sst_file_path(&self, file_id: FileId) -> String {
+            file_id.to_string()
+        }
     }
 
     /// tag_str:
@@ -483,16 +496,16 @@ pub(crate) mod tests {
         indexer.update(&mut batch).await.unwrap();
 
         let (_d, factory) = PuffinManagerFactory::new_for_test_async(prefix).await;
-        let puffin_manager = factory.build(object_store);
+        let puffin_manager = factory.build(object_store, TestPathProvider);
 
-        let index_file_name = "index_file";
-        let mut puffin_writer = puffin_manager.writer(index_file_name).await.unwrap();
+        let file_id = FileId::random();
+        let mut puffin_writer = puffin_manager.writer(&file_id).await.unwrap();
         let (row_count, byte_count) = indexer.finish(&mut puffin_writer).await.unwrap();
         assert_eq!(row_count, 20);
         assert!(byte_count > 0);
         puffin_writer.finish().await.unwrap();
 
-        let puffin_reader = puffin_manager.reader(index_file_name).await.unwrap();
+        let puffin_reader = puffin_manager.reader(&file_id).await.unwrap();
 
         // tag_str
         {

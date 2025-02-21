@@ -61,25 +61,26 @@ impl<S, F> FsPuffinManager<S, F> {
 #[async_trait]
 impl<S, F> PuffinManager for FsPuffinManager<S, F>
 where
-    S: Stager + Clone + 'static,
     F: PuffinFileAccessor + Clone,
+    S: Stager<FileHandle = F::FileHandle> + Clone + 'static,
 {
     type Reader = FsPuffinReader<S, F>;
     type Writer = FsPuffinWriter<S, F::Writer>;
+    type FileHandle = F::FileHandle;
 
-    async fn reader(&self, puffin_file_name: &str) -> Result<Self::Reader> {
+    async fn reader(&self, handle: &Self::FileHandle) -> Result<Self::Reader> {
         Ok(FsPuffinReader::new(
-            puffin_file_name.to_string(),
+            handle.clone(),
             self.stager.clone(),
             self.puffin_file_accessor.clone(),
             self.puffin_metadata_cache.clone(),
         ))
     }
 
-    async fn writer(&self, puffin_file_name: &str) -> Result<Self::Writer> {
-        let writer = self.puffin_file_accessor.writer(puffin_file_name).await?;
+    async fn writer(&self, handle: &Self::FileHandle) -> Result<Self::Writer> {
+        let writer = self.puffin_file_accessor.writer(handle).await?;
         Ok(FsPuffinWriter::new(
-            puffin_file_name.to_string(),
+            handle.clone(),
             self.stager.clone(),
             writer,
         ))

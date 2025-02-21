@@ -42,4 +42,4 @@
 
 ## All Contributors
 
-To see the full list of contributors, please visit our [Contributors page (https:// ?repo=GreptimeTeam/greptimedb)](https://github.com/GreptimeTeam/greptimedb/graphs/contributors)
+To see the full list of contributors, please visit our [Contributors page](https://github.com/GreptimeTeam/greptimedb/graphs/contributors)
