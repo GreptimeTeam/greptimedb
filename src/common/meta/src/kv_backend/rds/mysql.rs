@@ -153,7 +153,7 @@ impl<'a> MySqlTemplateFactory<'a> {
         MySqlTemplateSet {
             table_name: table_name.to_string(),
             create_table_statement: format!(
-                "CREATE TABLE IF NOT EXISTS {table_name}(k VARCHAR(2048) PRIMARY KEY, v BLOB);",
+                "CREATE TABLE IF NOT EXISTS {table_name}(k VARCHAR(255) PRIMARY KEY, v BLOB);",
             ),
             range_template: RangeTemplate {
                 point: format!("SELECT k, v FROM {table_name} WHERE k = ?"),
