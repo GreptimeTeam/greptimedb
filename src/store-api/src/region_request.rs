@@ -222,7 +222,13 @@ fn make_region_creates(creates: CreateRequests) -> Result<Vec<(RegionId, RegionR
 
 fn parse_region_drop(drop: DropRequest) -> Result<(RegionId, RegionDropRequest)> {
     let region_id = drop.region_id.into();
-    Ok((region_id, RegionDropRequest {}))
+    let force_drop_all_logical_tables = drop.force_drop_all_logical_tables;
+    Ok((
+        region_id,
+        RegionDropRequest {
+            force_drop_all_logical_tables,
+        },
+    ))
 }
 
 fn make_region_drop(drop: DropRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
@@ -397,8 +403,12 @@ impl RegionCreateRequest {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct RegionDropRequest {}
+#[derive(Debug, Clone)]
+pub struct RegionDropRequest {
+    /// fast drop database path for the shortcut that do not need to delete logical
+    /// columns first more to check issue #4974 and #5561
+    pub force_drop_all_logical_tables: bool,
+}
 
 /// Open region request.
 #[derive(Debug, Clone)]

@@ -63,32 +63,13 @@ impl DropDatabaseCursor {
 
     async fn handle_table(
         &mut self,
-        ddl_ctx: &DdlContext,
+        _ddl_ctx: &DdlContext,
         ctx: &mut DropDatabaseContext,
         table_name: String,
         table_id: TableId,
         table_route_value: TableRouteValue,
     ) -> Result<(Box<dyn State>, Status)> {
         match (self.target, table_route_value) {
-            (DropTableTarget::Logical, TableRouteValue::Logical(route)) => {
-                let physical_table_id = route.physical_table_id();
-
-                let (_, table_route) = ddl_ctx
-                    .table_metadata_manager
-                    .table_route_manager()
-                    .get_physical_table_route(physical_table_id)
-                    .await?;
-                Ok((
-                    Box::new(DropDatabaseExecutor::new(
-                        table_id,
-                        table_id,
-                        TableName::new(&ctx.catalog, &ctx.schema, &table_name),
-                        table_route.region_routes,
-                        self.target,
-                    )),
-                    Status::executing(true),
-                ))
-            }
             (DropTableTarget::Physical, TableRouteValue::Physical(table_route)) => Ok((
                 Box::new(DropDatabaseExecutor::new(
                     table_id,

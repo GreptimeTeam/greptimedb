@@ -74,7 +74,9 @@ async fn test_drop_database_with_logical_tables() {
         .try_collect::<Vec<_>>()
         .await
         .unwrap();
-    assert!(tables.is_empty());
+    // the logical region will shortcut drop when DropDatabaseProcedure so the table is not empty now
+    // more to check issue #5561
+    assert!(!tables.is_empty());
 }
 
 #[tokio::test]

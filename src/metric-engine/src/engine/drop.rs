@@ -30,9 +30,10 @@ impl MetricEngineInner {
     pub async fn drop_region(
         &self,
         region_id: RegionId,
-        _req: RegionDropRequest,
+        req: RegionDropRequest,
     ) -> Result<AffectedRows> {
         let data_region_id = utils::to_data_region_id(region_id);
+        let force_drop_all_logical_tables = req.force_drop_all_logical_tables;
 
         // enclose the guard in a block to prevent the guard from polluting the async context
         let (is_physical_region, is_physical_region_busy) = {
@@ -52,7 +53,7 @@ impl MetricEngineInner {
 
         if is_physical_region {
             // check if there is no logical region relates to this physical region
-            if is_physical_region_busy {
+            if is_physical_region_busy && !force_drop_all_logical_tables {
                 // reject if there is any present logical region
                 return Err(PhysicalRegionBusySnafu {
                     region_id: data_region_id,
@@ -60,9 +61,9 @@ impl MetricEngineInner {
                 .build());
             }
 
-            self.drop_physical_region(data_region_id).await
-        } else {
-            // cannot merge these two `if` otherwise the stupid type checker will complain
+            self.drop_physical_region(data_region_id, force_drop_all_logical_tables)
+                .await
+        } else if !force_drop_all_logical_tables {
             let metadata_region_id = self
                 .state
                 .read()
@@ -76,10 +77,16 @@ impl MetricEngineInner {
             } else {
                 Err(LogicalRegionNotFoundSnafu { region_id }.build())
             }
+        } else {
+            Ok(0)
         }
     }
 
-    async fn drop_physical_region(&self, region_id: RegionId) -> Result<AffectedRows> {
+    async fn drop_physical_region(
+        &self,
+        region_id: RegionId,
+        force_drop_all_logical_tables: bool,
+    ) -> Result<AffectedRows> {
         let data_region_id = utils::to_data_region_id(region_id);
         let metadata_region_id = utils::to_metadata_region_id(region_id);
 
@@ -87,13 +94,20 @@ impl MetricEngineInner {
         // Since the physical regions are going to be dropped, we don't need to
         // update the contents in metadata region.
         self.mito
-            .handle_request(data_region_id, RegionRequest::Drop(RegionDropRequest {}))
+            .handle_request(
+                data_region_id,
+                RegionRequest::Drop(RegionDropRequest {
+                    force_drop_all_logical_tables,
+                }),
+            )
             .await
             .with_context(|_| CloseMitoRegionSnafu { region_id })?;
         self.mito
             .handle_request(
                 metadata_region_id,
-                RegionRequest::Drop(RegionDropRequest {}),
+                RegionRequest::Drop(RegionDropRequest {
+                    force_drop_all_logical_tables,
+                }),
             )
             .await
             .with_context(|_| CloseMitoRegionSnafu { region_id })?;
