@@ -27,7 +27,8 @@ use tokio_postgres::types::ToSql;
 use tokio_postgres::Client;
 
 use crate::election::{
-    listen_leader_change, Election, LeaderChangeMessage, LeaderKey, CANDIDATES_ROOT, ELECTION_KEY,
+    listen_leader_change, Election, LeaderChangeMessage, LeaderKey, CANDIDATES_ROOT,
+    DEFAULT_IDLE_SESSION_TIMEOUT_SECS, ELECTION_KEY,
 };
 use crate::error::{
     DeserializeFromJsonSnafu, NoLeaderSnafu, PostgresExecutionSnafu, Result, SerializeToJsonSnafu,
@@ -111,8 +112,11 @@ impl<'a> ElectionSqlFactory<'a> {
 
     // Currently the session timeout is longer than the leader lease time, so the leader lease may expire while the session is still alive.
     // Either the leader reconnects and step down or the session expires and the lock is released.
-    fn set_idle_session_timeout_sql(&self) -> &str {
-        "SET idle_session_timeout = '10s';"
+    fn set_idle_session_timeout_sql(&self) -> String {
+        format!(
+            "SET idle_session_timeout = '{}s';",
+            DEFAULT_IDLE_SESSION_TIMEOUT_SECS
+        )
     }
 
     fn campaign_sql(&self) -> String {
@@ -241,7 +245,7 @@ impl PgElection {
         let sql_factory = ElectionSqlFactory::new(lock_id, table_name);
         // Set idle session timeout to IDLE_SESSION_TIMEOUT to avoid dead advisory lock.
         client
-            .execute(sql_factory.set_idle_session_timeout_sql(), &[])
+            .execute(&sql_factory.set_idle_session_timeout_sql(), &[])
             .await
             .context(PostgresExecutionSnafu)?;
 
