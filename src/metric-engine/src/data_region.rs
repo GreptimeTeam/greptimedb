@@ -142,6 +142,7 @@ impl DataRegion {
                 c.column_id = new_column_id_start + delta as u32;
                 c.column_schema.set_nullable();
                 match index_options {
+                    IndexOptions::None => {}
                     IndexOptions::Inverted => {
                         c.column_schema.set_inverted_index(true);
                     }

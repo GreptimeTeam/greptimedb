@@ -21,7 +21,7 @@ use api::v1::SemanticType;
 use common_telemetry::info;
 use common_time::{Timestamp, FOREVER};
 use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::ColumnSchema;
+use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
 use datatypes::value::Value;
 use mito2::engine::MITO_ENGINE_NAME;
 use object_store::util::join_dir;
@@ -54,6 +54,8 @@ use crate::error::{
 };
 use crate::metrics::PHYSICAL_REGION_COUNT;
 use crate::utils::{self, to_data_region_id, to_metadata_region_id};
+
+const DEFAULT_TABLE_ID_SKIPPING_INDEX_GRANULARITY: u32 = 1024;
 
 impl MetricEngineInner {
     pub async fn create_regions(
@@ -440,6 +442,7 @@ impl MetricEngineInner {
     ///
     /// Return `[table_id_col, tsid_col]`
     fn internal_column_metadata() -> [ColumnMetadata; 2] {
+        // Safety: BloomFilter is a valid skipping index type
         let metric_name_col = ColumnMetadata {
             column_id: ReservedColumnId::table_id(),
             semantic_type: SemanticType::Tag,
@@ -448,7 +451,11 @@ impl MetricEngineInner {
                 ConcreteDataType::uint32_datatype(),
                 false,
             )
-            .with_inverted_index(true),
+            .with_skipping_options(SkippingIndexOptions {
+                granularity: DEFAULT_TABLE_ID_SKIPPING_INDEX_GRANULARITY,
+                index_type: datatypes::schema::SkippingIndexType::BloomFilter,
+            })
+            .unwrap(),
         };
         let tsid_col = ColumnMetadata {
             column_id: ReservedColumnId::tsid(),
