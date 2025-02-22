@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "mysql_kvbackend")]
+use std::str::FromStr;
 use std::sync::Arc;
 
 use api::v1::meta::cluster_server::ClusterServer;
@@ -43,6 +45,8 @@ use servers::server::Server;
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use snafu::OptionExt;
 use snafu::ResultExt;
+#[cfg(feature = "mysql_kvbackend")]
+use sqlx::mysql::MySqlConnectOptions;
 #[cfg(feature = "mysql_kvbackend")]
 use sqlx::mysql::{MySqlConnection, MySqlPool};
 #[cfg(feature = "mysql_kvbackend")]
@@ -359,7 +363,14 @@ async fn create_mysql_pool(opts: &MetasrvOptions) -> Result<MySqlPool> {
         .context(error::InvalidArgumentsSnafu {
             err_msg: "empty store addrs",
         })?;
-    let pool = MySqlPool::connect(mysql_url)
+    let opts = MySqlConnectOptions::from_str(mysql_url)
+        .context(error::ParseMySqlUrlSnafu { url: mysql_url })?;
+    let opts = opts
+        .no_engine_substitution(false)
+        .set_names(false)
+        .pipes_as_concat(false)
+        .timezone(None);
+    let pool = MySqlPool::connect_with(opts)
         .await
         .context(error::CreateMySqlPoolSnafu)?;
     Ok(pool)
@@ -373,7 +384,14 @@ async fn create_mysql_client(opts: &MetasrvOptions) -> Result<MySqlConnection> {
         .context(error::InvalidArgumentsSnafu {
             err_msg: "empty store addrs",
         })?;
-    let client = MySqlConnection::connect(mysql_url)
+    let opts = MySqlConnectOptions::from_str(mysql_url)
+        .context(error::ParseMySqlUrlSnafu { url: mysql_url })?;
+    let opts = opts
+        .no_engine_substitution(false)
+        .set_names(false)
+        .pipes_as_concat(false)
+        .timezone(None);
+    let client = MySqlConnection::connect_with(&opts)
         .await
         .context(error::ConnectMySqlSnafu)?;
     Ok(client)

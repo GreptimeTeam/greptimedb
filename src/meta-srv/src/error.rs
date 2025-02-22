@@ -756,6 +756,16 @@ pub enum Error {
         location: Location,
     },
 
+    #[cfg(feature = "mysql_kvbackend")]
+    #[snafu(display("Failed to parse mysql url: {}", url))]
+    ParseMySqlUrl {
+        #[snafu(source)]
+        error: sqlx::Error,
+        url: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Handler not found: {}", name))]
     HandlerNotFound {
         name: String,
@@ -902,7 +912,8 @@ impl ErrorExt for Error {
             #[cfg(feature = "mysql_kvbackend")]
             Error::MySqlExecution { .. }
             | Error::CreateMySqlPool { .. }
-            | Error::ConnectMySql { .. } => StatusCode::Internal,
+            | Error::ConnectMySql { .. }
+            | Error::ParseMySqlUrl { .. } => StatusCode::Internal,
         }
     }
 
