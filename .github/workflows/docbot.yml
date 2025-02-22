@@ -3,6 +3,10 @@ on:
   pull_request_target:
     types: [opened, edited]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   docbot:
     runs-on: ubuntu-20.04
