@@ -20,14 +20,13 @@ pub mod processor;
 pub mod transform;
 pub mod value;
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use error::{
     IntermediateKeyIndexSnafu, PrepareValueMustBeObjectSnafu, YamlLoadSnafu, YamlParseSnafu,
 };
 use itertools::Itertools;
-use processor::{IntermediateStatus, Processor, Processors};
+use processor::{Processor, Processors};
 use snafu::{ensure, OptionExt, ResultExt};
 use transform::{Transformer, Transforms};
 use value::Value;
@@ -42,6 +41,8 @@ const PROCESSORS: &str = "processors";
 const TRANSFORM: &str = "transform";
 const TRANSFORMS: &str = "transforms";
 const DISPATCHER: &str = "dispatcher";
+
+pub type PipelineMap = std::collections::BTreeMap<String, Value>;
 
 pub enum Content<'a> {
     Json(&'a str),
@@ -153,10 +154,10 @@ impl<O> PipelineExecOutput<O> {
     }
 }
 
-pub fn json_to_intermediate_state(val: serde_json::Value) -> Result<IntermediateStatus> {
+pub fn json_to_intermediate_state(val: serde_json::Value) -> Result<PipelineMap> {
     match val {
         serde_json::Value::Object(map) => {
-            let mut intermediate_state = BTreeMap::new();
+            let mut intermediate_state = PipelineMap::new();
             for (k, v) in map {
                 intermediate_state.insert(k, Value::try_from(v)?);
             }
@@ -166,9 +167,7 @@ pub fn json_to_intermediate_state(val: serde_json::Value) -> Result<Intermediate
     }
 }
 
-pub fn json_array_to_intermediate_state(
-    val: Vec<serde_json::Value>,
-) -> Result<Vec<IntermediateStatus>> {
+pub fn json_array_to_intermediate_state(val: Vec<serde_json::Value>) -> Result<Vec<PipelineMap>> {
     val.into_iter().map(json_to_intermediate_state).collect()
 }
 
@@ -176,10 +175,7 @@ impl<T> Pipeline<T>
 where
     T: Transformer,
 {
-    pub fn exec_mut(
-        &self,
-        val: &mut BTreeMap<String, Value>,
-    ) -> Result<PipelineExecOutput<T::VecOutput>> {
+    pub fn exec_mut(&self, val: &mut PipelineMap) -> Result<PipelineExecOutput<T::VecOutput>> {
         for processor in self.processors.iter() {
             processor.exec_mut(val)?;
         }
@@ -350,7 +346,7 @@ transform:
       type: timestamp, ns
       index: time"#;
         let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_str)).unwrap();
-        let mut payload = BTreeMap::new();
+        let mut payload = PipelineMap::new();
         payload.insert("message".to_string(), Value::String(message));
         let result = pipeline
             .exec_mut(&mut payload)

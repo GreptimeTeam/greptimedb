@@ -13,7 +13,7 @@ workspace = true
 [dependencies]
 api.workspace = true
 arc-swap = "1.0"
-async-trait = "0.1"
+async-trait.workspace = true
 auth.workspace = true
 cache.workspace = true
 catalog.workspace = true
@@ -44,6 +44,7 @@ lazy_static.workspace = true
 log-query.workspace = true
 log-store.workspace = true
 meta-client.workspace = true
+num_cpus.workspace = true
 opentelemetry-proto.workspace = true
 operator.workspace = true
 partition.workspace = true
@@ -70,7 +71,7 @@ catalog = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 datanode.workspace = true
 datatypes.workspace = true
-futures = "0.3"
+futures.workspace = true
 serde_json.workspace = true
 strfmt = "0.2"
 tower.workspace = true

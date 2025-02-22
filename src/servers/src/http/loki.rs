@@ -18,8 +18,8 @@ use std::time::Instant;
 
 use api::v1::value::ValueData;
 use api::v1::{
-    ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
-    Value as GreptimeValue,
+    ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
+    RowInsertRequest, RowInsertRequests, Rows, SemanticType, Value as GreptimeValue,
 };
 use axum::extract::State;
 use axum::Extension;
@@ -30,6 +30,7 @@ use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
 use hashbrown::HashMap;
 use headers::ContentType;
+use jsonb::Value;
 use lazy_static::lazy_static;
 use loki_proto::prost_types::Timestamp;
 use prost::Message;
@@ -53,6 +54,7 @@ use crate::{prom_store, unwrap_or_warn_continue};
 
 const LOKI_TABLE_NAME: &str = "loki_logs";
 const LOKI_LINE_COLUMN: &str = "line";
+const LOKI_STRUCTURED_METADATA_COLUMN: &str = "structured_metadata";
 
 const STREAMS_KEY: &str = "streams";
 const LABEL_KEY: &str = "stream";
@@ -74,6 +76,17 @@ lazy_static! {
             datatype_extension: None,
             options: None,
         },
+        ColumnSchema {
+            column_name: LOKI_STRUCTURED_METADATA_COLUMN.to_string(),
+            datatype: ColumnDataType::Binary.into(),
+            semantic_type: SemanticType::Field.into(),
+            datatype_extension: Some(ColumnDataTypeExtension {
+                type_ext: Some(api::v1::column_data_type_extension::TypeExt::JsonType(
+                    JsonTypeExtension::JsonBinary.into()
+                ))
+            }),
+            options: None,
+        }
     ];
 }
 
@@ -224,9 +237,20 @@ async fn handle_json_req(
                 stream_index,
                 line_index
             );
-            // TODO(shuiyisong): we'll ignore structured metadata for now
 
-            let mut row = init_row(schemas.len(), ts, line_text);
+            let structured_metadata = match line.get(2) {
+                Some(sdata) if sdata.is_object() => sdata
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), Value::String(s.into()))))
+                    .collect(),
+                _ => BTreeMap::new(),
+            };
+            let structured_metadata = Value::Object(structured_metadata);
+
+            let mut row = init_row(schemas.len(), ts, line_text, structured_metadata);
+
             process_labels(&mut column_indexer, schemas, &mut row, labels.as_ref());
 
             rows.push(row);
@@ -267,7 +291,20 @@ async fn handle_pb_req(
             };
             let line = entry.line;
 
-            let mut row = init_row(schemas.len(), prost_ts_to_nano(&ts), line);
+            let structured_metadata = entry
+                .structured_metadata
+                .into_iter()
+                .map(|d| (d.name, Value::String(d.value.into())))
+                .collect::<BTreeMap<String, Value>>();
+            let structured_metadata = Value::Object(structured_metadata);
+
+            let mut row = init_row(
+                schemas.len(),
+                prost_ts_to_nano(&ts),
+                line,
+                structured_metadata,
+            );
+
             process_labels(&mut column_indexer, schemas, &mut row, labels.as_ref());
 
             rows.push(row);
@@ -357,7 +394,12 @@ fn prost_ts_to_nano(ts: &Timestamp) -> i64 {
     ts.seconds * 1_000_000_000 + ts.nanos as i64
 }
 
-fn init_row(schema_len: usize, ts: i64, line: String) -> Vec<GreptimeValue> {
+fn init_row(
+    schema_len: usize,
+    ts: i64,
+    line: String,
+    structured_metadata: Value,
+) -> Vec<GreptimeValue> {
     // create and init row
     let mut row = Vec::with_capacity(schema_len);
     // set ts and line
@@ -367,7 +409,10 @@ fn init_row(schema_len: usize, ts: i64, line: String) -> Vec<GreptimeValue> {
     row.push(GreptimeValue {
         value_data: Some(ValueData::StringValue(line)),
     });
-    for _ in 0..(schema_len - 2) {
+    row.push(GreptimeValue {
+        value_data: Some(ValueData::BinaryValue(structured_metadata.to_vec())),
+    });
+    for _ in 0..(schema_len - 3) {
         row.push(GreptimeValue { value_data: None });
     }
     row

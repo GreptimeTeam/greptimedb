@@ -9,7 +9,7 @@ workspace = true
 
 [dependencies]
 api.workspace = true
-async-trait = "0.1"
+async-trait.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true

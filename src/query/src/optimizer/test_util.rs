@@ -32,7 +32,7 @@ use store_api::region_engine::{
     SettableRegionRoleState,
 };
 use store_api::region_request::RegionRequest;
-use store_api::storage::{ConcreteDataType, RegionId, ScanRequest};
+use store_api::storage::{ConcreteDataType, RegionId, ScanRequest, SequenceNumber};
 
 use crate::dummy_catalog::DummyTableProvider;
 
@@ -84,6 +84,13 @@ impl RegionEngine for MetaRegionEngine {
 
     fn region_statistic(&self, _region_id: RegionId) -> Option<RegionStatistic> {
         None
+    }
+
+    async fn get_last_seq_num(
+        &self,
+        _region_id: RegionId,
+    ) -> Result<Option<SequenceNumber>, BoxedError> {
+        Ok(None)
     }
 
     async fn stop(&self) -> Result<(), BoxedError> {

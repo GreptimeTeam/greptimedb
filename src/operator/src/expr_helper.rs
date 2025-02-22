@@ -22,14 +22,15 @@ use api::v1::{
     set_index, unset_index, AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer,
     ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
     DropColumn, DropColumns, ExpireAfter, ModifyColumnType, ModifyColumnTypes, RenameTable,
-    SemanticType, SetDatabaseOptions, SetFulltext, SetIndex, SetInverted, SetTableOptions,
-    TableName, UnsetDatabaseOptions, UnsetFulltext, UnsetIndex, UnsetInverted, UnsetTableOptions,
+    SemanticType, SetDatabaseOptions, SetFulltext, SetIndex, SetInverted, SetSkipping,
+    SetTableOptions, SkippingIndexType as PbSkippingIndexType, TableName, UnsetDatabaseOptions,
+    UnsetFulltext, UnsetIndex, UnsetInverted, UnsetSkipping, UnsetTableOptions,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
 use common_time::Timezone;
 use datafusion::sql::planner::object_name_to_table_reference;
-use datatypes::schema::{ColumnSchema, FulltextAnalyzer, Schema, COMMENT_KEY};
+use datatypes::schema::{ColumnSchema, FulltextAnalyzer, Schema, SkippingIndexType, COMMENT_KEY};
 use file_engine::FileOptions;
 use query::sql::{
     check_file_to_table_schema_compatibility, file_column_schemas_to_table,
@@ -587,6 +588,19 @@ pub(crate) fn to_alter_table_expr(
                     column_name: column_name.value,
                 })),
             },
+            sql::statements::alter::SetIndexOperation::Skipping {
+                column_name,
+                options,
+            } => SetIndex {
+                options: Some(set_index::Options::Skipping(SetSkipping {
+                    column_name: column_name.value,
+                    enable: true,
+                    granularity: options.granularity as u64,
+                    skipping_index_type: match options.index_type {
+                        SkippingIndexType::BloomFilter => PbSkippingIndexType::BloomFilter.into(),
+                    },
+                })),
+            },
         }),
         AlterTableOperation::UnsetIndex { options } => AlterTableKind::UnsetIndex(match options {
             sql::statements::alter::UnsetIndexOperation::Fulltext { column_name } => UnsetIndex {
@@ -596,6 +610,11 @@ pub(crate) fn to_alter_table_expr(
             },
             sql::statements::alter::UnsetIndexOperation::Inverted { column_name } => UnsetIndex {
                 options: Some(unset_index::Options::Inverted(UnsetInverted {
+                    column_name: column_name.value,
+                })),
+            },
+            sql::statements::alter::UnsetIndexOperation::Skipping { column_name } => UnsetIndex {
+                options: Some(unset_index::Options::Skipping(UnsetSkipping {
                     column_name: column_name.value,
                 })),
             },

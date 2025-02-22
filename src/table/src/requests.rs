@@ -25,7 +25,7 @@ use common_time::range::TimestampRange;
 use common_time::TimeToLive;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
-use datatypes::schema::{ColumnSchema, FulltextOptions};
+use datatypes::schema::{ColumnSchema, FulltextOptions, SkippingIndexOptions};
 use greptime_proto::v1::region::compact_request;
 use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{
@@ -239,12 +239,17 @@ pub enum SetIndexOptions {
     Inverted {
         column_name: String,
     },
+    Skipping {
+        column_name: String,
+        options: SkippingIndexOptions,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum UnsetIndexOptions {
     Fulltext { column_name: String },
     Inverted { column_name: String },
+    Skipping { column_name: String },
 }
 
 #[derive(Debug)]

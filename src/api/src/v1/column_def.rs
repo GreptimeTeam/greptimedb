@@ -15,10 +15,10 @@
 use std::collections::HashMap;
 
 use datatypes::schema::{
-    ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextOptions, COMMENT_KEY,
-    FULLTEXT_KEY, INVERTED_INDEX_KEY, SKIPPING_INDEX_KEY,
+    ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextOptions, SkippingIndexType,
+    COMMENT_KEY, FULLTEXT_KEY, INVERTED_INDEX_KEY, SKIPPING_INDEX_KEY,
 };
-use greptime_proto::v1::Analyzer;
+use greptime_proto::v1::{Analyzer, SkippingIndexType as PbSkippingIndexType};
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -118,6 +118,13 @@ pub fn as_fulltext_option(analyzer: Analyzer) -> FulltextAnalyzer {
     match analyzer {
         Analyzer::English => FulltextAnalyzer::English,
         Analyzer::Chinese => FulltextAnalyzer::Chinese,
+    }
+}
+
+/// Tries to construct a `SkippingIndexType` from the given skipping index type.
+pub fn as_skipping_index_type(skipping_index_type: PbSkippingIndexType) -> SkippingIndexType {
+    match skipping_index_type {
+        PbSkippingIndexType::BloomFilter => SkippingIndexType::BloomFilter,
     }
 }
 

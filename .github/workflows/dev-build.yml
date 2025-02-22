@@ -274,6 +274,7 @@ jobs:
           aws-cn-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
           aws-cn-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
           aws-cn-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
+          upload-to-s3: false
           dev-mode: true                     # Only build the standard images(exclude centos images).
           push-latest-tag: false             # Don't push the latest tag to registry.
           update-version-info: false         # Don't update the version info in S3.

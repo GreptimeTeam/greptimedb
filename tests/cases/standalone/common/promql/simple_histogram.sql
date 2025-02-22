@@ -51,6 +51,9 @@ tql eval (3000, 3000, '1s') histogram_quantile(0.5, histogram_bucket);
 -- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') histogram_quantile(0.8, histogram_bucket);
 
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') label_replace(histogram_quantile(0.8, histogram_bucket), "s", "$1", "s", "(.*)tive");
+
 -- More realistic with rates.
 -- This case doesn't contains value because other point are not inserted.
 -- quantile with rate is covered in other cases

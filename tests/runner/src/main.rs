@@ -26,6 +26,7 @@ use crate::env::StoreConfig;
 
 mod env;
 mod protocol_interceptor;
+mod server_mode;
 mod util;
 
 #[derive(ValueEnum, Debug, Clone)]
@@ -114,11 +115,15 @@ struct Args {
     /// Whether to setup mysql, by default it is false.
     #[clap(long, default_value = "false")]
     setup_mysql: bool,
+
+    /// The number of jobs to run in parallel. Default to half of the cores.
+    #[clap(short, long, default_value = "0")]
+    jobs: usize,
 }
 
 #[tokio::main]
 async fn main() {
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     let temp_dir = tempfile::Builder::new()
         .prefix("sqlness")
@@ -137,6 +142,20 @@ async fn main() {
             panic!("{} is not a directory", d.display());
         }
     }
+    if args.jobs == 0 {
+        args.jobs = num_cpus::get() / 2;
+    }
+
+    // normalize parallelism to 1 if any of the following conditions are met:
+    if args.server_addr.server_addr.is_some()
+        || args.setup_etcd
+        || args.setup_pg
+        || args.kafka_wal_broker_endpoints.is_some()
+    {
+        args.jobs = 1;
+        println!("Normalizing parallelism to 1 due to server addresses or etcd/pg setup");
+    }
+
     let config = ConfigBuilder::default()
         .case_dir(util::get_case_dir(args.case_dir))
         .fail_fast(args.fail_fast)
@@ -144,6 +163,7 @@ async fn main() {
         .follow_links(true)
         .env_config_file(args.env_config_file)
         .interceptor_registry(interceptor_registry)
+        .parallelism(args.jobs)
         .build()
         .unwrap();
 

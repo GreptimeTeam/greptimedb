@@ -28,6 +28,7 @@ use puffin::puffin_manager::{BlobGuard, PuffinManager, PuffinReader};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 
+use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::index::inverted_index::{CachedInvertedIndexBlobReader, InvertedIndexCacheRef};
 use crate::error::{
@@ -38,7 +39,6 @@ use crate::sst::file::FileId;
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
 use crate::sst::index::TYPE_INVERTED_INDEX;
-use crate::sst::location;
 
 /// `InvertedIndexApplier` is responsible for applying predicates to the provided SST files
 /// and returning the relevant row group ids for further scan.
@@ -172,12 +172,14 @@ impl InvertedIndexApplier {
             return Ok(None);
         };
 
-        let puffin_manager = self.puffin_manager_factory.build(file_cache.local_store());
-        let puffin_file_name = file_cache.cache_file_path(index_key);
+        let puffin_manager = self.puffin_manager_factory.build(
+            file_cache.local_store(),
+            WriteCachePathProvider::new(self.region_id, file_cache.clone()),
+        );
 
         // Adds file size hint to the puffin reader to avoid extra metadata read.
         let reader = puffin_manager
-            .reader(&puffin_file_name)
+            .reader(&file_id)
             .await
             .context(PuffinBuildReaderSnafu)?
             .with_file_size_hint(file_size_hint)
@@ -198,12 +200,14 @@ impl InvertedIndexApplier {
     ) -> Result<BlobReader> {
         let puffin_manager = self
             .puffin_manager_factory
-            .build(self.store.clone())
+            .build(
+                self.store.clone(),
+                RegionFilePathFactory::new(self.region_dir.clone()),
+            )
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
-        let file_path = location::index_file_path(&self.region_dir, file_id);
         puffin_manager
-            .reader(&file_path)
+            .reader(&file_id)
             .await
             .context(PuffinBuildReaderSnafu)?
             .with_file_size_hint(file_size_hint)
@@ -239,10 +243,12 @@ mod tests {
         let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
         let file_id = FileId::random();
         let region_dir = "region_dir".to_string();
-        let path = location::index_file_path(&region_dir, file_id);
 
-        let puffin_manager = puffin_manager_factory.build(object_store.clone());
-        let mut writer = puffin_manager.writer(&path).await.unwrap();
+        let puffin_manager = puffin_manager_factory.build(
+            object_store.clone(),
+            RegionFilePathFactory::new(region_dir.clone()),
+        );
+        let mut writer = puffin_manager.writer(&file_id).await.unwrap();
         writer
             .put_blob(INDEX_BLOB_TYPE, Cursor::new(vec![]), Default::default())
             .await
@@ -285,10 +291,12 @@ mod tests {
         let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
         let file_id = FileId::random();
         let region_dir = "region_dir".to_string();
-        let path = location::index_file_path(&region_dir, file_id);
 
-        let puffin_manager = puffin_manager_factory.build(object_store.clone());
-        let mut writer = puffin_manager.writer(&path).await.unwrap();
+        let puffin_manager = puffin_manager_factory.build(
+            object_store.clone(),
+            RegionFilePathFactory::new(region_dir.clone()),
+        );
+        let mut writer = puffin_manager.writer(&file_id).await.unwrap();
         writer
             .put_blob("invalid_blob_type", Cursor::new(vec![]), Default::default())
             .await

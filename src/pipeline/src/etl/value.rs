@@ -16,8 +16,6 @@ pub mod array;
 pub mod map;
 pub mod time;
 
-use std::collections::BTreeMap;
-
 pub use array::Array;
 use jsonb::{Number as JsonbNumber, Object as JsonbObject, Value as JsonbValue};
 use jsonpath_rust::path::{JsonLike, Path};
@@ -32,6 +30,7 @@ use super::error::{
     ValueParseFloatSnafu, ValueParseIntSnafu, ValueParseTypeSnafu, ValueUnsupportedNumberTypeSnafu,
     ValueUnsupportedYamlTypeSnafu, ValueYamlKeyMustBeStringSnafu,
 };
+use super::PipelineMap;
 use crate::etl::error::{Error, Result};
 
 /// Value can be used as type
@@ -347,7 +346,7 @@ impl TryFrom<serde_json::Value> for Value {
                 Ok(Value::Array(Array { values }))
             }
             serde_json::Value::Object(v) => {
-                let mut values = BTreeMap::new();
+                let mut values = PipelineMap::new();
                 for (k, v) in v {
                     values.insert(k, Value::try_from(v)?);
                 }
@@ -378,7 +377,7 @@ impl TryFrom<&yaml_rust::Yaml> for Value {
                 Ok(Value::Array(Array { values }))
             }
             yaml_rust::Yaml::Hash(v) => {
-                let mut values = BTreeMap::new();
+                let mut values = PipelineMap::new();
                 for (k, v) in v {
                     let key = k
                         .as_str()
@@ -458,7 +457,7 @@ impl From<Value> for JsonbValue<'_> {
             }
             Value::Map(obj) => {
                 let mut map = JsonbObject::new();
-                for (k, v) in obj.into_iter() {
+                for (k, v) in obj.values.into_iter() {
                     let val: JsonbValue = v.into();
                     map.insert(k, val);
                 }

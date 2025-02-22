@@ -140,6 +140,14 @@ pub enum Error {
         error: prost::UnknownEnumValue,
     },
 
+    #[snafu(display("Invalid set skipping index option request"))]
+    InvalidSetSkippingIndexOptionRequest {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: prost::UnknownEnumValue,
+    },
+
     #[snafu(display("Missing alter index options"))]
     MissingAlterIndexOption {
         #[snafu(implicit)]
@@ -171,6 +179,7 @@ impl ErrorExt for Error {
             Error::InvalidSetTableOptionRequest { .. }
             | Error::InvalidUnsetTableOptionRequest { .. }
             | Error::InvalidSetFulltextOptionRequest { .. }
+            | Error::InvalidSetSkippingIndexOptionRequest { .. }
             | Error::MissingAlterIndexOption { .. } => StatusCode::InvalidArguments,
         }
     }

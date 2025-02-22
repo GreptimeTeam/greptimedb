@@ -33,7 +33,7 @@ function upload_artifacts() {
   #    ├── greptime-darwin-amd64-v0.2.0.sha256sum
   #    └── greptime-darwin-amd64-v0.2.0.tar.gz
   find "$ARTIFACTS_DIR" -type f \( -name "*.tar.gz" -o -name "*.sha256sum" \) | while IFS= read -r file; do
-    aws s3 cp \
+    s5cmd cp \
       "$file" "s3://$AWS_S3_BUCKET/$RELEASE_DIRS/$VERSION/$(basename "$file")"
   done
 }
@@ -45,7 +45,7 @@ function update_version_info() {
     if [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
       echo "Updating latest-version.txt"
       echo "$VERSION" > latest-version.txt
-      aws s3 cp \
+      s5cmd cp \
         latest-version.txt "s3://$AWS_S3_BUCKET/$RELEASE_DIRS/latest-version.txt"
     fi
 
@@ -53,7 +53,7 @@ function update_version_info() {
     if [[ "$VERSION" == *"nightly"* ]]; then
       echo "Updating latest-nightly-version.txt"
       echo "$VERSION" > latest-nightly-version.txt
-      aws s3 cp \
+      s5cmd cp \
         latest-nightly-version.txt "s3://$AWS_S3_BUCKET/$RELEASE_DIRS/latest-nightly-version.txt"
     fi
   fi

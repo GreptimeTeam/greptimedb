@@ -9,7 +9,7 @@ workspace = true
 
 [dependencies]
 api.workspace = true
-async-trait = "0.1"
+async-trait.workspace = true
 common-error.workspace = true
 common-grpc.workspace = true
 common-macro.workspace = true
@@ -27,7 +27,7 @@ tonic.workspace = true
 
 [dev-dependencies]
 datatypes.workspace = true
-futures = "0.3"
+futures.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
 tower.workspace = true
 tracing = "0.1"

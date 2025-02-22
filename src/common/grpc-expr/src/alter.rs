@@ -15,13 +15,14 @@
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::alter_table_expr::Kind;
-use api::v1::column_def::as_fulltext_option;
+use api::v1::column_def::{as_fulltext_option, as_skipping_index_type};
 use api::v1::{
     column_def, AddColumnLocation as Location, AlterTableExpr, Analyzer, CreateTableExpr,
     DropColumns, ModifyColumnTypes, RenameTable, SemanticType,
+    SkippingIndexType as PbSkippingIndexType,
 };
 use common_query::AddColumnLocation;
-use datatypes::schema::{ColumnSchema, FulltextOptions, RawSchema};
+use datatypes::schema::{ColumnSchema, FulltextOptions, RawSchema, SkippingIndexOptions};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use table::metadata::TableId;
@@ -31,7 +32,8 @@ use table::requests::{
 };
 
 use crate::error::{
-    InvalidColumnDefSnafu, InvalidSetFulltextOptionRequestSnafu, InvalidSetTableOptionRequestSnafu,
+    InvalidColumnDefSnafu, InvalidSetFulltextOptionRequestSnafu,
+    InvalidSetSkippingIndexOptionRequestSnafu, InvalidSetTableOptionRequestSnafu,
     InvalidUnsetTableOptionRequestSnafu, MissingAlterIndexOptionSnafu, MissingFieldSnafu,
     MissingTimestampColumnSnafu, Result, UnknownLocationTypeSnafu,
 };
@@ -137,6 +139,18 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<
                         column_name: i.column_name,
                     },
                 },
+                api::v1::set_index::Options::Skipping(s) => AlterKind::SetIndex {
+                    options: SetIndexOptions::Skipping {
+                        column_name: s.column_name,
+                        options: SkippingIndexOptions {
+                            granularity: s.granularity as u32,
+                            index_type: as_skipping_index_type(
+                                PbSkippingIndexType::try_from(s.skipping_index_type)
+                                    .context(InvalidSetSkippingIndexOptionRequestSnafu)?,
+                            ),
+                        },
+                    },
+                },
             },
             None => return MissingAlterIndexOptionSnafu.fail(),
         },
@@ -150,6 +164,11 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<
                 api::v1::unset_index::Options::Inverted(i) => AlterKind::UnsetIndex {
                     options: UnsetIndexOptions::Inverted {
                         column_name: i.column_name,
+                    },
+                },
+                api::v1::unset_index::Options::Skipping(s) => AlterKind::UnsetIndex {
+                    options: UnsetIndexOptions::Skipping {
+                        column_name: s.column_name,
                     },
                 },
             },

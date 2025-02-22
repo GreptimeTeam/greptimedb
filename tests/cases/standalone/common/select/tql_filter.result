@@ -1,0 +1,96 @@
+create table t1 (a string primary key, b timestamp time index, c double);
+
+Affected Rows: 0
+
+insert into t1 values ("a", 1000, 1.0), ("b", 2000, 2.0), ("c", 3000, 3.0);
+
+Affected Rows: 3
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+tql analyze (1, 3, '1s') t1{ a = "a" };
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_PromInstantManipulateExec: range=[1000..3000], lookback=[300000], interval=[1000], time index=[b] REDACTED
+|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[b], filter NaN: [false] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["a"] REDACTED
+|_|_|_SortPreservingMergeExec: [a@0 ASC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[a@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SortPreservingMergeExec: [a@0 DESC NULLS LAST, b@1 DESC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[a@0 DESC NULLS LAST, b@1 DESC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: b@1 >= -299000 AND b@1 <= 303000 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
+|_|_|_|
+|_|_| Total rows: 3_|
++-+-+-+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+tql analyze (1, 3, '1s') t1{ a =~ ".*" };
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_PromInstantManipulateExec: range=[1000..3000], lookback=[300000], interval=[1000], time index=[b] REDACTED
+|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[b], filter NaN: [false] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["a"] REDACTED
+|_|_|_SortPreservingMergeExec: [a@0 ASC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[a@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SortPreservingMergeExec: [a@0 DESC NULLS LAST, b@1 DESC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[a@0 DESC NULLS LAST, b@1 DESC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: b@1 >= -299000 AND b@1 <= 303000 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
+|_|_|_|
+|_|_| Total rows: 6_|
++-+-+-+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+tql analyze (1, 3, '1s') t1{ a =~ "a.*" };
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_PromInstantManipulateExec: range=[1000..3000], lookback=[300000], interval=[1000], time index=[b] REDACTED
+|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[b], filter NaN: [false] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["a"] REDACTED
+|_|_|_SortPreservingMergeExec: [a@0 ASC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[a@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SortPreservingMergeExec: [a@0 DESC NULLS LAST, b@1 DESC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[a@0 DESC NULLS LAST, b@1 DESC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: a@0 ~ a.* AND b@1 >= -299000 AND b@1 <= 303000 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
+|_|_|_|
+|_|_| Total rows: 3_|
++-+-+-+
+
+drop table t1;
+
+Affected Rows: 0
+

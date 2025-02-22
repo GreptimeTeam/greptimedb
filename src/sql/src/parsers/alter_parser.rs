@@ -25,7 +25,9 @@ use sqlparser::tokenizer::{Token, TokenWithLocation};
 use crate::error::{self, InvalidColumnOptionSnafu, Result, SetFulltextOptionSnafu};
 use crate::parser::ParserContext;
 use crate::parsers::create_parser::INVERTED;
-use crate::parsers::utils::validate_column_fulltext_create_option;
+use crate::parsers::utils::{
+    validate_column_fulltext_create_option, validate_column_skipping_index_create_option,
+};
 use crate::statements::alter::{
     AddColumn, AlterDatabase, AlterDatabaseOperation, AlterTable, AlterTableOperation,
     KeyValueOption, SetIndexOperation, UnsetIndexOperation,
@@ -241,9 +243,14 @@ impl ParserContext<'_> {
             TokenWithLocation {
                 token: Token::Word(w),
                 ..
-            } if w.keyword == Keyword::FULLTEXT => Ok(AlterTableOperation::UnsetIndex {
-                options: UnsetIndexOperation::Fulltext { column_name },
-            }),
+            } if w.keyword == Keyword::FULLTEXT => {
+                self.parser
+                    .expect_keyword(Keyword::INDEX)
+                    .context(error::SyntaxSnafu)?;
+                Ok(AlterTableOperation::UnsetIndex {
+                    options: UnsetIndexOperation::Fulltext { column_name },
+                })
+            }
 
             TokenWithLocation {
                 token: Token::Word(w),
@@ -256,8 +263,24 @@ impl ParserContext<'_> {
                     options: UnsetIndexOperation::Inverted { column_name },
                 })
             }
+
+            TokenWithLocation {
+                token: Token::Word(w),
+                ..
+            } if w.value.eq_ignore_ascii_case("SKIPPING") => {
+                self.parser
+                    .expect_keyword(Keyword::INDEX)
+                    .context(error::SyntaxSnafu)?;
+                Ok(AlterTableOperation::UnsetIndex {
+                    options: UnsetIndexOperation::Skipping { column_name },
+                })
+            }
             _ => self.expected(
-                format!("{:?} OR INVERTED INDEX", Keyword::FULLTEXT).as_str(),
+                format!(
+                    "{:?} OR INVERTED INDEX OR SKIPPING INDEX",
+                    Keyword::FULLTEXT
+                )
+                .as_str(),
                 self.parser.peek_token(),
             ),
         }
@@ -268,7 +291,12 @@ impl ParserContext<'_> {
             TokenWithLocation {
                 token: Token::Word(w),
                 ..
-            } if w.keyword == Keyword::FULLTEXT => self.parse_alter_column_fulltext(column_name),
+            } if w.keyword == Keyword::FULLTEXT => {
+                self.parser
+                    .expect_keyword(Keyword::INDEX)
+                    .context(error::SyntaxSnafu)?;
+                self.parse_alter_column_fulltext(column_name)
+            }
 
             TokenWithLocation {
                 token: Token::Word(w),
@@ -281,8 +309,18 @@ impl ParserContext<'_> {
                     options: SetIndexOperation::Inverted { column_name },
                 })
             }
+
+            TokenWithLocation {
+                token: Token::Word(w),
+                ..
+            } if w.value.eq_ignore_ascii_case("SKIPPING") => {
+                self.parser
+                    .expect_keyword(Keyword::INDEX)
+                    .context(error::SyntaxSnafu)?;
+                self.parse_alter_column_skipping(column_name)
+            }
             _ => self.expected(
-                format!("{:?} OR INVERTED INDEX", Keyword::FULLTEXT).as_str(),
+                format!("{:?} OR INVERTED OR SKIPPING INDEX", Keyword::FULLTEXT).as_str(),
                 self.parser.peek_token(),
             ),
         }
@@ -316,6 +354,35 @@ impl ParserContext<'_> {
             options: SetIndexOperation::Fulltext {
                 column_name,
                 options: options.try_into().context(SetFulltextOptionSnafu)?,
+            },
+        })
+    }
+
+    fn parse_alter_column_skipping(&mut self, column_name: Ident) -> Result<AlterTableOperation> {
+        let options = self
+            .parser
+            .parse_options(Keyword::WITH)
+            .context(error::SyntaxSnafu)?
+            .into_iter()
+            .map(parse_option_string)
+            .collect::<Result<HashMap<String, String>>>()?;
+
+        for key in options.keys() {
+            ensure!(
+                validate_column_skipping_index_create_option(key),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: format!("invalid SKIPPING INDEX option: {key}"),
+                }
+            );
+        }
+
+        Ok(AlterTableOperation::SetIndex {
+            options: SetIndexOperation::Skipping {
+                column_name,
+                options: options
+                    .try_into()
+                    .context(error::SetSkippingIndexOptionSnafu)?,
             },
         })
     }
@@ -891,7 +958,7 @@ mod tests {
 
     #[test]
     fn test_parse_alter_column_fulltext() {
-        let sql = "ALTER TABLE test_table MODIFY COLUMN a SET FULLTEXT WITH(analyzer='English',case_sensitive='false')";
+        let sql = "ALTER TABLE test_table MODIFY COLUMN a SET FULLTEXT INDEX WITH(analyzer='English',case_sensitive='false')";
         let mut result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -928,7 +995,7 @@ mod tests {
             _ => unreachable!(),
         }
 
-        let sql = "ALTER TABLE test_table MODIFY COLUMN a UNSET FULLTEXT";
+        let sql = "ALTER TABLE test_table MODIFY COLUMN a UNSET FULLTEXT INDEX";
         let mut result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -955,7 +1022,8 @@ mod tests {
             _ => unreachable!(),
         }
 
-        let invalid_sql = "ALTER TABLE test_table MODIFY COLUMN a SET FULLTEXT WITH('abcd'='true')";
+        let invalid_sql =
+            "ALTER TABLE test_table MODIFY COLUMN a SET FULLTEXT INDEX WITH('abcd'='true')";
         let result = ParserContext::create_with_dialect(
             invalid_sql,
             &GreptimeDbDialect {},

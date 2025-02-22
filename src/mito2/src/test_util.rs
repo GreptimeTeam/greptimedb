@@ -640,7 +640,7 @@ impl TestEnv {
         capacity: ReadableSize,
     ) -> WriteCacheRef {
         let index_aux_path = self.data_home.path().join("index_aux");
-        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None)
+        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
             .await
             .unwrap();
         let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())

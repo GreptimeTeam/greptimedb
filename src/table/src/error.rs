@@ -156,6 +156,22 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to set skipping index options for column {}", column_name))]
+    SetSkippingOptions {
+        column_name: String,
+        source: datatypes::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to unset skipping index options for column {}", column_name))]
+    UnsetSkippingOptions {
+        column_name: String,
+        source: datatypes::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -179,7 +195,9 @@ impl ErrorExt for Error {
             Error::Unsupported { .. } => StatusCode::Unsupported,
             Error::ParseTableOption { .. } => StatusCode::InvalidArguments,
             Error::MissingTimeIndexColumn { .. } => StatusCode::IllegalState,
-            Error::InvalidTableOptionValue { .. } => StatusCode::InvalidArguments,
+            Error::InvalidTableOptionValue { .. }
+            | Error::SetSkippingOptions { .. }
+            | Error::UnsetSkippingOptions { .. } => StatusCode::InvalidArguments,
         }
     }
 

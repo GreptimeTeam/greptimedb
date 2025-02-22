@@ -114,15 +114,14 @@ impl WriteCache {
         let region_id = write_request.metadata.region_id;
 
         let store = self.file_cache.local_store();
-        let path_provider = WriteCachePathProvider {
-            file_cache: self.file_cache.clone(),
-            region_id,
-        };
+        let path_provider = WriteCachePathProvider::new(region_id, self.file_cache.clone());
         let indexer = IndexerBuilderImpl {
             op_type: write_request.op_type,
             metadata: write_request.metadata.clone(),
             row_group_size: write_opts.row_group_size,
-            puffin_manager: self.puffin_manager_factory.build(store),
+            puffin_manager: self
+                .puffin_manager_factory
+                .build(store, path_provider.clone()),
             intermediate_manager: self.intermediate_manager.clone(),
             index_options: write_request.index_options,
             inverted_index_config: write_request.inverted_index_config,
@@ -355,9 +354,7 @@ mod tests {
         // and now just use local file system to mock.
         let mut env = TestEnv::new();
         let mock_store = env.init_object_store_manager();
-        let path_provider = RegionFilePathFactory {
-            region_dir: "test".to_string(),
-        };
+        let path_provider = RegionFilePathFactory::new("test".to_string());
 
         let local_dir = create_temp_dir("");
         let local_store = new_fs_store(local_dir.path().to_str().unwrap());
@@ -488,9 +485,7 @@ mod tests {
             ..Default::default()
         };
         let upload_request = SstUploadRequest {
-            dest_path_provider: RegionFilePathFactory {
-                region_dir: data_home.clone(),
-            },
+            dest_path_provider: RegionFilePathFactory::new(data_home.clone()),
             remote_store: mock_store.clone(),
         };
 
