@@ -113,11 +113,9 @@ impl FilePurger for LocalFilePurger {
             }
 
             // Purges index content in the stager.
-            let puffin_file_name =
-                crate::sst::location::index_file_path(sst_layer.region_dir(), file_meta.file_id);
             if let Err(e) = sst_layer
                 .puffin_manager_factory()
-                .purge_stager(&puffin_file_name)
+                .purge_stager(file_meta.file_id)
                 .await
             {
                 error!(e; "Failed to purge stager with index file, file_id: {}, region: {}",

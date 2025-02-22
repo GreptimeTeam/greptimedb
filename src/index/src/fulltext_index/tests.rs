@@ -25,7 +25,7 @@ use crate::fulltext_index::create::{FulltextIndexCreator, TantivyFulltextIndexCr
 use crate::fulltext_index::search::{FulltextIndexSearcher, RowId, TantivyFulltextIndexSearcher};
 use crate::fulltext_index::{Analyzer, Config};
 
-async fn new_bounded_stager(prefix: &str) -> (TempDir, Arc<BoundedStager>) {
+async fn new_bounded_stager(prefix: &str) -> (TempDir, Arc<BoundedStager<String>>) {
     let staging_dir = create_temp_dir(prefix);
     let path = staging_dir.path().to_path_buf();
     (
@@ -68,13 +68,13 @@ async fn test_search(
     let file_accessor = Arc::new(MockFileAccessor::new(prefix));
     let puffin_manager = FsPuffinManager::new(stager, file_accessor);
 
-    let file_name = "fulltext_index";
-    let blob_key = "fulltext_index";
-    let mut writer = puffin_manager.writer(file_name).await.unwrap();
-    create_index(prefix, &mut writer, blob_key, texts, config).await;
+    let file_name = "fulltext_index".to_string();
+    let blob_key = "fulltext_index".to_string();
+    let mut writer = puffin_manager.writer(&file_name).await.unwrap();
+    create_index(prefix, &mut writer, &blob_key, texts, config).await;
 
-    let reader = puffin_manager.reader(file_name).await.unwrap();
-    let index_dir = reader.dir(blob_key).await.unwrap();
+    let reader = puffin_manager.reader(&file_name).await.unwrap();
+    let index_dir = reader.dir(&blob_key).await.unwrap();
     let searcher = TantivyFulltextIndexSearcher::new(index_dir.path()).unwrap();
     let results = searcher.search(query).await.unwrap();
 

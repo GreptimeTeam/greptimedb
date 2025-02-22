@@ -36,12 +36,13 @@ use crate::file_metadata::FileMetadata;
 pub trait PuffinManager {
     type Reader: PuffinReader;
     type Writer: PuffinWriter;
+    type FileHandle: ToString + Clone + Send + Sync;
 
-    /// Creates a `PuffinReader` for the specified `puffin_file_name`.
-    async fn reader(&self, puffin_file_name: &str) -> Result<Self::Reader>;
+    /// Creates a `PuffinReader` for the specified `handle`.
+    async fn reader(&self, handle: &Self::FileHandle) -> Result<Self::Reader>;
 
-    /// Creates a `PuffinWriter` for the specified `puffin_file_name`.
-    async fn writer(&self, puffin_file_name: &str) -> Result<Self::Writer>;
+    /// Creates a `PuffinWriter` for the specified `handle`.
+    async fn writer(&self, handle: &Self::FileHandle) -> Result<Self::Writer>;
 }
 
 /// The `PuffinWriter` trait provides methods for writing blobs and directories to a Puffin file.

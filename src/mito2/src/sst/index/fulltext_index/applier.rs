@@ -15,19 +15,22 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use common_telemetry::warn;
 use index::fulltext_index::search::{FulltextIndexSearcher, RowId, TantivyFulltextIndexSearcher};
 use object_store::ObjectStore;
+use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{DirGuard, PuffinManager, PuffinReader};
 use snafu::ResultExt;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, RegionId};
 
+use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
+use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::error::{ApplyFulltextIndexSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result};
 use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::sst::file::FileId;
 use crate::sst::index::fulltext_index::INDEX_BLOB_TYPE_TANTIVY;
 use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinDir};
 use crate::sst::index::TYPE_FULLTEXT_INDEX;
-use crate::sst::location;
 
 pub mod builder;
 
@@ -35,6 +38,9 @@ pub mod builder;
 pub struct FulltextIndexApplier {
     /// The root directory of the region.
     region_dir: String,
+
+    /// The region ID.
+    region_id: RegionId,
 
     /// Queries to apply to the index.
     queries: Vec<(ColumnId, String)>,
@@ -44,6 +50,12 @@ pub struct FulltextIndexApplier {
 
     /// Store responsible for accessing index files.
     store: ObjectStore,
+
+    /// File cache to be used by the `FulltextIndexApplier`.
+    file_cache: Option<FileCacheRef>,
+
+    /// The puffin metadata cache.
+    puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
 }
 
 pub type FulltextIndexApplierRef = Arc<FulltextIndexApplier>;
@@ -52,20 +64,43 @@ impl FulltextIndexApplier {
     /// Creates a new `FulltextIndexApplier`.
     pub fn new(
         region_dir: String,
+        region_id: RegionId,
         store: ObjectStore,
         queries: Vec<(ColumnId, String)>,
         puffin_manager_factory: PuffinManagerFactory,
     ) -> Self {
         Self {
             region_dir,
+            region_id,
             store,
             queries,
             puffin_manager_factory,
+            file_cache: None,
+            puffin_metadata_cache: None,
         }
     }
 
+    /// Sets the file cache.
+    pub fn with_file_cache(mut self, file_cache: Option<FileCacheRef>) -> Self {
+        self.file_cache = file_cache;
+        self
+    }
+
+    /// Sets the puffin metadata cache.
+    pub fn with_puffin_metadata_cache(
+        mut self,
+        puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
+    ) -> Self {
+        self.puffin_metadata_cache = puffin_metadata_cache;
+        self
+    }
+
     /// Applies the queries to the fulltext index of the specified SST file.
-    pub async fn apply(&self, file_id: FileId) -> Result<BTreeSet<RowId>> {
+    pub async fn apply(
+        &self,
+        file_id: FileId,
+        file_size_hint: Option<u64>,
+    ) -> Result<BTreeSet<RowId>> {
         let _timer = INDEX_APPLY_ELAPSED
             .with_label_values(&[TYPE_FULLTEXT_INDEX])
             .start_timer();
@@ -74,7 +109,9 @@ impl FulltextIndexApplier {
         let mut row_ids = BTreeSet::new();
 
         for (column_id, query) in &self.queries {
-            let dir = self.index_dir_path(file_id, *column_id).await?;
+            let dir = self
+                .index_dir_path(file_id, *column_id, file_size_hint)
+                .await?;
             let path = match &dir {
                 Some(dir) => dir.path(),
                 None => {
@@ -110,15 +147,74 @@ impl FulltextIndexApplier {
         &self,
         file_id: FileId,
         column_id: ColumnId,
+        file_size_hint: Option<u64>,
     ) -> Result<Option<SstPuffinDir>> {
-        let puffin_manager = self.puffin_manager_factory.build(self.store.clone());
-        let file_path = location::index_file_path(&self.region_dir, file_id);
+        let blob_key = format!("{INDEX_BLOB_TYPE_TANTIVY}-{column_id}");
 
-        match puffin_manager
-            .reader(&file_path)
+        // FAST PATH: Try to read the index from the file cache.
+        if let Some(file_cache) = &self.file_cache {
+            let index_key = IndexKey::new(self.region_id, file_id, FileType::Puffin);
+            if file_cache.get(index_key).await.is_some() {
+                match self
+                    .get_index_from_file_cache(file_cache, file_id, file_size_hint, &blob_key)
+                    .await
+                {
+                    Ok(dir) => return Ok(dir),
+                    Err(err) => {
+                        warn!(err; "An unexpected error occurred while reading the cached index file. Fallback to remote index file.")
+                    }
+                }
+            }
+        }
+
+        // SLOW PATH: Try to read the index from the remote file.
+        self.get_index_from_remote_file(file_id, file_size_hint, &blob_key)
+            .await
+    }
+
+    async fn get_index_from_file_cache(
+        &self,
+        file_cache: &FileCacheRef,
+        file_id: FileId,
+        file_size_hint: Option<u64>,
+        blob_key: &str,
+    ) -> Result<Option<SstPuffinDir>> {
+        match self
+            .puffin_manager_factory
+            .build(
+                file_cache.local_store(),
+                WriteCachePathProvider::new(self.region_id, file_cache.clone()),
+            )
+            .reader(&file_id)
             .await
             .context(PuffinBuildReaderSnafu)?
-            .dir(&format!("{INDEX_BLOB_TYPE_TANTIVY}-{column_id}"))
+            .with_file_size_hint(file_size_hint)
+            .dir(blob_key)
+            .await
+        {
+            Ok(dir) => Ok(Some(dir)),
+            Err(puffin::error::Error::BlobNotFound { .. }) => Ok(None),
+            Err(err) => Err(err).context(PuffinReadBlobSnafu),
+        }
+    }
+
+    async fn get_index_from_remote_file(
+        &self,
+        file_id: FileId,
+        file_size_hint: Option<u64>,
+        blob_key: &str,
+    ) -> Result<Option<SstPuffinDir>> {
+        match self
+            .puffin_manager_factory
+            .build(
+                self.store.clone(),
+                RegionFilePathFactory::new(self.region_dir.clone()),
+            )
+            .reader(&file_id)
+            .await
+            .context(PuffinBuildReaderSnafu)?
+            .with_file_size_hint(file_size_hint)
+            .dir(blob_key)
             .await
         {
             Ok(dir) => Ok(Some(dir)),
