@@ -49,7 +49,6 @@ enum ExportTarget {
     #[default]
     All,
 }
-// Copy last_non_null_table TO 's3://my-bucket-name/demo.parquet' with (format = 'parquet', pattern = '.*parquet.*') CONNECTION (ACCESS_KEY_ID='minioadmin', SECRET_ACCESS_KEY='minioadmin',REGION='us-east-1', endpoint='http://localhost:9000/');
 
 #[derive(Debug, Default, Parser)]
 pub struct ExportCommand {
