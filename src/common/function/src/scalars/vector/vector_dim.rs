@@ -20,12 +20,10 @@ use common_query::prelude::{Signature, TypeSignature, Volatility};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{BinaryVectorBuilder, MutableVector, VectorRef};
-use nalgebra::DVectorView;
 use snafu::ensure;
 
 use crate::function::{Function, FunctionContext};
-use crate::helper;
-use crate::scalars::vector::impl_conv::{as_veclit, as_veclit_if_const, usize_to_binlit, veclit_to_binlit};
+use crate::scalars::vector::impl_conv::{as_veclit, as_veclit_if_const, usize_to_binlit};
 
 const NAME: &str = "vec_dim";
 
@@ -120,10 +118,9 @@ impl Display for VectorDimFunction {
 mod tests {
     use std::sync::Arc;
 
+    use super::*;
     use common_query::error::Error;
     use datatypes::vectors::StringVector;
-    use crate::scalars::vector::vector_norm::VectorNormFunction;
-    use super::*;
 
     #[test]
     fn test_vec_dim() {
