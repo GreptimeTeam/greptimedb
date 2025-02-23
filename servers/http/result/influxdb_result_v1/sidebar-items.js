@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["InfluxdbOutput","InfluxdbRecordsOutput","InfluxdbV1Response","SqlQuery"]};

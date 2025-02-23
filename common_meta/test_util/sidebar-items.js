@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["new_ddl_context","new_ddl_context_with_kv_backend"],"struct":["MockDatanodeManager","MockFlownodeManager","MockNode","NoopPeerLookupService"],"trait":["MockDatanodeHandler","MockFlownodeHandler"],"type":["AffectedRows"]};

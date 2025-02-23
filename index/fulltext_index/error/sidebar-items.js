@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Error"],"struct":["AbortedSnafu","BiErrorsSnafu","BloomFilterFinishSnafu","ExternalSnafu","FinishedSnafu","IoSnafu","JoinSnafu","PuffinAddBlobSnafu","TantivyDocNotFoundSnafu","TantivyParserSnafu","TantivySnafu"],"type":["Result"]};

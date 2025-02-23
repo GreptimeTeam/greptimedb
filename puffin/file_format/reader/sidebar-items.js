@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["file","footer"],"struct":["PuffinFileFooterReader","PuffinFileReader"],"trait":["AsyncReader"]};
