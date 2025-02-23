@@ -685,7 +685,36 @@ pub enum Error {
         operation: String,
     },
 
-    #[cfg(feature = "pg_kvbackend")]
+    #[cfg(feature = "mysql_kvbackend")]
+    #[snafu(display("Failed to execute via MySql, sql: {}", sql))]
+    MySqlExecution {
+        sql: String,
+        #[snafu(source)]
+        error: sqlx::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "mysql_kvbackend")]
+    #[snafu(display("Failed to create connection pool for MySql"))]
+    CreateMySqlPool {
+        #[snafu(source)]
+        error: sqlx::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "mysql_kvbackend")]
+    #[snafu(display("Failed to {} MySql transaction", operation))]
+    MySqlTransaction {
+        #[snafu(source)]
+        error: sqlx::Error,
+        #[snafu(implicit)]
+        location: Location,
+        operation: String,
+    },
+
+    #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
     #[snafu(display("Rds transaction retry failed"))]
     RdsTransactionRetryFailed {
         #[snafu(implicit)]
@@ -823,8 +852,13 @@ impl ErrorExt for Error {
             PostgresExecution { .. }
             | CreatePostgresPool { .. }
             | GetPostgresConnection { .. }
-            | PostgresTransaction { .. }
-            | RdsTransactionRetryFailed { .. } => StatusCode::Internal,
+            | PostgresTransaction { .. } => StatusCode::Internal,
+            #[cfg(feature = "mysql_kvbackend")]
+            MySqlExecution { .. } | CreateMySqlPool { .. } | MySqlTransaction { .. } => {
+                StatusCode::Internal
+            }
+            #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+            RdsTransactionRetryFailed { .. } => StatusCode::Internal,
             Error::DatanodeTableInfoNotFound { .. } => StatusCode::Internal,
         }
     }
@@ -835,15 +869,25 @@ impl ErrorExt for Error {
 }
 
 impl Error {
-    #[cfg(feature = "pg_kvbackend")]
+    #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
     /// Check if the error is a serialization error.
     pub fn is_serialization_error(&self) -> bool {
         match self {
+            #[cfg(feature = "pg_kvbackend")]
             Error::PostgresTransaction { error, .. } => {
                 error.code() == Some(&tokio_postgres::error::SqlState::T_R_SERIALIZATION_FAILURE)
             }
+            #[cfg(feature = "pg_kvbackend")]
             Error::PostgresExecution { error, .. } => {
                 error.code() == Some(&tokio_postgres::error::SqlState::T_R_SERIALIZATION_FAILURE)
+            }
+            #[cfg(feature = "mysql_kvbackend")]
+            Error::MySqlExecution {
+                error: sqlx::Error::Database(database_error),
+                ..
+            } => {
+                database_error.message()
+                    == "Deadlock found when trying to get lock; try restarting transaction"
             }
             _ => false,
         }
