@@ -79,3 +79,7 @@ FROM (
     UNION ALL
     SELECT '[4.0, 5.0, 6.0]' AS v
 );
+
+SELECT vec_to_string(vec_dim('[0.0, 1.0, 2.0]'));
+
+SELECT vec_to_string(vec_dim('[7.0, 8.0, 9.0, 10.0]'));
