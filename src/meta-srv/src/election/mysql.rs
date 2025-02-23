@@ -323,7 +323,9 @@ impl Election for MySqlElection {
                 prev_expire_time > current_time,
                 UnexpectedSnafu {
                     violated: format!(
-                        "Candidate lease expired, key: {:?}",
+                        "Candidate lease expired at {:?} (current time: {:?}), key: {:?}",
+                        prev_expire_time,
+                        current_time,
                         String::from_utf8_lossy(&key.into_bytes())
                     ),
                 }
