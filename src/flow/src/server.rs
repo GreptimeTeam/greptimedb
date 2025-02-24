@@ -246,6 +246,7 @@ impl FlownodeInstance {
         self.server.shutdown().await.context(ShutdownServerSnafu)?;
 
         if let Some(task) = &self.heartbeat_task {
+            info!("Close heartbeat task for flownode");
             task.shutdown();
         }
 

@@ -294,7 +294,7 @@ fn find_expr_time_window_lower_bound(
         reason: format!(" unit mismatch for time window expression {expr:?}, found {lower_bound:?} and {upper_bound:?}"),
     });
 
-    let output_unit = lower_bound
+    let input_time_unit = lower_bound
         .context(UnexpectedSnafu {
             reason: "should have lower bound",
         })?
@@ -310,9 +310,10 @@ fn find_expr_time_window_lower_bound(
             reason: "should have upper bound",
         })?
         .value();
+
     while low < high {
         let mid = (low + high) / 2;
-        let mid_probe = common_time::Timestamp::new(mid, output_unit);
+        let mid_probe = common_time::Timestamp::new(mid, input_time_unit);
         let mid_time_window = eval_ts_to_ts(&phy_expr, df_schema, mid_probe)?;
 
         match mid_time_window.cmp(&cur_time_window) {
@@ -325,7 +326,7 @@ fn find_expr_time_window_lower_bound(
         }
     }
 
-    let final_lower_bound_for_time_window = common_time::Timestamp::new(low, output_unit);
+    let final_lower_bound_for_time_window = common_time::Timestamp::new(low, input_time_unit);
 
     Ok(Some(final_lower_bound_for_time_window))
 }
@@ -434,18 +435,20 @@ fn find_expr_time_window_upper_bound(
 fn eval_ts_to_ts(
     phy: &PhysicalExprRef,
     df_schema: &DFSchema,
-    value: Timestamp,
+    input_value: Timestamp,
 ) -> Result<Timestamp, Error> {
-    let ts_vector = match value.unit() {
-        TimeUnit::Second => TimestampSecondVector::from_vec(vec![value.value()]).to_arrow_array(),
+    let ts_vector = match input_value.unit() {
+        TimeUnit::Second => {
+            TimestampSecondVector::from_vec(vec![input_value.value()]).to_arrow_array()
+        }
         TimeUnit::Millisecond => {
-            TimestampMillisecondVector::from_vec(vec![value.value()]).to_arrow_array()
+            TimestampMillisecondVector::from_vec(vec![input_value.value()]).to_arrow_array()
         }
         TimeUnit::Microsecond => {
-            TimestampMicrosecondVector::from_vec(vec![value.value()]).to_arrow_array()
+            TimestampMicrosecondVector::from_vec(vec![input_value.value()]).to_arrow_array()
         }
         TimeUnit::Nanosecond => {
-            TimestampNanosecondVector::from_vec(vec![value.value()]).to_arrow_array()
+            TimestampNanosecondVector::from_vec(vec![input_value.value()]).to_arrow_array()
         }
     };
 
@@ -617,6 +620,28 @@ mod test {
         let ctx = QueryContext::arc();
 
         let testcases = [
+            // same alias is not same column
+            (
+                "SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS ts FROM numbers_with_ts GROUP BY ts;",
+                Timestamp::new(1740394109, TimeUnit::Second),
+                (
+                    "ts".to_string(),
+                    Some(Timestamp::new(1740394109000, TimeUnit::Millisecond)),
+                    Some(Timestamp::new(1740394109001, TimeUnit::Millisecond)),
+                ),
+                "SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS ts FROM numbers_with_ts WHERE ((ts >= CAST('2025-02-24 10:48:29' AS TIMESTAMP)) AND (ts <= CAST('2025-02-24 10:48:29.001' AS TIMESTAMP))) GROUP BY numbers_with_ts.ts"
+            ),
+            // complex time window index
+            (
+                "SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS time_window FROM numbers_with_ts GROUP BY time_window;",
+                Timestamp::new(1740394109, TimeUnit::Second),
+                (
+                    "ts".to_string(),
+                    Some(Timestamp::new(1740394080, TimeUnit::Second)),
+                    Some(Timestamp::new(1740394140, TimeUnit::Second)),
+                ),
+                "SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS time_window FROM numbers_with_ts WHERE ((ts >= CAST('2025-02-24 10:48:00' AS TIMESTAMP)) AND (ts <= CAST('2025-02-24 10:49:00' AS TIMESTAMP))) GROUP BY arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)')"
+            ),
             // no time index
             (
                 "SELECT date_bin('5 minutes', ts) FROM numbers_with_ts;",
@@ -690,7 +715,7 @@ mod test {
                 find_plan_time_window_bound(&plan, current, ctx.clone(), query_engine.clone())
                     .await
                     .unwrap();
-            assert_eq!(real, expected);
+            assert_eq!(expected, real);
 
             let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, false)
                 .await
