@@ -121,8 +121,7 @@ where
         path_provider: P,
     ) -> ParquetWriter<F, I, P> {
         let init_file = FileId::random();
-        let index_file_path = path_provider.build_index_file_path(init_file);
-        let indexer = indexer_builder.build(init_file, index_file_path).await;
+        let indexer = indexer_builder.build(init_file).await;
 
         ParquetWriter {
             path_provider,
@@ -140,11 +139,7 @@ where
         match self.current_indexer {
             None => {
                 self.current_file = FileId::random();
-                let index_file_path = self.path_provider.build_index_file_path(self.current_file);
-                let indexer = self
-                    .indexer_builder
-                    .build(self.current_file, index_file_path)
-                    .await;
+                let indexer = self.indexer_builder.build(self.current_file).await;
                 self.current_indexer = Some(indexer);
                 // safety: self.current_indexer already set above.
                 self.current_indexer.as_mut().unwrap()

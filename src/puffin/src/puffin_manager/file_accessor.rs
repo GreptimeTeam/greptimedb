@@ -27,12 +27,13 @@ use crate::error::Result;
 pub trait PuffinFileAccessor: Send + Sync + 'static {
     type Reader: SizeAwareRangeReader + Sync;
     type Writer: AsyncWrite + Unpin + Send;
+    type FileHandle: ToString + Clone + Send + Sync;
 
-    /// Opens a reader for the given puffin file.
-    async fn reader(&self, puffin_file_name: &str) -> Result<Self::Reader>;
+    /// Opens a reader for the given puffin file handle.
+    async fn reader(&self, handle: &Self::FileHandle) -> Result<Self::Reader>;
 
-    /// Creates a writer for the given puffin file.
-    async fn writer(&self, puffin_file_name: &str) -> Result<Self::Writer>;
+    /// Creates a writer for the given puffin file handle.
+    async fn writer(&self, handle: &Self::FileHandle) -> Result<Self::Writer>;
 }
 
 pub struct MockFileAccessor {
@@ -50,15 +51,16 @@ impl MockFileAccessor {
 impl PuffinFileAccessor for MockFileAccessor {
     type Reader = FileReader;
     type Writer = Compat<File>;
+    type FileHandle = String;
 
-    async fn reader(&self, puffin_file_name: &str) -> Result<Self::Reader> {
-        Ok(FileReader::new(self.tempdir.path().join(puffin_file_name))
+    async fn reader(&self, handle: &String) -> Result<Self::Reader> {
+        Ok(FileReader::new(self.tempdir.path().join(handle))
             .await
             .unwrap())
     }
 
-    async fn writer(&self, puffin_file_name: &str) -> Result<Self::Writer> {
-        let p = self.tempdir.path().join(puffin_file_name);
+    async fn writer(&self, handle: &String) -> Result<Self::Writer> {
+        let p = self.tempdir.path().join(handle);
         if let Some(p) = p.parent() {
             if !tokio::fs::try_exists(p).await.unwrap() {
                 tokio::fs::create_dir_all(p).await.unwrap();
