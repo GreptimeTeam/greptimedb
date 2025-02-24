@@ -17,14 +17,14 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common_meta::ddl::create_flow::FlowType;
-use common_telemetry::info;
 use common_telemetry::tracing::warn;
+use common_telemetry::{debug, info};
 use common_time::Timestamp;
 use datafusion_common::tree_node::TreeNode;
 use datatypes::value::Value;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, ResultExt};
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio::sync::{oneshot, RwLock};
 use tokio::time::Instant;
@@ -32,7 +32,7 @@ use tokio::time::Instant;
 use super::frontend_client::FrontendClient;
 use super::{df_plan_to_sql, AddFilterRewriter};
 use crate::adapter::{CreateFlowArgs, FlowId};
-use crate::error::{DatafusionSnafu, DatatypesSnafu, FlowNotFoundSnafu, UnexpectedSnafu};
+use crate::error::{DatafusionSnafu, DatatypesSnafu, UnexpectedSnafu};
 use crate::metrics::METRIC_FLOW_RULE_ENGINE_QUERY_TIME;
 use crate::recording_rules::{find_plan_time_window_bound, sql_to_df_plan};
 use crate::Error;
@@ -138,45 +138,13 @@ impl RecordingRuleEngine {
         }
         Ok(())
     }
-
-    async fn gen_and_exec_query_for_flow(
-        &self,
-        flow_id: FlowId,
-        need_upper_bound: bool,
-    ) -> Result<(), Error> {
-        let (new_query, state_ref) = {
-            let tasks = self.tasks.read().await;
-            let task = tasks
-                .get(&flow_id)
-                .context(FlowNotFoundSnafu { id: flow_id })?;
-            let new_query = task
-                .gen_query_with_time_window(self.engine.clone(), need_upper_bound)
-                .await?;
-            task.state.write().await.exec_state = ExecState::Executing;
-            (new_query, task.state.clone())
-        };
-
-        let instant = Instant::now();
-        info!("Executing flow {flow_id} with query {new_query}");
-        let res = self.frontend_client.sql(&new_query).await;
-        let elapsed = instant.elapsed();
-        info!(
-            "Flow {flow_id} executed, result: {res:?}, elapsed: {:?}",
-            elapsed
-        );
-        {
-            let mut state = state_ref.write().await;
-            state.set_next_sleep(elapsed, res.is_ok());
-        }
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone)]
 pub struct RecordingRuleTask {
     flow_id: FlowId,
     query: String,
-    /// in millisecond
+    /// in seconds
     expire_after: Option<i64>,
     sink_table_name: [String; 3],
     state: Arc<RwLock<RecordingRuleState>>,
@@ -230,7 +198,11 @@ impl RecordingRuleTask {
 
             let instant = Instant::now();
             let flow_id = self.flow_id;
-            info!("Executing flow {flow_id} with query {insert_into}");
+            let db_client = frontend_client.get_database_client().await?;
+            debug!(
+                "Executing flow {flow_id}(expire_after={:?} secs) on {:?} with query {insert_into}",
+                self.expire_after, db_client.peer.addr
+            );
 
             let timer = METRIC_FLOW_RULE_ENGINE_QUERY_TIME
                 .with_label_values(&[flow_id.to_string().as_str()])
@@ -240,14 +212,23 @@ impl RecordingRuleTask {
             drop(timer);
 
             let elapsed = instant.elapsed();
-            info!(
-                "Flow {flow_id} executed, result: {res:?}, elapsed: {:?}",
-                elapsed
-            );
-            {
-                let mut state = self.state.write().await;
-                state.set_next_sleep(elapsed, res.is_ok());
+            if res.is_ok() {
+                debug!(
+                    "Flow {flow_id} executed, result: {res:?}, elapsed: {:?}",
+                    elapsed
+                );
+            } else {
+                warn!(
+                    "Failed to execute Flow {flow_id}, result: {res:?}, elapsed: {:?} with query: {insert_into}",
+                    elapsed
+                );
             }
+
+            self.state
+                .write()
+                .await
+                .after_query_exec(elapsed, res.is_ok());
+
             let sleep_until = {
                 let mut state = self.state.write().await;
                 match state.shutdown_rx.try_recv() {
@@ -276,13 +257,13 @@ impl RecordingRuleTask {
             .expect("Time went backwards");
         let low_bound = self
             .expire_after
-            .map(|e| since_the_epoch.as_millis() - e as u128);
+            .map(|e| since_the_epoch.as_secs() - e as u64);
 
         let Some(low_bound) = low_bound else {
             return Ok(self.query.clone());
         };
 
-        let low_bound = Timestamp::new_millisecond(low_bound as i64);
+        let low_bound = Timestamp::new_second(low_bound as i64);
 
         let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.query, true).await?;
 
@@ -363,7 +344,7 @@ impl RecordingRuleState {
 
     /// called after last query is done
     /// `is_succ` indicate whether the last query is successful
-    pub fn set_next_sleep(&mut self, elapsed: Duration, _is_succ: bool) {
+    pub fn after_query_exec(&mut self, elapsed: Duration, _is_succ: bool) {
         self.exec_state = ExecState::Idle;
         self.last_query_duration = elapsed;
         self.last_update_time = Instant::now();
