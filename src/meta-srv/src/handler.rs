@@ -293,7 +293,7 @@ impl HeartbeatHandlerGroup {
         &self,
         req: HeartbeatRequest,
         mut ctx: Context,
-    ) -> Result<HeartbeatResponse> {
+    ) -> Result<(HeartbeatResponse, Context)> {
         let mut acc = HeartbeatAccumulator::default();
         let role = req
             .header
@@ -322,7 +322,7 @@ impl HeartbeatHandlerGroup {
             region_lease: acc.region_lease,
             ..Default::default()
         };
-        Ok(res)
+        Ok((res, ctx))
     }
 }
 

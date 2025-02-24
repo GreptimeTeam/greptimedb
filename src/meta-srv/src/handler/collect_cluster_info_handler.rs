@@ -157,6 +157,7 @@ fn extract_base_info(request: &HeartbeatRequest) -> Option<(NodeInfoKey, Peer, P
 }
 
 async fn put_into_memory_store(ctx: &mut Context, key: NodeInfoKey, value: NodeInfo) -> Result<()> {
+    ctx.current_node_info = Some(key);
     let key = key.into();
     let value = value.try_into().context(InvalidClusterInfoFormatSnafu)?;
     let put_req = PutRequest {

@@ -50,7 +50,7 @@ impl heartbeat_server::Heartbeat for Metasrv {
             violated: "expected heartbeat handlers",
         })?;
 
-        let ctx = self.new_ctx();
+        let mut ctx = self.new_ctx();
         let _handle = common_runtime::spawn_global(async move {
             let mut pusher_id = None;
             while let Some(msg) = in_stream.next().await {
@@ -68,17 +68,26 @@ impl heartbeat_server::Heartbeat for Metasrv {
                         };
 
                         if pusher_id.is_none() {
-                            pusher_id = register_pusher(&handler_group, header, tx.clone()).await;
+                            pusher_id =
+                                Some(register_pusher(&handler_group, header, tx.clone()).await);
                         }
                         if let Some(k) = &pusher_id {
                             METRIC_META_HEARTBEAT_RECV.with_label_values(&[&k.to_string()]);
                         } else {
                             METRIC_META_HEARTBEAT_RECV.with_label_values(&["none"]);
                         }
-                        let res = handler_group
+
+                        let res = match handler_group
                             .handle(req, ctx.clone())
                             .await
-                            .map_err(|e| e.into());
+                            .map_err(|e| e.into())
+                        {
+                            Ok((resp, new_ctx)) => {
+                                ctx = new_ctx;
+                                Ok(resp)
+                            }
+                            Err(e) => Err(e),
+                        };
 
                         is_not_leader = res.as_ref().is_ok_and(|r| r.is_not_leader());
 
@@ -111,6 +120,7 @@ impl heartbeat_server::Heartbeat for Metasrv {
                 }
             }
 
+            ctx.on_node_disconnect().await;
             info!("Heartbeat stream closed: {pusher_id:?}");
 
             if let Some(pusher_id) = pusher_id {
@@ -173,13 +183,13 @@ async fn register_pusher(
     handler_group: &HeartbeatHandlerGroup,
     header: &RequestHeader,
     sender: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
-) -> Option<PusherId> {
+) -> PusherId {
     let role = header.role();
     let id = get_node_id(header);
     let pusher_id = PusherId::new(role, id);
     let pusher = Pusher::new(sender, header);
     handler_group.register_pusher(pusher_id, pusher).await;
-    Some(pusher_id)
+    pusher_id
 }
 
 #[cfg(test)]
