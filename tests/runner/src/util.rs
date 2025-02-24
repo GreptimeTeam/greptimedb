@@ -389,7 +389,7 @@ pub fn setup_mysql(mysql_port: u16, mysql_version: Option<&str>) {
     ]);
     arg_list.extend(["-p", &mysql_port_forward]);
 
-    arg_list.extend(["--name", "greptimedb_mysql", &mysql_image]);
+    arg_list.extend(["--name", "greptimedb_mysql_sqlness", &mysql_image]);
 
     let mut cmd = std::process::Command::new("docker");
 
