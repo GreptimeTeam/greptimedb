@@ -373,20 +373,20 @@ Affected Rows: 0
 
 show create table test_column_constrain_composite_indexes;
 
-+-----------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| Table                                   | Create Table                                                                                                                                                  |
-+-----------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| test_column_constrain_composite_indexes | CREATE TABLE IF NOT EXISTS "test_column_constrain_composite_indexes" (                                                                                        |
-|                                         |   "id" INT NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM') INVERTED INDEX,                                                                    |
-|                                         |   "host" STRING NULL FULLTEXT WITH(analyzer = 'English', case_sensitive = 'false') SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM') INVERTED INDEX, |
-|                                         |   "ts" TIMESTAMP(3) NOT NULL,                                                                                                                                 |
-|                                         |   TIME INDEX ("ts"),                                                                                                                                          |
-|                                         |   PRIMARY KEY ("host")                                                                                                                                        |
-|                                         | )                                                                                                                                                             |
-|                                         |                                                                                                                                                               |
-|                                         | ENGINE=mito                                                                                                                                                   |
-|                                         |                                                                                                                                                               |
-+-----------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------+
++-----------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table                                   | Create Table                                                                                                                                                        |
++-----------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| test_column_constrain_composite_indexes | CREATE TABLE IF NOT EXISTS "test_column_constrain_composite_indexes" (                                                                                              |
+|                                         |   "id" INT NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM') INVERTED INDEX,                                                                          |
+|                                         |   "host" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', case_sensitive = 'false') SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM') INVERTED INDEX, |
+|                                         |   "ts" TIMESTAMP(3) NOT NULL,                                                                                                                                       |
+|                                         |   TIME INDEX ("ts"),                                                                                                                                                |
+|                                         |   PRIMARY KEY ("host")                                                                                                                                              |
+|                                         | )                                                                                                                                                                   |
+|                                         |                                                                                                                                                                     |
+|                                         | ENGINE=mito                                                                                                                                                         |
+|                                         |                                                                                                                                                                     |
++-----------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 drop table test_column_constrain_composite_indexes;
 
