@@ -23,13 +23,13 @@ INSERT INTO test_hll (`id`, `value`) VALUES
 
 Affected Rows: 13
 
-select hll_calc(hll_state(`value`)) from test_hll;
+select hll_count(hll(`value`)) from test_hll;
 
-+-------------------------------------+
-| hll_calc(hll_state(test_hll.value)) |
-+-------------------------------------+
-| 10                                  |
-+-------------------------------------+
++--------------------------------+
+| hll_count(hll(test_hll.value)) |
++--------------------------------+
+| 10                             |
++--------------------------------+
 
 INSERT INTO test_hll (`id`, `value`) VALUES
     (16, "b"),
@@ -40,13 +40,13 @@ INSERT INTO test_hll (`id`, `value`) VALUES
 
 Affected Rows: 5
 
-select hll_calc(hll_state(`value`)) from test_hll;
+select hll_count(hll(`value`)) from test_hll;
 
-+-------------------------------------+
-| hll_calc(hll_state(test_hll.value)) |
-+-------------------------------------+
-| 12                                  |
-+-------------------------------------+
++--------------------------------+
+| hll_count(hll(test_hll.value)) |
++--------------------------------+
+| 12                             |
++--------------------------------+
 
 create table test_hll_merge (
     `id` INT PRIMARY KEY,
@@ -57,22 +57,22 @@ create table test_hll_merge (
 Affected Rows: 0
 
 insert into test_hll_merge (`id`, `state`)
-select 1, hll_state(`value`) from test_hll;
+select 1, hll(`value`) from test_hll;
 
 Affected Rows: 1
 
 insert into test_hll_merge (`id`, `state`)
-select 2, hll_state(`value`) from test_hll;
+select 2, hll(`value`) from test_hll;
 
 Affected Rows: 1
 
-select hll_calc(hll_merge(`state`)) from test_hll_merge;
+select hll_count(hll_merge(`state`)) from test_hll_merge;
 
-+-------------------------------------------+
-| hll_calc(hll_merge(test_hll_merge.state)) |
-+-------------------------------------------+
-| 12                                        |
-+-------------------------------------------+
++--------------------------------------------+
+| hll_count(hll_merge(test_hll_merge.state)) |
++--------------------------------------------+
+| 12                                         |
++--------------------------------------------+
 
 drop table test_hll;
 

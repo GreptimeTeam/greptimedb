@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Implementation of the scalar function `hll_calc`.
+//! Implementation of the scalar function `hll_count`.
 
 use std::fmt;
 use std::fmt::Display;
@@ -31,9 +31,9 @@ use crate::aggr::HllStateType;
 use crate::function::{Function, FunctionContext};
 use crate::function_registry::FunctionRegistry;
 
-const NAME: &str = "hll_calc";
+const NAME: &str = "hll_count";
 
-/// HllCalcFunction implements the scalar function `hll_calc`.
+/// HllCalcFunction implements the scalar function `hll_count`.
 ///
 /// It accepts one argument:
 /// 1. The serialized HyperLogLogPlus state, as produced by the aggregator (binary).
@@ -74,7 +74,7 @@ impl Function for HllCalcFunction {
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         if columns.len() != 1 {
             return InvalidFuncArgsSnafu {
-                err_msg: format!("hll_calc expects 1 argument, got {}", columns.len()),
+                err_msg: format!("hll_count expects 1 argument, got {}", columns.len()),
             }
             .fail();
         }
@@ -123,9 +123,9 @@ mod tests {
     use crate::utils::FixedRandomState;
 
     #[test]
-    fn test_hll_calc_function() {
+    fn test_hll_count_function() {
         let function = HllCalcFunction;
-        assert_eq!("hll_calc", function.name());
+        assert_eq!("hll_count", function.name());
         assert_eq!(
             ConcreteDataType::uint64_datatype(),
             function
@@ -154,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hll_calc_function_errors() {
+    fn test_hll_count_function_errors() {
         let function = HllCalcFunction;
 
         // Test with invalid number of arguments
@@ -164,7 +164,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("hll_calc expects 1 argument"));
+            .contains("hll_count expects 1 argument"));
 
         // Test with invalid binary data
         let args: Vec<VectorRef> = vec![Arc::new(BinaryVector::from(vec![Some(vec![1, 2, 3])]))]; // Invalid binary data

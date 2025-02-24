@@ -22,7 +22,7 @@ pub mod matches;
 pub mod math;
 pub mod vector;
 
-pub(crate) mod hll_calc;
+pub(crate) mod hll_count;
 #[cfg(test)]
 pub(crate) mod test;
 pub(crate) mod timestamp;

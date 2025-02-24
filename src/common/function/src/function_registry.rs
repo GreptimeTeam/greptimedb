@@ -22,7 +22,7 @@ use crate::function::{AsyncFunctionRef, FunctionRef};
 use crate::scalars::aggregate::{AggregateFunctionMetaRef, AggregateFunctions};
 use crate::scalars::date::DateFunction;
 use crate::scalars::expression::ExpressionFunction;
-use crate::scalars::hll_calc::HllCalcFunction;
+use crate::scalars::hll_count::HllCalcFunction;
 use crate::scalars::json::JsonFunction;
 use crate::scalars::matches::MatchesFunction;
 use crate::scalars::math::MathFunction;

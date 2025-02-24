@@ -19,7 +19,7 @@ INSERT INTO test_hll (`id`, `value`) VALUES
     (14, "n"),
     (15, "o");
 
-select hll_calc(hll_state(`value`)) from test_hll;
+select hll_count(hll(`value`)) from test_hll;
 
 INSERT INTO test_hll (`id`, `value`) VALUES
     (16, "b"),
@@ -28,7 +28,7 @@ INSERT INTO test_hll (`id`, `value`) VALUES
     (19, "s"),
     (20, "t");
 
-select hll_calc(hll_state(`value`)) from test_hll;
+select hll_count(hll(`value`)) from test_hll;
 
 create table test_hll_merge (
     `id` INT PRIMARY KEY,
@@ -37,12 +37,12 @@ create table test_hll_merge (
 );
 
 insert into test_hll_merge (`id`, `state`)
-select 1, hll_state(`value`) from test_hll;
+select 1, hll(`value`) from test_hll;
 
 insert into test_hll_merge (`id`, `state`)
-select 2, hll_state(`value`) from test_hll;
+select 2, hll(`value`) from test_hll;
 
-select hll_calc(hll_merge(`state`)) from test_hll_merge;
+select hll_count(hll_merge(`state`)) from test_hll_merge;
 
 drop table test_hll;
 
