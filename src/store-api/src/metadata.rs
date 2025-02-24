@@ -340,27 +340,16 @@ impl RegionMetadata {
     }
 
     /// Gets the column ids to be indexed by inverted index.
-    ///
-    /// If there is no column with inverted index key, it will use primary key columns.
     pub fn inverted_indexed_column_ids<'a>(
         &self,
         ignore_column_ids: impl Iterator<Item = &'a ColumnId>,
     ) -> HashSet<ColumnId> {
-        // Default to use primary key columns as inverted index columns.
-        let pk_as_inverted_index = !self
+        let mut inverted_index = self
             .column_metadatas
             .iter()
-            .any(|c| c.column_schema.has_inverted_index_key());
-
-        let mut inverted_index: HashSet<_> = if pk_as_inverted_index {
-            self.primary_key_columns().map(|c| c.column_id).collect()
-        } else {
-            self.column_metadatas
-                .iter()
-                .filter(|column| column.column_schema.is_inverted_indexed())
-                .map(|column| column.column_id)
-                .collect()
-        };
+            .filter(|column| column.column_schema.is_inverted_indexed())
+            .map(|column| column.column_id)
+            .collect::<HashSet<_>>();
 
         for ignored in ignore_column_ids {
             inverted_index.remove(ignored);
