@@ -56,7 +56,10 @@ async fn test_engine_drop_region() {
 
     // It's okay to drop a region doesn't exist.
     engine
-        .handle_request(region_id, RegionRequest::Drop(RegionDropRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Drop(RegionDropRequest { fast_path: false }),
+        )
         .await
         .unwrap_err();
 
@@ -86,7 +89,10 @@ async fn test_engine_drop_region() {
 
     // drop the created region.
     engine
-        .handle_request(region_id, RegionRequest::Drop(RegionDropRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Drop(RegionDropRequest { fast_path: false }),
+        )
         .await
         .unwrap();
     assert!(!engine.is_region_exists(region_id));
@@ -192,7 +198,10 @@ async fn test_engine_drop_region_for_custom_store() {
 
     // Drop the custom region.
     engine
-        .handle_request(custom_region_id, RegionRequest::Drop(RegionDropRequest {}))
+        .handle_request(
+            custom_region_id,
+            RegionRequest::Drop(RegionDropRequest { fast_path: false }),
+        )
         .await
         .unwrap();
     assert!(!engine.is_region_exists(custom_region_id));
