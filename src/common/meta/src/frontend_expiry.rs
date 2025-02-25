@@ -111,7 +111,6 @@ impl FrontendExpiryListener {
         let req = RangeRequest::new().with_prefix(prefix);
         let current_time_millis = common_time::util::current_time_millis();
         let resp = in_memory.range(req).await?;
-        let max_idle_time = max_idle_time;
         Ok(resp
             .kvs
             .into_iter()
