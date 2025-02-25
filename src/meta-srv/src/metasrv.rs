@@ -25,7 +25,6 @@ use common_base::Plugins;
 use common_config::Configurable;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
-use common_meta::cluster::{NodeInfoKey, Role};
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::maintenance::MaintenanceModeManagerRef;
 use common_meta::key::TableMetadataManagerRef;
@@ -251,25 +250,11 @@ pub struct Context {
     pub is_infancy: bool,
     pub table_metadata_manager: TableMetadataManagerRef,
     pub cache_invalidator: CacheInvalidatorRef,
-    pub current_node_info: Option<NodeInfoKey>,
 }
 
 impl Context {
     pub fn reset_in_memory(&self) {
         self.in_memory.reset();
-    }
-
-    /// Handle node stream disconnect event.
-    pub async fn on_node_disconnect(self) {
-        if let Some(current_node_info) = self.current_node_info {
-            if current_node_info.role == Role::Frontend {
-                let node_id = current_node_info.node_id;
-                let bytes: Vec<u8> = current_node_info.into();
-                if let Err(e) = self.in_memory.delete(&bytes, false).await {
-                    warn!(e; "Failed to delete node info: {}", node_id);
-                }
-            }
-        }
     }
 }
 
@@ -688,7 +673,6 @@ impl Metasrv {
             is_infancy: false,
             table_metadata_manager,
             cache_invalidator,
-            current_node_info: None,
         }
     }
 }

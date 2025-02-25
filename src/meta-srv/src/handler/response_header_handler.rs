@@ -87,7 +87,6 @@ mod tests {
             is_infancy: false,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend.clone())),
             cache_invalidator: Arc::new(DummyCacheInvalidator),
-            current_node_info: None,
         };
 
         let req = HeartbeatRequest {

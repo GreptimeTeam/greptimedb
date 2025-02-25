@@ -113,7 +113,6 @@ impl heartbeat_server::Heartbeat for Metasrv {
                 }
             }
 
-            ctx.on_node_disconnect().await;
             info!("Heartbeat stream closed: {pusher_id:?}");
 
             if let Some(pusher_id) = pusher_id {
