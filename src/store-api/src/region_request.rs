@@ -222,11 +222,10 @@ fn make_region_creates(creates: CreateRequests) -> Result<Vec<(RegionId, RegionR
 
 fn parse_region_drop(drop: DropRequest) -> Result<(RegionId, RegionDropRequest)> {
     let region_id = drop.region_id.into();
-    let force_drop_all_logical_tables = drop.force_drop_all_logical_tables;
     Ok((
         region_id,
         RegionDropRequest {
-            fast_path: force_drop_all_logical_tables,
+            fast_path: drop.fast_path,
         },
     ))
 }
