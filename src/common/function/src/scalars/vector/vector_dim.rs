@@ -19,11 +19,11 @@ use common_query::error::InvalidFuncArgsSnafu;
 use common_query::prelude::{Signature, TypeSignature, Volatility};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{BinaryVectorBuilder, MutableVector, VectorRef};
+use datatypes::vectors::{MutableVector, UInt64VectorBuilder, VectorRef};
 use snafu::ensure;
 
 use crate::function::{Function, FunctionContext};
-use crate::scalars::vector::impl_conv::{as_veclit, as_veclit_if_const, usize_to_binlit};
+use crate::scalars::vector::impl_conv::{as_veclit, as_veclit_if_const};
 
 const NAME: &str = "vec_dim";
 
@@ -52,7 +52,7 @@ impl Function for VectorDimFunction {
         &self,
         _input_types: &[ConcreteDataType],
     ) -> common_query::error::Result<ConcreteDataType> {
-        Ok(ConcreteDataType::binary_datatype())
+        Ok(ConcreteDataType::uint64_datatype())
     }
 
     fn signature(&self) -> Signature {
@@ -82,7 +82,7 @@ impl Function for VectorDimFunction {
         let arg0 = &columns[0];
 
         let len = arg0.len();
-        let mut result = BinaryVectorBuilder::with_capacity(len);
+        let mut result = UInt64VectorBuilder::with_capacity(len);
         if len == 0 {
             return Ok(result.to_vector());
         }
@@ -98,10 +98,7 @@ impl Function for VectorDimFunction {
                 result.push_null();
                 continue;
             };
-
-            let len = arg0.len();
-            let binlit = usize_to_binlit(len);
-            result.push(Some(&binlit));
+            result.push(Some(arg0.len() as u64));
         }
 
         Ok(result.to_vector())
@@ -118,9 +115,10 @@ impl Display for VectorDimFunction {
 mod tests {
     use std::sync::Arc;
 
-    use super::*;
     use common_query::error::Error;
     use datatypes::vectors::StringVector;
+
+    use super::*;
 
     #[test]
     fn test_vec_dim() {
@@ -137,19 +135,10 @@ mod tests {
 
         let result = result.as_ref();
         assert_eq!(result.len(), 4);
-        assert_eq!(
-            result.get_ref(0).as_binary().unwrap(),
-            Some(usize_to_binlit(3).as_slice())
-        );
-        assert_eq!(
-            result.get_ref(1).as_binary().unwrap(),
-            Some(usize_to_binlit(4).as_slice())
-        );
+        assert_eq!(result.get_ref(0).as_u64().unwrap(), Some(3));
+        assert_eq!(result.get_ref(1).as_u64().unwrap(), Some(4));
         assert!(result.get_ref(2).is_null());
-        assert_eq!(
-            result.get_ref(3).as_binary().unwrap(),
-            Some(usize_to_binlit(1).as_slice())
-        );
+        assert_eq!(result.get_ref(3).as_u64().unwrap(), Some(1));
     }
 
     #[test]

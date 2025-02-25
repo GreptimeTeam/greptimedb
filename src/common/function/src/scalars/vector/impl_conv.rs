@@ -125,18 +125,6 @@ pub fn veclit_to_binlit(vec: &[f32]) -> Vec<u8> {
     }
 }
 
-/// Convert an usize to a binary literal.
-pub fn usize_to_binlit(num: usize) -> Vec<u8> {
-    if cfg!(target_endian = "little") {
-        unsafe {
-            std::slice::from_raw_parts(&num as *const usize as *const u8, std::mem::size_of::<usize>())
-                .to_vec()
-        }
-    } else {
-        num.to_le_bytes().to_vec()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

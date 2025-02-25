@@ -22,11 +22,11 @@ mod scalar_add;
 mod scalar_mul;
 pub(crate) mod sum;
 mod vector_add;
+mod vector_dim;
 mod vector_div;
 mod vector_mul;
 mod vector_norm;
 mod vector_sub;
-mod vector_dim;
 
 use std::sync::Arc;
 
