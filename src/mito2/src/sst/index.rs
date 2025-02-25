@@ -394,27 +394,27 @@ mod tests {
     use crate::config::{FulltextIndexConfig, Mode};
 
     struct MetaConfig {
-        with_tag: bool,
+        with_inverted: bool,
         with_fulltext: bool,
         with_skipping_bloom: bool,
     }
 
     fn mock_region_metadata(
         MetaConfig {
-            with_tag,
+            with_inverted,
             with_fulltext,
             with_skipping_bloom,
         }: MetaConfig,
     ) -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
+        let mut column_schema = ColumnSchema::new("a", ConcreteDataType::int64_datatype(), false);
+        if with_inverted {
+            column_schema = column_schema.with_inverted_index(true);
+        }
         builder
             .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("a", ConcreteDataType::int64_datatype(), false),
-                semantic_type: if with_tag {
-                    SemanticType::Tag
-                } else {
-                    SemanticType::Field
-                },
+                column_schema,
+                semantic_type: SemanticType::Field,
                 column_id: 1,
             })
             .push_column_metadata(ColumnMetadata {
@@ -431,10 +431,6 @@ mod tests {
                 semantic_type: SemanticType::Timestamp,
                 column_id: 3,
             });
-
-        if with_tag {
-            builder.primary_key(vec![1]);
-        }
 
         if with_fulltext {
             let column_schema =
@@ -502,7 +498,7 @@ mod tests {
         let intm_manager = mock_intm_mgr(dir.path().to_string_lossy()).await;
 
         let metadata = mock_region_metadata(MetaConfig {
-            with_tag: true,
+            with_inverted: true,
             with_fulltext: true,
             with_skipping_bloom: true,
         });
@@ -532,7 +528,7 @@ mod tests {
         let intm_manager = mock_intm_mgr(dir.path().to_string_lossy()).await;
 
         let metadata = mock_region_metadata(MetaConfig {
-            with_tag: true,
+            with_inverted: true,
             with_fulltext: true,
             with_skipping_bloom: true,
         });
@@ -607,7 +603,7 @@ mod tests {
         let intm_manager = mock_intm_mgr(dir.path().to_string_lossy()).await;
 
         let metadata = mock_region_metadata(MetaConfig {
-            with_tag: false,
+            with_inverted: false,
             with_fulltext: true,
             with_skipping_bloom: true,
         });
@@ -630,7 +626,7 @@ mod tests {
         assert!(indexer.bloom_filter_indexer.is_some());
 
         let metadata = mock_region_metadata(MetaConfig {
-            with_tag: true,
+            with_inverted: true,
             with_fulltext: false,
             with_skipping_bloom: true,
         });
@@ -653,7 +649,7 @@ mod tests {
         assert!(indexer.bloom_filter_indexer.is_some());
 
         let metadata = mock_region_metadata(MetaConfig {
-            with_tag: true,
+            with_inverted: true,
             with_fulltext: true,
             with_skipping_bloom: false,
         });
@@ -683,7 +679,7 @@ mod tests {
         let intm_manager = mock_intm_mgr(dir.path().to_string_lossy()).await;
 
         let metadata = mock_region_metadata(MetaConfig {
-            with_tag: true,
+            with_inverted: true,
             with_fulltext: true,
             with_skipping_bloom: true,
         });
