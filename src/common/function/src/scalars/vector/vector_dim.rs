@@ -27,17 +27,17 @@ use crate::scalars::vector::impl_conv::{as_veclit, as_veclit_if_const};
 
 const NAME: &str = "vec_dim";
 
-/// Adds corresponding elements of two vectors, returns a vector.
+/// Returns the dimension of the vector.
 ///
 /// # Example
 ///
 /// ```sql
-/// SELECT vec_to_string(vec_dim("[1.0, 1.0, 1.0, 2.0]")) as result;
+/// SELECT vec_dim('[7.0, 8.0, 9.0, 10.0]');
 ///
 /// +---------------------------------------------------------------+
-/// | vec_to_string(vec_dim(Utf8("[1.0, 1.0, 1.0, 2.0]"))) |
+/// | vec_dim(Utf8("[7.0, 8.0, 9.0, 10.0]"))                        |
 /// +---------------------------------------------------------------+
-/// | [1]                                                         |
+/// | 4                                                             |
 /// +---------------------------------------------------------------+
 ///
 #[derive(Debug, Clone, Default)]
