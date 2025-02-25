@@ -292,8 +292,8 @@ impl HeartbeatHandlerGroup {
     pub async fn handle(
         &self,
         req: HeartbeatRequest,
-        mut ctx: Context,
-    ) -> Result<(HeartbeatResponse, Context)> {
+        ctx: &mut Context,
+    ) -> Result<HeartbeatResponse> {
         let mut acc = HeartbeatAccumulator::default();
         let role = req
             .header
@@ -312,7 +312,7 @@ impl HeartbeatHandlerGroup {
                 .with_label_values(&[*name])
                 .start_timer();
 
-            if handler.handle(&req, &mut ctx, &mut acc).await? == HandleControl::Done {
+            if handler.handle(&req, ctx, &mut acc).await? == HandleControl::Done {
                 break;
             }
         }
@@ -322,7 +322,7 @@ impl HeartbeatHandlerGroup {
             region_lease: acc.region_lease,
             ..Default::default()
         };
-        Ok((res, ctx))
+        Ok(res)
     }
 }
 

@@ -77,17 +77,10 @@ impl heartbeat_server::Heartbeat for Metasrv {
                             METRIC_META_HEARTBEAT_RECV.with_label_values(&["none"]);
                         }
 
-                        let res = match handler_group
-                            .handle(req, ctx.clone())
+                        let res = handler_group
+                            .handle(req, &mut ctx)
                             .await
-                            .map_err(|e| e.into())
-                        {
-                            Ok((resp, new_ctx)) => {
-                                ctx = new_ctx;
-                                Ok(resp)
-                            }
-                            Err(e) => Err(e),
-                        };
+                            .map_err(|e| e.into());
 
                         is_not_leader = res.as_ref().is_ok_and(|r| r.is_not_leader());
 
