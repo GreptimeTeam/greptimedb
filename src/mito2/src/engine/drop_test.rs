@@ -58,9 +58,7 @@ async fn test_engine_drop_region() {
     engine
         .handle_request(
             region_id,
-            RegionRequest::Drop(RegionDropRequest {
-                force_drop_all_logical_tables: false,
-            }),
+            RegionRequest::Drop(RegionDropRequest { fast_path: false }),
         )
         .await
         .unwrap_err();
@@ -93,9 +91,7 @@ async fn test_engine_drop_region() {
     engine
         .handle_request(
             region_id,
-            RegionRequest::Drop(RegionDropRequest {
-                force_drop_all_logical_tables: false,
-            }),
+            RegionRequest::Drop(RegionDropRequest { fast_path: false }),
         )
         .await
         .unwrap();
@@ -204,9 +200,7 @@ async fn test_engine_drop_region_for_custom_store() {
     engine
         .handle_request(
             custom_region_id,
-            RegionRequest::Drop(RegionDropRequest {
-                force_drop_all_logical_tables: false,
-            }),
+            RegionRequest::Drop(RegionDropRequest { fast_path: false }),
         )
         .await
         .unwrap();
