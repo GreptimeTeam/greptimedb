@@ -627,7 +627,7 @@ impl WorkerRequest {
             RegionRequest::Drop(_) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
                 sender: sender.into(),
-                request: DdlRequest::Drop(()),
+                request: DdlRequest::Drop,
             }),
             RegionRequest::Open(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
@@ -690,7 +690,7 @@ impl WorkerRequest {
 #[derive(Debug)]
 pub(crate) enum DdlRequest {
     Create(RegionCreateRequest),
-    Drop(()),
+    Drop,
     Open((RegionOpenRequest, Option<WalEntryReceiver>)),
     Close(RegionCloseRequest),
     Alter(RegionAlterRequest),
