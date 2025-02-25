@@ -230,8 +230,8 @@ impl TryFrom<Vec<u8>> for NodeInfoKey {
     }
 }
 
-impl From<NodeInfoKey> for Vec<u8> {
-    fn from(key: NodeInfoKey) -> Self {
+impl From<&NodeInfoKey> for Vec<u8> {
+    fn from(key: &NodeInfoKey) -> Self {
         format!(
             "{}-{}-{}-{}",
             CLUSTER_NODE_INFO_PREFIX,
@@ -313,7 +313,7 @@ mod tests {
             node_id: 2,
         };
 
-        let key_bytes: Vec<u8> = key.into();
+        let key_bytes: Vec<u8> = (&key).into();
         let new_key: NodeInfoKey = key_bytes.try_into().unwrap();
 
         assert_eq!(1, new_key.cluster_id);

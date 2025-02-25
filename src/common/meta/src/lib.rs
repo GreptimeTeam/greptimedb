@@ -27,6 +27,7 @@ pub mod ddl_manager;
 pub mod distributed_time_constants;
 pub mod error;
 pub mod flow_name;
+pub mod frontend_expiry;
 pub mod heartbeat;
 pub mod instruction;
 pub mod key;

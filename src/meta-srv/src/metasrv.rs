@@ -26,6 +26,7 @@ use common_config::Configurable;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::ProcedureExecutorRef;
+use common_meta::frontend_expiry::FrontendExpiryListener;
 use common_meta::key::maintenance::MaintenanceModeManagerRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
@@ -442,6 +443,11 @@ impl Metasrv {
             leadership_change_notifier.add_listener(self.wal_options_allocator.clone());
             leadership_change_notifier
                 .add_listener(Arc::new(ProcedureManagerListenerAdapter(procedure_manager)));
+            leadership_change_notifier.add_listener(Arc::new(FrontendExpiryListener::new(
+                Duration::from_secs(1),
+                Duration::from_secs(60),
+                self.in_memory.clone(),
+            )));
             if let Some(region_supervisor_ticker) = &self.region_supervisor_ticker {
                 leadership_change_notifier.add_listener(region_supervisor_ticker.clone() as _);
             }
