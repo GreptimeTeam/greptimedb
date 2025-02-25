@@ -26,6 +26,8 @@ use crate::leadership_notifier::LeadershipChangeListener;
 use crate::rpc::store::RangeRequest;
 use crate::rpc::KeyValue;
 
+/// FrontendExpiryListener periodically checks all node info in memory and removes
+/// expired node info to prevent memory leak.
 pub struct FrontendExpiryListener {
     handle: Mutex<Option<JoinHandle<()>>>,
     tick_interval: Duration,
@@ -83,6 +85,7 @@ impl FrontendExpiryListener {
         }
     }
 
+    /// Cleans expired nodes from memory.
     async fn clean_expired_frontend_node(
         in_memory: &ResettableKvBackendRef,
         max_idle_time: Duration,
@@ -99,6 +102,7 @@ impl FrontendExpiryListener {
         Ok(())
     }
 
+    /// Lists expired frontend nodes that have been inactive more than `max_idle_time`.
     async fn list_expired_nodes(
         in_memory: &ResettableKvBackendRef,
         max_idle_time: Duration,
