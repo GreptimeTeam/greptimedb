@@ -152,6 +152,12 @@ pub struct MetasrvOptions {
     #[cfg(feature = "pg_kvbackend")]
     /// Lock id for meta kv election. Only effect when using pg_kvbackend.
     pub meta_election_lock_id: u64,
+    /// Interval for checking expired nodes.
+    #[serde(with = "humantime_serde")]
+    pub node_expiry_tick: Duration,
+    /// Max idle time before nodes are removed from metasrv in-memory state.
+    #[serde(with = "humantime_serde")]
+    pub node_max_idle_time: Duration,
 }
 
 const DEFAULT_METASRV_ADDR_PORT: &str = "3002";
@@ -193,6 +199,8 @@ impl Default for MetasrvOptions {
             meta_table_name: DEFAULT_META_TABLE_NAME.to_string(),
             #[cfg(feature = "pg_kvbackend")]
             meta_election_lock_id: DEFAULT_META_ELECTION_LOCK_ID,
+            node_expiry_tick: Duration::from_secs(60),
+            node_max_idle_time: Duration::from_secs(12 * 60 * 60),
         }
     }
 }
@@ -444,8 +452,8 @@ impl Metasrv {
             leadership_change_notifier
                 .add_listener(Arc::new(ProcedureManagerListenerAdapter(procedure_manager)));
             leadership_change_notifier.add_listener(Arc::new(FrontendExpiryListener::new(
-                Duration::from_secs(1),
-                Duration::from_secs(60),
+                self.options.node_expiry_tick,
+                self.options.node_max_idle_time,
                 self.in_memory.clone(),
             )));
             if let Some(region_supervisor_ticker) = &self.region_supervisor_ticker {

@@ -319,6 +319,8 @@
 | `selector` | String | `round_robin` | Datanode selector type.<br/>- `round_robin` (default value)<br/>- `lease_based`<br/>- `load_based`<br/>For details, please see "https://docs.greptime.com/developer-guide/metasrv/selector". |
 | `use_memory_store` | Bool | `false` | Store data in memory. |
 | `enable_region_failover` | Bool | `false` | Whether to enable region failover.<br/>This feature is only available on GreptimeDB running on cluster mode and<br/>- Using Remote WAL<br/>- Using shared storage (e.g., s3). |
+| `node_expiry_tick` | String | `1minute` | Interval for checking expired nodes. |
+| `node_max_idle_time` | String | `24hours` | Max allowed idle time before removing node info from metasrv memory. |
 | `enable_telemetry` | Bool | `true` | Whether to enable greptimedb telemetry. Enabled by default. |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |

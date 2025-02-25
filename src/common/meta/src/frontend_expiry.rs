@@ -29,7 +29,7 @@ use crate::rpc::KeyValue;
 pub struct FrontendExpiryListener {
     handle: Mutex<Option<JoinHandle<()>>>,
     tick_interval: Duration,
-    expire_interval: Duration,
+    max_idle_time: Duration,
     in_memory: ResettableKvBackendRef,
 }
 
@@ -42,13 +42,13 @@ impl Drop for FrontendExpiryListener {
 impl FrontendExpiryListener {
     pub fn new(
         tick_interval: Duration,
-        expire_interval: Duration,
+        max_idle_time: Duration,
         in_memory: ResettableKvBackendRef,
     ) -> Self {
         Self {
             handle: Mutex::new(None),
             tick_interval,
-            expire_interval,
+            max_idle_time,
             in_memory,
         }
     }
@@ -59,14 +59,14 @@ impl FrontendExpiryListener {
             let tick_interval = self.tick_interval;
             let in_memory = self.in_memory.clone();
 
-            let expire_interval = self.expire_interval;
+            let max_idle_time = self.max_idle_time;
             let ticker_loop = tokio::spawn(async move {
                 let mut interval = interval(tick_interval);
                 interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
                 loop {
                     interval.tick().await;
                     if let Err(e) =
-                        Self::clean_expired_frontend_node(&in_memory, expire_interval).await
+                        Self::clean_expired_frontend_node(&in_memory, max_idle_time).await
                     {
                         error!(e; "Failed to clean expired frontend node");
                     }
@@ -85,9 +85,9 @@ impl FrontendExpiryListener {
 
     async fn clean_expired_frontend_node(
         in_memory: &ResettableKvBackendRef,
-        expire_interval: Duration,
+        max_idle_time: Duration,
     ) -> error::Result<()> {
-        let node_keys = Self::list_expired_nodes(in_memory, expire_interval).await?;
+        let node_keys = Self::list_expired_nodes(in_memory, max_idle_time).await?;
         for key in node_keys {
             let key_bytes: Vec<u8> = (&key).into();
             if let Err(e) = in_memory.delete(&key_bytes, false).await {
@@ -101,13 +101,13 @@ impl FrontendExpiryListener {
 
     async fn list_expired_nodes(
         in_memory: &ResettableKvBackendRef,
-        expire_interval: Duration,
+        max_idle_time: Duration,
     ) -> error::Result<impl Iterator<Item = NodeInfoKey>> {
         let prefix = NodeInfoKey::key_prefix_with_role(0, Role::Frontend);
         let req = RangeRequest::new().with_prefix(prefix);
         let current_time_millis = common_time::util::current_time_millis();
         let resp = in_memory.range(req).await?;
-        let expire_interval = expire_interval;
+        let max_idle_time = max_idle_time;
         Ok(resp
             .kvs
             .into_iter()
@@ -117,8 +117,7 @@ impl FrontendExpiryListener {
                 }) else {
                     return None;
                 };
-                if (current_time_millis - info.last_activity_ts)
-                    > expire_interval.as_millis() as i64
+                if (current_time_millis - info.last_activity_ts) > max_idle_time.as_millis() as i64
                 {
                     NodeInfoKey::try_from(key)
                         .inspect_err(|e| {
@@ -140,7 +139,10 @@ impl LeadershipChangeListener for FrontendExpiryListener {
 
     async fn on_leader_start(&self) -> error::Result<()> {
         self.start().await;
-        info!("On leader start, frontend expiry listener started");
+        info!(
+            "On leader start, frontend expiry listener started with tick {:?} and max idle time: {:?}",
+            self.tick_interval, self.max_idle_time
+        );
         Ok(())
     }
 
