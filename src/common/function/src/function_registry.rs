@@ -22,6 +22,7 @@ use crate::function::{AsyncFunctionRef, FunctionRef};
 use crate::scalars::aggregate::{AggregateFunctionMetaRef, AggregateFunctions};
 use crate::scalars::date::DateFunction;
 use crate::scalars::expression::ExpressionFunction;
+use crate::scalars::hll_count::HllCalcFunction;
 use crate::scalars::json::JsonFunction;
 use crate::scalars::matches::MatchesFunction;
 use crate::scalars::math::MathFunction;
@@ -107,6 +108,7 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
     DateFunction::register(&function_registry);
     ExpressionFunction::register(&function_registry);
     UddSketchCalcFunction::register(&function_registry);
+    HllCalcFunction::register(&function_registry);
 
     // Aggregate functions
     AggregateFunctions::register(&function_registry);
