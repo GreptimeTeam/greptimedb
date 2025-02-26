@@ -273,13 +273,10 @@ impl PromPlanner {
         } = aggr_expr;
 
         let input = self.prom_expr_to_plan(expr, session_state).await?;
-
-        // calculate columns to group by
-        // Need to append time index column into group by columns
-        let group_exprs = self.agg_modifier_to_col(input.schema(), modifier)?;
-
         match (*op).id() {
             token::T_TOPK | token::T_BOTTOMK => {
+                let group_exprs = self.agg_modifier_to_col(input.schema(), modifier, false)?;
+
                 let param = param
                     .as_deref()
                     .with_context(|| FunctionInvalidArgumentSnafu {
@@ -323,19 +320,22 @@ impl PromPlanner {
                     })
                     .unwrap();
 
-                let rank_columns: Vec<_> = rank_columns
-                    .into_iter()
-                    .map(|name| col(name))
-                    .collect();
+                let rank_columns: Vec<_> = rank_columns.into_iter().map(col).collect();
 
-                let mut group_exprs = group_exprs
-                    .clone();
-
-                group_exprs.extend(rank_columns);
-
-                let group_sort_expr = group_exprs
+                let mut new_group_exprs = group_exprs.clone();
+                // Order by ranks
+                new_group_exprs.extend(rank_columns);
+                // When the field values are equal, we sort based on tags to ensure the relative stability of the output results.
+                new_group_exprs.extend(self.create_tag_column_exprs()?);
+                let group_sort_expr = new_group_exprs
                     .into_iter()
                     .map(|expr| expr.sort(true, false));
+
+                let project_fields = self
+                    .create_field_column_exprs()?
+                    .into_iter()
+                    .chain(self.create_tag_column_exprs()?)
+                    .chain(Some(self.create_time_index_column_expr()?));
 
                 let plan = LogicalPlanBuilder::from(input)
                     .window(window_exprs)
@@ -344,12 +344,17 @@ impl PromPlanner {
                     .context(DataFusionPlanningSnafu)?
                     .sort(group_sort_expr)
                     .context(DataFusionPlanningSnafu)?
+                    .project(project_fields)
+                    .context(DataFusionPlanningSnafu)?
                     .build()
                     .context(DataFusionPlanningSnafu)?;
 
                 Ok(plan)
             }
             _ => {
+                // calculate columns to group by
+                // Need to append time index column into group by columns
+                let group_exprs = self.agg_modifier_to_col(input.schema(), modifier, true)?;
                 // convert op and value columns to aggregate exprs
                 let aggr_exprs = self.create_aggregate_exprs(*op, &input)?;
 
@@ -1033,15 +1038,18 @@ impl PromPlanner {
     ///
     /// # Side effect
     ///
-    /// This method will also change the tag columns in ctx.
+    /// This method will also change the tag columns in ctx if `update_ctx` is true.
     fn agg_modifier_to_col(
         &mut self,
         input_schema: &DFSchemaRef,
         modifier: &Option<LabelModifier>,
+        update_ctx: bool,
     ) -> Result<Vec<DfExpr>> {
         match modifier {
             None => {
-                self.ctx.tag_columns = vec![];
+                if update_ctx {
+                    self.ctx.tag_columns = vec![];
+                }
                 Ok(vec![self.create_time_index_column_expr()?])
             }
             Some(LabelModifier::Include(labels)) => {
@@ -1053,8 +1061,10 @@ impl PromPlanner {
                     }
                 }
 
-                // change the tag columns in context
-                self.ctx.tag_columns.clone_from(&labels.labels);
+                if update_ctx {
+                    // change the tag columns in context
+                    self.ctx.tag_columns.clone_from(&labels.labels);
+                }
 
                 // add timestamp column
                 exprs.push(self.create_time_index_column_expr()?);
@@ -1082,8 +1092,10 @@ impl PromPlanner {
                     let _ = all_fields.remove(value);
                 }
 
-                // change the tag columns in context
-                self.ctx.tag_columns = all_fields.iter().map(|col| (*col).clone()).collect();
+                if update_ctx {
+                    // change the tag columns in context
+                    self.ctx.tag_columns = all_fields.iter().map(|col| (*col).clone()).collect();
+                }
 
                 // collect remaining fields and convert to col expr
                 let mut exprs = all_fields
@@ -1846,6 +1858,15 @@ impl PromPlanner {
         Ok(result)
     }
 
+    fn create_field_column_exprs(&self) -> Result<Vec<DfExpr>> {
+        let mut result = Vec::with_capacity(self.ctx.field_columns.len());
+        for field in &self.ctx.field_columns {
+            let expr = DfExpr::Column(Column::from_name(field));
+            result.push(expr);
+        }
+        Ok(result)
+    }
+
     fn create_tag_and_time_index_column_sort_exprs(&self) -> Result<Vec<SortExpr>> {
         let mut result = self
             .ctx
@@ -1966,6 +1987,13 @@ impl PromPlanner {
         group_exprs: Vec<DfExpr>,
         input_plan: &LogicalPlan,
     ) -> Result<Vec<DfExpr>> {
+        ensure!(
+            self.ctx.field_columns.len() == 1,
+            UnsupportedExprSnafu {
+                name: "topk or bottomk on multi-value input"
+            }
+        );
+
         assert!(matches!(op.id(), token::T_TOPK | token::T_BOTTOMK));
 
         let asc = matches!(op.id(), token::T_BOTTOMK);
