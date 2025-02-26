@@ -16,9 +16,9 @@ use std::cmp::Ordering;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use common_base::BitVec;
 use futures::{ready, Stream, StreamExt};
 use pin_project::pin_project;
+use roaring::RoaringBitmap;
 
 use crate::inverted_index::create::sort::SortedStream;
 use crate::inverted_index::error::Result;
@@ -28,10 +28,10 @@ use crate::Bytes;
 #[pin_project]
 pub struct MergeSortedStream {
     stream1: Option<SortedStream>,
-    peek1: Option<(Bytes, BitVec)>,
+    peek1: Option<(Bytes, RoaringBitmap)>,
 
     stream2: Option<SortedStream>,
-    peek2: Option<(Bytes, BitVec)>,
+    peek2: Option<(Bytes, RoaringBitmap)>,
 }
 
 impl MergeSortedStream {
@@ -49,7 +49,7 @@ impl MergeSortedStream {
 }
 
 impl Stream for MergeSortedStream {
-    type Item = Result<(Bytes, BitVec)>;
+    type Item = Result<(Bytes, RoaringBitmap)>;
 
     /// Polls both streams and returns the next item from the stream that has the smaller next item.
     /// If both streams have the same next item, the bitmaps are unioned together.
@@ -89,14 +89,8 @@ impl Stream for MergeSortedStream {
 }
 
 /// Merges two bitmaps by bit-wise OR'ing them together, preserving all bits from both
-fn merge_bitmaps(bitmap1: BitVec, bitmap2: BitVec) -> BitVec {
-    // make sure longer bitmap is on the left to avoid truncation
-    #[allow(clippy::if_same_then_else)]
-    if bitmap1.len() > bitmap2.len() {
-        bitmap1 | bitmap2
-    } else {
-        bitmap2 | bitmap1
-    }
+fn merge_bitmaps(bitmap1: RoaringBitmap, bitmap2: RoaringBitmap) -> RoaringBitmap {
+    bitmap1 | bitmap2
 }
 
 #[cfg(test)]
@@ -106,60 +100,64 @@ mod tests {
     use super::*;
     use crate::inverted_index::error::Error;
 
-    fn sorted_stream_from_vec(vec: Vec<(Bytes, BitVec)>) -> SortedStream {
+    fn bitmap(bytes: &[u8]) -> roaring::RoaringBitmap {
+        roaring::RoaringBitmap::from_lsb0_bytes(0, bytes)
+    }
+
+    fn sorted_stream_from_vec(vec: Vec<(Bytes, RoaringBitmap)>) -> SortedStream {
         Box::new(stream::iter(vec.into_iter().map(Ok::<_, Error>)))
     }
 
     #[tokio::test]
     async fn test_merge_sorted_stream_non_overlapping() {
         let stream1 = sorted_stream_from_vec(vec![
-            (Bytes::from("apple"), BitVec::from_slice(&[0b10101010])),
-            (Bytes::from("orange"), BitVec::from_slice(&[0b01010101])),
+            (Bytes::from("apple"), bitmap(&[0b10101010])),
+            (Bytes::from("orange"), bitmap(&[0b01010101])),
         ]);
         let stream2 = sorted_stream_from_vec(vec![
-            (Bytes::from("banana"), BitVec::from_slice(&[0b10101010])),
-            (Bytes::from("peach"), BitVec::from_slice(&[0b01010101])),
+            (Bytes::from("banana"), bitmap(&[0b10101010])),
+            (Bytes::from("peach"), bitmap(&[0b01010101])),
         ]);
 
         let mut merged_stream = MergeSortedStream::merge(stream1, stream2);
 
         let item = merged_stream.next().await.unwrap().unwrap();
         assert_eq!(item.0, Bytes::from("apple"));
-        assert_eq!(item.1, BitVec::from_slice(&[0b10101010]));
+        assert_eq!(item.1, bitmap(&[0b10101010]));
         let item = merged_stream.next().await.unwrap().unwrap();
         assert_eq!(item.0, Bytes::from("banana"));
-        assert_eq!(item.1, BitVec::from_slice(&[0b10101010]));
+        assert_eq!(item.1, bitmap(&[0b10101010]));
         let item = merged_stream.next().await.unwrap().unwrap();
         assert_eq!(item.0, Bytes::from("orange"));
-        assert_eq!(item.1, BitVec::from_slice(&[0b01010101]));
+        assert_eq!(item.1, bitmap(&[0b01010101]));
         let item = merged_stream.next().await.unwrap().unwrap();
         assert_eq!(item.0, Bytes::from("peach"));
-        assert_eq!(item.1, BitVec::from_slice(&[0b01010101]));
+        assert_eq!(item.1, bitmap(&[0b01010101]));
         assert!(merged_stream.next().await.is_none());
     }
 
     #[tokio::test]
     async fn test_merge_sorted_stream_overlapping() {
         let stream1 = sorted_stream_from_vec(vec![
-            (Bytes::from("apple"), BitVec::from_slice(&[0b10101010])),
-            (Bytes::from("orange"), BitVec::from_slice(&[0b10101010])),
+            (Bytes::from("apple"), bitmap(&[0b10101010])),
+            (Bytes::from("orange"), bitmap(&[0b10101010])),
         ]);
         let stream2 = sorted_stream_from_vec(vec![
-            (Bytes::from("apple"), BitVec::from_slice(&[0b01010101])),
-            (Bytes::from("peach"), BitVec::from_slice(&[0b01010101])),
+            (Bytes::from("apple"), bitmap(&[0b01010101])),
+            (Bytes::from("peach"), bitmap(&[0b01010101])),
         ]);
 
         let mut merged_stream = MergeSortedStream::merge(stream1, stream2);
 
         let item = merged_stream.next().await.unwrap().unwrap();
         assert_eq!(item.0, Bytes::from("apple"));
-        assert_eq!(item.1, BitVec::from_slice(&[0b11111111]));
+        assert_eq!(item.1, bitmap(&[0b11111111]));
         let item = merged_stream.next().await.unwrap().unwrap();
         assert_eq!(item.0, Bytes::from("orange"));
-        assert_eq!(item.1, BitVec::from_slice(&[0b10101010]));
+        assert_eq!(item.1, bitmap(&[0b10101010]));
         let item = merged_stream.next().await.unwrap().unwrap();
         assert_eq!(item.0, Bytes::from("peach"));
-        assert_eq!(item.1, BitVec::from_slice(&[0b01010101]));
+        assert_eq!(item.1, bitmap(&[0b01010101]));
         assert!(merged_stream.next().await.is_none());
     }
 

@@ -19,26 +19,20 @@
 //! The serialization format is as follows:
 //!
 //! ```text
-//! [magic][bitmap leading zeros][item][item]...[item]
-//!    [4]          [4]              [?]
+//! [magic][item][item]...[item]
+//!    [4]       [?]
 //!
 //! Each [item] is structured as:
 //! [value len][value][bitmap len][bitmap]
 //!     [8]       [?]       [8]        [?]
 //! ```
 //!
-//! The format starts with a 4-byte magic identifier, followed by a 4-byte
-//! bitmap leading zeros count, indicating how many leading zeros are in the
-//! fixed-size region of the bitmap. Following that, each item represents
-//! a value and its associated bitmap, serialized with their lengths for
+//! Each item represents a value and its associated bitmap, serialized with their lengths for
 //! easier deserialization.
 
 mod codec_v1;
 
-use std::collections::BTreeMap;
-
 use asynchronous_codec::{FramedRead, FramedWrite};
-use common_base::BitVec;
 use futures::{stream, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
 use snafu::ResultExt;
 
@@ -62,8 +56,7 @@ impl<W: AsyncWrite + Unpin> IntermediateWriter<W> {
     /// Serializes and writes all provided values to the wrapped writer
     pub async fn write_all(
         mut self,
-        values: BTreeMap<Bytes, BitVec>,
-        bitmap_leading_zeros: u32,
+        values: impl IntoIterator<Item = (Bytes, roaring::RoaringBitmap)>,
     ) -> Result<()> {
         let (codec_magic, encoder) = (
             codec_v1::CODEC_V1_MAGIC,
@@ -72,11 +65,6 @@ impl<W: AsyncWrite + Unpin> IntermediateWriter<W> {
 
         self.writer
             .write_all(codec_magic)
-            .await
-            .context(WriteSnafu)?;
-
-        self.writer
-            .write_all(&bitmap_leading_zeros.to_be_bytes())
             .await
             .context(WriteSnafu)?;
 
@@ -112,17 +100,7 @@ impl<R: AsyncRead + Unpin + Send + 'static> IntermediateReader<R> {
             .context(ReadSnafu)?;
 
         let decoder = match &magic {
-            codec_v1::CODEC_V1_MAGIC => {
-                let bitmap_leading_zeros = {
-                    let mut buf = [0u8; 4];
-                    self.reader.read_exact(&mut buf).await.context(ReadSnafu)?;
-                    u32::from_be_bytes(buf)
-                };
-
-                codec_v1::IntermediateItemDecoderV1 {
-                    bitmap_leading_zeros,
-                }
-            }
+            codec_v1::CODEC_V1_MAGIC => codec_v1::IntermediateItemDecoderV1,
             _ => return UnknownIntermediateCodecMagicSnafu { magic }.fail(),
         };
 
@@ -132,6 +110,7 @@ impl<R: AsyncRead + Unpin + Send + 'static> IntermediateReader<R> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::io::{Seek, SeekFrom};
 
     use futures::io::{AllowStdIo, Cursor};
@@ -139,6 +118,10 @@ mod tests {
 
     use super::*;
     use crate::inverted_index::error::Error;
+
+    fn bitmap(bytes: &[u8]) -> roaring::RoaringBitmap {
+        roaring::RoaringBitmap::from_lsb0_bytes(0, bytes)
+    }
 
     #[tokio::test]
     async fn test_intermediate_read_write_basic() {
@@ -148,12 +131,12 @@ mod tests {
         let buf_w = AllowStdIo::new(file_w);
 
         let values = BTreeMap::from_iter([
-            (Bytes::from("a"), BitVec::from_slice(&[0b10101010])),
-            (Bytes::from("b"), BitVec::from_slice(&[0b01010101])),
+            (Bytes::from("a"), bitmap(&[0b10101010])),
+            (Bytes::from("b"), bitmap(&[0b01010101])),
         ]);
 
         let writer = IntermediateWriter::new(buf_w);
-        writer.write_all(values.clone(), 0).await.unwrap();
+        writer.write_all(values.clone()).await.unwrap();
         // reset the handle
         buf_r.seek(SeekFrom::Start(0)).unwrap();
 
@@ -161,48 +144,9 @@ mod tests {
         let mut stream = reader.into_stream().await.unwrap();
 
         let a = stream.next().await.unwrap().unwrap();
-        assert_eq!(a, (Bytes::from("a"), BitVec::from_slice(&[0b10101010])));
+        assert_eq!(a, (Bytes::from("a"), bitmap(&[0b10101010])));
         let b = stream.next().await.unwrap().unwrap();
-        assert_eq!(b, (Bytes::from("b"), BitVec::from_slice(&[0b01010101])));
-        assert!(stream.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_intermediate_read_write_with_prefix_zeros() {
-        let file_r = tempfile().unwrap();
-        let file_w = file_r.try_clone().unwrap();
-        let mut buf_r = AllowStdIo::new(file_r);
-        let buf_w = AllowStdIo::new(file_w);
-
-        let values = BTreeMap::from_iter([
-            (Bytes::from("a"), BitVec::from_slice(&[0b10101010])),
-            (Bytes::from("b"), BitVec::from_slice(&[0b01010101])),
-        ]);
-
-        let writer = IntermediateWriter::new(buf_w);
-        writer.write_all(values.clone(), 8).await.unwrap();
-        // reset the handle
-        buf_r.seek(SeekFrom::Start(0)).unwrap();
-
-        let reader = IntermediateReader::new(buf_r);
-        let mut stream = reader.into_stream().await.unwrap();
-
-        let a = stream.next().await.unwrap().unwrap();
-        assert_eq!(
-            a,
-            (
-                Bytes::from("a"),
-                BitVec::from_slice(&[0b00000000, 0b10101010])
-            )
-        );
-        let b = stream.next().await.unwrap().unwrap();
-        assert_eq!(
-            b,
-            (
-                Bytes::from("b"),
-                BitVec::from_slice(&[0b00000000, 0b01010101])
-            )
-        );
+        assert_eq!(b, (Bytes::from("b"), bitmap(&[0b01010101])));
         assert!(stream.next().await.is_none());
     }
 
@@ -213,7 +157,7 @@ mod tests {
         let values = BTreeMap::new();
 
         let writer = IntermediateWriter::new(&mut buf);
-        writer.write_all(values.clone(), 0).await.unwrap();
+        writer.write_all(values.clone()).await.unwrap();
 
         let reader = IntermediateReader::new(Cursor::new(buf));
         let mut stream = reader.into_stream().await.unwrap();

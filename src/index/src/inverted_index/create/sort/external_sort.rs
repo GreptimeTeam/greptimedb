@@ -20,11 +20,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_base::BitVec;
 use common_telemetry::{debug, error};
-use futures::stream;
+use futures::{stream, StreamExt};
+use roaring::RoaringBitmap;
 use snafu::ResultExt;
 
+use crate::bitmap::Bitmap;
 use crate::external_provider::ExternalTempFileProvider;
 use crate::inverted_index::create::sort::intermediate_rw::{
     IntermediateReader, IntermediateWriter,
@@ -45,18 +46,10 @@ pub struct ExternalSorter {
     temp_file_provider: Arc<dyn ExternalTempFileProvider>,
 
     /// Bitmap indicating which segments have null values
-    segment_null_bitmap: BitVec,
+    segment_null_bitmap: RoaringBitmap,
 
     /// In-memory buffer to hold values and their corresponding bitmaps until memory threshold is exceeded
-    values_buffer: BTreeMap<Bytes, BitVec>,
-
-    /// Count of rows in the last dumped buffer, used to streamline memory usage of `values_buffer`.
-    ///
-    /// After data is dumped to external files, `last_dump_row_count` is updated to reflect the new starting point
-    /// for `BitVec` indexing. This means each `BitVec` in `values_buffer` thereafter encodes positions relative to
-    /// this count, not from 0. This mechanism effectively shrinks the memory footprint of each `BitVec`, helping manage
-    /// memory use more efficiently by focusing only on newly ingested data post-dump.
-    last_dump_row_count: usize,
+    values_buffer: BTreeMap<Bytes, (RoaringBitmap, usize)>,
 
     /// Count of all rows ingested so far
     total_row_count: usize,
@@ -93,7 +86,7 @@ impl Sorter for ExternalSorter {
             return Ok(());
         }
 
-        let segment_index_range = self.segment_index_range(n, value.is_none());
+        let segment_index_range = self.segment_index_range(n);
         self.total_row_count += n;
 
         if let Some(value) = value {
@@ -117,15 +110,10 @@ impl Sorter for ExternalSorter {
         // TODO(zhongzc): k-way merge instead of 2-way merge
 
         let mut tree_nodes: VecDeque<SortedStream> = VecDeque::with_capacity(readers.len() + 1);
-        let leading_zeros = self.last_dump_row_count / self.segment_row_count;
         tree_nodes.push_back(Box::new(stream::iter(
             mem::take(&mut self.values_buffer)
                 .into_iter()
-                .map(move |(value, mut bitmap)| {
-                    bitmap.resize(bitmap.len() + leading_zeros, false);
-                    bitmap.shift_right(leading_zeros);
-                    Ok((value, bitmap))
-                }),
+                .map(|(value, (bitmap, _))| Ok((value, bitmap))),
         )));
         for (_, reader) in readers {
             tree_nodes.push_back(IntermediateReader::new(reader).into_stream().await?);
@@ -140,8 +128,13 @@ impl Sorter for ExternalSorter {
         }
 
         Ok(SortOutput {
-            segment_null_bitmap: mem::take(&mut self.segment_null_bitmap),
-            sorted_stream: tree_nodes.pop_front().unwrap(),
+            segment_null_bitmap: Bitmap::Roaring(mem::take(&mut self.segment_null_bitmap)),
+            sorted_stream: Box::new(
+                tree_nodes
+                    .pop_front()
+                    .unwrap()
+                    .map(|r| r.map(|(k, v)| (k, Bitmap::Roaring(v)))),
+            ),
             total_row_count: self.total_row_count,
         })
     }
@@ -161,11 +154,10 @@ impl ExternalSorter {
             index_name,
             temp_file_provider,
 
-            segment_null_bitmap: BitVec::new(),
+            segment_null_bitmap: RoaringBitmap::new(),
             values_buffer: BTreeMap::new(),
 
             total_row_count: 0,
-            last_dump_row_count: 0,
             segment_row_count,
 
             current_memory_usage: 0,
@@ -195,7 +187,7 @@ impl ExternalSorter {
     }
 
     /// Pushes the non-null values to the values buffer and sets the bits within
-    /// the specified range in the given BitVec to true.
+    /// the specified range in the given RoaringBitmap to true.
     /// Returns the memory usage difference of the buffer after the operation.
     fn push_not_null(
         &mut self,
@@ -203,20 +195,23 @@ impl ExternalSorter {
         segment_index_range: RangeInclusive<usize>,
     ) -> usize {
         match self.values_buffer.get_mut(value) {
-            Some(bitmap) => {
-                let old_len = bitmap.as_raw_slice().len();
+            Some((bitmap, mem_usage)) => {
                 set_bits(bitmap, segment_index_range);
+                let new_usage = bitmap_memory_usage(bitmap) + value.len();
+                let diff = new_usage - *mem_usage;
+                *mem_usage = new_usage;
 
-                bitmap.as_raw_slice().len() - old_len
+                diff
             }
             None => {
-                let mut bitmap = BitVec::default();
+                let mut bitmap = RoaringBitmap::new();
                 set_bits(&mut bitmap, segment_index_range);
 
-                let mem_diff = bitmap.as_raw_slice().len() + value.len();
-                self.values_buffer.insert(value.to_vec(), bitmap);
+                let mem_usage = bitmap_memory_usage(&bitmap) + value.len();
+                self.values_buffer
+                    .insert(value.to_vec(), (bitmap, mem_usage));
 
-                mem_diff
+                mem_usage
             }
         }
     }
@@ -257,12 +252,8 @@ impl ExternalSorter {
             .fetch_sub(memory_usage, Ordering::Relaxed);
         self.current_memory_usage = 0;
 
-        let bitmap_leading_zeros = self.last_dump_row_count / self.segment_row_count;
-        self.last_dump_row_count =
-            self.total_row_count - self.total_row_count % self.segment_row_count; // align to segment
-
         let entries = values.len();
-        IntermediateWriter::new(writer).write_all(values, bitmap_leading_zeros as _).await.inspect(|_|
+        IntermediateWriter::new(writer).write_all(values.into_iter().map(|(k, (b, _))| (k, b))).await.inspect(|_|
             debug!("Dumped {entries} entries ({memory_usage} bytes) to intermediate file {file_id} for index {index_name}")
         ).inspect_err(|e|
             error!(e; "Failed to dump {entries} entries to intermediate file {file_id} for index {index_name}")
@@ -271,13 +262,8 @@ impl ExternalSorter {
 
     /// Determines the segment index range for the row index range
     /// `[row_begin, row_begin + n - 1]`
-    fn segment_index_range(&self, n: usize, is_null: bool) -> RangeInclusive<usize> {
-        let row_begin = if is_null {
-            self.total_row_count
-        } else {
-            self.total_row_count - self.last_dump_row_count
-        };
-
+    fn segment_index_range(&self, n: usize) -> RangeInclusive<usize> {
+        let row_begin = self.total_row_count;
         let start = self.segment_index(row_begin);
         let end = self.segment_index(row_begin + n - 1);
         start..=end
@@ -289,14 +275,16 @@ impl ExternalSorter {
     }
 }
 
-/// Sets the bits within the specified range in the given `BitVec` to true
-fn set_bits(bitmap: &mut BitVec, index_range: RangeInclusive<usize>) {
-    if *index_range.end() >= bitmap.len() {
-        bitmap.resize(index_range.end() + 1, false);
-    }
-    for index in index_range {
-        bitmap.set(index, true);
-    }
+/// Sets the bits within the specified range in the given `RoaringBitmap` to true
+fn set_bits(bitmap: &mut RoaringBitmap, index_range: RangeInclusive<usize>) {
+    let range = *index_range.start() as u32..=*index_range.end() as u32;
+    bitmap.insert_range(range);
+}
+
+fn bitmap_memory_usage(bitmap: &RoaringBitmap) -> usize {
+    let stat = bitmap.statistics();
+    (stat.n_bytes_array_containers + stat.n_bytes_bitset_containers + stat.n_bytes_run_containers)
+        as usize
 }
 
 #[cfg(test)]
@@ -312,6 +300,13 @@ mod tests {
 
     use super::*;
     use crate::external_provider::MockExternalTempFileProvider;
+
+    fn roaring(bm: Bitmap) -> RoaringBitmap {
+        match bm {
+            Bitmap::Roaring(bm) => bm,
+            _ => unreachable!(),
+        }
+    }
 
     async fn test_external_sorter(
         current_memory_usage_threshold: Option<usize>,
@@ -330,7 +325,7 @@ mod tests {
             move |index_name, file_id| {
                 assert_eq!(index_name, "test");
                 let mut files = files.lock().unwrap();
-                let (writer, reader) = duplex(8 * 1024);
+                let (writer, reader) = duplex(1024 * 1024);
                 files.insert(file_id.to_string(), Box::new(reader.compat()));
                 Ok(Box::new(writer.compat_write()))
             }
@@ -379,16 +374,25 @@ mod tests {
             mut sorted_stream,
             total_row_count,
         } = sorter.output().await.unwrap();
+        let segment_null_bitmap = roaring(segment_null_bitmap);
+
         assert_eq!(total_row_count, row_count);
         let n = sorted_result.remove(&None);
         assert_eq!(
-            segment_null_bitmap.iter_ones().collect::<Vec<_>>(),
+            segment_null_bitmap
+                .iter()
+                .map(|n| n as usize)
+                .collect::<Vec<_>>(),
             n.unwrap_or_default()
         );
         for (value, offsets) in sorted_result {
             let item = sorted_stream.next().await.unwrap().unwrap();
+            let bitmap = roaring(item.1);
             assert_eq!(item.0, value.unwrap());
-            assert_eq!(item.1.iter_ones().collect::<Vec<_>>(), offsets);
+            assert_eq!(
+                bitmap.iter().map(|n| n as usize).collect::<Vec<_>>(),
+                offsets
+            );
         }
     }
 

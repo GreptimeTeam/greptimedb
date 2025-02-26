@@ -4697,7 +4697,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=a25adc8a01340231121646d8f0a29d0e92f45461#a25adc8a01340231121646d8f0a29d0e92f45461"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?branch=zhongzc%2Fintro-roaring-bitmap#349bd78cf9a83bafd400f9de8c38fe03a16c4d93"
 dependencies = [
  "prost 0.13.3",
  "serde",
@@ -5553,6 +5553,7 @@ dependencies = [
  "rand",
  "regex",
  "regex-automata 0.4.8",
+ "roaring",
  "serde",
  "serde_json",
  "snafu 0.8.5",
@@ -9617,6 +9618,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "roaring"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41589aba99537475bf697f2118357cad1c31590c5a1b9f6d9fc4ad6d07503661"
+dependencies = [
+ "bytemuck",
+ "byteorder",
 ]
 
 [[package]]

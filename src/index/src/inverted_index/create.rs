@@ -17,6 +17,7 @@ pub mod sort_create;
 
 use async_trait::async_trait;
 
+use crate::bitmap::BitmapType;
 use crate::inverted_index::error::Result;
 use crate::inverted_index::format::writer::InvertedIndexWriter;
 use crate::BytesRef;
@@ -53,5 +54,9 @@ pub trait InvertedIndexCreator: Send {
 
     /// Finalizes the index creation process, ensuring all data is properly indexed and stored
     /// in the provided writer
-    async fn finish(&mut self, writer: &mut dyn InvertedIndexWriter) -> Result<()>;
+    async fn finish(
+        &mut self,
+        writer: &mut dyn InvertedIndexWriter,
+        bitmap_type: BitmapType,
+    ) -> Result<()>;
 }

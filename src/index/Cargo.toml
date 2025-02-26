@@ -37,6 +37,7 @@ tantivy-jieba = "0.11.0"
 tokio.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
+roaring = "0.10"
 
 [dev-dependencies]
 common-test-util.workspace = true
