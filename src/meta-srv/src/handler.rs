@@ -292,7 +292,7 @@ impl HeartbeatHandlerGroup {
     pub async fn handle(
         &self,
         req: HeartbeatRequest,
-        ctx: &mut Context,
+        mut ctx: Context,
     ) -> Result<HeartbeatResponse> {
         let mut acc = HeartbeatAccumulator::default();
         let role = req
@@ -312,7 +312,7 @@ impl HeartbeatHandlerGroup {
                 .with_label_values(&[*name])
                 .start_timer();
 
-            if handler.handle(&req, ctx, &mut acc).await? == HandleControl::Done {
+            if handler.handle(&req, &mut ctx, &mut acc).await? == HandleControl::Done {
                 break;
             }
         }

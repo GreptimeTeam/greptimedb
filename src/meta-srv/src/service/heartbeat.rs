@@ -50,7 +50,7 @@ impl heartbeat_server::Heartbeat for Metasrv {
             violated: "expected heartbeat handlers",
         })?;
 
-        let mut ctx = self.new_ctx();
+        let ctx = self.new_ctx();
         let _handle = common_runtime::spawn_global(async move {
             let mut pusher_id = None;
             while let Some(msg) = in_stream.next().await {
@@ -78,7 +78,7 @@ impl heartbeat_server::Heartbeat for Metasrv {
                         }
 
                         let res = handler_group
-                            .handle(req, &mut ctx)
+                            .handle(req, ctx.clone())
                             .await
                             .map_err(|e| e.into());
 
