@@ -26,13 +26,13 @@ use common_config::Configurable;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::ProcedureExecutorRef;
-use common_meta::frontend_expiry::FrontendExpiryListener;
 use common_meta::key::maintenance::MaintenanceModeManagerRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
 use common_meta::leadership_notifier::{
     LeadershipChangeNotifier, LeadershipChangeNotifierCustomizerRef,
 };
+use common_meta::node_expiry_listener::NodeExpiryListener;
 use common_meta::peer::Peer;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::wal_options_allocator::WalOptionsAllocatorRef;
@@ -152,10 +152,6 @@ pub struct MetasrvOptions {
     #[cfg(feature = "pg_kvbackend")]
     /// Lock id for meta kv election. Only effect when using pg_kvbackend.
     pub meta_election_lock_id: u64,
-    /// Interval for checking expired nodes.
-    #[serde(with = "humantime_serde")]
-    pub node_expiry_tick: Duration,
-    /// Max idle time before nodes are removed from metasrv in-memory state.
     #[serde(with = "humantime_serde")]
     pub node_max_idle_time: Duration,
 }
@@ -199,8 +195,7 @@ impl Default for MetasrvOptions {
             meta_table_name: DEFAULT_META_TABLE_NAME.to_string(),
             #[cfg(feature = "pg_kvbackend")]
             meta_election_lock_id: DEFAULT_META_ELECTION_LOCK_ID,
-            node_expiry_tick: Duration::from_secs(60),
-            node_max_idle_time: Duration::from_secs(12 * 60 * 60),
+            node_max_idle_time: Duration::from_secs(24 * 60 * 60),
         }
     }
 }
@@ -451,8 +446,7 @@ impl Metasrv {
             leadership_change_notifier.add_listener(self.wal_options_allocator.clone());
             leadership_change_notifier
                 .add_listener(Arc::new(ProcedureManagerListenerAdapter(procedure_manager)));
-            leadership_change_notifier.add_listener(Arc::new(FrontendExpiryListener::new(
-                self.options.node_expiry_tick,
+            leadership_change_notifier.add_listener(Arc::new(NodeExpiryListener::new(
                 self.options.node_max_idle_time,
                 self.in_memory.clone(),
             )));

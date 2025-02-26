@@ -19,37 +19,31 @@ use common_telemetry::{debug, error, info, warn};
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
-use crate::cluster::{NodeInfo, NodeInfoKey, Role};
+use crate::cluster::{NodeInfo, NodeInfoKey};
 use crate::error;
 use crate::kv_backend::ResettableKvBackendRef;
 use crate::leadership_notifier::LeadershipChangeListener;
 use crate::rpc::store::RangeRequest;
 use crate::rpc::KeyValue;
 
-/// FrontendExpiryListener periodically checks all node info in memory and removes
+/// [NodeExpiryListener] periodically checks all node info in memory and removes
 /// expired node info to prevent memory leak.
-pub struct FrontendExpiryListener {
+pub struct NodeExpiryListener {
     handle: Mutex<Option<JoinHandle<()>>>,
-    tick_interval: Duration,
     max_idle_time: Duration,
     in_memory: ResettableKvBackendRef,
 }
 
-impl Drop for FrontendExpiryListener {
+impl Drop for NodeExpiryListener {
     fn drop(&mut self) {
         self.stop();
     }
 }
 
-impl FrontendExpiryListener {
-    pub fn new(
-        tick_interval: Duration,
-        max_idle_time: Duration,
-        in_memory: ResettableKvBackendRef,
-    ) -> Self {
+impl NodeExpiryListener {
+    pub fn new(max_idle_time: Duration, in_memory: ResettableKvBackendRef) -> Self {
         Self {
             handle: Mutex::new(None),
-            tick_interval,
             max_idle_time,
             in_memory,
         }
@@ -58,19 +52,17 @@ impl FrontendExpiryListener {
     async fn start(&self) {
         let mut handle = self.handle.lock().unwrap();
         if handle.is_none() {
-            let tick_interval = self.tick_interval;
             let in_memory = self.in_memory.clone();
 
             let max_idle_time = self.max_idle_time;
             let ticker_loop = tokio::spawn(async move {
-                let mut interval = interval(tick_interval);
+                // Run clean task every minute.
+                let mut interval = interval(Duration::from_secs(60));
                 interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
                 loop {
                     interval.tick().await;
-                    if let Err(e) =
-                        Self::clean_expired_frontend_node(&in_memory, max_idle_time).await
-                    {
-                        error!(e; "Failed to clean expired frontend node");
+                    if let Err(e) = Self::clean_expired_nodes(&in_memory, max_idle_time).await {
+                        error!(e; "Failed to clean expired node");
                     }
                 }
             });
@@ -81,12 +73,12 @@ impl FrontendExpiryListener {
     fn stop(&self) {
         if let Some(handle) = self.handle.lock().unwrap().take() {
             handle.abort();
-            info!("Frontend expiry ticker stopped")
+            info!("Node expiry listener stopped")
         }
     }
 
     /// Cleans expired nodes from memory.
-    async fn clean_expired_frontend_node(
+    async fn clean_expired_nodes(
         in_memory: &ResettableKvBackendRef,
         max_idle_time: Duration,
     ) -> error::Result<()> {
@@ -94,20 +86,20 @@ impl FrontendExpiryListener {
         for key in node_keys {
             let key_bytes: Vec<u8> = (&key).into();
             if let Err(e) = in_memory.delete(&key_bytes, false).await {
-                warn!(e;"Failed to delete expired frontend node: {:?}", key_bytes);
+                warn!(e; "Failed to delete expired node: {:?}", key_bytes);
             } else {
-                debug!("Deleted expired frontend node key: {:?}", key);
+                debug!("Deleted expired node key: {:?}", key);
             }
         }
         Ok(())
     }
 
-    /// Lists expired frontend nodes that have been inactive more than `max_idle_time`.
+    /// Lists expired nodes that have been inactive more than `max_idle_time`.
     async fn list_expired_nodes(
         in_memory: &ResettableKvBackendRef,
         max_idle_time: Duration,
     ) -> error::Result<impl Iterator<Item = NodeInfoKey>> {
-        let prefix = NodeInfoKey::key_prefix_with_role(0, Role::Frontend);
+        let prefix = NodeInfoKey::key_prefix_with_cluster_id(0);
         let req = RangeRequest::new().with_prefix(prefix);
         let current_time_millis = common_time::util::current_time_millis();
         let resp = in_memory.range(req).await?;
@@ -116,7 +108,7 @@ impl FrontendExpiryListener {
             .into_iter()
             .filter_map(move |KeyValue { key, value }| {
                 let Ok(info) = NodeInfo::try_from(value).inspect_err(|e| {
-                    warn!(e; "Unrecognized frontend node info value");
+                    warn!(e; "Unrecognized node info value");
                 }) else {
                     return None;
                 };
@@ -127,6 +119,9 @@ impl FrontendExpiryListener {
                             warn!(e; "Unrecognized node info key");
                         })
                         .ok()
+                        .inspect(|node_key| {
+                            debug!("Found expired node: {:?}", node_key);
+                        })
                 } else {
                     None
                 }
@@ -135,23 +130,23 @@ impl FrontendExpiryListener {
 }
 
 #[async_trait::async_trait]
-impl LeadershipChangeListener for FrontendExpiryListener {
+impl LeadershipChangeListener for NodeExpiryListener {
     fn name(&self) -> &str {
-        "FrontendExpiryListener"
+        "NodeExpiryListener"
     }
 
     async fn on_leader_start(&self) -> error::Result<()> {
         self.start().await;
         info!(
-            "On leader start, frontend expiry listener started with tick {:?} and max idle time: {:?}",
-            self.tick_interval, self.max_idle_time
+            "On leader start, node expiry listener started with max idle time: {:?}",
+            self.max_idle_time
         );
         Ok(())
     }
 
     async fn on_leader_stop(&self) -> error::Result<()> {
         self.stop();
-        info!("On leader stop, frontend expiry listener stopped");
+        info!("On leader stop, node expiry listener stopped");
         Ok(())
     }
 }
