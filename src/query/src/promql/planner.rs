@@ -266,90 +266,13 @@ impl PromPlanner {
         aggr_expr: &AggregateExpr,
     ) -> Result<LogicalPlan> {
         let AggregateExpr {
-            op,
-            expr,
-            param,
-            modifier,
+            op, expr, modifier, ..
         } = aggr_expr;
 
         let input = self.prom_expr_to_plan(expr, session_state).await?;
         match (*op).id() {
             token::T_TOPK | token::T_BOTTOMK => {
-                let group_exprs = self.agg_modifier_to_col(input.schema(), modifier, false)?;
-
-                let param = param
-                    .as_deref()
-                    .with_context(|| FunctionInvalidArgumentSnafu {
-                        fn_name: (*op).to_string(),
-                    })?;
-
-                let PromExpr::NumberLiteral(NumberLiteral { val }) = param else {
-                    return FunctionInvalidArgumentSnafu {
-                        fn_name: (*op).to_string(),
-                    }
-                    .fail();
-                };
-
-                // convert op and value columns to window exprs,
-                let window_exprs = self.create_window_exprs(*op, group_exprs.clone(), &input)?;
-
-                let rank_columns: Vec<_> = window_exprs
-                    .iter()
-                    .map(|expr| expr.schema_name().to_string())
-                    .collect();
-
-                // Create ranks filter with `Operator::Or`.
-                // Safety: at least one rank column
-                let filter: DfExpr = rank_columns
-                    .iter()
-                    .fold(None, |expr, rank| {
-                        let predicate = DfExpr::BinaryExpr(BinaryExpr {
-                            left: Box::new(col(rank)),
-                            op: Operator::LtEq,
-                            right: Box::new(lit(*val)),
-                        });
-
-                        match expr {
-                            None => Some(predicate),
-                            Some(expr) => Some(DfExpr::BinaryExpr(BinaryExpr {
-                                left: Box::new(expr),
-                                op: Operator::Or,
-                                right: Box::new(predicate),
-                            })),
-                        }
-                    })
-                    .unwrap();
-
-                let rank_columns: Vec<_> = rank_columns.into_iter().map(col).collect();
-
-                let mut new_group_exprs = group_exprs.clone();
-                // Order by ranks
-                new_group_exprs.extend(rank_columns);
-                // When the field values are equal, we sort based on tags to ensure the relative stability of the output results.
-                new_group_exprs.extend(self.create_tag_column_exprs()?);
-                let group_sort_expr = new_group_exprs
-                    .into_iter()
-                    .map(|expr| expr.sort(true, false));
-
-                let project_fields = self
-                    .create_field_column_exprs()?
-                    .into_iter()
-                    .chain(self.create_tag_column_exprs()?)
-                    .chain(Some(self.create_time_index_column_expr()?));
-
-                let plan = LogicalPlanBuilder::from(input)
-                    .window(window_exprs)
-                    .context(DataFusionPlanningSnafu)?
-                    .filter(filter)
-                    .context(DataFusionPlanningSnafu)?
-                    .sort(group_sort_expr)
-                    .context(DataFusionPlanningSnafu)?
-                    .project(project_fields)
-                    .context(DataFusionPlanningSnafu)?
-                    .build()
-                    .context(DataFusionPlanningSnafu)?;
-
-                Ok(plan)
+                self.prom_topk_bottomk_to_plan(aggr_expr, input).await
             }
             _ => {
                 // calculate columns to group by
@@ -372,6 +295,94 @@ impl PromPlanner {
                     .context(DataFusionPlanningSnafu)
             }
         }
+    }
+
+    /// Create logical plan for PromQL topk and bottomk expr.
+    async fn prom_topk_bottomk_to_plan(
+        &mut self,
+        aggr_expr: &AggregateExpr,
+        input: LogicalPlan,
+    ) -> Result<LogicalPlan> {
+        let AggregateExpr {
+            op,
+            param,
+            modifier,
+            ..
+        } = aggr_expr;
+
+        let group_exprs = self.agg_modifier_to_col(input.schema(), modifier, false)?;
+
+        let param = param
+            .as_deref()
+            .with_context(|| FunctionInvalidArgumentSnafu {
+                fn_name: (*op).to_string(),
+            })?;
+
+        let PromExpr::NumberLiteral(NumberLiteral { val }) = param else {
+            return FunctionInvalidArgumentSnafu {
+                fn_name: (*op).to_string(),
+            }
+            .fail();
+        };
+
+        // convert op and value columns to window exprs,
+        let window_exprs = self.create_window_exprs(*op, group_exprs.clone(), &input)?;
+
+        let rank_columns: Vec<_> = window_exprs
+            .iter()
+            .map(|expr| expr.schema_name().to_string())
+            .collect();
+
+        // Create ranks filter with `Operator::Or`.
+        // Safety: at least one rank column
+        let filter: DfExpr = rank_columns
+            .iter()
+            .fold(None, |expr, rank| {
+                let predicate = DfExpr::BinaryExpr(BinaryExpr {
+                    left: Box::new(col(rank)),
+                    op: Operator::LtEq,
+                    right: Box::new(lit(*val)),
+                });
+
+                match expr {
+                    None => Some(predicate),
+                    Some(expr) => Some(DfExpr::BinaryExpr(BinaryExpr {
+                        left: Box::new(expr),
+                        op: Operator::Or,
+                        right: Box::new(predicate),
+                    })),
+                }
+            })
+            .unwrap();
+
+        let rank_columns: Vec<_> = rank_columns.into_iter().map(col).collect();
+
+        let mut new_group_exprs = group_exprs.clone();
+        // Order by ranks
+        new_group_exprs.extend(rank_columns);
+        // When the field values are equal, we sort based on tags to ensure the relative stability of the output results.
+        new_group_exprs.extend(self.create_tag_column_exprs()?);
+        let group_sort_expr = new_group_exprs
+            .into_iter()
+            .map(|expr| expr.sort(true, false));
+
+        let project_fields = self
+            .create_field_column_exprs()?
+            .into_iter()
+            .chain(self.create_tag_column_exprs()?)
+            .chain(Some(self.create_time_index_column_expr()?));
+
+        LogicalPlanBuilder::from(input)
+            .window(window_exprs)
+            .context(DataFusionPlanningSnafu)?
+            .filter(filter)
+            .context(DataFusionPlanningSnafu)?
+            .sort(group_sort_expr)
+            .context(DataFusionPlanningSnafu)?
+            .project(project_fields)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)
     }
 
     async fn prom_unary_expr_to_plan(
