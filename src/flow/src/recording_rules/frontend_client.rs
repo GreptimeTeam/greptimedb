@@ -18,15 +18,25 @@ use std::sync::Arc;
 
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
+use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::cluster::{NodeInfo, NodeInfoKey, Role};
 use common_meta::peer::Peer;
 use common_meta::rpc::store::RangeRequest;
-use common_query::Output;
 use meta_client::client::MetaClient;
 use snafu::ResultExt;
 
 use crate::error::{ExternalSnafu, UnexpectedSnafu};
+use crate::recording_rules::engine::DEFAULT_RULE_ENGINE_QUERY_TIMEOUT;
 use crate::Error;
+
+fn default_channel_mgr() -> ChannelManager {
+    let cfg = ChannelConfig::new().timeout(DEFAULT_RULE_ENGINE_QUERY_TIMEOUT);
+    ChannelManager::with_config(cfg)
+}
+
+fn client_from_urls(addrs: Vec<String>) -> Client {
+    Client::with_manager_and_urls(default_channel_mgr(), addrs)
+}
 
 /// A simple frontend client able to execute sql using grpc protocol
 #[derive(Debug)]
@@ -65,7 +75,7 @@ impl FrontendClient {
             addr: addr.clone(),
         };
 
-        let client = Client::with_urls(vec![addr]);
+        let client = client_from_urls(vec![addr]);
         let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
         Self::Standalone {
             database_client: DatabaseWithPeer::new(database, peer),
@@ -125,7 +135,7 @@ impl FrontendClient {
             }
             .fail()?
         };
-        let client = Client::with_urls(vec![peer.addr.clone()]);
+        let client = client_from_urls(vec![peer.addr.clone()]);
         let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
         Ok(DatabaseWithPeer::new(database, peer))
     }
@@ -136,14 +146,5 @@ impl FrontendClient {
             Self::Standalone { database_client } => Ok(database_client.clone()),
             Self::Distributed { meta_client: _ } => self.get_last_active_frontend().await,
         }
-    }
-
-    pub async fn sql(&self, sql: &str) -> Result<Output, Error> {
-        let db = self.get_database_client().await?;
-        db.database
-            .sql(sql)
-            .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)
     }
 }
