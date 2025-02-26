@@ -30,18 +30,19 @@ use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
 use datafusion::functions_aggregate::stddev::stddev_pop_udaf;
 use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion::functions_aggregate::variance::var_pop_udaf;
-use datafusion::logical_expr::expr::{AggregateFunction, Alias, ScalarFunction};
+use datafusion::functions_window::row_number::RowNumber;
+use datafusion::logical_expr::expr::{AggregateFunction, Alias, ScalarFunction, WindowFunction};
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
 use datafusion::logical_expr::{
     BinaryExpr, Cast, Extension, LogicalPlan, LogicalPlanBuilder, Operator,
-    ScalarUDF as ScalarUdfDef,
+    ScalarUDF as ScalarUdfDef, WindowFrame, WindowFunctionDefinition,
 };
 use datafusion::prelude as df_prelude;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
 use datafusion::sql::TableReference;
 use datafusion_expr::utils::conjunction;
-use datafusion_expr::SortExpr;
+use datafusion_expr::{col, lit, SortExpr};
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
@@ -267,8 +268,7 @@ impl PromPlanner {
         let AggregateExpr {
             op,
             expr,
-            // TODO(ruihang): support param
-            param: _param,
+            param,
             modifier,
         } = aggr_expr;
 
@@ -278,21 +278,95 @@ impl PromPlanner {
         // Need to append time index column into group by columns
         let group_exprs = self.agg_modifier_to_col(input.schema(), modifier)?;
 
-        // convert op and value columns to aggregate exprs
-        let aggr_exprs = self.create_aggregate_exprs(*op, &input)?;
+        match (*op).id() {
+            token::T_TOPK | token::T_BOTTOMK => {
+                let param = param
+                    .as_deref()
+                    .with_context(|| FunctionInvalidArgumentSnafu {
+                        fn_name: (*op).to_string(),
+                    })?;
 
-        // create plan
-        let group_sort_expr = group_exprs
-            .clone()
-            .into_iter()
-            .map(|expr| expr.sort(true, false));
-        LogicalPlanBuilder::from(input)
-            .aggregate(group_exprs, aggr_exprs)
-            .context(DataFusionPlanningSnafu)?
-            .sort(group_sort_expr)
-            .context(DataFusionPlanningSnafu)?
-            .build()
-            .context(DataFusionPlanningSnafu)
+                let PromExpr::NumberLiteral(NumberLiteral { val }) = param else {
+                    return FunctionInvalidArgumentSnafu {
+                        fn_name: (*op).to_string(),
+                    }
+                    .fail();
+                };
+
+                // convert op and value columns to window exprs,
+                let window_exprs = self.create_window_exprs(*op, group_exprs.clone(), &input)?;
+
+                let rank_columns: Vec<_> = window_exprs
+                    .iter()
+                    .map(|expr| expr.schema_name().to_string())
+                    .collect();
+
+                // Create ranks filter with `Operator::Or`.
+                // Safety: at least one rank column
+                let filter: DfExpr = rank_columns
+                    .iter()
+                    .fold(None, |expr, rank| {
+                        let predicate = DfExpr::BinaryExpr(BinaryExpr {
+                            left: Box::new(col(rank)),
+                            op: Operator::LtEq,
+                            right: Box::new(lit(*val)),
+                        });
+
+                        match expr {
+                            None => Some(predicate),
+                            Some(expr) => Some(DfExpr::BinaryExpr(BinaryExpr {
+                                left: Box::new(expr),
+                                op: Operator::Or,
+                                right: Box::new(predicate),
+                            })),
+                        }
+                    })
+                    .unwrap();
+
+                let rank_columns: Vec<_> = rank_columns
+                    .into_iter()
+                    .map(|name| col(name))
+                    .collect();
+
+                let mut group_exprs = group_exprs
+                    .clone();
+
+                group_exprs.extend(rank_columns);
+
+                let group_sort_expr = group_exprs
+                    .into_iter()
+                    .map(|expr| expr.sort(true, false));
+
+                let plan = LogicalPlanBuilder::from(input)
+                    .window(window_exprs)
+                    .context(DataFusionPlanningSnafu)?
+                    .filter(filter)
+                    .context(DataFusionPlanningSnafu)?
+                    .sort(group_sort_expr)
+                    .context(DataFusionPlanningSnafu)?
+                    .build()
+                    .context(DataFusionPlanningSnafu)?;
+
+                Ok(plan)
+            }
+            _ => {
+                // convert op and value columns to aggregate exprs
+                let aggr_exprs = self.create_aggregate_exprs(*op, &input)?;
+
+                // create plan
+                let group_sort_expr = group_exprs
+                    .clone()
+                    .into_iter()
+                    .map(|expr| expr.sort(true, false));
+                LogicalPlanBuilder::from(input)
+                    .aggregate(group_exprs.clone(), aggr_exprs)
+                    .context(DataFusionPlanningSnafu)?
+                    .sort(group_sort_expr)
+                    .context(DataFusionPlanningSnafu)?
+                    .build()
+                    .context(DataFusionPlanningSnafu)
+            }
+        }
     }
 
     async fn prom_unary_expr_to_plan(
@@ -1882,6 +1956,40 @@ impl PromPlanner {
         self.ctx.field_columns = new_field_columns;
 
         Ok(exprs)
+    }
+
+    /// Create [DfExpr::WindowFunction] expr for each value column with given window function.
+    ///
+    fn create_window_exprs(
+        &mut self,
+        op: TokenType,
+        group_exprs: Vec<DfExpr>,
+        input_plan: &LogicalPlan,
+    ) -> Result<Vec<DfExpr>> {
+        assert!(matches!(op.id(), token::T_TOPK | token::T_BOTTOMK));
+
+        let asc = matches!(op.id(), token::T_BOTTOMK);
+
+        // perform window operation to each value column
+        let exprs: Vec<DfExpr> = self
+            .ctx
+            .field_columns
+            .iter()
+            .map(|col| {
+                DfExpr::WindowFunction(WindowFunction {
+                    fun: WindowFunctionDefinition::WindowUDF(Arc::new(RowNumber::new().into())),
+                    args: vec![],
+                    partition_by: group_exprs.clone(),
+                    order_by: vec![DfExpr::Column(Column::from(col)).sort(asc, false)],
+                    window_frame: WindowFrame::new(Some(true)),
+                    null_treatment: None,
+                })
+            })
+            .collect();
+
+        let normalized_exprs =
+            normalize_cols(exprs.iter().cloned(), input_plan).context(DataFusionPlanningSnafu)?;
+        Ok(normalized_exprs)
     }
 
     /// Create a [SPECIAL_HISTOGRAM_QUANTILE] plan.
