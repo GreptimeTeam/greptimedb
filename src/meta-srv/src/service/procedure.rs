@@ -25,7 +25,7 @@ use common_meta::ddl::ExecutorContext;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest};
 use common_meta::rpc::procedure;
 use common_telemetry::warn;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 use tonic::{Request, Response};
 
 use super::GrpcResult;
@@ -121,12 +121,15 @@ impl procedure_service_server::ProcedureService for Metasrv {
         &self,
         request: Request<MigrateRegionRequest>,
     ) -> GrpcResult<MigrateRegionResponse> {
-        ensure!(
-            self.meta_peer_client().is_leader(),
-            error::UnexpectedSnafu {
-                violated: "Trying to submit a region migration procedure to non-leader meta server"
-            }
-        );
+        if !self.is_leader() {
+            let resp = MigrateRegionResponse {
+                header: Some(ResponseHeader::failed(0, Error::is_not_leader())),
+                ..Default::default()
+            };
+
+            warn!("The current meta is not leader, but a `migrate` request have reached the meta. Detail: {:?}.", request);
+            return Ok(Response::new(resp));
+        }
 
         let MigrateRegionRequest {
             header,
