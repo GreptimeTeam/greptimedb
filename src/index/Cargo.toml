@@ -29,6 +29,7 @@ prost.workspace = true
 puffin.workspace = true
 regex.workspace = true
 regex-automata.workspace = true
+roaring = "0.10"
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
@@ -37,7 +38,6 @@ tantivy-jieba = "0.11.0"
 tokio.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
-roaring = "0.10"
 
 [dev-dependencies]
 common-test-util.workspace = true
