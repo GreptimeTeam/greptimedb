@@ -237,7 +237,10 @@ impl Inner {
             .map_err(error::Error::from)?
             .context(error::CreateHeartbeatStreamSnafu)?;
 
-        info!("Success to create heartbeat stream to server: {}, response: {:#?}", leader_addr, res);
+        info!(
+            "Success to create heartbeat stream to server: {}, response: {:#?}",
+            leader_addr, res
+        );
 
         Ok((
             HeartbeatSender::new(self.id, self.role, sender),
