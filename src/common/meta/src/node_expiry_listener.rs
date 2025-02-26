@@ -116,7 +116,7 @@ impl NodeExpiryListener {
                 {
                     NodeInfoKey::try_from(key)
                         .inspect_err(|e| {
-                            warn!(e; "Unrecognized node info key");
+                            warn!(e; "Unrecognized node info key: {:?}", info.peer);
                         })
                         .ok()
                         .inspect(|node_key| {
