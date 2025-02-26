@@ -144,71 +144,95 @@ impl LogQueryPlanner {
             return Ok(None);
         }
 
-        let exprs = column_filter
-            .filters
+        self.build_content_filters(&column_filter.column_name, &column_filter.filters)
+    }
+
+    /// Builds filter expressions from content filters for a specific column
+    fn build_content_filters(
+        &self,
+        column_name: &str,
+        filters: &[log_query::ContentFilter],
+    ) -> Result<Option<Expr>> {
+        if filters.is_empty() {
+            return Ok(None);
+        }
+
+        let exprs = filters
             .iter()
-            .map(|filter| match filter {
-                log_query::ContentFilter::Exact(pattern) => Ok(col(&column_filter.column_name)
-                    .like(lit(ScalarValue::Utf8(Some(escape_like_pattern(pattern)))))),
-                log_query::ContentFilter::Prefix(pattern) => Ok(col(&column_filter.column_name)
-                    .like(lit(ScalarValue::Utf8(Some(format!(
-                        "{}%",
-                        escape_like_pattern(pattern)
-                    )))))),
-                log_query::ContentFilter::Postfix(pattern) => Ok(col(&column_filter.column_name)
-                    .like(lit(ScalarValue::Utf8(Some(format!(
-                        "%{}",
-                        escape_like_pattern(pattern)
-                    )))))),
-                log_query::ContentFilter::Contains(pattern) => Ok(col(&column_filter.column_name)
-                    .like(lit(ScalarValue::Utf8(Some(format!(
-                        "%{}%",
-                        escape_like_pattern(pattern)
-                    )))))),
-                log_query::ContentFilter::Regex(..) => Err::<Expr, _>(
-                    UnimplementedSnafu {
-                        feature: "regex filter",
-                    }
-                    .build(),
-                ),
-                log_query::ContentFilter::Exist => {
-                    Ok(col(&column_filter.column_name).is_not_null())
-                }
-                log_query::ContentFilter::Between {
-                    start,
-                    end,
-                    start_inclusive,
-                    end_inclusive,
-                } => {
-                    let left = if *start_inclusive {
-                        Expr::gt_eq
-                    } else {
-                        Expr::gt
-                    };
-                    let right = if *end_inclusive {
-                        Expr::lt_eq
-                    } else {
-                        Expr::lt
-                    };
-                    Ok(left(
-                        col(&column_filter.column_name),
-                        lit(ScalarValue::Utf8(Some(escape_like_pattern(start)))),
-                    )
-                    .and(right(
-                        col(&column_filter.column_name),
-                        lit(ScalarValue::Utf8(Some(escape_like_pattern(end)))),
-                    )))
-                }
-                log_query::ContentFilter::Compound(..) => Err::<Expr, _>(
-                    UnimplementedSnafu {
-                        feature: "compound filter",
-                    }
-                    .build(),
-                ),
-            })
+            .map(|filter| self.build_content_filter(column_name, filter))
             .try_collect::<Vec<_>>()?;
 
         Ok(conjunction(exprs))
+    }
+
+    /// Builds a single content filter expression
+    #[allow(clippy::only_used_in_recursion)]
+    fn build_content_filter(
+        &self,
+        column_name: &str,
+        filter: &log_query::ContentFilter,
+    ) -> Result<Expr> {
+        match filter {
+            log_query::ContentFilter::Exact(pattern) => {
+                Ok(col(column_name)
+                    .like(lit(ScalarValue::Utf8(Some(escape_like_pattern(pattern))))))
+            }
+            log_query::ContentFilter::Prefix(pattern) => Ok(col(column_name).like(lit(
+                ScalarValue::Utf8(Some(format!("{}%", escape_like_pattern(pattern)))),
+            ))),
+            log_query::ContentFilter::Postfix(pattern) => Ok(col(column_name).like(lit(
+                ScalarValue::Utf8(Some(format!("%{}", escape_like_pattern(pattern)))),
+            ))),
+            log_query::ContentFilter::Contains(pattern) => Ok(col(column_name).like(lit(
+                ScalarValue::Utf8(Some(format!("%{}%", escape_like_pattern(pattern)))),
+            ))),
+            log_query::ContentFilter::Regex(..) => Err::<Expr, _>(
+                UnimplementedSnafu {
+                    feature: "regex filter",
+                }
+                .build(),
+            ),
+            log_query::ContentFilter::Exist => Ok(col(column_name).is_not_null()),
+            log_query::ContentFilter::Between {
+                start,
+                end,
+                start_inclusive,
+                end_inclusive,
+            } => {
+                let left = if *start_inclusive {
+                    Expr::gt_eq
+                } else {
+                    Expr::gt
+                };
+                let right = if *end_inclusive {
+                    Expr::lt_eq
+                } else {
+                    Expr::lt
+                };
+                Ok(left(
+                    col(column_name),
+                    lit(ScalarValue::Utf8(Some(escape_like_pattern(start)))),
+                )
+                .and(right(
+                    col(column_name),
+                    lit(ScalarValue::Utf8(Some(escape_like_pattern(end)))),
+                )))
+            }
+            log_query::ContentFilter::Compound(filters, op) => {
+                let exprs = filters
+                    .iter()
+                    .map(|filter| self.build_content_filter(column_name, filter))
+                    .try_collect::<Vec<_>>()?;
+
+                match op {
+                    log_query::BinaryOperator::And => Ok(conjunction(exprs).unwrap()),
+                    log_query::BinaryOperator::Or => {
+                        // Build a disjunction (OR) of expressions
+                        Ok(exprs.into_iter().reduce(|a, b| a.or(b)).unwrap())
+                    }
+                }
+            }
+        }
     }
 
     fn build_aggr_func(
@@ -303,15 +327,10 @@ impl LogQueryPlanner {
                 let expr = self.log_expr_to_column_expr(expr, schema)?;
 
                 let col_name = expr.schema_name().to_string();
-                let filter = self.build_column_filter(&ColumnFilters {
-                    column_name: col_name,
-                    filters: vec![filter.clone()],
-                })?;
-                if let Some(filter) = filter {
-                    plan_builder = plan_builder
-                        .filter(filter)
-                        .context(DataFusionPlanningSnafu)?;
-                }
+                let filter_expr = self.build_content_filter(&col_name, filter)?;
+                plan_builder = plan_builder
+                    .filter(filter_expr)
+                    .context(DataFusionPlanningSnafu)?;
             }
             LogExpr::ScalarFunc { name, args, alias } => {
                 let schema = plan_builder.schema();
@@ -355,7 +374,7 @@ mod tests {
     use datafusion::execution::SessionStateBuilder;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaRef};
-    use log_query::{ContentFilter, Context, Limit};
+    use log_query::{BinaryOperator, ContentFilter, Context, Limit};
     use session::context::QueryContext;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
     use table::table_name::TableName;
@@ -780,5 +799,70 @@ mod tests {
 \n        TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N]";
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_build_compound_filter() {
+        let table_provider =
+            build_test_table_provider(&[("public".to_string(), "test_table".to_string())]).await;
+        let session_state = SessionStateBuilder::new().with_default_features().build();
+        let planner = LogQueryPlanner::new(table_provider, session_state);
+
+        // Test AND compound
+        let filter = ContentFilter::Compound(
+            vec![
+                ContentFilter::Contains("error".to_string()),
+                ContentFilter::Prefix("WARN".to_string()),
+            ],
+            BinaryOperator::And,
+        );
+        let expr = planner.build_content_filter("message", &filter).unwrap();
+
+        let expected_expr = col("message")
+            .like(lit(ScalarValue::Utf8(Some("%error%".to_string()))))
+            .and(col("message").like(lit(ScalarValue::Utf8(Some("WARN%".to_string())))));
+
+        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
+
+        // Test OR compound
+        let filter = ContentFilter::Compound(
+            vec![
+                ContentFilter::Contains("error".to_string()),
+                ContentFilter::Prefix("WARN".to_string()),
+            ],
+            BinaryOperator::Or,
+        );
+        let expr = planner.build_content_filter("message", &filter).unwrap();
+
+        let expected_expr = col("message")
+            .like(lit(ScalarValue::Utf8(Some("%error%".to_string()))))
+            .or(col("message").like(lit(ScalarValue::Utf8(Some("WARN%".to_string())))));
+
+        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
+
+        // Test nested compound
+        let filter = ContentFilter::Compound(
+            vec![
+                ContentFilter::Contains("error".to_string()),
+                ContentFilter::Compound(
+                    vec![
+                        ContentFilter::Prefix("WARN".to_string()),
+                        ContentFilter::Exact("DEBUG".to_string()),
+                    ],
+                    BinaryOperator::Or,
+                ),
+            ],
+            BinaryOperator::And,
+        );
+        let expr = planner.build_content_filter("message", &filter).unwrap();
+
+        let expected_nested = col("message")
+            .like(lit(ScalarValue::Utf8(Some("WARN%".to_string()))))
+            .or(col("message").like(lit(ScalarValue::Utf8(Some("DEBUG".to_string())))));
+        let expected_expr = col("message")
+            .like(lit(ScalarValue::Utf8(Some("%error%".to_string()))))
+            .and(expected_nested);
+
+        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
     }
 }
