@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! impl `FlowNode` trait for FlowNodeManager so standalone can call them
-
+use common_telemetry::warn;
 use std::collections::HashMap;
 
 use api::v1::flow::{
@@ -157,6 +157,7 @@ impl Flownode for FlowWorkerManager {
         // using try_read to ensure two things:
         // 1. flush wouldn't happen until inserts before it is inserted
         // 2. inserts happening concurrently with flush wouldn't be block by flush
+        warn!("todo by jiajingzhe 22312321321");
         let _flush_lock = self.flush_lock.try_read();
         for write_request in request.requests {
             let region_id = write_request.region_id;
@@ -164,7 +165,7 @@ impl Flownode for FlowWorkerManager {
 
             let (insert_schema, rows_proto) = write_request
                 .rows
-                .map(|r| (r.schema, r.rows))
+                .map(|r: api::v1::Rows| (r.schema, r.rows))
                 .unwrap_or_default();
 
             // TODO(discord9): reconsider time assignment mechanism
@@ -276,6 +277,22 @@ impl Flownode for FlowWorkerManager {
                 common_telemetry::error!(err; "Failed to handle write request");
                 let err = to_meta_err(snafu::location!())(err);
                 return Err(err);
+            } else {
+                let flow_ids = self
+                    .node_context
+                    .read()
+                    .await
+                    .get_flow_ids(table_id)
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+                    .collect_vec();
+                for id in flow_ids {
+                    if let Some(flow) = &&self.query_engine.as_ref().engine_state().function_state().flow_service_handler {
+                        flow.
+                    }
+
+                }
             }
         }
         Ok(Default::default())

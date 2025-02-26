@@ -15,6 +15,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,7 @@ use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKe
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::FlownodeId;
+use common_telemetry::warn;
 
 const FLOW_INFO_KEY_PREFIX: &str = "info";
 
@@ -131,6 +133,12 @@ pub struct FlowInfoValue {
     pub(crate) comment: String,
     /// The options.
     pub(crate) options: HashMap<String, String>,
+    /// The CreateTime.
+    pub(crate) created_time: DateTime<Utc>,
+    /// The UpdateTime.
+    pub(crate) updated_time: DateTime<Utc>,
+    /// The Last Execution Time.
+    pub(crate) last_execution_time: Option<DateTime<Utc>>,
 }
 
 impl FlowInfoValue {
@@ -170,6 +178,22 @@ impl FlowInfoValue {
 
     pub fn options(&self) -> &HashMap<String, String> {
         &self.options
+    }
+
+    pub fn created_time(&self) -> &DateTime<Utc> {
+        &self.created_time
+    }
+
+    pub fn updated_time(&self) -> &DateTime<Utc> {
+        &self.updated_time
+    }
+
+    pub fn last_execution_time(&self) -> Option<&DateTime<Utc>> {
+        self.last_execution_time.as_ref()
+    }
+
+    pub fn update_last_execution_time(&mut self, time: DateTime<Utc>) {
+        self.last_execution_time = Some(time);
     }
 }
 
@@ -257,6 +281,24 @@ impl FlowInfoManager {
             txn,
             TxnOpGetResponseSet::decode_with(TxnOpGetResponseSet::filter(key)),
         ))
+    }
+
+    /// Returns the [&FlowInfoValue] of specified `flow_id`.
+    pub async fn update_last_execution_time(
+        &self,
+        flow_id: FlowId,
+        last_execution_time: DateTime<Utc>,
+    ) -> Result<()> {
+        let prev_flow_info = self.get(flow_id).await?.unwrap();
+        let prev_raw_flow_info = self.get_raw(flow_id).await?.unwrap();
+
+        let mut new_flow_info = prev_flow_info.clone();
+        new_flow_info.update_last_execution_time(last_execution_time);
+        let (create_flow_txn, _) =
+            self.build_update_txn(flow_id, &prev_raw_flow_info, &new_flow_info)?;
+        self.kv_backend.txn(create_flow_txn).await?;
+        warn!("todo by jiajignzhe success update");
+        Ok(())
     }
 }
 

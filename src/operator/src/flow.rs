@@ -14,6 +14,7 @@
 
 use api::v1::flow::FlowRequestHeader;
 use async_trait::async_trait;
+use chrono::Utc;
 use common_error::ext::BoxedError;
 use common_function::handlers::FlowServiceHandler;
 use common_meta::key::flow::FlowMetadataManagerRef;
@@ -63,7 +64,7 @@ impl FlowServiceOperator {
         flow: &str,
         ctx: QueryContextRef,
     ) -> Result<api::v1::flow::FlowResponse> {
-        let id = self
+        let id: u32 = self
             .flow_metadata_manager
             .flow_name_manager()
             .get(catalog, flow)
@@ -123,6 +124,14 @@ impl FlowServiceOperator {
                 final_result = Some(res);
             }
         }
+
+        self.flow_metadata_manager
+            .flow_info_manager()
+            .update_last_execution_time(id, Utc::now())
+            .await
+            .map_err(BoxedError::new)
+            .context(common_query::error::ExecuteSnafu)?;
+
         final_result.context(common_query::error::FlownodeNotFoundSnafu)
     }
 }
