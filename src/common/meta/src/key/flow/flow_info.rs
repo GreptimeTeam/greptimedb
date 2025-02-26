@@ -15,6 +15,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -131,6 +132,12 @@ pub struct FlowInfoValue {
     pub(crate) comment: String,
     /// The options.
     pub(crate) options: HashMap<String, String>,
+    /// The CreateTime.
+    pub(crate) created_time: DateTime<Utc>,
+    /// The UpdateTime.
+    pub(crate) updated_time: DateTime<Utc>,
+    /// The Last Execution Time.
+    pub(crate) last_execution_time: Option<DateTime<Utc>>,
 }
 
 impl FlowInfoValue {
@@ -171,6 +178,18 @@ impl FlowInfoValue {
     pub fn options(&self) -> &HashMap<String, String> {
         &self.options
     }
+
+    pub fn created_time(&self) -> &DateTime<Utc> {
+        &self.created_time
+    }
+
+    pub fn updated_time(&self) -> &DateTime<Utc> {
+        &self.updated_time
+    }
+
+    pub fn last_execution_time(&self) -> Option<&DateTime<Utc>> {
+        self.last_execution_time.as_ref()
+    }
 }
 
 pub type FlowInfoManagerRef = Arc<FlowInfoManager>;
@@ -194,6 +213,12 @@ impl FlowInfoManager {
             .await?
             .map(|x| FlowInfoValue::try_from_raw_value(&x.value))
             .transpose()
+    }
+
+    /// Returns the [&FlowInfoValue] of specified `flow_id`.
+    pub async fn get_mut(&self, flow_id: FlowId) -> Result<Option<FlowInfoValue>> {
+        let _key = FlowInfoKey::new(flow_id).to_bytes();
+        todo!("todo by jia");
     }
 
     /// Returns the [FlowInfoValue] with original bytes of specified `flow_id`.

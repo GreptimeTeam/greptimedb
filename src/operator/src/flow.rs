@@ -16,7 +16,7 @@ use api::v1::flow::FlowRequestHeader;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_function::handlers::FlowServiceHandler;
-use common_meta::key::flow::FlowMetadataManagerRef;
+use common_meta::key::flow::{flow_info, FlowMetadataManagerRef};
 use common_meta::node_manager::NodeManagerRef;
 use common_query::error::Result;
 use common_telemetry::tracing_context::TracingContext;
@@ -63,7 +63,7 @@ impl FlowServiceOperator {
         flow: &str,
         ctx: QueryContextRef,
     ) -> Result<api::v1::flow::FlowResponse> {
-        let id = self
+        let id: u32 = self
             .flow_metadata_manager
             .flow_name_manager()
             .get(catalog, flow)
@@ -76,7 +76,20 @@ impl FlowServiceOperator {
             .map_err(BoxedError::new)
             .context(common_query::error::ExecuteSnafu)?
             .flow_id();
-
+        let flow_info = self
+            .flow_metadata_manager
+            .flow_info_manager()
+            .get(id)
+            .await
+            .map_err(BoxedError::new)
+            .context(InternalSnafu)?
+            .context(FlowInfoNotFoundSnafu {
+                catalog_name: catalog_name.to_string(),
+                flow_name: flow_name.to_string(),
+            })?
+            .updated_time();
+            todo!("todo by jiajingzhe");
+            
         let all_flownode_peers = self
             .flow_metadata_manager
             .flow_route_manager()

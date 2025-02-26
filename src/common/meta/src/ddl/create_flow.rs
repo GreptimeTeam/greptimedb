@@ -442,6 +442,9 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             expire_after,
             comment,
             options,
+            created_time: chrono::Utc::now(),
+            updated_time: chrono::Utc::now(),
+            last_execution_time: None,
         };
 
         (flow_info, flow_routes)
