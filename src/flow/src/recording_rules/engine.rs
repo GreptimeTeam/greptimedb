@@ -32,10 +32,17 @@ use tokio::time::Instant;
 use super::frontend_client::FrontendClient;
 use super::{df_plan_to_sql, AddFilterRewriter};
 use crate::adapter::{CreateFlowArgs, FlowId};
-use crate::error::{DatafusionSnafu, DatatypesSnafu, UnexpectedSnafu};
-use crate::metrics::METRIC_FLOW_RULE_ENGINE_QUERY_TIME;
+use crate::error::{DatafusionSnafu, DatatypesSnafu, FlowAlreadyExistSnafu, UnexpectedSnafu};
+use crate::metrics::{METRIC_FLOW_RULE_ENGINE_QUERY_TIME, METRIC_FLOW_RULE_ENGINE_SLOW_QUERY};
 use crate::recording_rules::{find_plan_time_window_bound, sql_to_df_plan};
 use crate::Error;
+
+/// TODO(discord9): make those constants configurable
+/// The default rule engine query timeout is 5 minutes
+pub const DEFAULT_RULE_ENGINE_QUERY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// will output a warn log for any query that runs for more that 1 minutes, and also every 1 minutes when that query is still running
+pub const SLOW_QUERY_THRESHOLD: Duration = Duration::from_secs(60);
 
 /// TODO(discord9): determine how to configure refresh rate
 pub struct RecordingRuleEngine {
@@ -64,14 +71,34 @@ impl RecordingRuleEngine {
             flow_id,
             sink_table_name,
             source_table_ids: _,
-            create_if_not_exists: _,
-            or_replace: _,
+            create_if_not_exists,
+            or_replace,
             expire_after,
             comment: _,
             sql,
             flow_options,
             query_ctx,
         } = args;
+
+        // or replace logic
+        {
+            let is_exist = self.tasks.read().await.contains_key(&flow_id);
+            match (create_if_not_exists, or_replace, is_exist) {
+                // if replace, ignore that old flow exists
+                (_, true, true) => {
+                    info!("Replacing flow with id={}", flow_id);
+                }
+                (false, false, true) => FlowAlreadyExistSnafu { id: flow_id }.fail()?,
+                // already exists, and not replace, return None
+                (true, false, true) => {
+                    info!("Flow with id={} already exists, do nothing", flow_id);
+                    return Ok(None);
+                }
+
+                // continue as normal
+                (_, _, false) => (),
+            }
+        }
 
         let flow_type = flow_options.get(FlowType::FLOW_TYPE_KEY);
 
@@ -199,29 +226,41 @@ impl RecordingRuleTask {
             let instant = Instant::now();
             let flow_id = self.flow_id;
             let db_client = frontend_client.get_database_client().await?;
+            let peer_addr = db_client.peer.addr;
             debug!(
-                "Executing flow {flow_id}(expire_after={:?} secs) on {:?} with query {insert_into}",
-                self.expire_after, db_client.peer.addr
+                "Executing flow {flow_id}(expire_after={:?} secs) on {:?} with query {}",
+                self.expire_after, peer_addr, &insert_into
             );
 
             let timer = METRIC_FLOW_RULE_ENGINE_QUERY_TIME
                 .with_label_values(&[flow_id.to_string().as_str()])
                 .start_timer();
 
-            let res = frontend_client.sql(&insert_into).await;
+            let res = db_client.database.sql(&insert_into).await;
             drop(timer);
 
             let elapsed = instant.elapsed();
-            if res.is_ok() {
+            if let Ok(res1) = &res {
                 debug!(
-                    "Flow {flow_id} executed, result: {res:?}, elapsed: {:?}",
+                    "Flow {flow_id} executed, result: {res1:?}, elapsed: {:?}",
                     elapsed
                 );
-            } else {
+            } else if let Err(res) = &res {
                 warn!(
-                    "Failed to execute Flow {flow_id}, result: {res:?}, elapsed: {:?} with query: {insert_into}",
-                    elapsed
+                    "Failed to execute Flow {flow_id} on frontend {}, result: {res:?}, elapsed: {:?} with query: {}",
+                    peer_addr, elapsed, &insert_into
                 );
+            }
+
+            // record slow query
+            if elapsed >= SLOW_QUERY_THRESHOLD {
+                warn!(
+                    "Flow {flow_id} on frontend {} executed for {:?} before complete, query: {}",
+                    peer_addr, elapsed, &insert_into
+                );
+                METRIC_FLOW_RULE_ENGINE_SLOW_QUERY
+                    .with_label_values(&[flow_id.to_string().as_str(), &insert_into, &peer_addr])
+                    .observe(elapsed.as_secs_f64());
             }
 
             self.state
