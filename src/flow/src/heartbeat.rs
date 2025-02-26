@@ -14,6 +14,7 @@
 
 //! Send heartbeat from flownode to metasrv
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use api::v1::meta::{HeartbeatRequest, Peer};
@@ -24,7 +25,7 @@ use common_meta::heartbeat::handler::{
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef, OutgoingMessage};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
 use common_meta::key::flow::flow_state::FlowStat;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, error, info, warn};
 use greptime_proto::v1::meta::NodeInfo;
 use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient};
 use servers::addrs;
@@ -65,6 +66,7 @@ pub struct HeartbeatTask {
     report_interval: Duration,
     retry_interval: Duration,
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
+    running: Arc<AtomicBool>,
     query_stat_size: Option<SizeReportSender>,
 }
 
@@ -87,11 +89,25 @@ impl HeartbeatTask {
             report_interval: heartbeat_opts.interval,
             retry_interval: heartbeat_opts.retry_interval,
             resp_handler_executor,
+            running: Arc::new(AtomicBool::new(false)),
             query_stat_size: None,
         }
     }
 
     pub async fn start(&self) -> Result<(), Error> {
+        if self
+            .running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            warn!("Heartbeat task started multiple times");
+            return Ok(());
+        }
+
+        self.create_streams().await
+    }
+
+    pub async fn create_streams(&self) -> Result<(), Error> {
         info!("Start to establish the heartbeat connection to metasrv.");
         let (req_sender, resp_stream) = self
             .meta_client
@@ -114,6 +130,13 @@ impl HeartbeatTask {
 
     pub fn shutdown(&self) {
         info!("Close heartbeat task for flownode");
+        if self
+            .running
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            warn!("Call close heartbeat task multiple times");
+        }
     }
 
     fn new_heartbeat_request(
@@ -258,7 +281,7 @@ impl HeartbeatTask {
 
             info!("Try to re-establish the heartbeat connection to metasrv.");
 
-            if self.start().await.is_ok() {
+            if self.create_streams().await.is_ok() {
                 break;
             }
         }
