@@ -23,8 +23,8 @@ pub struct CheckLeaderHandler;
 
 #[async_trait::async_trait]
 impl HeartbeatHandler for CheckLeaderHandler {
-    fn is_acceptable(&self, role: Role) -> bool {
-        role == Role::Datanode
+    fn is_acceptable(&self, _role: Role) -> bool {
+        true
     }
 
     async fn handle(

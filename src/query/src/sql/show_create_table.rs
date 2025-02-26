@@ -327,7 +327,7 @@ CREATE TABLE IF NOT EXISTS "system_metrics" (
   "host" STRING NULL INVERTED INDEX,
   "cpu" DOUBLE NULL,
   "disk" FLOAT NULL,
-  "msg" STRING NULL FULLTEXT WITH(analyzer = 'English', case_sensitive = 'false'),
+  "msg" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', case_sensitive = 'false'),
   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(),
   TIME INDEX ("ts"),
   PRIMARY KEY ("id", "host")
